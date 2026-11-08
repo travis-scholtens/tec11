@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_shared_library")
+load("@rules_rust_wasm_bindgen//:defs.bzl", "rust_wasm_bindgen")
+
+rust_shared_library(
+    name = "tec11_wasm_lib",
+    srcs = ["src/lib.rs"],
+    edition = "2021",
+    deps = [
+        "@rules_rust_wasm_bindgen//3rdparty:wasm_bindgen",
+    ],
+)
+
+rust_wasm_bindgen(
+    name = "tec11_wasm",
+    target = "web",
+    wasm_file = ":tec11_wasm_lib",
+    visibility = ["//visibility:public"],
+)

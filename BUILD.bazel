@@ -1,0 +1,66 @@
+# Root Bazel build file for tec11
+
+genrule(
+    name = "web_bundle",
+    srcs = glob([
+        "src/**/*.purs",
+        "src/**/*.js",
+        ".spago/*/*/src/**/*.purs",
+        ".spago/*/*/src/**/*.js",
+        "node_modules/react/**",
+        "node_modules/react-dom/**",
+        "node_modules/scheduler/**",
+        "node_modules/three/**",
+    ]) + [
+        "node_modules/purescript/purs.bin",
+        "node_modules/@esbuild/linux-x64/bin/esbuild",
+        "static/index.html",
+        "//crates/tec11-wasm:tec11_wasm",
+    ],
+    outs = [
+        "dist/index.html",
+        "dist/bundle.js",
+        "dist/tec11_wasm_bg.wasm",
+    ],
+    cmd = """
+        set -euo pipefail
+        PURS_OUT=$$(mktemp -d)
+        ENTRY_JS="$$PURS_OUT/entry.js"
+
+        WASM_JS=""
+        WASM_BG=""
+        for f in $(locations //crates/tec11-wasm:tec11_wasm); do
+            case "$$f" in
+                *tec11_wasm.js) WASM_JS="$$PWD/$$f" ;;
+                *tec11_wasm_bg.wasm) WASM_BG="$$PWD/$$f" ;;
+            esac
+        done
+
+        $(location node_modules/purescript/purs.bin) compile \
+            ".spago/*/*/src/**/*.purs" \
+            "src/**/*.purs" \
+            --output "$$PURS_OUT/output"
+
+        printf 'import { main } from "./output/Main/index.js";\\nmain();\\n' > "$$ENTRY_JS"
+
+        NODE_PATH="$$PWD/node_modules" $(location node_modules/@esbuild/linux-x64/bin/esbuild) "$$ENTRY_JS" \
+            --bundle \
+            --format=esm \
+            --platform=browser \
+            "--alias:tec11-wasm=$$WASM_JS" \
+            --outfile=$(location dist/bundle.js)
+
+        cp $(location static/index.html) $(location dist/index.html)
+        cp "$$WASM_BG" $(location dist/tec11_wasm_bg.wasm)
+        rm -rf "$$PURS_OUT"
+    """,
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "serve",
+    srcs = ["serve.sh"],
+    data = [":web_bundle"],
+    visibility = ["//visibility:public"],
+)
+

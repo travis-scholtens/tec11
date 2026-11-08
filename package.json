@@ -1,0 +1,16 @@
+{
+  "name": "tec11",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tec11 — Browser Planetary & Historical Simulation",
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "purescript": "^0.15.15",
+    "spago": "^0.21.0"
+  }
+}

@@ -1,0 +1,6 @@
+/bazel-*
+/node_modules/
+/.spago/
+/output/
+/dist/
+MODULE.bazel.lock
