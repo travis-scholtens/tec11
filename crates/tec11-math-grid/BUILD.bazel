@@ -2,7 +2,14 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 rust_library(
     name = "tec11_math_grid",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/geometry.rs",
+        "src/grid.rs",
+        "src/lib.rs",
+        "src/point_tree.rs",
+        "src/rng.rs",
+        "src/vec3.rs",
+    ],
     edition = "2021",
     visibility = ["//visibility:public"],
 )

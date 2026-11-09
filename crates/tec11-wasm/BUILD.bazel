@@ -3,9 +3,15 @@ load("@rules_rust_wasm_bindgen//:defs.bzl", "rust_wasm_bindgen")
 
 rust_shared_library(
     name = "tec11_wasm_lib",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/grid_session.rs",
+        "src/lib.rs",
+        "src/mesh.rs",
+        "src/pangea_session.rs",
+    ],
     edition = "2021",
     deps = [
+        "//crates/tec11-geology:tec11_geology",
         "//crates/tec11-math-grid:tec11_math_grid",
         "@rules_rust_wasm_bindgen//3rdparty:wasm_bindgen",
     ],

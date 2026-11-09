@@ -1,0 +1,21 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_geology",
+    srcs = [
+        "src/lib.rs",
+        "src/pangea.rs",
+        "src/rock.rs",
+        "src/tile.rs",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/tec11-math-grid:tec11_math_grid",
+    ],
+)
+
+rust_test(
+    name = "tec11_geology_test",
+    crate = ":tec11_geology",
+)

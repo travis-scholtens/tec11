@@ -1,13 +1,13 @@
 import * as THREE from "three";
-import initWasmModule, { WasmGridSession } from "tec11-wasm";
+import initWasmModule, { WasmGridSession, WasmPangeaSession } from "tec11-wasm";
 
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
 let activeView = null;
 
 /**
- * Frontend colormap: maps per-tile unit sphere coordinates (x, y, z) in [-1, 1]
- * to per-vertex RGB colors (r/g/b = (x+1)/2, (y+1)/2, (z+1)/2).
+ * Frontend colormap for Grid mode: maps per-tile unit sphere coordinates (x, y, z)
+ * in [-1, 1] to per-vertex RGB colors (r/g/b = (x+1)/2, (y+1)/2, (z+1)/2).
  */
 function computePositionVertexColors(tileCenters, vertexTileIds) {
   const numVerts = vertexTileIds.length;
@@ -27,8 +27,54 @@ function computePositionVertexColors(tileCenters, vertexTileIds) {
 }
 
 /**
- * Extracts the outer polygon border segments (v1 -> v2 of each fan triangle)
- * so pentagon/hexagon tile boundaries are visible without internal fan spokes.
+ * Frontend colormaps for Pangea mode:
+ * - "color": Water (elevation <= 0) is ocean blue rgb(0, 0, 128).
+ *            Land rock (elevation > 0) is colored by silica/felsity f in [0.5, 1.0]:
+ *            rgb(128, 64 + 64*f, 128*f).
+ * - "elevation": Land (elevation > 0) is upper greyscale [142..255].
+ *                Ocean floor bathymetry (elevation <= 0, -5.6..0 km) is lower greyscale [18..112].
+ */
+function computePangeaVertexColors(elevations, felsities, vertexTileIds, renderMode) {
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+  const isElevation = renderMode === "elevation";
+
+  for (let v = 0; v < numVerts; v++) {
+    const tid = vertexTileIds[v];
+    const h = elevations[tid];
+    const out = v * 3;
+
+    if (isElevation) {
+      if (h > 0.0) {
+        const val = Math.min(255.0, 142.0 + 96.0 * h) / 255.0;
+        colors[out] = val;
+        colors[out + 1] = val;
+        colors[out + 2] = val;
+      } else {
+        const norm = Math.max(0.0, Math.min(1.0, (h + 5.6) / 5.6));
+        const val = (18.0 + 94.0 * norm) / 255.0;
+        colors[out] = val;
+        colors[out + 1] = val;
+        colors[out + 2] = val;
+      }
+    } else {
+      if (h <= 0.0) {
+        colors[out] = 0.0;
+        colors[out + 1] = 0.0;
+        colors[out + 2] = 128.0 / 255.0;
+      } else {
+        const f = felsities[tid];
+        colors[out] = 128.0 / 255.0;
+        colors[out + 1] = (64.0 + 64.0 * f) / 255.0;
+        colors[out + 2] = (128.0 * f) / 255.0;
+      }
+    }
+  }
+  return colors;
+}
+
+/**
+ * Extracts the outer polygon border segments (v1 -> v2 of each fan triangle).
  */
 function extractBorderPositions(positions) {
   const numTris = positions.length / 9;
@@ -36,7 +82,6 @@ function extractBorderPositions(positions) {
   for (let t = 0; t < numTris; t++) {
     const src = t * 9;
     const dst = t * 6;
-    // Second and third vertices of each fan triangle form the outer polygon edge
     border[dst] = positions[src + 3];
     border[dst + 1] = positions[src + 4];
     border[dst + 2] = positions[src + 5];
@@ -48,7 +93,7 @@ function extractBorderPositions(positions) {
 }
 
 function paintCanvasFallback(view) {
-  const { canvas, width, height, geometry, mesh, camera } = view;
+  const { canvas, width, height, geometry, mesh, camera, showBorders } = view;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
@@ -115,22 +160,97 @@ function paintCanvasFallback(view) {
     ctx.closePath();
     ctx.fillStyle = t.fill;
     ctx.fill();
-    // Subtle same-color stroke prevents subpixel seams between fan triangles
     ctx.strokeStyle = t.fill;
     ctx.lineWidth = 0.75;
     ctx.stroke();
 
-    // Draw the outer polygon edge (B -> C) so pentagon/hexagon borders stand out cleanly
-    ctx.beginPath();
-    ctx.moveTo(t.bx, t.by);
-    ctx.lineTo(t.cx, t.cy);
-    ctx.strokeStyle = "rgba(10, 14, 24, 0.45)";
-    ctx.lineWidth = 1.0;
-    ctx.stroke();
+    if (showBorders) {
+      ctx.beginPath();
+      ctx.moveTo(t.bx, t.by);
+      ctx.lineTo(t.cx, t.cy);
+      ctx.strokeStyle = "rgba(10, 14, 24, 0.45)";
+      ctx.lineWidth = 1.0;
+      ctx.stroke();
+    }
   }
 }
 
-function updateViewBuffers(view) {
+function createBaseSphereView(canvas, showBorders) {
+  const width = 460;
+  const height = 460;
+
+  const camera = new THREE.OrthographicCamera(-1.1, 1.1, 1.1, -1.1, 0, 11);
+  camera.position.z = 11;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x050505);
+
+  const light = new THREE.HemisphereLight(0xffffff, 0x444444, 2.8);
+  scene.add(light);
+
+  const geometry = new THREE.BufferGeometry();
+  const material = new THREE.MeshPhongMaterial({
+    side: THREE.FrontSide,
+    vertexColors: true,
+    flatShading: true,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  scene.add(mesh);
+
+  let borderGeometry = null;
+  let borderMaterial = null;
+  if (showBorders) {
+    borderGeometry = new THREE.BufferGeometry();
+    borderMaterial = new THREE.LineBasicMaterial({
+      color: 0x0a0e18,
+      transparent: true,
+      opacity: 0.45,
+    });
+    const borderLines = new THREE.LineSegments(borderGeometry, borderMaterial);
+    mesh.add(borderLines);
+  }
+
+  let renderer = null;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    renderer.setSize(width, height, false);
+  } catch (err) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  return {
+    canvas,
+    width,
+    height,
+    showBorders,
+    camera,
+    scene,
+    geometry,
+    material,
+    borderGeometry,
+    borderMaterial,
+    mesh,
+    renderer,
+    paint() {
+      if (this.renderer) {
+        this.renderer.render(this.scene, this.camera);
+      } else {
+        paintCanvasFallback(this);
+      }
+    },
+    dispose() {
+      geometry.dispose();
+      material.dispose();
+      if (borderGeometry) borderGeometry.dispose();
+      if (borderMaterial) borderMaterial.dispose();
+      if (renderer) renderer.dispose();
+    },
+  };
+}
+
+function updateGridViewBuffers(view) {
   const { session, geometry, borderGeometry } = view;
   const positions = session.mesh_positions();
   const normals = session.mesh_normals();
@@ -152,6 +272,30 @@ function updateViewBuffers(view) {
   view.paint();
 }
 
+function updatePangeaViewBuffers(view, rebuildGeometry) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+
+  view.elevations = session.tile_elevations();
+  view.felsities = session.tile_felsities();
+
+  const colors = computePangeaVertexColors(
+    view.elevations,
+    view.felsities,
+    view.vertexTileIds,
+    view.renderMode
+  );
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
 export const initWasm = (onReady) => () => {
   initWasmModule({ module_or_path: "./tec11_wasm_bg.wasm" })
     .then(() => {
@@ -168,99 +312,88 @@ export const mountGridView = (setGridInfo) => () => {
     return () => {};
   }
 
-  const width = 460;
-  const height = 460;
-  const session = new WasmGridSession();
-
-  const camera = new THREE.OrthographicCamera(-1.1, 1.1, 1.1, -1.1, 0, 11);
-  camera.position.z = 11;
-
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x050505);
-
-  const light = new THREE.HemisphereLight(0xffffff, 0x444444, 2.8);
-  scene.add(light);
-
-  const geometry = new THREE.BufferGeometry();
-  const material = new THREE.MeshPhongMaterial({
-    side: THREE.FrontSide,
-    vertexColors: true,
-    flatShading: true,
-  });
-  const mesh = new THREE.Mesh(geometry, material);
-  scene.add(mesh);
-
-  const borderGeometry = new THREE.BufferGeometry();
-  const borderMaterial = new THREE.LineBasicMaterial({
-    color: 0x0a0e18,
-    transparent: true,
-    opacity: 0.45,
-  });
-  const borderLines = new THREE.LineSegments(borderGeometry, borderMaterial);
-  mesh.add(borderLines);
-
-  let renderer = null;
-  try {
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio || 1);
-    renderer.setSize(width, height, false);
-  } catch (err) {
-    canvas.width = width;
-    canvas.height = height;
-  }
-
-  const view = {
-    canvas,
-    width,
-    height,
-    session,
-    camera,
-    scene,
-    geometry,
-    material,
-    borderGeometry,
-    borderMaterial,
-    mesh,
-    renderer,
-    paint() {
-      if (this.renderer) {
-        this.renderer.render(this.scene, this.camera);
-      } else {
-        paintCanvasFallback(this);
-      }
-    },
-  };
+  const view = createBaseSphereView(canvas, true);
+  view.session = new WasmGridSession();
 
   activeView = view;
-  updateViewBuffers(view);
+  updateGridViewBuffers(view);
   setGridInfo({
-    size: session.size(),
-    tileCount: session.tile_count(),
+    size: view.session.size(),
+    tileCount: view.session.tile_count(),
   })();
 
   return () => {
     if (activeView === view) {
       activeView = null;
     }
-    geometry.dispose();
-    material.dispose();
-    borderGeometry.dispose();
-    borderMaterial.dispose();
-    if (renderer) {
-      renderer.dispose();
-    }
-    session.free();
+    view.dispose();
+    view.session.free();
   };
 };
 
 export const subdivideGrid = (setGridInfo) => () => {
-  if (!activeView) return;
+  if (!activeView || !activeView.session) return;
   activeView.session.subdivide();
-  updateViewBuffers(activeView);
+  updateGridViewBuffers(activeView);
   setGridInfo({
     size: activeView.session.size(),
     tileCount: activeView.session.tile_count(),
   })();
+};
+
+export const mountPangeaView = (gridSize) => (landPct) => (renderMode) => (setPangeaInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  const seed = BigInt(Date.now());
+  view.session = new WasmPangeaSession(gridSize, landPct, seed);
+  view.currentGridSize = gridSize;
+  view.renderMode = renderMode;
+
+  activeView = view;
+  updatePangeaViewBuffers(view, true);
+  setPangeaInfo({
+    gridSize: view.session.grid_size(),
+    tileCount: view.session.tile_count(),
+    actualLandPercent: view.session.land_percent_actual(),
+  })();
+
+  return () => {
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const regeneratePangea = (gridSize) => (landPct) => (setPangeaInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const sizeChanged = activeView.currentGridSize !== gridSize;
+  activeView.session.regenerate(gridSize, landPct);
+  activeView.currentGridSize = gridSize;
+  updatePangeaViewBuffers(activeView, sizeChanged);
+  setPangeaInfo({
+    gridSize: activeView.session.grid_size(),
+    tileCount: activeView.session.tile_count(),
+    actualLandPercent: activeView.session.land_percent_actual(),
+  })();
+};
+
+export const setPangeaRenderMode = (renderMode) => () => {
+  if (!activeView || !activeView.elevations) return;
+  activeView.renderMode = renderMode;
+  const colors = computePangeaVertexColors(
+    activeView.elevations,
+    activeView.felsities,
+    activeView.vertexTileIds,
+    activeView.renderMode
+  );
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
 };
 
 export const rotateGrid = (deg) => () => {
