@@ -19,52 +19,31 @@
       align-items: center;
       justify-content: center;
     }
-    .app-shell {
+    .main-menu {
       display: flex;
-      flex-direction: row;
-      gap: 2rem;
+      flex-direction: column;
       align-items: center;
+      gap: 1.5rem;
       background: #111827;
       border: 1px solid #1f2937;
       border-radius: 16px;
-      padding: 2rem;
+      padding: 3rem 4rem;
       box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
-      max-width: 960px;
-    }
-    .control-panel {
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-      width: 340px;
+      min-width: 320px;
     }
     h1 {
       font-size: 2rem;
       font-weight: 700;
       color: #f8fafc;
     }
-    .subtitle {
-      font-size: 0.9rem;
-      color: #94a3b8;
-      line-height: 1.4;
+    .menu-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      width: 100%;
     }
-    .badge {
-      display: inline-block;
-      padding: 0.25rem 0.65rem;
-      border-radius: 9999px;
-      font-size: 0.78rem;
-      font-weight: 600;
-    }
-    .badge.ready {
-      background: rgba(16, 185, 129, 0.15);
-      color: #34d399;
-      border: 1px solid rgba(52, 211, 153, 0.3);
-    }
-    .badge.loading {
-      background: rgba(245, 158, 11, 0.15);
-      color: #fbbf24;
-      border: 1px solid rgba(251, 191, 36, 0.3);
-    }
-    .hello-btn {
+    .menu-btn,
+    .action-btn {
       padding: 0.75rem 1.25rem;
       font-size: 1rem;
       font-weight: 600;
@@ -74,37 +53,89 @@
       border-radius: 8px;
       cursor: pointer;
       transition: background 0.15s ease;
+      width: 100%;
     }
-    .hello-btn:hover:not(:disabled) {
+    .menu-btn:hover:not(:disabled),
+    .action-btn:hover:not(:disabled) {
       background: #1d4ed8;
     }
-    .hello-btn:disabled {
-      opacity: 0.5;
+    .menu-btn:disabled,
+    .action-btn:disabled {
+      opacity: 0.45;
       cursor: not-allowed;
     }
-    .wasm-output {
-      padding: 1rem;
+    .action-btn.secondary {
+      background: #334155;
+    }
+    .action-btn.secondary:hover:not(:disabled) {
+      background: #475569;
+    }
+    .mode-layout {
+      display: flex;
+      flex-direction: row;
+      gap: 2rem;
+      align-items: flex-start;
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 16px;
+      padding: 2rem;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+    }
+    .viewport-column {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      align-items: center;
+    }
+    .canvas-container {
+      background: #050505;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .sphere-canvas {
+      width: 460px;
+      height: 460px;
+      display: block;
+    }
+    .slider-row {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 0.75rem;
+      width: 100%;
+    }
+    .rotate-slider {
+      flex: 1;
+      accent-color: #3b82f6;
+      cursor: pointer;
+    }
+    .rotation-label {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.9rem;
+      color: #94a3b8;
+      min-width: 3.5rem;
+      text-align: right;
+    }
+    .sidebar-column {
+      display: flex;
+      flex-direction: column;
+      gap: 0.85rem;
+      width: 180px;
+    }
+    .grid-stats {
       background: #0b1021;
       border: 1px solid #1e293b;
       border-radius: 8px;
+      padding: 0.85rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .stat-line {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.9rem;
-      color: #60a5fa;
-      min-height: 4.5rem;
-      display: flex;
-      align-items: center;
-    }
-    .viewport-panel {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .three-canvas {
-      width: 520px;
-      height: 420px;
-      border-radius: 12px;
-      border: 1px solid #1e293b;
-      display: block;
+      font-size: 0.95rem;
+      color: #e2e8f0;
     }
   </style>
 </head>

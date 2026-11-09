@@ -1,189 +1,271 @@
 import * as THREE from "three";
-import initWasm, { hello } from "tec11-wasm";
+import initWasmModule, { WasmGridSession } from "tec11-wasm";
 
-let wasmInitialized = false;
+const _yAxis = new THREE.Vector3(0, 1, 0);
 
-function startCanvas3DFallback(canvas, width, height, geometry, planetMesh, camera) {
-  canvas.width = width;
-  canvas.height = height;
+let activeView = null;
+
+/**
+ * Frontend colormap: maps per-tile unit sphere coordinates (x, y, z) in [-1, 1]
+ * to per-vertex RGB colors (r/g/b = (x+1)/2, (y+1)/2, (z+1)/2).
+ */
+function computePositionVertexColors(tileCenters, vertexTileIds) {
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+  for (let v = 0; v < numVerts; v++) {
+    const tid = vertexTileIds[v];
+    const base = tid * 3;
+    const x = tileCenters[base];
+    const y = tileCenters[base + 1];
+    const z = tileCenters[base + 2];
+    const out = v * 3;
+    colors[out] = 0.5 * (x + 1.0);
+    colors[out + 1] = 0.5 * (y + 1.0);
+    colors[out + 2] = 0.5 * (z + 1.0);
+  }
+  return colors;
+}
+
+/**
+ * Extracts the outer polygon border segments (v1 -> v2 of each fan triangle)
+ * so pentagon/hexagon tile boundaries are visible without internal fan spokes.
+ */
+function extractBorderPositions(positions) {
+  const numTris = positions.length / 9;
+  const border = new Float32Array(numTris * 6);
+  for (let t = 0; t < numTris; t++) {
+    const src = t * 9;
+    const dst = t * 6;
+    // Second and third vertices of each fan triangle form the outer polygon edge
+    border[dst] = positions[src + 3];
+    border[dst + 1] = positions[src + 4];
+    border[dst + 2] = positions[src + 5];
+    border[dst + 3] = positions[src + 6];
+    border[dst + 4] = positions[src + 7];
+    border[dst + 5] = positions[src + 8];
+  }
+  return border;
+}
+
+function paintCanvasFallback(view) {
+  const { canvas, width, height, geometry, mesh, camera } = view;
   const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  mesh.updateMatrixWorld(true);
+  camera.updateMatrixWorld(true);
+
+  ctx.fillStyle = "#050505";
+  ctx.fillRect(0, 0, width, height);
+
   const posAttr = geometry.attributes.position;
-  const lightDir = new THREE.Vector3(5, 4, 6).normalize();
+  const normAttr = geometry.attributes.normal;
+  const colAttr = geometry.attributes.color;
+  if (!posAttr || !colAttr) return;
 
   const vA = new THREE.Vector3();
   const vB = new THREE.Vector3();
   const vC = new THREE.Vector3();
+  const nVec = new THREE.Vector3();
   const pA = new THREE.Vector3();
   const pB = new THREE.Vector3();
   const pC = new THREE.Vector3();
-  const edge1 = new THREE.Vector3();
-  const edge2 = new THREE.Vector3();
-  const normal = new THREE.Vector3();
-  const toCam = new THREE.Vector3();
+  const lightDir = new THREE.Vector3(0.25, 0.75, 1.0).normalize();
+  const rotMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
 
-  let frameId = 0;
-  const renderFrame = () => {
-    frameId = requestAnimationFrame(renderFrame);
-    planetMesh.rotation.y += 0.008;
-    planetMesh.rotation.x += 0.003;
-    planetMesh.updateMatrixWorld(true);
-    camera.updateMatrixWorld(true);
-
-    ctx.fillStyle = "#0b1021";
-    ctx.fillRect(0, 0, width, height);
-
-    const faces = [];
-    for (let i = 0; i < posAttr.count; i += 3) {
-      vA.fromBufferAttribute(posAttr, i).applyMatrix4(planetMesh.matrixWorld);
-      vB.fromBufferAttribute(posAttr, i + 1).applyMatrix4(planetMesh.matrixWorld);
-      vC.fromBufferAttribute(posAttr, i + 2).applyMatrix4(planetMesh.matrixWorld);
-
-      edge1.subVectors(vB, vA);
-      edge2.subVectors(vC, vA);
-      normal.crossVectors(edge1, edge2).normalize();
-
-      toCam.subVectors(camera.position, vA).normalize();
-      if (normal.dot(toCam) <= 0) {
-        continue;
-      }
-
-      const diffuse = Math.max(0, normal.dot(lightDir));
-      const intensity = Math.min(1, 0.28 + 0.72 * diffuse);
-
-      pA.copy(vA).project(camera);
-      pB.copy(vB).project(camera);
-      pC.copy(vC).project(camera);
-
-      const depth = (pA.z + pB.z + pC.z) / 3;
-      faces.push({
-        ax: (pA.x * 0.5 + 0.5) * width,
-        ay: (-pA.y * 0.5 + 0.5) * height,
-        bx: (pB.x * 0.5 + 0.5) * width,
-        by: (-pB.y * 0.5 + 0.5) * height,
-        cx: (pC.x * 0.5 + 0.5) * width,
-        cy: (-pC.y * 0.5 + 0.5) * height,
-        depth,
-        intensity,
-      });
+  const tris = [];
+  for (let i = 0; i < posAttr.count; i += 3) {
+    nVec.fromBufferAttribute(normAttr, i).applyMatrix3(rotMatrix).normalize();
+    if (nVec.z <= -0.05) {
+      continue;
     }
 
-    faces.sort((a, b) => b.depth - a.depth);
+    vA.fromBufferAttribute(posAttr, i).applyMatrix4(mesh.matrixWorld);
+    vB.fromBufferAttribute(posAttr, i + 1).applyMatrix4(mesh.matrixWorld);
+    vC.fromBufferAttribute(posAttr, i + 2).applyMatrix4(mesh.matrixWorld);
 
-    for (const f of faces) {
-      const r = Math.round(43 * f.intensity);
-      const g = Math.round(108 * f.intensity);
-      const b = Math.round(176 * f.intensity);
-      ctx.beginPath();
-      ctx.moveTo(f.ax, f.ay);
-      ctx.lineTo(f.bx, f.by);
-      ctx.lineTo(f.cx, f.cy);
-      ctx.closePath();
-      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-      ctx.fill();
-      ctx.strokeStyle = "rgba(144, 205, 244, 0.45)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-  };
+    pA.copy(vA).project(camera);
+    pB.copy(vB).project(camera);
+    pC.copy(vC).project(camera);
 
-  renderFrame();
-  return () => cancelAnimationFrame(frameId);
+    const shade = 0.55 + 0.45 * Math.max(0, nVec.dot(lightDir));
+    const r = Math.min(255, Math.round(colAttr.getX(i) * 255 * shade));
+    const g = Math.min(255, Math.round(colAttr.getY(i) * 255 * shade));
+    const b = Math.min(255, Math.round(colAttr.getZ(i) * 255 * shade));
+
+    tris.push({
+      ax: (pA.x * 0.5 + 0.5) * width,
+      ay: (-pA.y * 0.5 + 0.5) * height,
+      bx: (pB.x * 0.5 + 0.5) * width,
+      by: (-pB.y * 0.5 + 0.5) * height,
+      cx: (pC.x * 0.5 + 0.5) * width,
+      cy: (-pC.y * 0.5 + 0.5) * height,
+      depth: (pA.z + pB.z + pC.z) / 3,
+      fill: `rgb(${r}, ${g}, ${b})`,
+    });
+  }
+
+  tris.sort((a, b) => b.depth - a.depth);
+
+  for (const t of tris) {
+    ctx.beginPath();
+    ctx.moveTo(t.ax, t.ay);
+    ctx.lineTo(t.bx, t.by);
+    ctx.lineTo(t.cx, t.cy);
+    ctx.closePath();
+    ctx.fillStyle = t.fill;
+    ctx.fill();
+    // Subtle same-color stroke prevents subpixel seams between fan triangles
+    ctx.strokeStyle = t.fill;
+    ctx.lineWidth = 0.75;
+    ctx.stroke();
+
+    // Draw the outer polygon edge (B -> C) so pentagon/hexagon borders stand out cleanly
+    ctx.beginPath();
+    ctx.moveTo(t.bx, t.by);
+    ctx.lineTo(t.cx, t.cy);
+    ctx.strokeStyle = "rgba(10, 14, 24, 0.45)";
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+  }
 }
 
-export const initWasmAndScene = (onReady) => () => {
-  initWasm({ module_or_path: "./tec11_wasm_bg.wasm" })
+function updateViewBuffers(view) {
+  const { session, geometry, borderGeometry } = view;
+  const positions = session.mesh_positions();
+  const normals = session.mesh_normals();
+  const vertexTileIds = session.vertex_tile_ids();
+  const tileCenters = session.tile_centers();
+
+  const colors = computePositionVertexColors(tileCenters, vertexTileIds);
+
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.computeBoundingSphere();
+
+  if (borderGeometry) {
+    const borderPos = extractBorderPositions(positions);
+    borderGeometry.setAttribute("position", new THREE.Float32BufferAttribute(borderPos, 3));
+  }
+
+  view.paint();
+}
+
+export const initWasm = (onReady) => () => {
+  initWasmModule({ module_or_path: "./tec11_wasm_bg.wasm" })
     .then(() => {
-      wasmInitialized = true;
       onReady();
     })
     .catch((err) => {
       console.error("Failed to initialize tec11_wasm:", err);
     });
+};
 
-  const canvas = document.getElementById("three-canvas");
+export const mountGridView = (setGridInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
   if (!canvas) {
     return () => {};
   }
 
-  const width = 520;
-  const height = 420;
+  const width = 460;
+  const height = 460;
+  const session = new WasmGridSession();
+
+  const camera = new THREE.OrthographicCamera(-1.1, 1.1, 1.1, -1.1, 0, 11);
+  camera.position.z = 11;
+
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b1021);
+  scene.background = new THREE.Color(0x050505);
 
-  const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-  camera.position.set(0, 0.6, 4.5);
-  camera.lookAt(0, 0, 0);
+  const light = new THREE.HemisphereLight(0xffffff, 0x444444, 2.8);
+  scene.add(light);
 
-  const geometry = new THREE.IcosahedronGeometry(1.45, 2);
-  const material = new THREE.MeshStandardMaterial({
-    color: 0x2b6cb0,
-    roughness: 0.45,
-    metalness: 0.15,
+  const geometry = new THREE.BufferGeometry();
+  const material = new THREE.MeshPhongMaterial({
+    side: THREE.FrontSide,
+    vertexColors: true,
     flatShading: true,
   });
-  const planetMesh = new THREE.Mesh(geometry, material);
-  scene.add(planetMesh);
+  const mesh = new THREE.Mesh(geometry, material);
+  scene.add(mesh);
+
+  const borderGeometry = new THREE.BufferGeometry();
+  const borderMaterial = new THREE.LineBasicMaterial({
+    color: 0x0a0e18,
+    transparent: true,
+    opacity: 0.45,
+  });
+  const borderLines = new THREE.LineSegments(borderGeometry, borderMaterial);
+  mesh.add(borderLines);
 
   let renderer = null;
   try {
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setSize(width, height, false);
     renderer.setPixelRatio(window.devicePixelRatio || 1);
+    renderer.setSize(width, height, false);
   } catch (err) {
-    console.warn("WebGL context unavailable, using Three.js 3D projection renderer:", err);
-    const stopFallback = startCanvas3DFallback(
-      canvas,
-      width,
-      height,
-      geometry,
-      planetMesh,
-      camera
-    );
-    return () => {
-      stopFallback();
-      geometry.dispose();
-      material.dispose();
-    };
+    canvas.width = width;
+    canvas.height = height;
   }
 
-  const wireframeGeometry = new THREE.WireframeGeometry(geometry);
-  const wireframeMaterial = new THREE.LineBasicMaterial({
-    color: 0x90cdf4,
-    transparent: true,
-    opacity: 0.45,
-  });
-  const wireframe = new THREE.LineSegments(wireframeGeometry, wireframeMaterial);
-  planetMesh.add(wireframe);
-
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.55);
-  scene.add(ambientLight);
-
-  const dirLight = new THREE.DirectionalLight(0xffffff, 1.3);
-  dirLight.position.set(5, 4, 6);
-  scene.add(dirLight);
-
-  let frameId = 0;
-  const animate = () => {
-    frameId = requestAnimationFrame(animate);
-    planetMesh.rotation.y += 0.008;
-    planetMesh.rotation.x += 0.003;
-    renderer.render(scene, camera);
+  const view = {
+    canvas,
+    width,
+    height,
+    session,
+    camera,
+    scene,
+    geometry,
+    material,
+    borderGeometry,
+    borderMaterial,
+    mesh,
+    renderer,
+    paint() {
+      if (this.renderer) {
+        this.renderer.render(this.scene, this.camera);
+      } else {
+        paintCanvasFallback(this);
+      }
+    },
   };
-  animate();
+
+  activeView = view;
+  updateViewBuffers(view);
+  setGridInfo({
+    size: session.size(),
+    tileCount: session.tile_count(),
+  })();
 
   return () => {
-    cancelAnimationFrame(frameId);
+    if (activeView === view) {
+      activeView = null;
+    }
     geometry.dispose();
     material.dispose();
-    wireframeGeometry.dispose();
-    wireframeMaterial.dispose();
-    renderer.dispose();
+    borderGeometry.dispose();
+    borderMaterial.dispose();
+    if (renderer) {
+      renderer.dispose();
+    }
+    session.free();
   };
 };
 
-export const callRustHello = (name) => () => {
-  if (!wasmInitialized) {
-    return "Rust Wasm module is still initializing...";
-  }
-  return hello(name);
+export const subdivideGrid = (setGridInfo) => () => {
+  if (!activeView) return;
+  activeView.session.subdivide();
+  updateViewBuffers(activeView);
+  setGridInfo({
+    size: activeView.session.size(),
+    tileCount: activeView.session.tile_count(),
+  })();
+};
+
+export const rotateGrid = (deg) => () => {
+  if (!activeView) return;
+  const angleRad = (deg * Math.PI) / 180.0;
+  activeView.mesh.setRotationFromAxisAngle(_yAxis, angleRad);
+  activeView.paint();
 };

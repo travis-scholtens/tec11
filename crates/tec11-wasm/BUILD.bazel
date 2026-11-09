@@ -6,6 +6,7 @@ rust_shared_library(
     srcs = ["src/lib.rs"],
     edition = "2021",
     deps = [
+        "//crates/tec11-math-grid:tec11_math_grid",
         "@rules_rust_wasm_bindgen//3rdparty:wasm_bindgen",
     ],
 )
