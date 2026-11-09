@@ -15,6 +15,7 @@ pub struct PangeaWorld {
     pub radius_km: f64,
     pub tiles: Vec<TileGeology>,
     pub continent_tiles: Vec<usize>,
+    pub ridge_arcs: Vec<GreatCircleArc>,
 }
 
 impl PangeaWorld {
@@ -167,6 +168,7 @@ impl PangeaWorld {
             radius_km,
             tiles,
             continent_tiles,
+            ridge_arcs,
         }
     }
 

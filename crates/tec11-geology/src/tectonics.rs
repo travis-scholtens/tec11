@@ -3,10 +3,10 @@ use std::f64::consts::PI;
 
 use tec11_climate::ClimateModel;
 use tec11_math_grid::{
-    great_circle_distance, length, normal, Pcg64Mcg, PointTree, SphericalGrid, Vec3,
+    cross, dot, length, normal, rotate, GreatCircleArc, Pcg64Mcg, PointTree, SphericalGrid, Vec3,
 };
 
-use crate::movement::{center_tile, move_group, split_group};
+use crate::movement::{center_tile, farthest_tile, move_group, split_group};
 use crate::pangea::PangeaWorld;
 use crate::rock::{
     deposit_sedimentary, metamorphic_contact, metamorphic_regional, DepositClimate,
@@ -19,6 +19,15 @@ use crate::tile::TileGeology;
 pub struct LithosphericGroup {
     pub tiles: Vec<usize>,
     pub velocity: Vec3,
+}
+
+/// An active mid-ocean spreading ridge segment on the unit sphere (`Section 5.4` of the design doc).
+#[derive(Clone, Debug)]
+pub struct SpreadingRidgeArc {
+    pub start: Vec3,
+    pub end: Vec3,
+    pub velocity: Vec3,
+    pub age_ticks: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +52,7 @@ pub struct TectonicsSimulation {
     geoticks: u32,
     tiles: Vec<TileGeology>,
     groups: Vec<LithosphericGroup>,
+    ridges: Vec<SpreadingRidgeArc>,
     climate_model: ClimateModel,
     tile_koeppen: Vec<u8>,
     tile_life: Vec<f32>,
@@ -94,6 +104,17 @@ impl TectonicsSimulation {
             velocity: [0.0, 0.0, 0.0],
         }];
 
+        let ridges = pangea
+            .ridge_arcs
+            .into_iter()
+            .map(|arc| SpreadingRidgeArc {
+                start: arc.start,
+                end: arc.end,
+                velocity: [0.0, 0.0, 0.0],
+                age_ticks: 8,
+            })
+            .collect();
+
         let climate_model = ClimateModel::new_for_tectonics(grid.clone(), cells, spin, tilt_deg);
 
         Self {
@@ -110,6 +131,7 @@ impl TectonicsSimulation {
             geoticks: 0,
             tiles: pangea.tiles,
             groups,
+            ridges,
             climate_model,
             tile_koeppen: vec![0; n],
             tile_life: vec![0.0; n],
@@ -268,21 +290,60 @@ impl TectonicsSimulation {
         }
 
         let mut in_new_continent = vec![false; n];
+        let mut tile_vel = vec![[0.0, 0.0, 0.0]; n];
         for &dest in new_movements.keys() {
             in_new_continent[dest] = true;
+            let g_indices = &overlapping[dest];
+            if !g_indices.is_empty() {
+                let mut sum_v = [0.0, 0.0, 0.0];
+                for &g_idx in g_indices {
+                    let gv = self.groups[g_idx].velocity;
+                    sum_v[0] += gv[0];
+                    sum_v[1] += gv[1];
+                    sum_v[2] += gv[2];
+                }
+                let inv = 1.0 / (g_indices.len() as f64);
+                tile_vel[dest] = [sum_v[0] * inv, sum_v[1] * inv, sum_v[2] * inv];
+            }
         }
 
-        // 2. Apply tile movements, leading-edge subduction uplift, accretionary sediment scraping,
-        //    and oceanic trench deflection.
+        // 2. Apply tile movements, directional leading-edge subduction uplift, and accretionary
+        //    sediment scraping.
         let mut collisions: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-        let mut active_trench_tile = vec![false; n];
 
         for (&dest, movements) in &new_movements {
             let is_leading_edge = !old_continental[dest];
             let build_amount = if is_leading_edge {
                 let avg_speed: f64 =
                     movements.iter().map(|m| m.speed).sum::<f64>() / (movements.len() as f64);
-                (self.build_rate * avg_speed) as f32
+                let v_vec = tile_vel[dest];
+                let v_len = length(v_vec);
+                let p_dest = self.grid.faces[dest].0;
+                let mut cos_theta_max = 0.0f64;
+                let mut has_ocean_nb = false;
+                if v_len > 1e-9 {
+                    let v_hat = [v_vec[0] / v_len, v_vec[1] / v_len, v_vec[2] / v_len];
+                    for &nb in &self.adjacency[dest] {
+                        if !in_new_continent[nb] {
+                            has_ocean_nb = true;
+                            let p_nb = self.grid.faces[nb].0;
+                            let d_hat = normal([
+                                p_nb[0] - p_dest[0],
+                                p_nb[1] - p_dest[1],
+                                p_nb[2] - p_dest[2],
+                            ]);
+                            cos_theta_max = cos_theta_max.max(dot(v_hat, d_hat));
+                        }
+                    }
+                    if !has_ocean_nb {
+                        cos_theta_max = 0.75;
+                    }
+                }
+                if cos_theta_max > 0.25 {
+                    (self.build_rate * avg_speed * cos_theta_max) as f32
+                } else {
+                    0.0
+                }
             } else {
                 0.0
             };
@@ -308,17 +369,6 @@ impl TectonicsSimulation {
 
             if build_amount > 0.0 {
                 self.tiles[dest].build(build_amount, Rock::seafloor());
-
-                // Carve an oceanic subduction trench in the 1-ring of ocean tiles ahead of the leading edge.
-                let trench_elev = (-5.8 - 22.0 * build_amount).clamp(-8.8, -5.8);
-                for &nb in &self.adjacency[dest] {
-                    if !in_new_continent[nb] {
-                        let thick = self.tiles[nb].thickness();
-                        self.tiles[nb].bottom = self.tiles[nb].bottom.min(trench_elev - thick);
-                        self.tiles[nb].subduction = (build_amount * 0.5).max(self.tiles[nb].subduction);
-                        active_trench_tile[nb] = true;
-                    }
-                }
             }
 
             // Record pairwise collisions between overlapping groups at `dest`.
@@ -332,54 +382,117 @@ impl TectonicsSimulation {
             }
         }
 
-        // 3. Trailing-edge seafloor accretion (Mid-Ocean Ridges) & ocean floor thermal subsidence.
-        //    Compute continent centroids to locate divergent spreading ridges between continents.
-        let group_centers: Vec<Vec3> = self
-            .groups
+        // 3. Mid-ocean spreading ridge advection, retirement, and dynamic ocean floor bathymetry:
+        //    - Advect active spreading ridges by their parent drift velocity and retire overridden ones.
+        //    - Compute Parsons & Sclater thermal subsidence (-2.5 km ridge axis -> -5.5 km abyssal plain
+        //      over 2,600 km) from active spreading ridges.
+        //    - Evaluate coastal ocean tiles directionally: active convergent trenches (cos_theta > 0.35)
+        //      flex downward to -5.5..-6.8 km, while passive/trailing shelves sit at -1.15 km.
+        for ridge in &mut self.ridges {
+            let speed = length(ridge.velocity);
+            if speed > 1e-9 {
+                let mid = normal([
+                    ridge.start[0] + ridge.end[0],
+                    ridge.start[1] + ridge.end[1],
+                    ridge.start[2] + ridge.end[2],
+                ]);
+                let axis = normal(cross(mid, ridge.velocity));
+                if length(axis) > 1e-9 {
+                    ridge.start = rotate(ridge.start, axis, speed);
+                    ridge.end = rotate(ridge.end, axis, speed);
+                }
+            }
+            ridge.age_ticks = ridge.age_ticks.saturating_add(1);
+        }
+
+        self.ridges.retain(|r| {
+            if r.age_ticks <= 6 {
+                return true;
+            }
+            let mid = normal([
+                r.start[0] + r.end[0],
+                r.start[1] + r.end[1],
+                r.start[2] + r.end[2],
+            ]);
+            let s_in = in_new_continent[self.tree.nearest(r.start)];
+            let m_in = in_new_continent[self.tree.nearest(mid)];
+            let e_in = in_new_continent[self.tree.nearest(r.end)];
+            !(s_in && m_in && e_in)
+        });
+
+        let active_arcs: Vec<(GreatCircleArc, f64)> = self
+            .ridges
             .iter()
-            .filter(|g| !g.tiles.is_empty())
-            .map(|g| {
-                let c_tile = center_tile(&self.grid, &g.tiles);
-                self.grid.faces[c_tile].0
+            .map(|r| {
+                let maturity = ((r.age_ticks as f64) / 6.0).clamp(0.25, 1.0);
+                (GreatCircleArc::new(r.start, r.end), maturity)
             })
             .collect();
 
         for v in 0..n {
-            if (old_continental[v] || self.tiles[v].elevation() > 0.0) && !in_new_continent[v] {
-                // Newly rifted / uncovered ocean floor in the wake of a moving continent:
-                // spawn buoyant mid-ocean ridge crust (ophiolite sequence at -2.5 km).
-                self.tiles[v] = TileGeology::birth_seafloor();
-            } else if !in_new_continent[v] && !active_trench_tile[v] {
-                let is_passive_shelf = self.adjacency[v]
-                    .iter()
-                    .any(|&nb| in_new_continent[nb] && self.tiles[nb].subduction <= 0.0);
+            if in_new_continent[v] {
+                continue;
+            }
 
-                let target_elev = if is_passive_shelf {
-                    -0.75f32
-                } else if group_centers.len() >= 2 {
-                    // Check angular distance to the nearest midpoint/equidistant ridge between continent pairs:
-                    let p = self.grid.faces[v].0;
-                    let mut d1 = f64::INFINITY;
-                    let mut d2 = f64::INFINITY;
-                    for &gc in &group_centers {
-                        let d = great_circle_distance(p, gc);
-                        if d < d1 {
-                            d2 = d1;
-                            d1 = d;
-                        } else if d < d2 {
-                            d2 = d;
+            let p_v = self.grid.faces[v].0;
+            let mut z_ridge = -5.5f64;
+            for &(ref arc, maturity) in &active_arcs {
+                let d_km = arc.distance_to_point(p_v) * self.radius_km;
+                let u = (d_km / 2600.0).clamp(0.0, 1.0);
+                let z_arc = -5.5 + maturity * 3.0 * (1.0 - u.sqrt());
+                if z_arc > z_ridge {
+                    z_ridge = z_arc;
+                }
+            }
+
+            let mut has_cont_nb = false;
+            let mut cos_theta_max = -1.0f64;
+            let mut max_sub = 0.0f64;
+            for &nb in &self.adjacency[v] {
+                if in_new_continent[nb] {
+                    has_cont_nb = true;
+                    let v_nb = tile_vel[nb];
+                    let v_len = length(v_nb);
+                    if v_len > 1e-9 {
+                        let v_hat = [v_nb[0] / v_len, v_nb[1] / v_len, v_nb[2] / v_len];
+                        let p_nb = self.grid.faces[nb].0;
+                        let d_hat = normal([
+                            p_v[0] - p_nb[0],
+                            p_v[1] - p_nb[1],
+                            p_v[2] - p_nb[2],
+                        ]);
+                        let ct = dot(v_hat, d_hat);
+                        if ct > cos_theta_max {
+                            cos_theta_max = ct;
                         }
+                        if ct > 0.25 {
+                            max_sub = max_sub.max(self.tiles[nb].subduction as f64);
+                        }
+                    } else {
+                        cos_theta_max = cos_theta_max.max(0.0);
                     }
-                    let ridge_dist_km = ((d2 - d1).abs() * 0.5) * self.radius_km;
-                    let u_ridge = (ridge_dist_km / 2400.0).clamp(0.0, 1.0);
-                    (-2.5 - 2.9 * u_ridge.sqrt()) as f32
-                } else {
-                    -5.2f32
-                };
+                }
+            }
 
-                let cur_elev = self.tiles[v].elevation();
-                let new_elev = cur_elev + 0.16 * (target_elev - cur_elev);
-                self.tiles[v].bottom = new_elev.min(-0.15) - self.tiles[v].thickness();
+            let target_elev = if !has_cont_nb {
+                z_ridge as f32
+            } else if cos_theta_max > 0.35 && max_sub > 0.0 {
+                // Active convergent subduction trench ahead of an advancing continental margin:
+                let trench_deflection = 1.35 * cos_theta_max * max_sub.clamp(0.25, 1.2);
+                (z_ridge - trench_deflection).clamp(-6.8, -4.8) as f32
+            } else if cos_theta_max <= 0.15 {
+                // Passive / trailing continental shelf:
+                -1.15f32
+            } else {
+                // Oblique coastal margin: smooth transition between passive shelf and open ocean / ridge depth:
+                let w = ((cos_theta_max - 0.15) / 0.20).clamp(0.0, 1.0);
+                ((-1.15 * (1.0 - w)) + z_ridge * w) as f32
+            };
+
+            if old_continental[v] || self.tiles[v].elevation() > 0.0 {
+                self.tiles[v] = TileGeology::empty_ocean_with_depth(Rock::seafloor(), target_elev);
+            } else {
+                self.tiles[v].bottom = target_elev.min(-0.15) - self.tiles[v].thickness();
             }
         }
 
@@ -666,6 +779,46 @@ impl TectonicsSimulation {
                 if let Some(((a_tiles, va), (b_tiles, vb))) =
                     split_group(&self.grid, &self.adjacency, &g.tiles, &mut self.rng)
                 {
+                    // Spawn a new mid-ocean spreading ridge along the rift seam between `a_tiles` and `b_tiles`.
+                    let b_set: BTreeSet<usize> = b_tiles.iter().copied().collect();
+                    let seam_tiles: Vec<usize> = a_tiles
+                        .iter()
+                        .copied()
+                        .filter(|&u| self.adjacency[u].iter().any(|nb| b_set.contains(nb)))
+                        .collect();
+                    if seam_tiles.len() >= 2 {
+                        let m_tile = center_tile(&self.grid, &seam_tiles);
+                        let p_m = self.grid.faces[m_tile].0;
+                        let e1_tile = farthest_tile(&self.grid, &seam_tiles, p_m);
+                        let p_e1 = self.grid.faces[e1_tile].0;
+                        let e2_tile = farthest_tile(&self.grid, &seam_tiles, p_e1);
+                        let p_e2 = self.grid.faces[e2_tile].0;
+                        if e1_tile != m_tile && m_tile != e2_tile {
+                            self.ridges.push(SpreadingRidgeArc {
+                                start: p_e1,
+                                end: p_m,
+                                velocity: g.velocity,
+                                age_ticks: 0,
+                            });
+                            self.ridges.push(SpreadingRidgeArc {
+                                start: p_m,
+                                end: p_e2,
+                                velocity: g.velocity,
+                                age_ticks: 0,
+                            });
+                        } else if e1_tile != e2_tile {
+                            self.ridges.push(SpreadingRidgeArc {
+                                start: p_e1,
+                                end: p_e2,
+                                velocity: g.velocity,
+                                age_ticks: 0,
+                            });
+                        }
+                        while self.ridges.len() > 18 {
+                            self.ridges.remove(0);
+                        }
+                    }
+
                     let dp = self.dp;
                     next_groups.push(LithosphericGroup {
                         tiles: a_tiles,
@@ -858,5 +1011,55 @@ mod tests {
                 pinholes
             );
         }
+    }
+
+    #[test]
+    fn test_realistic_ocean_bathymetry() {
+        let mut sim = TectonicsSimulation::new(5, 29.0, 42);
+        for _ in 0..25 {
+            sim.step();
+        }
+        let n = sim.tile_count();
+        let mut min_ocean = f32::INFINITY;
+        let mut max_ocean = f32::NEG_INFINITY;
+        let mut non_coastal_above_abyssal = 0usize;
+        for v in 0..n {
+            let elev = sim.tiles()[v].elevation();
+            if elev <= 0.0 {
+                min_ocean = min_ocean.min(elev);
+                max_ocean = max_ocean.max(elev);
+                let has_land_nb = sim.adjacency[v]
+                    .iter()
+                    .any(|&nb| sim.tiles()[nb].elevation() > 0.0);
+                if !has_land_nb {
+                    // Open-ocean tiles (not adjacent to a continent) must follow ridge-to-abyssal
+                    // thermal subsidence [-5.5, -2.5] km and never retain deep trench scars (< -5.6 km).
+                    assert!(
+                        (-5.6..=-2.4).contains(&elev),
+                        "Open-ocean tile {} has out-of-range elevation {} km",
+                        v,
+                        elev
+                    );
+                    if elev > -4.5 {
+                        non_coastal_above_abyssal += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            min_ocean >= -7.0 && min_ocean < -5.3,
+            "Expected abyssal/trench depths in [-7.0, -5.3), got {}",
+            min_ocean
+        );
+        assert!(
+            max_ocean <= -0.15 && max_ocean > -1.5,
+            "Expected passive continental shelf in (-1.5, -0.15], got {}",
+            max_ocean
+        );
+        assert!(
+            non_coastal_above_abyssal > 20,
+            "Expected active mid-ocean ridges to elevate open-ocean tiles above abyssal plain, got {}",
+            non_coastal_above_abyssal
+        );
     }
 }
