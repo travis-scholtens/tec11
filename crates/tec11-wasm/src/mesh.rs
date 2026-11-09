@@ -1,7 +1,7 @@
 use tec11_math_grid::{normal, SphericalGrid, Vec3};
 
 #[inline]
-fn rotate_axes(v: Vec3) -> [f32; 3] {
+pub fn rotate_axes(v: Vec3) -> [f32; 3] {
     [-v[1] as f32, v[2] as f32, v[0] as f32]
 }
 

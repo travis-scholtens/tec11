@@ -1,0 +1,23 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "tec11_climate",
+    srcs = [
+        "src/earth_data.rs",
+        "src/koeppen.rs",
+        "src/lib.rs",
+        "src/model.rs",
+        "src/ocean.rs",
+    ],
+    edition = "2021",
+    deps = [
+        "//crates/tec11-math-grid:tec11_math_grid",
+    ],
+)
+
+rust_test(
+    name = "tec11_climate_test",
+    crate = ":tec11_climate",
+)

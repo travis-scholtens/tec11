@@ -1,9 +1,34 @@
 import * as THREE from "three";
-import initWasmModule, { WasmGridSession, WasmPangeaSession } from "tec11-wasm";
+import initWasmModule, {
+  WasmClimateSession,
+  WasmGridSession,
+  WasmPangeaSession,
+} from "tec11-wasm";
 
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
 let activeView = null;
+
+/**
+ * Köppen classification RGB palette matching `koeppencolor.py` (in [0..255]).
+ * Index 0 is Ocean (0, 0, 0).
+ */
+const KOEPPEN_PALETTE_RGB = [
+  [0, 0, 0], // 0: Ocean
+  [0, 0, 255], // 1: Af
+  [0, 63, 255], // 2: Am
+  [0, 127, 255], // 3: Aw
+  [255, 127, 0], // 4: BS
+  [255, 0, 0], // 5: BW
+  [0, 255, 0], // 6: Cf
+  [255, 255, 0], // 7: Cs
+  [127, 255, 0], // 8: Cw
+  [0, 255, 255], // 9: Df
+  [255, 0, 255], // 10: Ds
+  [127, 127, 255], // 11: Dw
+  [127, 127, 127], // 12: EF
+  [191, 191, 191], // 13: ET
+];
 
 /**
  * Frontend colormap for Grid mode: maps per-tile unit sphere coordinates (x, y, z)
@@ -74,6 +99,129 @@ function computePangeaVertexColors(elevations, felsities, vertexTileIds, renderM
 }
 
 /**
+ * Frontend colormaps for Climate mode matching `climatedisplay.py` + `"ocean_currents"`:
+ * - "koeppen": Land tiles colored by Köppen classification (`koeppencolor.py`), ocean black (0, 0, 0).
+ * - "ocean_currents": Ocean tiles colored by SST Anomaly (Warm Red/Orange = poleward western
+ *   boundary currents, Cold Cyan/Blue = equatorward currents & upwelling, Deep Navy = calm),
+ *   with continents in muted dark slate and 3D flow arrows overlaid on ocean tiles.
+ * - "insolation": Land tiles colored yellow-white (`r=255, g=255*min(1, s/0.5), b=255*max(0, (s-0.5)/0.5)`).
+ * - "precipitation": Land tiles colored greyscale (`128 + 127 * s`).
+ * - "temperature": Land tiles colored blue-to-red (`r=255*min(1, s/0.5), g=0, b=255*min(1, (1-s)/0.5)`).
+ */
+function computeClimateVertexColors(view) {
+  const { session, elevations, vertexTileIds, attribute, seasonSlider } = view;
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+  const seasonCount = session.season_count();
+  const seasonIdx = Math.min(
+    seasonCount - 1,
+    Math.max(0, Math.round(((seasonCount - 1) * seasonSlider) / 100.0))
+  );
+
+  if (attribute === "koeppen") {
+    const koeppenIds = view.koeppenIds;
+    for (let v = 0; v < numVerts; v++) {
+      const tid = vertexTileIds[v];
+      const out = v * 3;
+      if (elevations[tid] > 0.0) {
+        const idx = Math.round(koeppenIds[tid]);
+        const rgb = KOEPPEN_PALETTE_RGB[idx] || KOEPPEN_PALETTE_RGB[0];
+        colors[out] = rgb[0] / 255.0;
+        colors[out + 1] = rgb[1] / 255.0;
+        colors[out + 2] = rgb[2] / 255.0;
+      } else {
+        colors[out] = 0.0;
+        colors[out + 1] = 0.0;
+        colors[out + 2] = 0.0;
+      }
+    }
+  } else if (attribute === "ocean_currents") {
+    const sstAnomaly = view.seasonalSstAnomaly[seasonIdx];
+    const oceanSpeed = view.seasonalOceanSpeed[seasonIdx];
+    for (let v = 0; v < numVerts; v++) {
+      const tid = vertexTileIds[v];
+      const out = v * 3;
+      if (elevations[tid] > 0.0) {
+        // Muted dark slate for continents so ocean currents stand out clearly
+        colors[out] = 36.0 / 255.0;
+        colors[out + 1] = 42.0 / 255.0;
+        colors[out + 2] = 52.0 / 255.0;
+      } else {
+        const anom = sstAnomaly[tid];
+        const spd = oceanSpeed[tid];
+        const baseR = 14.0;
+        const baseG = 30.0 + 18.0 * spd;
+        const baseB = 72.0 + 25.0 * spd;
+
+        if (anom >= 0.0) {
+          const t = Math.min(1.0, Math.pow(anom, 0.85));
+          // Deep navy -> vibrant crimson/red -> bright warm orange-gold (suppressing blue quickly so it never muddies)
+          const r = baseR + (255.0 - baseR) * Math.min(1.0, t * 1.35);
+          const g = t < 0.45 ? baseG * (1.0 - t) + 45.0 * t : 35.0 + 145.0 * ((t - 0.45) / 0.55);
+          const b = baseB * Math.pow(1.0 - t, 1.8);
+          colors[out] = r / 255.0;
+          colors[out + 1] = g / 255.0;
+          colors[out + 2] = b / 255.0;
+        } else {
+          const t = Math.min(1.0, -anom * 1.25);
+          // Deep navy -> bright marine cyan -> icy turquoise
+          const targetR = t > 0.5 ? 110.0 * ((t - 0.5) / 0.5) : 0.0;
+          const targetG = 210.0 + 35.0 * t;
+          const targetB = 255.0;
+          colors[out] = (baseR + (targetR - baseR) * t) / 255.0;
+          colors[out + 1] = (baseG + (targetG - baseG) * t) / 255.0;
+          colors[out + 2] = (baseB + (targetB - baseB) * t) / 255.0;
+        }
+      }
+    }
+  } else if (attribute === "insolation") {
+    const sun = session.tile_insolation(seasonIdx);
+    for (let v = 0; v < numVerts; v++) {
+      const tid = vertexTileIds[v];
+      const out = v * 3;
+      if (elevations[tid] > 0.0) {
+        const s = sun[tid];
+        const r = 1.0;
+        const g = Math.max(0.0, Math.min(1.0, s >= 0.5 ? 1.0 : s / 0.5));
+        const b = Math.max(0.0, Math.min(1.0, s < 0.5 ? 0.0 : (s - 0.5) / 0.5));
+        colors[out] = r;
+        colors[out + 1] = g;
+        colors[out + 2] = b;
+      }
+    }
+  } else if (attribute === "precipitation") {
+    const precip = session.tile_precipitation(seasonIdx);
+    for (let v = 0; v < numVerts; v++) {
+      const tid = vertexTileIds[v];
+      const out = v * 3;
+      if (elevations[tid] > 0.0) {
+        const s = precip[tid];
+        const val = Math.max(0.0, Math.min(255.0, 128.0 + 127.0 * s)) / 255.0;
+        colors[out] = val;
+        colors[out + 1] = val;
+        colors[out + 2] = val;
+      }
+    }
+  } else if (attribute === "temperature") {
+    const temp = session.tile_temperature(seasonIdx);
+    for (let v = 0; v < numVerts; v++) {
+      const tid = vertexTileIds[v];
+      const out = v * 3;
+      if (elevations[tid] > 0.0) {
+        const s = temp[tid];
+        const r = Math.max(0.0, Math.min(1.0, s >= 0.5 ? 1.0 : s / 0.5));
+        const b = Math.max(0.0, Math.min(1.0, s < 0.5 ? 1.0 : (1.0 - s) / 0.5));
+        colors[out] = r;
+        colors[out + 1] = 0.0;
+        colors[out + 2] = b;
+      }
+    }
+  }
+
+  return colors;
+}
+
+/**
  * Extracts the outer polygon border segments (v1 -> v2 of each fan triangle).
  */
 function extractBorderPositions(positions) {
@@ -93,7 +241,8 @@ function extractBorderPositions(positions) {
 }
 
 function paintCanvasFallback(view) {
-  const { canvas, width, height, geometry, mesh, camera, showBorders } = view;
+  const { canvas, width, height, geometry, mesh, camera, showBorders, arrowGeometry, arrowLines } =
+    view;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
@@ -173,6 +322,32 @@ function paintCanvasFallback(view) {
       ctx.stroke();
     }
   }
+
+  // Draw 3D ocean current arrows if visible
+  if (arrowLines && arrowLines.visible && arrowGeometry) {
+    const arrowPos = arrowGeometry.attributes.position;
+    if (arrowPos) {
+      ctx.strokeStyle = "rgba(248, 250, 252, 0.78)";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      for (let i = 0; i < arrowPos.count; i += 2) {
+        vA.fromBufferAttribute(arrowPos, i).applyMatrix4(mesh.matrixWorld);
+        vB.fromBufferAttribute(arrowPos, i + 1).applyMatrix4(mesh.matrixWorld);
+        if (vA.z <= 0.02 && vB.z <= 0.02) {
+          continue;
+        }
+        pA.copy(vA).project(camera);
+        pB.copy(vB).project(camera);
+        const x0 = (pA.x * 0.5 + 0.5) * width;
+        const y0 = (-pA.y * 0.5 + 0.5) * height;
+        const x1 = (pB.x * 0.5 + 0.5) * width;
+        const y1 = (-pB.y * 0.5 + 0.5) * height;
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+      }
+      ctx.stroke();
+    }
+  }
 }
 
 function createBaseSphereView(canvas, showBorders) {
@@ -210,6 +385,16 @@ function createBaseSphereView(canvas, showBorders) {
     mesh.add(borderLines);
   }
 
+  const arrowGeometry = new THREE.BufferGeometry();
+  const arrowMaterial = new THREE.LineBasicMaterial({
+    color: 0xf8fafc,
+    transparent: true,
+    opacity: 0.78,
+  });
+  const arrowLines = new THREE.LineSegments(arrowGeometry, arrowMaterial);
+  arrowLines.visible = false;
+  mesh.add(arrowLines);
+
   let renderer = null;
   try {
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -231,6 +416,9 @@ function createBaseSphereView(canvas, showBorders) {
     material,
     borderGeometry,
     borderMaterial,
+    arrowGeometry,
+    arrowMaterial,
+    arrowLines,
     mesh,
     renderer,
     paint() {
@@ -245,6 +433,8 @@ function createBaseSphereView(canvas, showBorders) {
       material.dispose();
       if (borderGeometry) borderGeometry.dispose();
       if (borderMaterial) borderMaterial.dispose();
+      arrowGeometry.dispose();
+      arrowMaterial.dispose();
       if (renderer) renderer.dispose();
     },
   };
@@ -293,6 +483,37 @@ function updatePangeaViewBuffers(view, rebuildGeometry) {
     view.renderMode
   );
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function updateClimateDataBuffers(view) {
+  view.koeppenIds = view.session.tile_koeppen_ids();
+  const seasonCount = view.session.season_count();
+  view.seasonalSstAnomaly = [];
+  view.seasonalOceanSpeed = [];
+  view.seasonalArrowPos = [];
+  for (let s = 0; s < seasonCount; s++) {
+    view.seasonalSstAnomaly.push(view.session.tile_ocean_sst_anomaly(s));
+    view.seasonalOceanSpeed.push(view.session.tile_ocean_speed(s));
+    view.seasonalArrowPos.push(view.session.ocean_arrow_positions(s));
+  }
+}
+
+function updateClimateViewColors(view) {
+  const seasonCount = view.session.season_count();
+  const seasonIdx = Math.min(
+    seasonCount - 1,
+    Math.max(0, Math.round(((seasonCount - 1) * view.seasonSlider) / 100.0))
+  );
+  view.arrowLines.visible = view.attribute === "ocean_currents";
+  if (view.attribute === "ocean_currents" && view.seasonalArrowPos && view.seasonalArrowPos[seasonIdx]) {
+    view.arrowGeometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(view.seasonalArrowPos[seasonIdx], 3)
+    );
+  }
+  const colors = computeClimateVertexColors(view);
+  view.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
   view.paint();
 }
 
@@ -394,6 +615,58 @@ export const setPangeaRenderMode = (renderMode) => () => {
   );
   activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
   activeView.paint();
+};
+
+export const mountClimateView = (cells) => (glaciationPct) => (attribute) => (seasonSlider) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  view.session = new WasmClimateSession(cells, glaciationPct / 100.0);
+  view.attribute = attribute;
+  view.seasonSlider = seasonSlider;
+
+  const positions = view.session.mesh_positions();
+  const normals = view.session.mesh_normals();
+  view.vertexTileIds = view.session.vertex_tile_ids();
+  view.elevations = view.session.tile_elevations();
+  updateClimateDataBuffers(view);
+
+  view.geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  view.geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  view.geometry.computeBoundingSphere();
+
+  activeView = view;
+  updateClimateViewColors(view);
+
+  return () => {
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const setClimateAttribute = (attribute) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.attribute = attribute;
+  updateClimateViewColors(activeView);
+};
+
+export const setClimateSeason = (seasonSlider) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.seasonSlider = seasonSlider;
+  updateClimateViewColors(activeView);
+};
+
+export const setClimateParams = (cells) => (glaciationPct) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_params(cells, glaciationPct / 100.0);
+  updateClimateDataBuffers(activeView);
+  updateClimateViewColors(activeView);
 };
 
 export const rotateGrid = (deg) => () => {
