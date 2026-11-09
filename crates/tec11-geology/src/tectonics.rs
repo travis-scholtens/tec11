@@ -330,37 +330,33 @@ impl TectonicsSimulation {
 
         for (&dest, movements) in &new_movements {
             let is_leading_edge = !old_continental[dest];
-            let build_amount = if is_leading_edge {
-                let avg_speed: f64 =
-                    movements.iter().map(|m| m.speed).sum::<f64>() / (movements.len() as f64);
-                let v_vec = tile_vel[dest];
-                let v_len = length(v_vec);
-                let p_dest = self.grid.faces[dest].0;
-                let mut cos_theta_max = 0.0f64;
-                let mut has_ocean_nb = false;
-                if v_len > 1e-9 {
-                    let v_hat = [v_vec[0] / v_len, v_vec[1] / v_len, v_vec[2] / v_len];
-                    for &nb in &self.adjacency[dest] {
-                        if !in_new_continent[nb] {
-                            has_ocean_nb = true;
-                            let p_nb = self.grid.faces[nb].0;
-                            let d_hat = normal([
-                                p_nb[0] - p_dest[0],
-                                p_nb[1] - p_dest[1],
-                                p_nb[2] - p_dest[2],
-                            ]);
-                            cos_theta_max = cos_theta_max.max(dot(v_hat, d_hat));
-                        }
-                    }
-                    if !has_ocean_nb {
-                        cos_theta_max = 0.75;
+            let avg_speed: f64 =
+                movements.iter().map(|m| m.speed).sum::<f64>() / (movements.len() as f64);
+            let speed_norm = (avg_speed / self.dp.max(1e-6)).clamp(0.0, 1.6);
+            let v_vec = tile_vel[dest];
+            let v_len = length(v_vec);
+            let p_dest = self.grid.faces[dest].0;
+            let mut cos_theta_max = 0.0f64;
+            let mut has_ocean_nb = false;
+            if v_len > 1e-9 {
+                let v_hat = [v_vec[0] / v_len, v_vec[1] / v_len, v_vec[2] / v_len];
+                for &nb in &self.adjacency[dest] {
+                    if !in_new_continent[nb] {
+                        has_ocean_nb = true;
+                        let p_nb = self.grid.faces[nb].0;
+                        let d_hat = normal([
+                            p_nb[0] - p_dest[0],
+                            p_nb[1] - p_dest[1],
+                            p_nb[2] - p_dest[2],
+                        ]);
+                        cos_theta_max = cos_theta_max.max(dot(v_hat, d_hat));
                     }
                 }
-                if cos_theta_max > 0.25 {
-                    (self.build_rate * avg_speed * cos_theta_max) as f32
-                } else {
-                    0.0
-                }
+            }
+            let raw_build = if has_ocean_nb && is_leading_edge && cos_theta_max > 0.20 {
+                (1.60 * self.build_rate * speed_norm * cos_theta_max) as f32
+            } else if has_ocean_nb && cos_theta_max > 0.45 {
+                (0.45 * self.build_rate * speed_norm * cos_theta_max) as f32
             } else {
                 0.0
             };
@@ -384,8 +380,14 @@ impl TectonicsSimulation {
                 self.tiles[dest].deposit(sed);
             }
 
-            if build_amount > 0.0 {
-                self.tiles[dest].build(build_amount, Rock::seafloor());
+            if raw_build > 0.0 {
+                let cur_h = self.tiles[dest].elevation().max(0.0);
+                let max_sub_h = if is_leading_edge { 6.8 } else { 6.2 };
+                let taper = ((max_sub_h - cur_h) / 5.8).clamp(0.0, 1.0);
+                let build_amount = raw_build * taper;
+                if build_amount > 0.01 {
+                    self.tiles[dest].build(build_amount, Rock::seafloor());
+                }
             }
 
             // Record pairwise collisions between overlapping groups at `dest`.
@@ -556,8 +558,14 @@ impl TectonicsSimulation {
             for v in 0..n {
                 let elev_v = self.tiles[v].elevation();
                 if elev_v > 0.05 {
-                    let climate_factor = self.tile_precip_norm[v]
+                    let base_climate = self.tile_precip_norm[v]
                         * (1.0 - self.tile_temp_norm[v]).max(0.0);
+                    let high_relief_weathering = if elev_v > 2.2 {
+                        0.08 * ((elev_v - 2.2) / 6.0).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let climate_factor = (base_climate + high_relief_weathering).max(0.0);
                     if climate_factor > 0.0 {
                         let mut min_nb_elev = elev_v;
                         for &u in &self.adjacency[v] {
@@ -565,7 +573,7 @@ impl TectonicsSimulation {
                             if nb_elev < elev_v {
                                 min_nb_elev = min_nb_elev.min(nb_elev);
                                 let drop = elev_v - nb_elev;
-                                let d = (drop / 10.0) * climate_factor;
+                                let d = (0.34 * (elev_v + drop) / 10.0) * climate_factor;
                                 if d > 0.0 {
                                     outgoing_dests[v].push((u, d));
                                     incoming_sources[u].push(v);
@@ -574,7 +582,7 @@ impl TectonicsSimulation {
                         }
                         if min_nb_elev < elev_v {
                             let base_level = min_nb_elev.max(0.05);
-                            max_erosion_cap[v] = (0.5 * (elev_v - base_level)).max(0.0);
+                            max_erosion_cap[v] = (0.38 * (elev_v - base_level)).max(0.0);
                         }
                     }
                 }
@@ -591,16 +599,28 @@ impl TectonicsSimulation {
                 if total_degree <= 1e-7 {
                     continue;
                 }
-                let num_all_neighbors = self.adjacency[v].len().max(1) as f32;
-                let avg_degree = total_degree / num_all_neighbors;
+                let avg_degree = total_degree / (outgoing_dests[v].len().max(1) as f32);
                 let (total_eroded, stripped_layers) =
                     self.tiles[v].erode_column(avg_degree, erode_dt, max_erosion_cap[v]);
                 if total_eroded > 1e-6 && !stripped_layers.is_empty() {
-                    // Distribute eroded material across lower neighbors proportional to slope,
-                    // capped so no single neighbor receives more than its geometric 1/N perimeter share.
-                    let denom = total_degree.max(avg_degree * num_all_neighbors);
+                    // Local Airy isostatic root rebound: removing crustal mass from an eroding
+                    // mountain unloads its root locally (`60%` rebound of bottom, `40%` net lowering
+                    // of surface elevation), exhuming deep metamorphic/plutonic rocks without
+                    // jacking up un-eroded lowland tiles across the rest of the continent.
+                    self.tiles[v].isostasize(0.60 * total_eroded);
+
+                    // Distribute eroded material across lower neighbors proportional to slope:
+                    // - On land neighbors, 35% is deposited locally in terrestrial basins while 65%
+                    //   is exported to the sea as dissolved/suspended fluvial load.
+                    // - On coastal ocean neighbors, the full share enters the coastal sea.
                     for &(dest_u, deg_u) in &outgoing_dests[v] {
-                        let amount_u = total_eroded * (deg_u / denom);
+                        let share = total_eroded * (deg_u / total_degree);
+                        let retention = if !overlapping[dest_u].is_empty() {
+                            0.35
+                        } else {
+                            1.0
+                        };
+                        let amount_u = share * retention;
                         incoming_batches[dest_u].push(ErodedMaterialBatch {
                             amount: amount_u,
                             total: total_eroded,
@@ -635,7 +655,10 @@ impl TectonicsSimulation {
                         false,
                         Some(clim_summary),
                     );
+                    let dep_t = dep.thickness;
                     self.tiles[t].deposit(dep);
+                    // Local Airy basin subsidence under the weight of newly deposited sediment:
+                    self.tiles[t].isostasize(-0.75 * dep_t);
                 } else {
                     let total_amount: f32 = incoming_batches[t].iter().map(|b| b.amount).sum();
                     let adj_continent_count = self.adjacency[t]
@@ -655,17 +678,17 @@ impl TectonicsSimulation {
                             self.tiles[t].bottom = (total_amount - 1.4).max(0.1) - self.tiles[t].thickness();
                         }
 
-                        let mut source_groups = BTreeSet::new();
+                        let mut group_counts: BTreeMap<usize, usize> = BTreeMap::new();
                         for &src_v in &incoming_sources[t] {
                             for &g_idx in &overlapping[src_v] {
-                                source_groups.insert(g_idx);
+                                *group_counts.entry(g_idx).or_insert(0) += 1;
                             }
                         }
-                        for g_idx in source_groups {
-                            if !self.groups[g_idx].tiles.contains(&t) {
-                                self.groups[g_idx].tiles.push(t);
+                        if let Some((&best_g, _)) = group_counts.iter().max_by_key(|&(_, c)| c) {
+                            if !self.groups[best_g].tiles.contains(&t) {
+                                self.groups[best_g].tiles.push(t);
                             }
-                            overlapping[t].push(g_idx);
+                            overlapping[t].push(best_g);
                         }
                     }
                 }
@@ -678,21 +701,45 @@ impl TectonicsSimulation {
             self.atmosphere_ticks_remaining -= 1;
         }
 
-        // 6. Apply continental isostatic rebound (`planetsimulation.py:318-321`).
+        // 6. Craton buoyancy safeguard & post-orogenic denudation (`planetsimulation.py:318-321`):
+        //    - Local Airy root rebound and basin subsidence are applied per-tile during erosion above.
+        //    - Ancient inactive mountain belts (`!is_active_orogen` and not adjacent to an active
+        //      orogenic front) slowly relax/denude toward lowland craton elevations (`2.0 km`).
         for (i, group) in self.groups.iter().enumerate() {
             if group.tiles.is_empty() {
                 continue;
             }
+            let n_tiles = group.tiles.len() as f32;
             let pre_h = pre_erosion_heights.get(i).copied().unwrap_or(0.0);
             let post_h: f32 = group
                 .tiles
                 .iter()
                 .map(|&t| self.tiles[t].elevation().max(0.0))
                 .sum();
-            let dh = (pre_h - post_h) / (group.tiles.len() as f32);
+            let pre_mean = pre_h / n_tiles;
+            let post_mean = post_h / n_tiles;
+            let eroded_loss = (pre_mean - post_mean).max(0.0);
+            let dh = if post_mean < 0.45 {
+                (0.45 - post_mean).min(eroded_loss.max(0.05))
+            } else {
+                0.0
+            };
+
             for &t in &group.tiles {
-                self.tiles[t].isostasize(dh);
-                // Keep continental tiles slightly emergent above sea level
+                if dh > 0.0 {
+                    self.tiles[t].isostasize(dh);
+                }
+                let is_active_orogen =
+                    self.tiles[t].subduction > 0.0 || overlapping[t].len() > 1;
+                if !is_active_orogen {
+                    let elev = self.tiles[t].elevation();
+                    if elev > 1.3 {
+                        let relax = 0.048 * (elev - 1.3);
+                        self.tiles[t].isostasize(-relax);
+                    }
+                    self.tiles[t].mountainosity = (self.tiles[t].mountainosity * 0.92).max(0.0);
+                }
+                // Keep continental tiles emergent above sea level
                 if self.tiles[t].elevation() < 0.05 {
                     self.tiles[t].bottom = 0.05 - self.tiles[t].thickness();
                 }
@@ -837,21 +884,34 @@ impl TectonicsSimulation {
                     }
 
                     let dp = self.dp;
+                    let max_speed = 1.35 * dp;
+                    let mut va_full = [
+                        g.velocity[0] + va[0] * dp,
+                        g.velocity[1] + va[1] * dp,
+                        g.velocity[2] + va[2] * dp,
+                    ];
+                    let sa = length(va_full);
+                    if sa > max_speed {
+                        let scale = max_speed / sa;
+                        va_full = [va_full[0] * scale, va_full[1] * scale, va_full[2] * scale];
+                    }
+                    let mut vb_full = [
+                        g.velocity[0] + vb[0] * dp,
+                        g.velocity[1] + vb[1] * dp,
+                        g.velocity[2] + vb[2] * dp,
+                    ];
+                    let sb = length(vb_full);
+                    if sb > max_speed {
+                        let scale = max_speed / sb;
+                        vb_full = [vb_full[0] * scale, vb_full[1] * scale, vb_full[2] * scale];
+                    }
                     next_groups.push(LithosphericGroup {
                         tiles: a_tiles,
-                        velocity: [
-                            g.velocity[0] + va[0] * dp,
-                            g.velocity[1] + va[1] * dp,
-                            g.velocity[2] + va[2] * dp,
-                        ],
+                        velocity: va_full,
                     });
                     next_groups.push(LithosphericGroup {
                         tiles: b_tiles,
-                        velocity: [
-                            g.velocity[0] + vb[0] * dp,
-                            g.velocity[1] + vb[1] * dp,
-                            g.velocity[2] + vb[2] * dp,
-                        ],
+                        velocity: vb_full,
                     });
                     continue;
                 }
@@ -1077,6 +1137,52 @@ mod tests {
             non_coastal_above_abyssal > 20,
             "Expected active mid-ocean ridges to elevate open-ocean tiles above abyssal plain, got {}",
             non_coastal_above_abyssal
+        );
+    }
+
+    #[test]
+    fn test_orogeny_erosion_balance() {
+        let mut sim = TectonicsSimulation::new(4, 45.0, 42);
+        for _ in 0..80 {
+            sim.step();
+        }
+        let land_tiles: Vec<usize> = (0..sim.tile_count())
+            .filter(|&v| sim.tiles()[v].elevation() > 0.0)
+            .collect();
+        assert!(!land_tiles.is_empty());
+        let mean_land_elev: f32 = land_tiles
+            .iter()
+            .map(|&v| sim.tiles()[v].elevation())
+            .sum::<f32>()
+            / (land_tiles.len() as f32);
+        let max_land_elev: f32 = land_tiles
+            .iter()
+            .map(|&v| sim.tiles()[v].elevation())
+            .fold(0.0f32, f32::max);
+        let alpine_snow_count = land_tiles
+            .iter()
+            .filter(|&&v| matches!(sim.tile_koeppen_ids()[v], 12 | 13))
+            .count();
+        let alpine_snow_frac = (alpine_snow_count as f64) / (land_tiles.len() as f64);
+
+        assert!(
+            max_land_elev > 4.2,
+            "Expected active orogeny to build mountain ranges > 4.2 km after 80 geoticks, got max {:.2} km (mean {:.2} km)",
+            max_land_elev,
+            mean_land_elev
+        );
+        assert!(
+            (0.45..=2.40).contains(&mean_land_elev),
+            "Expected mean continental elevation in [0.45, 2.40] km after 80 geoticks, got {:.2} km (max {:.2} km)",
+            mean_land_elev,
+            max_land_elev
+        );
+        assert!(
+            alpine_snow_frac < 0.35,
+            "Expected < 35% of land to be polar/alpine snow (ET/EF) after 80 geoticks, got {:.1}% (mean elev {:.2} km, max {:.2} km)",
+            alpine_snow_frac * 100.0,
+            mean_land_elev,
+            max_land_elev
         );
     }
 }

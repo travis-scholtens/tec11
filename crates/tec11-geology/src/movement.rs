@@ -590,7 +590,8 @@ fn first_corner(c: Vec3, f: Vec3) -> Vec3 {
     }
     let d = ncp.atan2(dot(c, f));
     let axis = [cp[0] / ncp, cp[1] / ncp, cp[2] / ncp];
-    let f2 = rotate(c, axis, d * 2.0_f64.sqrt());
+    let corner_angle = (d * 2.0_f64.sqrt()).min(0.45 * PI);
+    let f2 = rotate(c, axis, corner_angle);
     rotate(f2, c, PI / 4.0)
 }
 
@@ -784,7 +785,20 @@ pub fn split_group(
     if a_set.len() < min_half || b_set.len() < min_half {
         None
     } else {
-        Some(((a_set.into_iter().collect(), va), (b_set.into_iter().collect(), vb)))
+        let a_vecs: Vec<Vec3> = a_set.iter().map(|&t| grid.faces[t].0).collect();
+        let b_vecs: Vec<Vec3> = b_set.iter().map(|&t| grid.faces[t].0).collect();
+        let ca = average_vec3(&a_vecs);
+        let cb = average_vec3(&b_vecs);
+        let diff = [ca[0] - cb[0], ca[1] - cb[1], ca[2] - cb[2]];
+        let (final_va, final_vb) = if dot(va, diff) < 0.0 {
+            (vb, va)
+        } else {
+            (va, vb)
+        };
+        Some((
+            (a_set.into_iter().collect(), final_va),
+            (b_set.into_iter().collect(), final_vb),
+        ))
     }
 }
 

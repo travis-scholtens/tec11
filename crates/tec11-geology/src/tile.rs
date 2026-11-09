@@ -257,6 +257,13 @@ impl TileGeology {
     pub fn merge_sources(&mut self, groups: &[Vec<(f32, f32, Vec<RockLayer>)>]) {
         let mut merged_groups = Vec::with_capacity(groups.len());
         for g in groups {
+            let n_src = g.len().max(1) as f32;
+            let avg_b = g.iter().map(|(b, _, _)| *b).sum::<f32>() / n_src;
+            let avg_t = g
+                .iter()
+                .map(|(_, _, ls)| ls.iter().map(|l| l.thickness).sum::<f32>())
+                .sum::<f32>()
+                / n_src;
             let converted: Vec<(f32, f32, Vec<(Rock, f32)>)> = g
                 .iter()
                 .map(|(b, m, ls)| {
@@ -269,20 +276,51 @@ impl TileGeology {
                     )
                 })
                 .collect();
-            merged_groups.push(Self::merge_layers(&converted));
+            let (_, mountainosity, mut layers) = Self::merge_layers(&converted);
+            let raw_t: f32 = layers.iter().map(|l| l.1).sum();
+            if g.len() > 1 && raw_t > 1e-6 {
+                let scale = avg_t / raw_t;
+                for l in &mut layers {
+                    l.1 *= scale;
+                }
+            }
+            merged_groups.push((avg_b, mountainosity, layers));
         }
 
-        self.bottom = merged_groups.iter().map(|g| g.0).sum();
-        self.mountainosity = merged_groups.iter().map(|g| g.1).sum();
-        self.layers = merged_groups
-            .into_iter()
-            .flat_map(|g| {
-                g.2.into_iter()
-                    .map(|(rock, thickness)| RockLayer { rock, thickness })
-            })
-            .collect();
-        self.limit();
-        self.compact();
+        if merged_groups.len() == 1 {
+            let (b, m, ls) = merged_groups.into_iter().next().unwrap();
+            self.bottom = b;
+            self.mountainosity = m;
+            self.layers = ls
+                .into_iter()
+                .map(|(rock, thickness)| RockLayer { rock, thickness })
+                .collect();
+            self.limit();
+            self.compact();
+        } else {
+            let max_elev = merged_groups
+                .iter()
+                .map(|(b, _, ls)| *b + ls.iter().map(|l| l.1).sum::<f32>())
+                .fold(0.5f32, f32::max);
+            let mut target_elev = max_elev;
+            for _ in 1..merged_groups.len() {
+                let uplift = 2.6 * ((7.2 - target_elev) / 6.4).clamp(0.08, 1.0);
+                target_elev = (target_elev + uplift).min(7.8);
+            }
+            self.mountainosity = merged_groups.iter().map(|g| g.1).sum::<f32>()
+                + 4.0 * (merged_groups.len().saturating_sub(1) as f32);
+            self.layers = merged_groups
+                .into_iter()
+                .flat_map(|g| {
+                    g.2.into_iter()
+                        .map(|(rock, thickness)| RockLayer { rock, thickness })
+                })
+                .collect();
+            self.bottom = target_elev - self.thickness();
+            self.limit();
+            self.compact();
+            self.bottom = target_elev.min(Self::MAX_HEIGHT) - self.thickness();
+        }
     }
 
     /// Subduction uplift at the leading edge of a moving continent (`Tile.build` in `tile.py:195-201`).
@@ -365,7 +403,7 @@ impl TileGeology {
         let t = layer.thickness;
         self.layers.push(layer);
         self.limit();
-        self.mountainosity += t;
+        self.mountainosity = (self.mountainosity - 0.25 * t).max(0.0);
         self.compact();
     }
 
