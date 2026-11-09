@@ -8,8 +8,8 @@ The goal of this project is to rewrite **Tec-Nine**—originally a Python deskto
 1. **100% Client-Side Execution:** Eliminate the Python backend and server-side compute requirements. All simulation logic and rendering run locally in the browser.
 2. **Tech Stack:**
    - **UI Layer:** PureScript using `react-basic` (`react-basic-hooks` and `react-basic-dom`).
-   - **Simulation Engine:** Rust compiled to WebAssembly (`wasm32-unknown-unknown`), executing off the main thread in a dedicated Web Worker.
-   - **Planet Rendering:** Static spherical hex/pentagon tile grid rendered in 3D (WebGL / Three.js) where simulation ticks update per-tile color/attribute buffers without rebuilding geometry.
+   - **Simulation Engine:** Rust compiled to WebAssembly (`wasm32-unknown-unknown`), executing off the main thread in a dedicated Web Worker and emitting raw per-tile simulation data channels (`TypedArray` Structure-of-Arrays).
+   - **Multi-Viewport Planet Rendering:** 1 to 4 simultaneous 3D globes (WebGL / Three.js) sharing the same static spherical hex/pentagon grid geometry and simulation data buffers, where each viewport independently maps its chosen data layer (elevation, climate, ocean currents, population, states, etc.) to vertex/face colors and overlays on the frontend.
 3. **Simulation Modes:**
    - **Full Simulation Mode:** End-to-end planetary evolution from initial crust formation through tectonics, climate, lifeforms, prehistory, and history (`WorldSimulation` -> `PrehistorySimulation` -> `HistorySimulation`).
    - **Isolated Sandbox Modes:** Ability to run, inspect, and test every individual sub-simulation and algorithm in isolation (`Tectonics`, `Split`, `Move`, `Climate`, `Erosion`, `Rivers`, `Terrain`, `Lifeforms`, `Population`, `Racination`, `Prehistory`, `Language`, and `History`).
@@ -23,37 +23,51 @@ The goal of this project is to rewrite **Tec-Nine**—originally a Python deskto
 
 ## 2. High-Level System Architecture
 
-To keep the UI responsive during heavy simulation steps, the Rust Wasm engine runs inside a dedicated **Web Worker**, while PureScript (`react-basic`) manages application state, controls, and the 3D canvas on the main thread.
+To keep the UI responsive during heavy simulation steps and maintain a clean separation between physical simulation and visual presentation, the Rust Wasm engine runs inside a dedicated **Web Worker** and emits **per-tile numerical/categorical data channels** (never RGB colors). PureScript (`react-basic`) and the Three.js `SphereView` components on the main thread own all colormaps, legends, overlays, and multi-viewport rendering.
 
 ```mermaid
 flowchart LR
-    subgraph MainThread["Main Thread (Browser UI)"]
+    subgraph MainThread["Main Thread (Browser UI & Multi-View Renderer)"]
         UI["PureScript + react-basic\n(Mode Router, Controls, Inspector)"]
-        GL["WebGL / Three.js SphereView\n(Static Mesh Geometry + Color Buffer)"]
+        Store["Shared Simulation Data Store\n(TypedArray SoA Channels)"]
+        V1["SphereView #1\n(e.g. Elevation & Rivers)"]
+        V2["SphereView #2\n(e.g. Köppen Climate)"]
+        V3["SphereView #3\n(e.g. Population / States)"]
         UI -->|Commands / Params| WorkerBridge
-        WorkerBridge -->|Float32 / Uint8 Color Buffer| GL
+        WorkerBridge -->|Per-Tile Data Channels| Store
         WorkerBridge -->|Telemetry & Inspector DTOs| UI
-        GL -->|Raycast Click -> TileId| UI
+        Store --> V1
+        Store --> V2
+        Store --> V3
+        V1 & V2 & V3 -->|Raycast Click -> TileId| UI
     end
 
     subgraph WorkerThread["Web Worker (Simulation Host)"]
         WorkerBridge["Worker Message Loop (JS FFI)"]
-        Wasm["Rust Wasm Engine\n(tec9-wasm)"]
-        WorkerBridge <-->|wasm-bindgen Calls & ArrayViews| Wasm
+        Wasm["Rust Wasm Engine\n(tec11-wasm)"]
+        WorkerBridge <-->|wasm-bindgen Calls & TypedArrays| Wasm
     end
 ```
 
-### Zero-Copy Rendering & Picking Pipeline
+### Multi-Viewport Data & Picking Pipeline
 1. **Mesh Initialization (Once per Grid Topology Change):**
    - When a simulation mode starts (e.g., standard Size-6 coarse grid with $7,292$ faces, or partially subdivided `Terrain`/`History` grid with up to $65,612$ faces), Rust builds the triangulated fan geometry once:
      - Each $K$-gon tile ($K \in \{5, 6\}$) is tessellated into $K$ triangles around its center vector, producing `num_vertices = 3 * sum(K_i)`.
-     - Along with `positions: Float32Array` and `normals: Float32Array`, Rust generates a flat `face_to_tile: Uint32Array` lookup table mapping each Three.js triangle index (`intersect.faceIndex`) in $O(1)$ time to its logical `TileId(u32)`.
-2. **Per-Tick Color Buffer Updates:**
-   - Rust computes a normalized RGB `Uint8Array` (`3 * num_vertices` bytes, $\approx 130\text{ KB}$ for Size 6) directly in Wasm linear memory.
-   - The Worker transfers this compact buffer to the main thread, which updates `geometry.attributes.color` in-place without reallocating Three.js buffers.
-3. **Interactive Raycasting ($O(1)$ Picking):**
-   - When the user clicks the `<canvas>`, Three.js `Raycaster.intersectObject(mesh)` returns `intersect.faceIndex`.
-   - The view looks up `tileId = faceToTile[intersect.faceIndex]` immediately and sends `SelectTile(tileId)` to the Worker, which replies with the rich `TileInspectionPayload` for that tile.
+     - Along with `positions: Float32Array` and `normals: Float32Array`, Rust generates a flat `face_to_tile: Uint32Array` lookup table mapping each Three.js triangle index (`intersect.faceIndex`) in $O(1)$ time to its logical `TileId(u32)` (or `FineFaceId(u32)`).
+2. **Per-Tick Structure-of-Arrays (SoA) Data Channel Updates:**
+   - Rather than computing RGB colors in Wasm, the Worker emits compact **TypedArray data channels** indexed by `TileId` (or `FineFaceId` in subdivided modes), sending only the subsystem channels that changed on that tick:
+     - **`GeologyChannels`** ($N$ coarse tiles): `elevation_km: Float32Array`, `group_id: Uint32Array`, `mountainosity: Float32Array`, `top_rock_type: Uint8Array`.
+     - **`ClimateChannels`** ($N$ coarse tiles): `koeppen_code: Uint8Array`, `seasonal_temp_c: Float32Array` ($8 \times N$), `seasonal_precip_norm: Float32Array` ($8 \times N$), `aridity_norm: Float32Array`, `ocean_current_vec: Float32Array` ($3 \times N$), `upwelling: Float32Array`, `sst_anomaly_c: Float32Array`, `river_mask: Uint8Array`.
+     - **`BiosphereChannels`** ($N$ coarse tiles): `plant_count: Uint16Array`, `animal_count: Uint16Array`, `carrying_capacity: Float32Array`.
+     - **`AnthropologyChannels`** ($N$ coarse tiles in `Prehistory`; $F$ fine faces in `History`): `population_thousands: Float32Array`, `dominant_heritage_id: Uint16Array`, `agricultural_mask: Uint8Array`, `owner_state_id: Int16Array`, `dominant_language_id: Int16Array`, `is_city_mask: Uint8Array`.
+   - Each `Float32Array` channel for Size 6 ($7,292$ tiles) is only **$29.1\text{ KB}$** (and a `Uint8Array` channel is **$7.3\text{ KB}$**), so transferring updated channels takes $< 0.2\text{ ms}$.
+3. **Frontend Colormapping & Multi-Viewport Synchronization:**
+   - The UI can display **1 to 4 synchronized `SphereView` panels** side by side (e.g., Viewport 1 showing *Elevation & Bathymetry*, Viewport 2 showing *Köppen Climate*, Viewport 3 showing *Ocean Currents*, and Viewport 4 showing *Population / Political States*).
+   - Each `SphereView` subscribes to the shared simulation data store, runs its selected PureScript/WebGL colormap function (`Tec11.Components.Colormaps`) over the relevant channel(s) to populate its own Three.js `BufferAttribute` (and vector/river overlays), and optionally locks camera rotation/zoom with sibling viewports.
+   - Switching a viewport's layer, toggling Summer vs. Winter, or highlighting a clicked species/language/state happens **instantaneously on the main thread** with zero round-trip to the Web Worker.
+4. **Interactive Raycasting ($O(1)$ Picking):**
+   - When the user clicks any viewport `<canvas>`, Three.js `Raycaster.intersectObject(mesh)` returns `intersect.faceIndex`.
+   - The viewport looks up `tileId = faceToTile[intersect.faceIndex]` immediately, highlights the selected tile across all active viewports, and sends `SelectTile(tileId)` to the Worker, which replies with the detailed `TileInspectionPayload` for the inspector tree.
 
 ---
 
@@ -411,7 +425,7 @@ A core design principle of **Tec-Nine** is that once a planetary state is initia
 | **10. Flora & Fauna (`Lifeforms`)** | Parsing species tolerances, union-find connected-component clustering of year-round, seasonal, hibernating, and migratory habitats. | **None.** Species settling on a climate map is **100% deterministic**. |
 | **11. Prehistory (Eden, Migration, Agriculture, Racination)** | Main ocean basin detection, coastal/river habitability (`squattable`, `farmable`), BFS migration expansion (`expandpopulation`), and union-find geographic isolation/admixture (`racinate`). | 1. **Eden Selection:** Picks 1 random coastal `Aw` (savanna) tile bordering the main ocean (`random.choice(candidates)`).<br>2. **Sparking Agriculture:** On river tiles occupied by non-agricultural peoples, rolls $\mathcal{U}(0, 1) < g_{\text{factor}} \cdot P_{\text{ag}}(\text{koeppen})$ (`B`: $0.05$, `C`: $0.005$, `D`: $0.001$, `Aw`: $0.0001$).<br>3. **Lineage Naming:** Coining a random word for a newly branched/merged `Heritage`. |
 | **12. Phonology & Language** | Phonotactic constraint extraction, syllable cluster repair (`constrain`), phonetic distance generator (`adaptsounds`), vowel breaking, $i$-mutation, $a$-mutation, apheresis, apocope, orthography, and IPA rendering. | 1. **Phoneme Inventory (`phonemes`):** Weighted random sample without replacement from UPSID frequencies (6–7 vowels, 8–25 consonants).<br>2. **Lexicon Generation (`lexicon`):** Random stress $\text{round}(\mathcal{N}(-0.5, 1))$, onset/coda probabilities $\mathcal{N}(0.5, 0.1)$, and random phoneme sampling per syllable.<br>3. **Sound Change Selection & Multi-Target Rules:** Random choice of sound change per concept per tick; `syncopate` picks a random unstressed syllable; `lenition` (`open`, `sonorize`, `vocalize`) picks randomly when a consonant has 2 possible lenited reflexes (e.g., `p -> ['pP', 'pf']`, `b -> ['B', 'v']`). |
-| **13. History (States, Trade, War, Demographics)** | Carrying capacity, logistic population growth ($k=0.25$) and neighbor spillover, racial intermingling (2% max centroid shift), cultural/linguistic assimilation, dialect connected-component detection, trade network formation, military tension, conflict resolution, and lexical borrowing. | 1. **Initial & Split City Seeding (`randomcities`):** Bernoulli roll per populated face based on climate/agriculture (`cityprob`: $0.05\text{–}0.25$).<br>2. **Unclaimed Frontier Annexation:** When population spills into an unowned tile $f$, picks randomly among the adjacent states (`random.choice(states)`).<br>3. **State Breakup Trigger:** Per tick, non-warring state of size $N$ rolls $\mathcal{U}(0, 1) < \frac{3 + \text{sgn}(N-25)|N-25|^{1/3}}{600}$.<br>4. **Map Coloring Fallback:** Random available color in $0..5$ not used by the 6 nearest cities. |
+| **13. History (States, Trade, War, Demographics)** | Carrying capacity, logistic population growth ($k=0.25$) and neighbor spillover, racial intermingling (2% max centroid shift), cultural/linguistic assimilation, dialect connected-component detection, trade network formation, military tension, conflict resolution, and lexical borrowing. | 1. **Initial & Split City Seeding (`randomcities`):** Bernoulli roll per populated face based on climate/agriculture (`cityprob`: $0.05\text{–}0.25$).<br>2. **Unclaimed Frontier Annexation:** When population spills into an unowned tile $f$, picks randomly among the adjacent states (`random.choice(states)`).<br>3. **State Breakup Trigger:** Per tick, non-warring state of size $N$ rolls $\mathcal{U}(0, 1) < \frac{3 + \text{sgn}(N-25)|N-25|^{1/3}}{600}$. |
 
 ---
 
@@ -780,7 +794,7 @@ A core design principle of the geological model is that **a tile has no hidden t
        - For every populated fine face $f$, query the 6 nearest cities in `citytree` and run greedy shortest-path `nearestcity` toward all 6 candidates simultaneously (stepping to neighbor $n$ minimizing chord distance `dist2(city, n)`):
          - Step cost: $+\infty$ if underwater ($z \le 0$), unpopulated, or mixes agricultural and non-agricultural people; $+10$ to cross a river; $+3$ to cross a majority-nationality boundary; $+2$ to cross a majority-language boundary; $+1$ otherwise.
        - Assign $f$ to the lowest-cost reachable city $c$ (or spawn a new city at $f$ if all 6 candidates have cost $\infty$).
-       - Color states with 6 map colors (`colornations`), assign initial `nationality = state_id` and `language = state_id`, filter out states with $< 20$ native species (`minspecies = 20`), coin initial species/nation/state/language vocabulary, and run 2 initial coastal growth steps.
+       - Assign initial `nationality = state_id` and `language = state_id`, filter out states with $< 20$ native species (`minspecies = 20`), coin initial species/nation/state/language vocabulary, and run 2 initial coastal growth steps. (Political state map coloring is handled deterministically on the frontend from `owner_state_id` and face adjacency.)
   2. **Per-Tick Historical Update (`HistorySimulation::update`):**
      - **Step A — Sound Changes:** Each active language appends a vector of random `SoundChangeKind` indices (one per concept) to `changes_per_tick`.
      - **Step B — Logistic Population Growth & Spillover (`grow`):**
@@ -819,7 +833,6 @@ A core design principle of the geological model is that **a tile has no hidden t
   2. Initial and breakup city seeding (`randomcities`).
   3. Frontier tile state annexation tie-breaking (`random.choice(states)`).
   4. State breakup roll ($P_{\text{split}}(N)$).
-  5. Map 6-color fallback when all 6 neighbor colors are taken.
 
 ---
 
@@ -843,33 +856,34 @@ crates/
 ├── tec11-biosphere/      # Bundled animals.tsv/plants.tsv parser, SpeciesRecord, YearRound/Seasonal/Hibernating/Migratory finder
 ├── tec11-anthropology/   # Prehistory (Eden, Migration, Racination), Language (UPSID, Lexicon, SoundChanges, Lazy History), History
 ├── tec11-sim/            # SimulationRunner trait, 13 Mode Runners, Protobuf snapshot encode/decode
-└── tec11-wasm/           # wasm-bindgen Web Worker entrypoint & TypedArray color/geometry buffer builders
+└── tec11-wasm/           # wasm-bindgen Web Worker entrypoint & TypedArray per-tile data channel builders
 ```
 
-### 6.2. Web Worker Protocol (`PureScript <-> Rust Wasm`)
-Commands sent from PureScript (`Tec11.Worker.Client`) to the Web Worker:
-- `InitMode { mode, params, seed }` -> Returns `GeometryReady { positions, normals, faceToTile }` + initial `FrameUpdate`.
-- `Step { count }` / `SetRunLoop { running, intervalMs }` -> Returns `FrameUpdate { tick, phase, telemetry, colors }`.
-- `UpdateParam { param }` (e.g. `Cells`, `Glaciation`, `Season`, `HMin`, `PMin`, `MoveDirection`, `MoveSpeed`, `TravelRange`, `CoastProx`) -> Re-evaluates diagnostic/simulation state and returns `FrameUpdate`.
-- `SetDisplayAspect { aspect, season, showRivers }` -> Recomputes `colors: Uint8Array` in Wasm and returns `FrameUpdate`.
-- `SelectTile { tileId }` -> Runs `inspect_tile(tileId)` (including lazy language reification in `History` mode) and returns `TileInspected { tileId, treeNodes, highlightColors }`.
+### 6.3. Web Worker Protocol (`PureScript <-> Rust Wasm`)
+The Rust Wasm Worker never computes RGB colors or visual styling; instead, it emits structured **per-tile TypedArray data channels** (`FrameDataUpdate`) whenever simulation state changes, and the PureScript + Three.js frontend decides how to render each viewport:
+- `InitMode { mode, params, seed }` -> Returns `GeometryReady { positions, normals, faceToTile, tileCenters }` + initial `FrameDataUpdate`.
+- `Step { count }` / `SetRunLoop { running, intervalMs }` -> Returns `FrameDataUpdate { tick, phase, telemetry, geology?, climate?, biosphere?, anthropology? }` (only transferring the TypedArray channels modified during that step).
+- `UpdateParam { param }` (e.g. `Cells`, `Glaciation`, `HMin`, `PMin`, `MoveDirection`, `MoveSpeed`, `TravelRange`, `CoastProx`) -> Re-evaluates simulation state and returns `FrameDataUpdate` with the updated subsystem channels.
+- `SelectTile { tileId }` -> Runs `inspect_tile(tileId)` (including lazy language reification in `History` mode) and returns `TileInspected { tileId, treeNodes, relatedTileSet }` (where `relatedTileSet` is a `Uint32Array` of tile IDs for a selected species range, river basin, heritage, state, or language that any viewport can optionally highlight).
 - `LanguageAction { action }` -> Runs standalone `Language` sandbox mutations/borrowing and returns `LanguageSandboxUpdate`.
 - `LoadEarth` / `LoadSnapshot { bytes }` / `ExportSnapshot` -> Manages serialized Protobuf (`.tec11`) snapshots and pre-sampled ETOPO Earth bathymetry/topography.
 
-### 6.3. PureScript + `react-basic` Component Hierarchy
+### 6.4. PureScript + `react-basic` Component Hierarchy
 ```text
 src/
 ├── Main.purs                          -- Mounts React root
 ├── Tec11/
-│   ├── App.purs                       -- Top-level mode selector (Full World + 12 Isolated Sandboxes)
+│   ├── App.purs                       -- Top-level mode selector (Full World + 12 Isolated Sandboxes) & shared data store
 │   ├── Types/
-│   │   ├── Simulation.purs            -- ADTs for all 13 SimModes, SimParams, DisplayAspect, Telemetry
+│   │   ├── Simulation.purs            -- ADTs for all 13 SimModes, SimParams, ViewLayer, Telemetry, DataChannels
 │   │   └── Inspection.purs            -- ADTs for InspectorTree, RockLayerView, NationDemoView, LexiconRow
 │   ├── Worker/
 │   │   ├── Protocol.purs              -- Foreign/JSON codecs for WorkerCommand & WorkerEvent
-│   │   └── Client.purs (+ .js)        -- useSimulationWorker hook & Transferable Uint8Array/Float32Array bridge
+│   │   └── Client.purs (+ .js)        -- useSimulationWorker hook & Transferable TypedArray SoA channel bridge
 │   └── Components/
-│       ├── SphereView.purs (+ .js)    -- Three.js WebGL canvas, dynamic color BufferAttribute, O(1) faceToTile raycaster
+│       ├── ViewportGrid.purs          -- Configurable 1-to-4 synchronized 3D globe layout with independent ViewLayer selectors
+│       ├── SphereView.purs (+ .js)    -- Three.js 3D globe viewport, per-viewport colormap/shader attribute & O(1) raycaster
+│       ├── Colormaps.purs (+ .js)     -- PureScript/JS colormaps (hypsometric/bathymetric, Köppen, thermal, currents, states)
 │       ├── InspectorTree.purs         -- Collapsible tree widget for rock layers, species, demographics, etymologies
 │       ├── PlaybackBar.purs           -- Shared Start / Pause / Step / Tick & Year counter / Save / Load bar
 │       └── Modes/                     -- Mode-specific control panels for all 13 simulations
@@ -1086,10 +1100,9 @@ message HistoryStage {
   PrehistoryStage prehistory_base = 1; // Coarse tiles, heritages, and prior stage ticks
   uint32 history_ticks = 2;
   repeated PopulatedFineFace populated_faces = 3;
-  repeated uint32 state_colors = 4 [packed = true];
-  repeated LanguageHistory languages = 5;
-  repeated StatePair trade_partners = 6;
-  repeated StatePair conflicts = 7;
+  repeated LanguageHistory languages = 4;
+  repeated StatePair trade_partners = 5;
+  repeated StatePair conflicts = 6;
 }
 
 // --- Top-Level Snapshot Message (.tec11 file payload) ---
