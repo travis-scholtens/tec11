@@ -78,13 +78,43 @@ fn connected_components(adjacency: &[Vec<usize>], tile_set: &BTreeSet<usize>) ->
     components
 }
 
+/// Returns `true` if `subset` (a subset of a tile's immediate neighbors, `subset.len() <= 6`)
+/// forms a single connected component within `adjacency`.
+fn is_neighbor_subset_connected(adjacency: &[Vec<usize>], subset: &[usize]) -> bool {
+    let m = subset.len();
+    if m <= 1 {
+        return true;
+    }
+    if m == 2 {
+        return adjacency[subset[0]].contains(&subset[1]);
+    }
+    let mut visited = [false; 8];
+    let mut stack = [0usize; 8];
+    visited[0] = true;
+    stack[0] = 0;
+    let mut sp = 1usize;
+    let mut count = 1usize;
+    while sp > 0 {
+        sp -= 1;
+        let u = subset[stack[sp]];
+        for i in 1..m {
+            if !visited[i] && adjacency[u].contains(&subset[i]) {
+                visited[i] = true;
+                stack[sp] = i;
+                sp += 1;
+                count += 1;
+            }
+        }
+    }
+    count == m
+}
+
 /// Detect and fill small enclosed non-group pockets (`<= max_hole_tiles` tiles) completely
-/// surrounded by `new_map` (inspired by `holemethod.py` in `Tec-Nine`).
+/// surrounded by `new_map`, and zip shut 1-tile-wide cracks/fissures (inspired by `holemethod.py` in `Tec-Nine`).
 fn fill_enclosed_holes(
     adjacency: &[Vec<usize>],
     new_map: &mut BTreeMap<usize, Vec<usize>>,
     max_hole_tiles: usize,
-    close_four_neighbor_cracks: bool,
 ) {
     let mut candidates = BTreeSet::new();
     for &t in new_map.keys() {
@@ -157,14 +187,12 @@ fn fill_enclosed_holes(
         }
     }
 
-    // Morphological closing pass:
-    // - When `close_four_neighbor_cracks` is true, iteratively close any concave notch or
-    //   1-tile-wide crack surrounded on >= 4 sides by `new_map` until convergence.
-    //   On a hex grid, straight and convex coastlines have at most 2 or 3 neighbors in `new_map`,
-    //   so >= 4 strictly targets concave notches and 1-tile fissures without advancing straight coasts.
-    // - Always close any 1-tile pinhole surrounded on >= (deg - 1) sides (>= 5 of 6).
-    let max_passes = if close_four_neighbor_cracks { 24 } else { 6 };
-    for _pass in 0..max_passes {
+    // Morphological crack & pinhole closing pass:
+    // - Always close any 1-tile pinhole or fissure blind tip (`out_nbs.len() <= 1`, i.e. >= 5 of 6 neighbors).
+    // - Always close any 1-tile pinch point across a fissure (`!is_neighbor_subset_connected(adjacency, &out_nbs)`).
+    // - Close 4-neighbor concave notches on pass 0, or on subsequent passes when part of a narrow slot
+    //   (where at least one ocean neighbor in `out_nbs` itself has >= 3 continental neighbors).
+    for pass in 0..20 {
         let mut notch_fills: Vec<(usize, Vec<usize>)> = Vec::new();
         let mut border_candidates = BTreeSet::new();
         for &t in new_map.keys() {
@@ -175,25 +203,37 @@ fn fill_enclosed_holes(
             }
         }
         for c in border_candidates {
-            let total_nbs = adjacency[c].len();
             let mut srcs = Vec::new();
-            let mut in_count = 0usize;
+            let mut in_nbs = Vec::with_capacity(6);
+            let mut out_nbs = Vec::with_capacity(6);
             for &nb in &adjacency[c] {
                 if let Some(nb_srcs) = new_map.get(&nb) {
-                    in_count += 1;
+                    in_nbs.push(nb);
                     if let Some(&first_src) = nb_srcs.first() {
                         if !srcs.contains(&first_src) {
                             srcs.push(first_src);
                         }
                     }
+                } else {
+                    out_nbs.push(nb);
                 }
             }
-            let threshold = if close_four_neighbor_cracks {
-                4
-            } else {
-                total_nbs.saturating_sub(1).max(4)
-            };
-            if in_count >= threshold && !srcs.is_empty() {
+            if srcs.is_empty() {
+                continue;
+            }
+            let is_blind_tip_or_pinhole = out_nbs.len() <= 1;
+            let is_pinch_point =
+                in_nbs.len() >= 2 && !is_neighbor_subset_connected(adjacency, &out_nbs);
+            let is_narrow_slot_notch = in_nbs.len() >= 4
+                && (pass == 0
+                    || out_nbs.iter().any(|&o| {
+                        adjacency[o]
+                            .iter()
+                            .filter(|&&n2| new_map.contains_key(&n2))
+                            .count()
+                            >= 3
+                    }));
+            if is_blind_tip_or_pinhole || is_pinch_point || is_narrow_slot_notch {
                 notch_fills.push((c, srcs));
             }
         }
@@ -206,49 +246,39 @@ fn fill_enclosed_holes(
     }
 }
 
-/// Returns `true` if `t` is a "simple convex boundary point" of `new_map`:
-/// 1. `t` has `1 <= k <= 3` neighbors in `new_map` (`k < 4`, so removing `t` never leaves `t` as a
-///    `>= 4`-neighbor concave notch).
-/// 2. Those `k` neighbors of `t` in `new_map` form a single connected arc in `adjacency`, and every
-///    such neighbor retains `>= 2` neighbors in `new_map` after `t` is removed (so removing `t`
-///    cannot disconnect `new_map` or create a 1-tile spike).
-fn is_simple_convex_boundary_tile(
+/// Returns `true` if `t` is a topological simple boundary tile of `new_map` with `1 <= k <= max_k`
+/// continental neighbors:
+/// 1. `t` has `1 <= k <= max_k` neighbors in `new_map` and at least 1 neighbor outside `new_map`.
+/// 2. Both `in_nbs` and `out_nbs` form single connected arcs around `t` (`is_neighbor_subset_connected`),
+///    so removing `t` cannot disconnect `new_map` or create an interior hole.
+/// 3. Every neighbor in `in_nbs` retains `>= 2` neighbors in `new_map` after `t` is removed, so
+///    removing `t` never creates a 1-tile spike.
+fn is_simple_boundary_removal(
     adjacency: &[Vec<usize>],
     new_map: &BTreeMap<usize, Vec<usize>>,
     t: usize,
+    max_k: usize,
 ) -> bool {
-    let in_nbs: Vec<usize> = adjacency[t]
-        .iter()
-        .copied()
-        .filter(|&nb| new_map.contains_key(&nb))
-        .collect();
-    let k = in_nbs.len();
-    if k == 0 || k > 3 {
-        return false;
-    }
-
-    // Check that `in_nbs` is connected within `adjacency`:
-    // - k == 1: trivially connected (a 1-neighbor spike).
-    // - k == 2: the two neighbors must be adjacent to each other.
-    // - k == 3: at least one of the three neighbors must be adjacent to both of the other two
-    //           (forming a contiguous 3-tile arc around `t`).
-    let arc_connected = match k {
-        1 => true,
-        2 => adjacency[in_nbs[0]].contains(&in_nbs[1]),
-        3 => {
-            let a01 = adjacency[in_nbs[0]].contains(&in_nbs[1]);
-            let a12 = adjacency[in_nbs[1]].contains(&in_nbs[2]);
-            let a02 = adjacency[in_nbs[0]].contains(&in_nbs[2]);
-            (a01 as u8) + (a12 as u8) + (a02 as u8) >= 2
+    let mut in_nbs = Vec::with_capacity(6);
+    let mut out_nbs = Vec::with_capacity(6);
+    for &nb in &adjacency[t] {
+        if new_map.contains_key(&nb) {
+            in_nbs.push(nb);
+        } else {
+            out_nbs.push(nb);
         }
-        _ => false,
-    };
-    if !arc_connected {
+    }
+    let k = in_nbs.len();
+    if k == 0 || k > max_k || out_nbs.is_empty() {
         return false;
     }
 
-    // Ensure every neighbor in `in_nbs` still has >= 2 neighbors in `new_map` after `t` is removed
-    // (unless `new_map` is tiny).
+    if !is_neighbor_subset_connected(adjacency, &in_nbs)
+        || !is_neighbor_subset_connected(adjacency, &out_nbs)
+    {
+        return false;
+    }
+
     if new_map.len() > 6 {
         for &nb in &in_nbs {
             let rem_nbs = adjacency[nb]
@@ -383,14 +413,19 @@ pub fn move_group(
         fill = holes;
     }
 
-    // 2. Fill any remaining small enclosed interior holes (`<= 32` tiles), close 1-tile-wide cracks,
-    //    and prune detached specks before enforcing area conservation.
-    fill_enclosed_holes(adjacency, &mut new_map, 32, true);
+    // 2. Fill any remaining small enclosed interior holes, close 1-tile-wide cracks,
+    //    and prune detached specks before enforcing exact area conservation.
+    let max_hole_tiles = (target_len / 10).clamp(4, 32);
+    fill_enclosed_holes(adjacency, &mut new_map, max_hole_tiles);
     prune_detached_specks(adjacency, &mut new_map);
 
-    // 3. Maintain tile count by shaving simple convex boundary tiles (`is_simple_convex_boundary_tile`),
-    //    prioritizing newly-added 1-, 2-, and 3-neighbor protrusions farthest from the new centroid.
-    for _round in 0..4 {
+    // 3a. If `new_map.len() > target_len`, shave simple boundary tiles (`is_simple_boundary_removal`)
+    //     down to `target_len`:
+    //     - Prioritize `1 <= k <= 3` convex protrusions (`is_new == true`, smallest `k`, farthest from centroid).
+    //     - When a small smooth continent has only `k = 4` straight hex edges left, peel a single `k = 4`
+    //       simple boundary tile, which immediately exposes its two adjacent edge neighbors as `k = 3`
+    //       for the next iteration.
+    for _round in 0..64 {
         if new_map.len() <= target_len {
             break;
         }
@@ -400,7 +435,7 @@ pub fn move_group(
         let mut edge: Vec<(usize, bool, usize, f64)> = new_map
             .keys()
             .copied()
-            .filter(|&t| is_simple_convex_boundary_tile(adjacency, &new_map, t))
+            .filter(|&t| is_simple_boundary_removal(adjacency, &new_map, t, 3))
             .map(|t| {
                 let is_new = !old_set.contains(&t);
                 let nb_count = adjacency[t]
@@ -411,33 +446,117 @@ pub fn move_group(
             })
             .collect();
 
-        if edge.is_empty() {
-            break;
-        }
+        if !edge.is_empty() {
+            // Sort so `.pop()` removes newly-added (`is_new == true`) protruding tiles with the fewest
+            // neighbors in `new_map` first, breaking ties by farthest distance from `na`.
+            edge.sort_by(|a, b| {
+                a.1.cmp(&b.1)
+                    .then_with(|| b.2.cmp(&a.2))
+                    .then_with(|| a.3.total_cmp(&b.3))
+            });
 
-        // Sort so `.pop()` removes newly-added (`is_new == true`) protruding tiles with the fewest
-        // neighbors in `new_map` first, breaking ties by farthest distance from `na`.
-        edge.sort_by(|a, b| {
-            a.1.cmp(&b.1)
-                .then_with(|| b.2.cmp(&a.2))
-                .then_with(|| a.3.total_cmp(&b.3))
-        });
-
-        let mut removed_any = false;
-        while new_map.len() > target_len {
-            let Some((t, _, _, _)) = edge.pop() else {
-                break;
-            };
-            if is_simple_convex_boundary_tile(adjacency, &new_map, t) {
-                new_map.remove(&t);
-                removed_any = true;
+            let mut removed_any = false;
+            while new_map.len() > target_len {
+                let Some((t, _, _, _)) = edge.pop() else {
+                    break;
+                };
+                if is_simple_boundary_removal(adjacency, &new_map, t, 3) {
+                    new_map.remove(&t);
+                    removed_any = true;
+                }
+            }
+            if removed_any {
+                continue;
             }
         }
-        if !removed_any {
+
+        // Fallback: peel a single `k = 4` (or `k = 5`) simple straight-edge tile to seed new `k = 3`
+        // boundary tiles along that same edge without scattering notches around the perimeter.
+        let mut peeled_one = false;
+        for max_k in [4usize, 5usize] {
+            if let Some(best_t) = new_map
+                .keys()
+                .copied()
+                .filter(|&t| is_simple_boundary_removal(adjacency, &new_map, t, max_k))
+                .max_by(|&a, &b| {
+                    let new_a = !old_set.contains(&a);
+                    let new_b = !old_set.contains(&b);
+                    new_a
+                        .cmp(&new_b)
+                        .then_with(|| dist2(grid.faces[a].0, na).total_cmp(&dist2(grid.faces[b].0, na)))
+                })
+            {
+                new_map.remove(&best_t);
+                peeled_one = true;
+                break;
+            }
+        }
+        if !peeled_one {
             break;
         }
     }
-    prune_detached_specks(adjacency, &mut new_map);
+
+    // 3b. If `new_map.len() < target_len` (e.g. after pruning a pinched-off speck), accrete simple
+    //     boundary tiles (`k >= 2`, connected `in_nbs` and `out_nbs`) back up to `target_len`.
+    while new_map.len() < target_len {
+        let new_vs: Vec<Vec3> = new_map.keys().map(|&t| grid.faces[t].0).collect();
+        let na = average_vec3(&new_vs);
+
+        let mut border_candidates = BTreeSet::new();
+        for &t in new_map.keys() {
+            for &nb in &adjacency[t] {
+                if !new_map.contains_key(&nb) {
+                    border_candidates.insert(nb);
+                }
+            }
+        }
+
+        let mut best_cand: Option<(usize, Vec<usize>, bool, usize, f64)> = None;
+        for c in border_candidates {
+            let mut in_nbs = Vec::with_capacity(6);
+            let mut out_nbs = Vec::with_capacity(6);
+            let mut srcs = Vec::new();
+            for &nb in &adjacency[c] {
+                if let Some(nb_srcs) = new_map.get(&nb) {
+                    in_nbs.push(nb);
+                    if let Some(&first_src) = nb_srcs.first() {
+                        if !srcs.contains(&first_src) {
+                            srcs.push(first_src);
+                        }
+                    }
+                } else {
+                    out_nbs.push(nb);
+                }
+            }
+            let k = in_nbs.len();
+            if k < 2 || srcs.is_empty() {
+                continue;
+            }
+            if !is_neighbor_subset_connected(adjacency, &in_nbs)
+                || (!out_nbs.is_empty() && !is_neighbor_subset_connected(adjacency, &out_nbs))
+            {
+                continue;
+            }
+            let was_old = old_set.contains(&c);
+            let d2 = dist2(grid.faces[c].0, na);
+            let replace = match &best_cand {
+                None => true,
+                Some((_, _, best_old, best_k, best_d2)) => {
+                    (was_old, k) > (*best_old, *best_k)
+                        || ((was_old, k) == (*best_old, *best_k) && d2 < *best_d2)
+                }
+            };
+            if replace {
+                best_cand = Some((c, srcs, was_old, k, d2));
+            }
+        }
+
+        if let Some((c, srcs, _, _, _)) = best_cand {
+            new_map.insert(c, srcs);
+        } else {
+            break;
+        }
+    }
 
     let vp = rotate(velocity, axis, speed);
     let a_new = rotate(a, axis, speed);
@@ -475,135 +594,123 @@ fn first_corner(c: Vec3, f: Vec3) -> Vec3 {
     rotate(f2, c, PI / 4.0)
 }
 
+/// Reassign any disconnected fragments between `a_set` and `b_set` without ever deleting tiles.
+fn reassign_disconnected_halves(
+    adjacency: &[Vec<usize>],
+    a_set: &mut BTreeSet<usize>,
+    b_set: &mut BTreeSet<usize>,
+) {
+    for _iter in 0..4 {
+        let mut changed = false;
+        let a_comps = connected_components(adjacency, a_set);
+        if a_comps.len() > 1 {
+            let largest_a = a_comps
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, c)| c.len())
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            for (idx, comp) in a_comps.into_iter().enumerate() {
+                if idx != largest_a {
+                    for t in comp {
+                        a_set.remove(&t);
+                        b_set.insert(t);
+                    }
+                    changed = true;
+                }
+            }
+        }
+
+        let b_comps = connected_components(adjacency, b_set);
+        if b_comps.len() > 1 {
+            let largest_b = b_comps
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, c)| c.len())
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            for (idx, comp) in b_comps.into_iter().enumerate() {
+                if idx != largest_b {
+                    for t in comp {
+                        b_set.remove(&t);
+                        a_set.insert(t);
+                    }
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
 /// Reassign any small disconnected fragments clipped by the splitting wedge back to the contiguous
-/// half they touch so `split_group` always produces two clean, contiguous plates.
+/// half they touch so `split_group` always produces two clean, contiguous plates while strictly
+/// conserving `a_set.len() + b_set.len() == group_tiles.len()`.
 fn clean_split_components(
     adjacency: &[Vec<usize>],
     a_set: &mut BTreeSet<usize>,
     b_set: &mut BTreeSet<usize>,
 ) {
-    // 1. Move disconnected fragments of `a_set` into `b_set`.
-    let a_comps = connected_components(adjacency, a_set);
-    if a_comps.len() > 1 {
-        let largest_a = a_comps
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, c)| c.len())
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        for (idx, comp) in a_comps.into_iter().enumerate() {
-            if idx != largest_a {
-                for t in comp {
-                    a_set.remove(&t);
-                    b_set.insert(t);
-                }
-            }
-        }
-    }
+    reassign_disconnected_halves(adjacency, a_set, b_set);
 
-    // 2. Move disconnected fragments of `b_set` into `a_set`.
-    let b_comps = connected_components(adjacency, b_set);
-    if b_comps.len() > 1 {
-        let largest_b = b_comps
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, c)| c.len())
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        for (idx, comp) in b_comps.into_iter().enumerate() {
-            if idx != largest_b {
-                for t in comp {
-                    b_set.remove(&t);
-                    a_set.insert(t);
-                }
-            }
-        }
-    }
-
-    // 3. Smooth interlocking 1-tile zipper teeth/notches along the split boundary between `a_set` and `b_set`.
+    // Smooth interlocking 1-tile zipper teeth/notches along the split boundary between `a_set` and `b_set`,
+    // only swapping simple seam tiles whose neighbors in `a_set` and in `b_set` each form connected arcs.
     for _pass in 0..4 {
-        let mut to_b = Vec::new();
-        for &t in a_set.iter() {
-            let n_a = adjacency[t].iter().filter(|&&nb| a_set.contains(&nb)).count();
-            let n_b = adjacency[t].iter().filter(|&&nb| b_set.contains(&nb)).count();
-            if n_b > 0 && (n_a <= 1 || (n_a <= 2 && n_b >= 3)) {
-                to_b.push(t);
+        let mut moved_any = false;
+
+        let a_candidates: Vec<usize> = a_set.iter().copied().collect();
+        for t in a_candidates {
+            let mut nbs_a = Vec::with_capacity(6);
+            let mut nbs_b = Vec::with_capacity(6);
+            for &nb in &adjacency[t] {
+                if a_set.contains(&nb) {
+                    nbs_a.push(nb);
+                } else if b_set.contains(&nb) {
+                    nbs_b.push(nb);
+                }
+            }
+            if !nbs_b.is_empty()
+                && (nbs_a.len() <= 1 || (nbs_a.len() <= 2 && nbs_b.len() >= 3))
+                && is_neighbor_subset_connected(adjacency, &nbs_a)
+                && is_neighbor_subset_connected(adjacency, &nbs_b)
+            {
+                a_set.remove(&t);
+                b_set.insert(t);
+                moved_any = true;
             }
         }
-        for t in &to_b {
-            a_set.remove(t);
-            b_set.insert(*t);
-        }
 
-        let mut to_a = Vec::new();
-        for &t in b_set.iter() {
-            let n_b = adjacency[t].iter().filter(|&&nb| b_set.contains(&nb)).count();
-            let n_a = adjacency[t].iter().filter(|&&nb| a_set.contains(&nb)).count();
-            if n_a > 0 && (n_b <= 1 || (n_b <= 2 && n_a >= 3)) {
-                to_a.push(t);
+        let b_candidates: Vec<usize> = b_set.iter().copied().collect();
+        for t in b_candidates {
+            let mut nbs_b = Vec::with_capacity(6);
+            let mut nbs_a = Vec::with_capacity(6);
+            for &nb in &adjacency[t] {
+                if b_set.contains(&nb) {
+                    nbs_b.push(nb);
+                } else if a_set.contains(&nb) {
+                    nbs_a.push(nb);
+                }
+            }
+            if !nbs_a.is_empty()
+                && (nbs_b.len() <= 1 || (nbs_b.len() <= 2 && nbs_a.len() >= 3))
+                && is_neighbor_subset_connected(adjacency, &nbs_b)
+                && is_neighbor_subset_connected(adjacency, &nbs_a)
+            {
+                b_set.remove(&t);
+                a_set.insert(t);
+                moved_any = true;
             }
         }
-        for t in &to_a {
-            b_set.remove(t);
-            a_set.insert(*t);
-        }
 
-        if to_b.is_empty() && to_a.is_empty() {
+        if !moved_any {
             break;
         }
     }
 
-    // 4. Final connectedness passes on `a_set` and `b_set` after boundary smoothing.
-    let a_comps_2 = connected_components(adjacency, a_set);
-    if a_comps_2.len() > 1 {
-        let largest_a = a_comps_2
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, c)| c.len())
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        for (idx, comp) in a_comps_2.into_iter().enumerate() {
-            if idx != largest_a {
-                for t in comp {
-                    a_set.remove(&t);
-                    b_set.insert(t);
-                }
-            }
-        }
-    }
-    let b_comps_2 = connected_components(adjacency, b_set);
-    if b_comps_2.len() > 1 {
-        let largest_b = b_comps_2
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, c)| c.len())
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        for (idx, comp) in b_comps_2.into_iter().enumerate() {
-            if idx != largest_b {
-                for t in comp {
-                    b_set.remove(&t);
-                    a_set.insert(t);
-                }
-            }
-        }
-    }
-    let a_comps_final = connected_components(adjacency, a_set);
-    if a_comps_final.len() > 1 {
-        let largest_a = a_comps_final
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, c)| c.len())
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        for (idx, comp) in a_comps_final.into_iter().enumerate() {
-            if idx != largest_a {
-                for t in comp {
-                    a_set.remove(&t);
-                }
-            }
-        }
-    }
+    reassign_disconnected_halves(adjacency, a_set, b_set);
 }
 
 /// Split a continent group along a random 120-degree wedge (`splitmethod.py:split`).
@@ -716,12 +823,26 @@ mod tests {
         assert_eq!(connected_components(&adj, &a_set).len(), 1);
         assert_eq!(connected_components(&adj, &b_set).len(), 1);
 
-        // Advect group `a` at speed 0.08 rad
-        let vel = [va[0] * 0.08, va[1] * 0.08, va[2] * 0.08];
-        let (moved_map, next_v) = move_group(&grid, &adj, &tree, &a, vel);
-        assert!(!moved_map.is_empty());
-        let moved_set: BTreeSet<usize> = moved_map.keys().copied().collect();
-        assert_eq!(connected_components(&adj, &moved_set).len(), 1);
-        assert!((length(next_v) - 0.08).abs() < 1e-3);
+        // Advect group `a` at speed 0.08 rad over 30 steps and verify exact tile-count conservation
+        let expected_a_len = a.len();
+        let mut cur_tiles = a;
+        let mut cur_vel = [va[0] * 0.08, va[1] * 0.08, va[2] * 0.08];
+        for step in 0..30 {
+            let (moved_map, next_v) = move_group(&grid, &adj, &tree, &cur_tiles, cur_vel);
+            assert_eq!(
+                moved_map.len(),
+                expected_a_len,
+                "Step {step}: move_group must conserve exact tile count"
+            );
+            let moved_set: BTreeSet<usize> = moved_map.keys().copied().collect();
+            assert_eq!(
+                connected_components(&adj, &moved_set).len(),
+                1,
+                "Step {step}: moved group must remain a single connected component"
+            );
+            assert!((length(next_v) - 0.08).abs() < 1e-3);
+            cur_tiles = moved_map.keys().copied().collect();
+            cur_vel = next_v;
+        }
     }
 }

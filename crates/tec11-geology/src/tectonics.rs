@@ -241,51 +241,68 @@ impl TectonicsSimulation {
             }
         }
 
-        // Close any 1-tile inter-plate pinholes (`>= deg - 1` neighbors, i.e. >= 5 of 6) trapped
-        // between adjacent groups in `new_movements` without inflating `group.tiles` at rifts.
-        for _pass in 0..2 {
-            let mut suture_fills: Vec<(usize, usize, TileMovement)> = Vec::new();
-            for h in 0..n {
-                if new_movements.contains_key(&h) {
-                    continue;
-                }
-                let deg = self.adjacency[h].len();
-                let nb_in_cont: Vec<usize> = self.adjacency[h]
-                    .iter()
-                    .copied()
-                    .filter(|&nb| new_movements.contains_key(&nb))
-                    .collect();
-                if nb_in_cont.len() + 1 >= deg && !nb_in_cont.is_empty() {
-                    let mut group_counts: BTreeMap<usize, usize> = BTreeMap::new();
-                    for &nb in &nb_in_cont {
-                        for &g_idx in &overlapping[nb] {
-                            *group_counts.entry(g_idx).or_insert(0) += 1;
-                        }
+        // Close any 1-to-3 tile inter-plate pinholes completely enclosed by `new_movements`
+        // (and any 1-tile `>= deg - 1` pinhole) without inflating `group.tiles` at rifts.
+        let mut visited_non_land = vec![false; n];
+        for start in 0..n {
+            if visited_non_land[start] || new_movements.contains_key(&start) {
+                continue;
+            }
+            let mut comp = Vec::new();
+            let mut q = std::collections::VecDeque::new();
+            visited_non_land[start] = true;
+            q.push_back(start);
+            while let Some(u) = q.pop_front() {
+                comp.push(u);
+                for &nb in &self.adjacency[u] {
+                    if !visited_non_land[nb] && !new_movements.contains_key(&nb) {
+                        visited_non_land[nb] = true;
+                        q.push_back(nb);
                     }
-                    if let Some((&best_g, _)) = group_counts.iter().max_by_key(|&(_, c)| c) {
-                        let mut sources = Vec::new();
-                        for &nb in &nb_in_cont {
-                            if let Some(ms) = new_movements.get(&nb) {
-                                if let Some(first_m) = ms.first() {
-                                    if let Some(first_src) = first_m.sources.first() {
-                                        sources.push(first_src.clone());
+                }
+            }
+            if comp.len() <= 3 {
+                // Fill this tiny 1..=3 tile enclosed pocket from its surrounding `new_movements` neighbors
+                for _pass in 0..3 {
+                    for &h in &comp {
+                        if new_movements.contains_key(&h) {
+                            continue;
+                        }
+                        let nb_in_cont: Vec<usize> = self.adjacency[h]
+                            .iter()
+                            .copied()
+                            .filter(|&nb| new_movements.contains_key(&nb))
+                            .collect();
+                        if !nb_in_cont.is_empty() {
+                            let mut group_counts: BTreeMap<usize, usize> = BTreeMap::new();
+                            for &nb in &nb_in_cont {
+                                for &g_idx in &overlapping[nb] {
+                                    *group_counts.entry(g_idx).or_insert(0) += 1;
+                                }
+                            }
+                            if let Some((&best_g, _)) = group_counts.iter().max_by_key(|&(_, c)| c) {
+                                let mut sources = Vec::new();
+                                for &nb in &nb_in_cont {
+                                    if let Some(ms) = new_movements.get(&nb) {
+                                        if let Some(first_m) = ms.first() {
+                                            if let Some(first_src) = first_m.sources.first() {
+                                                sources.push(first_src.clone());
+                                            }
+                                        }
                                     }
+                                }
+                                if !sources.is_empty() {
+                                    let speed = length(self.groups[best_g].velocity);
+                                    new_movements
+                                        .entry(h)
+                                        .or_default()
+                                        .push(TileMovement { sources, speed });
+                                    overlapping[h].push(best_g);
                                 }
                             }
                         }
-                        if !sources.is_empty() {
-                            let speed = length(self.groups[best_g].velocity);
-                            suture_fills.push((h, best_g, TileMovement { sources, speed }));
-                        }
                     }
                 }
-            }
-            if suture_fills.is_empty() {
-                break;
-            }
-            for (h, best_g, tm) in suture_fills {
-                new_movements.entry(h).or_default().push(tm);
-                overlapping[h].push(best_g);
             }
         }
 
