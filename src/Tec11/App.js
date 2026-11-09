@@ -3,6 +3,7 @@ import initWasmModule, {
   WasmClimateSession,
   WasmGridSession,
   WasmPangeaSession,
+  WasmTectonicsSession,
 } from "tec11-wasm";
 
 const _yAxis = new THREE.Vector3(0, 1, 0);
@@ -95,6 +96,197 @@ function computePangeaVertexColors(elevations, felsities, vertexTileIds, renderM
       }
     }
   }
+  return colors;
+}
+
+/**
+ * Frontend colormaps for Tectonics mode matching `planetdisplay.py`:
+ * - "elevation": Land greyscale `min(255, 128 + 12.5 * h)` (above 140), ocean bathymetry `18..112`.
+ * - "color": Ocean blue `rgb(0, 0, 128)`; land rock felsity `rgb(128, 64+64*f, 128*f)` blended 50/50
+ *            with `rgb(0, 255*life, 0)` when atmosphere is active (or snow white `rgb(255, 255, 255)` for ET/EF).
+ * - "climate": Köppen palette on land when atmosphere is active (white before atmosphere), black on ocean.
+ * - "mountains": Elevation greyscale with red channel boosted by normalized `mountainosity`:
+ *                `r = c + m * (255 - c)`.
+ * - "rock": Top layer RockKind: Igneous `'I'` = `(255, val, val)`, Sedimentary `'S'` = `(val, val, 255)`,
+ *           Metamorphic `'M'` = `(val, 255, val)`.
+ * - "subduction": Elevation greyscale with active subduction tiles highlighted in red `(255, val, val)`.
+ * - "thickness": Crustal thickness greyscale `min(255, 128 + 1.69 * thickness)` on land,
+ *                and `24 + 14 * thickness` on ocean crust.
+ */
+function computeTectonicsVertexColors(view) {
+  const {
+    vertexTileIds,
+    elevations,
+    thicknesses,
+    mountainosities,
+    subductions,
+    felsities,
+    topRockKinds,
+    koeppenIds,
+    tileLife,
+    hasAtmosphere,
+    aspect,
+    selectedTileIdx,
+  } = view;
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+
+  for (let v = 0; v < numVerts; v++) {
+    const tid = vertexTileIds[v];
+    const h = elevations[tid];
+    const out = v * 3;
+    let r = 0.0;
+    let g = 0.0;
+    let b = 0.0;
+
+    if (aspect === "elevation") {
+      if (h > 0.0) {
+        const val = Math.min(255.0, 134.0 + 18.0 * h) / 255.0;
+        r = val;
+        g = val;
+        b = val;
+      } else {
+        const norm = Math.max(0.0, Math.min(1.0, (h + 7.5) / 7.5));
+        const val = (18.0 + 88.0 * norm) / 255.0;
+        r = val;
+        g = val;
+        b = val;
+      }
+    } else if (aspect === "color") {
+      if (h <= 0.0) {
+        r = 0.0;
+        g = 0.0;
+        b = 128.0 / 255.0;
+      } else {
+        const f = felsities[tid];
+        const rockR = 128.0;
+        const rockG = 64.0 + 64.0 * f;
+        const rockB = 128.0 * f;
+        const kId = koeppenIds[tid];
+        if (!hasAtmosphere || kId === 0) {
+          r = rockR / 255.0;
+          g = rockG / 255.0;
+          b = rockB / 255.0;
+        } else if (kId === 12 || kId === 13) {
+          // Polar ice / tundra snow (`planetdisplay.py:64`)
+          r = 1.0;
+          g = 1.0;
+          b = 1.0;
+        } else {
+          // 50/50 blend of rock color and vegetation green (`planetdisplay.py:66`)
+          const lifeGreen = 255.0 * tileLife[tid];
+          r = (0.5 * rockR) / 255.0;
+          g = (0.5 * (rockG + lifeGreen)) / 255.0;
+          b = (0.5 * rockB) / 255.0;
+        }
+      }
+    } else if (aspect === "climate") {
+      if (h > 0.0) {
+        if (!hasAtmosphere) {
+          r = 1.0;
+          g = 1.0;
+          b = 1.0;
+        } else {
+          const idx = Math.round(koeppenIds[tid]);
+          const rgb = KOEPPEN_PALETTE_RGB[idx] || [255, 255, 255];
+          r = rgb[0] / 255.0;
+          g = rgb[1] / 255.0;
+          b = rgb[2] / 255.0;
+        }
+      }
+    } else if (aspect === "mountains") {
+      if (h > 0.0) {
+        const base = Math.min(255.0, 128.0 + 12.5 * h);
+        const m = mountainosities[tid];
+        r = (base + m * (255.0 - base)) / 255.0;
+        g = base / 255.0;
+        b = base / 255.0;
+      } else {
+        const norm = Math.max(0.0, Math.min(1.0, (h + 7.5) / 7.5));
+        const val = (16.0 + 54.0 * norm) / 255.0;
+        r = val;
+        g = val;
+        b = val;
+      }
+    } else if (aspect === "rock") {
+      const kind = topRockKinds[tid];
+      if (h > 0.0) {
+        const val = Math.min(255.0, 128.0 + 12.5 * h) / 255.0;
+        if (kind === 0) {
+          // Igneous ('I'): red-tinted
+          r = 1.0;
+          g = val;
+          b = val;
+        } else if (kind === 1) {
+          // Sedimentary ('S'): blue-tinted
+          r = val;
+          g = val;
+          b = 1.0;
+        } else {
+          // Metamorphic ('M'): green-tinted
+          r = val;
+          g = 1.0;
+          b = val;
+        }
+      } else {
+        // Subtle ocean floor rock tint (basalt/gabbro vs marine sediment)
+        const norm = Math.max(0.0, Math.min(1.0, (h + 7.5) / 7.5));
+        const base = (18.0 + 42.0 * norm) / 255.0;
+        if (kind === 0) {
+          r = base + 0.14;
+          g = base;
+          b = base;
+        } else if (kind === 1) {
+          r = base;
+          g = base;
+          b = base + 0.16;
+        } else {
+          r = base;
+          g = base + 0.14;
+          b = base;
+        }
+      }
+    } else if (aspect === "subduction") {
+      const sub = subductions[tid];
+      if (h > 0.0) {
+        const val = Math.min(255.0, 128.0 + 12.5 * h) / 255.0;
+        r = sub > 0.0 ? 1.0 : val;
+        g = val;
+        b = val;
+      } else {
+        const norm = Math.max(0.0, Math.min(1.0, (h + 7.5) / 7.5));
+        const val = (18.0 + 64.0 * norm) / 255.0;
+        r = sub > 0.0 ? 0.85 : val;
+        g = val;
+        b = val;
+      }
+    } else if (aspect === "thickness") {
+      const th = thicknesses[tid];
+      if (h > 0.0) {
+        const val = Math.min(255.0, 128.0 + 1.69 * th) / 255.0;
+        r = val;
+        g = val;
+        b = val;
+      } else {
+        const val = Math.min(115.0, 18.0 + 10.0 * th) / 255.0;
+        r = val;
+        g = val;
+        b = val;
+      }
+    }
+
+    if (tid === selectedTileIdx) {
+      // Highlight selected tile with a warm golden-yellow tint
+      r = Math.min(1.0, r * 0.55 + 0.45);
+      g = Math.min(1.0, g * 0.55 + 0.42);
+      b = Math.min(1.0, b * 0.4);
+    }
+
+    colors[out] = r;
+    colors[out + 1] = g;
+    colors[out + 2] = b;
+  }
+
   return colors;
 }
 
@@ -421,6 +613,7 @@ function createBaseSphereView(canvas, showBorders) {
     arrowLines,
     mesh,
     renderer,
+    rotationAngleRad: 0.0,
     paint() {
       if (this.renderer) {
         this.renderer.render(this.scene, this.camera);
@@ -515,6 +708,59 @@ function updateClimateViewColors(view) {
   const colors = computeClimateVertexColors(view);
   view.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
   view.paint();
+}
+
+function updateTectonicsViewBuffers(view, rebuildGeometry) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+
+  view.elevations = session.tile_elevations();
+  view.thicknesses = session.tile_thicknesses();
+  view.mountainosities = session.tile_mountainosities();
+  view.subductions = session.tile_subductions();
+  view.felsities = session.tile_felsities();
+  view.topRockKinds = session.tile_top_rock_kinds();
+  view.koeppenIds = session.tile_koeppen_ids();
+  view.tileLife = session.tile_life();
+  view.hasAtmosphere = session.has_atmosphere();
+  view.hasLife = session.has_life();
+
+  const colors = computeTectonicsVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildTectonicsInfo(view) {
+  const { session, selectedTileIdx, timerId } = view;
+  const selectedTileReport =
+    selectedTileIdx >= 0
+      ? session.inspect_tile(selectedTileIdx)
+      : "Click any tile on the globe to inspect its rock layers.";
+  return {
+    gridSize: session.grid_size(),
+    tileCount: session.tile_count(),
+    geoticks: session.geoticks(),
+    continentCount: session.continent_count(),
+    actualLandPercent: session.land_percent_actual(),
+    hasAtmosphere: session.has_atmosphere(),
+    hasLife: session.has_life(),
+    isRunning: timerId !== null,
+    selectedTileReport,
+  };
+}
+
+function stopTectonicsLoop(view) {
+  if (view && view.timerId !== null) {
+    clearInterval(view.timerId);
+    view.timerId = null;
+  }
 }
 
 export const initWasm = (onReady) => () => {
@@ -669,9 +915,116 @@ export const setClimateParams = (cells) => (glaciationPct) => () => {
   updateClimateViewColors(activeView);
 };
 
+export const mountTectonicsView = (gridSize) => (landPct) => (aspect) => (setTectonicsInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  const seed = BigInt(Date.now());
+  view.session = new WasmTectonicsSession(gridSize, landPct, seed);
+  view.currentGridSize = gridSize;
+  view.aspect = aspect;
+  view.selectedTileIdx = -1;
+  view.timerId = null;
+  view.setTectonicsInfo = setTectonicsInfo;
+
+  const handleCanvasClick = (ev) => {
+    if (!view.session) return;
+    const rect = canvas.getBoundingClientRect();
+    const u = (ev.clientX - rect.left) / rect.width;
+    const v = (ev.clientY - rect.top) / rect.height;
+    // Orthographic frustum is [-1.1, 1.1] x [-1.1, 1.1]
+    const sx = (2.0 * u - 1.0) * 1.1;
+    const sy = (1.0 - 2.0 * v) * 1.1;
+    const r2 = sx * sx + sy * sy;
+    if (r2 > 1.0) {
+      return;
+    }
+    const sz = Math.sqrt(Math.max(0.0, 1.0 - r2));
+    // Inverse-rotate around Y by -rotationAngleRad (`tectonicspresenter.py:42`)
+    const cosA = Math.cos(-view.rotationAngleRad);
+    const sinA = Math.sin(-view.rotationAngleRad);
+    const gx = sx * cosA + sz * sinA;
+    const gy = sy;
+    const gz = -sx * sinA + sz * cosA;
+
+    view.selectedTileIdx = view.session.nearest_tile(gx, gy, gz);
+    const colors = computeTectonicsVertexColors(view);
+    view.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    view.paint();
+    view.setTectonicsInfo(buildTectonicsInfo(view))();
+  };
+
+  canvas.addEventListener("click", handleCanvasClick);
+
+  activeView = view;
+  updateTectonicsViewBuffers(view, true);
+  setTectonicsInfo(buildTectonicsInfo(view))();
+
+  return () => {
+    stopTectonicsLoop(view);
+    canvas.removeEventListener("click", handleCanvasClick);
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const stepTectonics = (setTectonicsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.step();
+  updateTectonicsViewBuffers(activeView, false);
+  setTectonicsInfo(buildTectonicsInfo(activeView))();
+};
+
+export const toggleTectonicsRunning = (setTectonicsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const view = activeView;
+  view.setTectonicsInfo = setTectonicsInfo;
+  if (view.timerId !== null) {
+    stopTectonicsLoop(view);
+    setTectonicsInfo(buildTectonicsInfo(view))();
+  } else {
+    view.timerId = setInterval(() => {
+      if (!activeView || activeView !== view || !view.session) {
+        stopTectonicsLoop(view);
+        return;
+      }
+      view.session.step();
+      updateTectonicsViewBuffers(view, false);
+      view.setTectonicsInfo(buildTectonicsInfo(view))();
+    }, 120);
+    setTectonicsInfo(buildTectonicsInfo(view))();
+  }
+};
+
+export const resetTectonics = (gridSize) => (landPct) => (setTectonicsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopTectonicsLoop(activeView);
+  const sizeChanged = activeView.currentGridSize !== gridSize;
+  activeView.session.reset(gridSize, landPct);
+  activeView.currentGridSize = gridSize;
+  activeView.selectedTileIdx = -1;
+  updateTectonicsViewBuffers(activeView, sizeChanged);
+  setTectonicsInfo(buildTectonicsInfo(activeView))();
+};
+
+export const setTectonicsAspect = (aspect) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.aspect = aspect;
+  const colors = computeTectonicsVertexColors(activeView);
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+};
+
 export const rotateGrid = (deg) => () => {
   if (!activeView) return;
   const angleRad = (deg * Math.PI) / 180.0;
+  activeView.rotationAngleRad = angleRad;
   activeView.mesh.setRotationFromAxisAngle(_yAxis, angleRad);
   activeView.paint();
 };

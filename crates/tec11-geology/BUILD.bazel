@@ -4,13 +4,16 @@ rust_library(
     name = "tec11_geology",
     srcs = [
         "src/lib.rs",
+        "src/movement.rs",
         "src/pangea.rs",
         "src/rock.rs",
+        "src/tectonics.rs",
         "src/tile.rs",
     ],
     edition = "2021",
     visibility = ["//visibility:public"],
     deps = [
+        "//crates/tec11-climate:tec11_climate",
         "//crates/tec11-math-grid:tec11_math_grid",
     ],
 )

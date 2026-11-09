@@ -1,4 +1,4 @@
-use crate::rock::{Rock, RockLayer};
+use crate::rock::{Rock, RockKind, RockLayer};
 
 #[derive(Clone, Debug)]
 pub struct TileGeology {
@@ -6,6 +6,7 @@ pub struct TileGeology {
     pub layers: Vec<RockLayer>,
     pub mountainosity: f32,
     pub subduction: f32,
+    pub intrusion: Option<(f32, f32)>,
 }
 
 impl TileGeology {
@@ -23,6 +24,7 @@ impl TileGeology {
             }],
             mountainosity: 0.0,
             subduction: 0.0,
+            intrusion: None,
         }
     }
 
@@ -42,6 +44,29 @@ impl TileGeology {
             }],
             mountainosity: 0.0,
             subduction: 0.0,
+            intrusion: None,
+        }
+    }
+
+    /// Newly accreted mid-ocean ridge seafloor (`Section 5.4.2` of design doc):
+    /// 3.0 km lower gabbro + 2.0 km upper pillow basalt = 5.0 km total thickness,
+    /// thermally buoyant at `bottom = -7.5 km` (`elevation = -2.5 km` ridge crest).
+    pub fn birth_seafloor() -> Self {
+        Self {
+            bottom: -7.5,
+            layers: vec![
+                RockLayer {
+                    rock: Rock::gabbro_seafloor(),
+                    thickness: 3.0,
+                },
+                RockLayer {
+                    rock: Rock::seafloor(),
+                    thickness: 2.0,
+                },
+            ],
+            mountainosity: 0.0,
+            subduction: 0.0,
+            intrusion: None,
         }
     }
 
@@ -56,9 +81,74 @@ impl TileGeology {
         self.bottom + self.thickness()
     }
 
+    /// Normalized mountainosity in `[0.0, 1.0]` (`tile.py:291-292`).
+    #[inline]
+    pub fn mountainosity_norm(&self) -> f32 {
+        (self.mountainosity.min(20.0) / 20.0).max(0.0)
+    }
+
     #[inline]
     pub fn top_felsity(&self) -> f32 {
         self.layers.last().map(|l| l.rock.felsity).unwrap_or(0.5)
+    }
+
+    #[inline]
+    pub fn top_rock_kind(&self) -> RockKind {
+        self.layers
+            .last()
+            .map(|l| l.rock.kind)
+            .unwrap_or(RockKind::Igneous)
+    }
+
+    /// Enforce `MAX_THICKNESS` (`75 km`) and `MAX_HEIGHT` (`10 km`) (`Tile.limit` in `tile.py:62-81`),
+    /// without clamping negative ocean bathymetry to `0`.
+    pub fn limit(&mut self) {
+        let mut shrunk = 0.0f32;
+        while self.thickness() > Self::MAX_THICKNESS && !self.layers.is_empty() {
+            let dt = self.thickness() - Self::MAX_THICKNESS;
+            let l = self.layers.remove(0);
+            let dlt = dt.min(l.thickness);
+            if dlt < l.thickness {
+                self.layers.insert(
+                    0,
+                    RockLayer {
+                        rock: l.rock,
+                        thickness: l.thickness - dlt,
+                    },
+                );
+            }
+            shrunk += dlt;
+        }
+
+        self.bottom += shrunk;
+
+        let de = self.elevation() - Self::MAX_HEIGHT;
+        if de > 0.0 {
+            self.bottom -= de;
+        }
+
+        if self.bottom > 0.0 {
+            self.bottom = -self.thickness();
+        }
+    }
+
+    /// Merge adjacent identical rock layers and remove zero-thickness layers (`Tile.compact` in `tile.py:87-96`).
+    pub fn compact(&mut self) {
+        self.layers.retain(|l| l.thickness > 1e-6);
+        let mut i = 0;
+        while i + 1 < self.layers.len() {
+            if self.layers[i].rock == self.layers[i + 1].rock {
+                let next_t = self.layers.remove(i + 1).thickness;
+                self.layers[i].thickness += next_t;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub fn transform(&mut self, layers: Vec<RockLayer>) {
+        self.layers = layers;
+        self.compact();
     }
 
     /// Merges multiple rock layer columns by voting from top to bottom (`Tile.mergelayers` in `tile.py`).
@@ -104,7 +194,7 @@ impl TileGeology {
             let mut votes: Vec<(R, usize)> = Vec::new();
             for s in &mut ss {
                 if let Some((rock_opt, thick)) = s.pop() {
-                    if thick > min_t {
+                    if thick > min_t + 1e-6 {
                         s.push((rock_opt.clone(), thick - min_t));
                     }
                     if let Some(r) = rock_opt {
@@ -145,7 +235,7 @@ impl TileGeology {
         // Compact adjacent identical layers and drop zero-thickness layers
         let mut i = 0;
         while i + 1 < output.len() {
-            if output[i].1 == 0.0 {
+            if output[i].1 <= 1e-6 {
                 output.remove(i);
             } else if output[i].0 == output[i + 1].0 {
                 let next_t = output.remove(i + 1).1;
@@ -157,9 +247,158 @@ impl TileGeology {
 
         output.reverse();
         let mountainosity =
-            sources.iter().map(|s| s.1).sum::<f32>() / (sources.len() as f32);
+            sources.iter().map(|s| s.1).sum::<f32>() / (sources.len().max(1) as f32);
 
         (bottom, mountainosity, output)
+    }
+
+    /// Average each group's contributing tiles with `merge_layers`, then stack colliding groups
+    /// (`Tile.mergesources` in `tile.py:185-194`).
+    pub fn merge_sources(&mut self, groups: &[Vec<(f32, f32, Vec<RockLayer>)>]) {
+        let mut merged_groups = Vec::with_capacity(groups.len());
+        for g in groups {
+            let converted: Vec<(f32, f32, Vec<(Rock, f32)>)> = g
+                .iter()
+                .map(|(b, m, ls)| {
+                    (
+                        *b,
+                        *m,
+                        ls.iter()
+                            .map(|l| (l.rock.clone(), l.thickness))
+                            .collect(),
+                    )
+                })
+                .collect();
+            merged_groups.push(Self::merge_layers(&converted));
+        }
+
+        self.bottom = merged_groups.iter().map(|g| g.0).sum();
+        self.mountainosity = merged_groups.iter().map(|g| g.1).sum();
+        self.layers = merged_groups
+            .into_iter()
+            .flat_map(|g| {
+                g.2.into_iter()
+                    .map(|(rock, thickness)| RockLayer { rock, thickness })
+            })
+            .collect();
+        self.limit();
+        self.compact();
+    }
+
+    /// Subduction uplift at the leading edge of a moving continent (`Tile.build` in `tile.py:195-201`).
+    pub fn build(&mut self, amount: f32, rock: Rock) {
+        if amount <= 0.0 {
+            return;
+        }
+        self.bottom -= amount;
+        self.layers.insert(
+            0,
+            RockLayer {
+                rock,
+                thickness: 2.0 * amount,
+            },
+        );
+        self.limit();
+        self.compact();
+        self.subduction = amount;
+        self.mountainosity += amount;
+    }
+
+    /// Strip top rock layers by erosion degree (`Tile.erode` in `tile.py:203-245`),
+    /// capped by `max_erosion` (the local base-level relief limit), returning `(total_eroded, stripped_layers)`.
+    pub fn erode_column(&mut self, degree: f32, dt: f32, max_erosion: f32) -> (f32, Vec<RockLayer>) {
+        let mut rem_degree = degree;
+        let mut rem_erosion = max_erosion.min(self.elevation().max(0.0)).max(0.0);
+        let mut materials: Vec<RockLayer> = Vec::new();
+
+        while rem_degree > 0.0 && rem_erosion > 1e-6 && !self.layers.is_empty() {
+            let layer = self.layers.pop().unwrap();
+            let rate = 0.5 + 9.5 * (1.0 - layer.rock.toughness);
+            let potential = rem_erosion.min(rem_degree * rate * dt);
+
+            if potential < layer.thickness {
+                if potential > 1e-6 {
+                    materials.push(RockLayer {
+                        rock: layer.rock.clone(),
+                        thickness: potential,
+                    });
+                }
+                self.layers.push(RockLayer {
+                    rock: layer.rock,
+                    thickness: layer.thickness - potential,
+                });
+                break;
+            } else if self.layers.is_empty() {
+                // Leave at least MIN_THICKNESS behind on the bottom-most layer
+                let amount = (potential - Self::MIN_THICKNESS).min(layer.thickness - Self::MIN_THICKNESS);
+                if amount > 0.0001 {
+                    materials.push(RockLayer {
+                        rock: layer.rock.clone(),
+                        thickness: amount,
+                    });
+                    self.layers.push(RockLayer {
+                        rock: layer.rock,
+                        thickness: layer.thickness - amount,
+                    });
+                } else {
+                    self.layers.push(layer);
+                }
+                break;
+            } else {
+                rem_erosion -= layer.thickness;
+                rem_degree -= layer.thickness / (rate * dt);
+                materials.push(layer);
+            }
+        }
+
+        let total_eroded: f32 = materials.iter().map(|m| m.thickness).sum();
+        self.mountainosity = (self.mountainosity - total_eroded).max(0.0);
+        self.compact();
+        (total_eroded, materials)
+    }
+
+    /// Deposit a sedimentary rock layer on top of the column (`Tile.deposit` in `tile.py:246-250`).
+    pub fn deposit(&mut self, layer: RockLayer) {
+        if layer.thickness <= 1e-6 {
+            return;
+        }
+        let t = layer.thickness;
+        self.layers.push(layer);
+        self.limit();
+        self.mountainosity += t;
+        self.compact();
+    }
+
+    /// Apply isostatic adjustment to `bottom` (`Tile.isostasize` in `tile.py:252-254`).
+    pub fn isostasize(&mut self, amount: f32) {
+        self.bottom += amount;
+        self.limit();
+    }
+
+    /// Emplace a 1 km plutonic intrusion at depth `max(2, thickness * (1 - felsity))`
+    /// (`Tile.intrude` in `tile.py:256-270`).
+    pub fn intrude(&mut self, rock: Rock) {
+        let depth = (self.thickness() * (1.0 - rock.felsity)).max(2.0);
+        let mut l = self.layers.len();
+        let mut d = 0.0f32;
+        while d < depth && l > 0 {
+            l -= 1;
+            d += self.layers[l].thickness;
+        }
+        let intrusion_layer = RockLayer {
+            rock,
+            thickness: 1.0,
+        };
+        self.layers.insert(l, intrusion_layer);
+        self.bottom -= 1.0;
+        self.limit();
+        self.compact();
+        self.intrusion = Some((d, d + 1.0));
+    }
+
+    pub fn clear_temp(&mut self) {
+        self.subduction = 0.0;
+        self.intrusion = None;
     }
 }
 
@@ -197,5 +436,37 @@ mod tests {
                 ('C', 17.0)
             ]
         );
+    }
+
+    #[test]
+    fn test_merge_layers_voting_and_ties() {
+        // Preserve height
+        let (_, _, l1) = TileGeology::merge_layers(&[
+            (0.0, 0.0, vec![('A', 1.0)]),
+            (0.0, 0.0, vec![('A', 2.0)]),
+        ]);
+        assert_eq!(l1[0].1, 2.0);
+
+        // Preserve depth
+        let (b2, _, _) = TileGeology::merge_layers(&[
+            (-5.0, 0.0, vec![('A', 10.0)]),
+            (-2.0, 0.0, vec![('A', 10.0)]),
+        ]);
+        assert_eq!(b2, -5.0);
+
+        // Most common wins
+        let (_, _, l3) = TileGeology::merge_layers(&[
+            (0.0, 0.0, vec![('A', 1.0)]),
+            (0.0, 0.0, vec![('B', 1.0)]),
+            (0.0, 0.0, vec![('B', 1.0)]),
+        ]);
+        assert_eq!(l3[0].0, 'B');
+
+        // Tie prefers change from layer above
+        let (_, _, l4) = TileGeology::merge_layers(&[
+            (0.0, 0.0, vec![('A', 2.0)]),
+            (0.0, 0.0, vec![('B', 1.0), ('A', 1.0)]),
+        ]);
+        assert_eq!(l4[0].0, 'B');
     }
 }

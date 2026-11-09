@@ -3,7 +3,7 @@ use tec11_math_grid::SphericalGrid;
 
 use crate::earth_data::EARTH_SIZE6_ELEVATIONS_M;
 use crate::koeppen::{classify_tile, TileClimateClassification};
-use crate::ocean::{solve_seasonal_ocean_circulation, OceanCirculation};
+use crate::ocean::{solve_ocean_circulation, solve_seasonal_ocean_circulation, OceanCirculation};
 
 /// Standard 8 seasonal steps used in `Tec-Nine` (`climatesimulation.py:41`).
 pub const DEFAULT_SEASONS: [f64; 8] = [-1.0, -0.5, 0.0, 0.5, 1.0, 0.5, 0.0, -0.5];
@@ -235,13 +235,120 @@ impl ClimateModel {
         self.recompute();
     }
 
+    /// Construct a `ClimateModel` attached to a planetary grid for tectonic simulation,
+    /// precomputing the static wind destination graph `dest_map` once.
+    pub fn new_for_tectonics(
+        grid: SphericalGrid,
+        cells: u32,
+        spin: f64,
+        tilt_deg: f64,
+    ) -> Self {
+        let n = grid.faces.len();
+        let adjacency = grid.adjacency();
+
+        let mut lats_deg = Vec::with_capacity(n);
+        let mut lons_deg = Vec::with_capacity(n);
+        for &([x, y, z], _) in &grid.faces {
+            let lat = 180.0 / PI * z.atan2((x * x + y * y).sqrt());
+            let lon = 180.0 / PI * (-y).atan2(x);
+            lats_deg.push(lat);
+            lons_deg.push(lon);
+        }
+
+        let mut model = Self {
+            grid,
+            adjacency,
+            lats_deg,
+            lons_deg,
+            elevations: vec![0.0; n],
+            cells: cells.max(1),
+            glaciation: 0.5,
+            spin,
+            tilt_deg,
+            cached_dest_params: None,
+            cached_ocean_params: None,
+            dest_map: vec![Vec::new(); n],
+            seabased: vec![0.0; n],
+            ocean_seasons: Vec::new(),
+            seasons: Vec::new(),
+            classifications: Vec::new(),
+        };
+        model.compute_wind_dest_map();
+        model.cached_dest_params = Some((model.cells, model.spin.to_bits()));
+        model
+    }
+
+    /// Fast per-tick update for `TectonicsSimulation` (`planetsimulation.py:278-286`),
+    /// reusing the precomputed wind `dest_map` (`_climatemappings`).
+    pub fn update_for_tectonics(&mut self, elevations: &[f32], has_life: bool) {
+        assert_eq!(self.elevations.len(), elevations.len());
+        self.elevations.copy_from_slice(elevations);
+        self.compute_seabreeze();
+
+        let annual_ocean = solve_ocean_circulation(
+            &self.grid,
+            &self.adjacency,
+            &self.lats_deg,
+            &self.elevations,
+            self.cells,
+            self.spin,
+        );
+
+        let n = self.tile_count();
+        let glacial_dt = 0.15 * (self.glaciation - 0.5) / 0.5;
+        let glacial_dp = 0.2 * (0.5 - self.glaciation) / 0.5;
+        let c_f64 = self.cells as f64;
+        let templimits = temp_range_for_glaciation(MEAN_TEMPRANGE_C, self.glaciation);
+        let num_seasons = DEFAULT_SEASONS.len();
+
+        let mut classifications = Vec::with_capacity(n);
+        let mut rts = vec![0.0f64; num_seasons];
+        let mut rps = vec![0.0f64; num_seasons];
+
+        for v in 0..n {
+            let lat = self.lats_deg[v];
+            let h = self.elevations[v] as f64;
+            let sst_inf = annual_ocean.coastal_sst_influence[v] as f64;
+
+            for (s_idx, &season_val) in DEFAULT_SEASONS.iter().enumerate() {
+                let ins = insolation(lat, season_val, self.tilt_deg);
+                let base_t = if h > 0.0 {
+                    ins * (1.0 - (h / 10.0).min(1.0))
+                } else {
+                    ins
+                };
+                let temp = base_t + glacial_dt + 0.06 * sst_inf;
+                let conv = (((lat * 2.0 * c_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
+                    + 1.0)
+                    / 2.0;
+                let precip =
+                    (self.seabased[v] + conv + glacial_dp + 0.12 * sst_inf).clamp(0.0, 1.0);
+
+                rts[s_idx] = temp;
+                rps[s_idx] = precip;
+            }
+
+            classifications.push(classify_tile(
+                self.elevations[v],
+                &rts,
+                &rps,
+                templimits,
+                has_life,
+            ));
+        }
+
+        self.ocean_seasons = vec![annual_ocean];
+        self.classifications = classifications;
+    }
+
     fn recompute(&mut self) {
         let spin_bits = self.spin.to_bits();
         let tilt_bits = self.tilt_deg.to_bits();
         let glac_bits = self.glaciation.to_bits();
 
         if self.cached_dest_params != Some((self.cells, spin_bits)) {
-            self.compute_wind_and_seabreeze();
+            self.compute_wind_dest_map();
+            self.compute_seabreeze();
             self.cached_dest_params = Some((self.cells, spin_bits));
         }
 
@@ -331,7 +438,7 @@ impl ClimateModel {
         self.classifications = classifications;
     }
 
-    fn compute_wind_and_seabreeze(&mut self) {
+    fn compute_wind_dest_map(&mut self) {
         let n = self.tile_count();
         let directions: Vec<f64> = self
             .lats_deg
@@ -380,7 +487,10 @@ impl ClimateModel {
             }
         }
         self.dest_map = dests;
+    }
 
+    fn compute_seabreeze(&mut self) {
+        let n = self.tile_count();
         // Multi-source BFS for seabreeze propagation up to BREEZE_DISTANCE.
         let mut seabreeze: Vec<Option<u32>> = vec![None; n];
         let mut frontier: Vec<usize> = Vec::new();

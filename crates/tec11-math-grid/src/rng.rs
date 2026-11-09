@@ -55,4 +55,13 @@ impl Pcg64Mcg {
     pub fn gen_index(&mut self, len: usize) -> usize {
         (self.next_u64() as usize) % len
     }
+
+    /// Gaussian (normal) distribution with `mean` and `std_dev` via Box-Muller transform.
+    #[inline]
+    pub fn gauss(&mut self, mean: f64, std_dev: f64) -> f64 {
+        let u1 = self.next_f64().max(1e-15);
+        let u2 = self.next_f64();
+        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        mean + std_dev * z0
+    }
 }

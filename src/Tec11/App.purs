@@ -19,6 +19,7 @@ data Screen
   | GridScreen
   | PangeaScreen
   | ClimateScreen
+  | TectonicsScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -31,6 +32,18 @@ type PangeaInfo =
   { gridSize :: Int
   , tileCount :: Int
   , actualLandPercent :: Int
+  }
+
+type TectonicsInfo =
+  { gridSize :: Int
+  , tileCount :: Int
+  , geoticks :: Int
+  , continentCount :: Int
+  , actualLandPercent :: Int
+  , hasAtmosphere :: Boolean
+  , hasLife :: Boolean
+  , isRunning :: Boolean
+  , selectedTileReport :: String
   }
 
 foreign import initWasm :: Effect Unit -> Effect Unit
@@ -49,6 +62,13 @@ foreign import mountClimateView :: Int -> Int -> String -> Int -> Effect (Effect
 foreign import setClimateAttribute :: String -> Effect Unit
 foreign import setClimateSeason :: Int -> Effect Unit
 foreign import setClimateParams :: Int -> Int -> Effect Unit
+
+-- Tectonics mode FFI
+foreign import mountTectonicsView :: Int -> Int -> String -> (TectonicsInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepTectonics :: (TectonicsInfo -> Effect Unit) -> Effect Unit
+foreign import toggleTectonicsRunning :: (TectonicsInfo -> Effect Unit) -> Effect Unit
+foreign import resetTectonics :: Int -> Int -> (TectonicsInfo -> Effect Unit) -> Effect Unit
+foreign import setTectonicsAspect :: String -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -75,6 +95,22 @@ mkApp = do
     climateGlaciation /\ setClimateGlaciationState <- useState' 50
     climateCells /\ setClimateCellsState <- useState' 3
 
+    -- Tectonics mode state
+    tectonicsSize /\ setTectonicsSize <- useState' 5
+    tectonicsLandPct /\ setTectonicsLandPct <- useState' 29
+    tectonicsAspect /\ setTectonicsAspectState <- useState' "elevation"
+    tectonicsInfo /\ setTectonicsInfo <- useState'
+      { gridSize: 5
+      , tileCount: 2432
+      , geoticks: 0
+      , continentCount: 1
+      , actualLandPercent: 29
+      , hasAtmosphere: false
+      , hasLife: false
+      , isRunning: false
+      , selectedTileReport: "Click any tile on the globe to inspect its rock layers."
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -91,6 +127,9 @@ mkApp = do
         ClimateScreen -> do
           setRotationDeg 0
           mountClimateView climateCells climateGlaciation climateAttribute climateSeason
+        TectonicsScreen -> do
+          setRotationDeg 0
+          mountTectonicsView tectonicsSize tectonicsLandPct tectonicsAspect setTectonicsInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -153,6 +192,26 @@ mkApp = do
           setClimateCellsState c
           setClimateParams c climateGlaciation
 
+      handleTectonicsAspectChange :: Maybe String -> Effect Unit
+      handleTectonicsAspectChange maybeVal = case maybeVal of
+        Nothing -> pure unit
+        Just aspect -> do
+          setTectonicsAspectState aspect
+          setTectonicsAspect aspect
+
+      handleTectonicsSizeChange :: Maybe String -> Effect Unit
+      handleTectonicsSizeChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just sz -> do
+          setTectonicsSize sz
+          resetTectonics sz tectonicsLandPct setTectonicsInfo
+
+      handleTectonicsLandPctChange :: Maybe String -> Effect Unit
+      handleTectonicsLandPctChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just pct -> do
+          setTectonicsLandPct pct
+
     pure case screen of
       MainMenu ->
         R.div
@@ -182,6 +241,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen ClimateScreen)
                           , children: [ R.text "Climate" ]
+                          }
+                      , R.button
+                          { id: "tectonics-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen TectonicsScreen)
+                          , children: [ R.text "Tectonics" ]
                           }
                       ]
                   }
@@ -542,6 +608,199 @@ mkApp = do
                           , className: "action-btn secondary"
                           , onClick: capture_ (setScreen MainMenu)
                           , children: [ R.text "Done" ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      TectonicsScreen ->
+        let
+          continentWord = if tectonicsInfo.continentCount == 1 then " continent" else " continents"
+          biosphereStatus =
+            if tectonicsInfo.hasLife then "Atmosphere + Life"
+            else if tectonicsInfo.hasAtmosphere then "Atmosphere active"
+            else "Pre-atmosphere"
+        in
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.select
+                                  { id: "tectonics-aspect-select"
+                                  , className: "control-select"
+                                  , value: tectonicsAspect
+                                  , onChange: handler targetValue handleTectonicsAspectChange
+                                  , children:
+                                      [ R.option { value: "elevation", children: [ R.text "Elevation" ] }
+                                      , R.option { value: "color", children: [ R.text "Color" ] }
+                                      , R.option { value: "climate", children: [ R.text "Climate" ] }
+                                      , R.option { value: "mountains", children: [ R.text "Mountains" ] }
+                                      , R.option { value: "rock", children: [ R.text "Rock" ] }
+                                      , R.option { value: "subduction", children: [ R.text "Subduction" ] }
+                                      , R.option { value: "thickness", children: [ R.text "Thickness" ] }
+                                      ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "tectonics-start-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (toggleTectonicsRunning setTectonicsInfo)
+                                  , children: [ R.text (if tectonicsInfo.isRunning then "Pause" else "Start") ]
+                                  }
+                              , R.button
+                                  { id: "tectonics-step-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: tectonicsInfo.isRunning
+                                  , onClick: capture_ (stepTectonics setTectonicsInfo)
+                                  , children: [ R.text "Step" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "tectonics-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "tectonics-geoticks-label"
+                                  , className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( show tectonicsInfo.geoticks
+                                              <> " geoticks ("
+                                              <> show (tectonicsInfo.geoticks * 5)
+                                              <> " Myr)"
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { id: "tectonics-continents-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show tectonicsInfo.continentCount <> continentWord) ]
+                                  }
+                              , R.div
+                                  { id: "tectonics-land-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show tectonicsInfo.actualLandPercent <> "% land") ]
+                                  }
+                              , R.div
+                                  { id: "tectonics-biosphere-label"
+                                  , className: "stat-line stat-subtle"
+                                  , children: [ R.text biosphereStatus ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Selection (Stratigraphy)" ]
+                                  }
+                              , R.pre
+                                  { id: "tectonics-details"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text tectonicsInfo.selectedTileReport ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Planet Size" ]
+                                  }
+                              , R.select
+                                  { id: "tectonics-size-select"
+                                  , className: "control-select"
+                                  , disabled: tectonicsInfo.isRunning
+                                  , value: show tectonicsSize
+                                  , onChange: handler targetValue handleTectonicsSizeChange
+                                  , children:
+                                      [ R.option { value: "4", children: [ R.text "Very Small (2,100 km)" ] }
+                                      , R.option { value: "5", children: [ R.text "Small (3,700 km)" ] }
+                                      , R.option { value: "6", children: [ R.text "Medium / Earth (6,400 km)" ] }
+                                      , R.option { value: "7", children: [ R.text "Large (11,000 km)" ] }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text ("Initial Land (" <> show tectonicsLandPct <> "%)") ]
+                                  }
+                              , R.input
+                                  { id: "tectonics-land-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "5"
+                                  , max: "65"
+                                  , step: "1"
+                                  , disabled: tectonicsInfo.isRunning
+                                  , value: show tectonicsLandPct
+                                  , onChange: handler targetValue handleTectonicsLandPctChange
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "tectonics-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: tectonicsInfo.isRunning
+                                  , onClick: capture_ (resetTectonics tectonicsSize tectonicsLandPct setTectonicsInfo)
+                                  , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
                           }
                       ]
                   }
