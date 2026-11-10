@@ -30,6 +30,7 @@ data Screen
   | PrehistoryScreen
   | LanguageScreen
   | HistoryScreen
+  | WorldScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -167,6 +168,24 @@ type HistoryInfo =
   , selectedReport :: String
   }
 
+type WorldInfo =
+  { stageIndex :: Int
+  , stageName :: String
+  , tileCount :: Int
+  , yearsText :: String
+  , populationText :: String
+  , gridSize :: Int
+  , dayHours :: Int
+  , tiltDeg :: Int
+  , landPct :: Int
+  , atmDtMyr :: Int
+  , lifeDtMyr :: Int
+  , peopleDtMyr :: Int
+  , isRunning :: Boolean
+  , hasSavedPlanet :: Boolean
+  , selectedReport :: String
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -280,6 +299,17 @@ foreign import saveHistoryPlanet :: (HistoryInfo -> Effect Unit) -> Effect Unit
 foreign import loadEarthIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
+
+-- Complete World Simulation mode FFI
+foreign import mountWorldView :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> String -> (WorldInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import createWorld :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Boolean -> (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import stepWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import advanceWorldStage :: (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import toggleWorldRunning :: (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import setWorldAspect :: String -> Effect Unit
+foreign import saveWorldPlanet :: (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -445,6 +475,34 @@ mkApp = do
       , selectedReport: "Click any state on the globe to inspect its demographics, diplomacy, and language lexicon."
       }
 
+    -- Complete World Simulation state (`world.py`, `worldpresenter.py`)
+    worldSize /\ setWorldSize <- useState' 5
+    worldDayHours /\ setWorldDayHours <- useState' 24
+    worldTiltDeg /\ setWorldTiltDeg <- useState' 23
+    worldLandPct /\ setWorldLandPct <- useState' 29
+    worldAtmDt /\ setWorldAtmDt <- useState' 125
+    worldLifeDt /\ setWorldLifeDt <- useState' 125
+    worldPeopleDt /\ setWorldPeopleDt <- useState' 125
+    worldRandomize /\ setWorldRandomize <- useState' true
+    worldAspect /\ setWorldAspectState <- useState' "color"
+    worldInfo /\ setWorldInfo <- useState'
+      { stageIndex: 0
+      , stageName: "Tectonics (Hadean / Early Crust)"
+      , tileCount: 2432
+      , yearsText: "0"
+      , populationText: "0"
+      , gridSize: 5
+      , dayHours: 24
+      , tiltDeg: 23
+      , landPct: 29
+      , atmDtMyr: 125
+      , lifeDtMyr: 125
+      , peopleDtMyr: 125
+      , isRunning: false
+      , hasSavedPlanet: false
+      , selectedReport: "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree."
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -493,6 +551,9 @@ mkApp = do
         HistoryScreen -> do
           setRotationDeg 0
           mountHistoryView historyAspect historyShowRivers setHistoryInfo
+        WorldScreen -> do
+          setRotationDeg 0
+          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldAspect setWorldInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -697,6 +758,63 @@ mkApp = do
         setHistoryShowRiversState next
         setHistoryShowRivers next
 
+      handleWorldAspectChange :: Maybe String -> Effect Unit
+      handleWorldAspectChange maybeVal = case maybeVal of
+        Nothing -> pure unit
+        Just asp -> do
+          setWorldAspectState asp
+          setWorldAspect asp
+
+      handleWorldSizeChange :: Maybe String -> Effect Unit
+      handleWorldSizeChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just sz -> setWorldSize sz
+
+      handleWorldDayHoursChange :: Maybe String -> Effect Unit
+      handleWorldDayHoursChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just dh -> setWorldDayHours dh
+
+      handleWorldTiltChange :: Maybe String -> Effect Unit
+      handleWorldTiltChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just t -> setWorldTiltDeg t
+
+      handleWorldLandChange :: Maybe String -> Effect Unit
+      handleWorldLandChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just l -> setWorldLandPct l
+
+      handleWorldAtmDtChange :: Maybe String -> Effect Unit
+      handleWorldAtmDtChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just dt -> setWorldAtmDt dt
+
+      handleWorldLifeDtChange :: Maybe String -> Effect Unit
+      handleWorldLifeDtChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just dt -> setWorldLifeDt dt
+
+      handleWorldPeopleDtChange :: Maybe String -> Effect Unit
+      handleWorldPeopleDtChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just dt -> setWorldPeopleDt dt
+
+      handleToggleWorldRandomize :: Effect Unit
+      handleToggleWorldRandomize =
+        setWorldRandomize (not worldRandomize)
+
+      handleCreateWorld :: Effect Unit
+      handleCreateWorld =
+        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldRandomize \info -> do
+          setWorldInfo info
+          setWorldDayHours info.dayHours
+          setWorldTiltDeg info.tiltDeg
+          setWorldLandPct info.landPct
+          setWorldAtmDt info.atmDtMyr
+          setWorldLifeDt info.lifeDtMyr
+          setWorldPeopleDt info.peopleDtMyr
+
     pure case screen of
       MainMenu ->
         R.div
@@ -707,6 +825,13 @@ mkApp = do
                   { className: "menu-buttons"
                   , children:
                       [ R.button
+                          { id: "world-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen WorldScreen)
+                          , children: [ R.text "Start (World Simulation)" ]
+                          }
+                      , R.button
                           { id: "grid-btn"
                           , className: "menu-btn"
                           , disabled: not wasmReady
@@ -3034,6 +3159,359 @@ mkApp = do
                                   , disabled: historyInfo.isRunning
                                   , onClick: capture_ (resetHistory setHistoryInfo)
                                   , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      WorldScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.select
+                                  { id: "world-aspect-select"
+                                  , className: "control-select"
+                                  , value: worldAspect
+                                  , onChange: handler targetValue handleWorldAspectChange
+                                  , children:
+                                      [ R.option
+                                          { value: "color"
+                                          , children: [ R.text "Color" ]
+                                          }
+                                      , R.option
+                                          { value: "climate"
+                                          , children: [ R.text "Climate" ]
+                                          }
+                                      , R.option
+                                          { value: "population"
+                                          , children: [ R.text "Population" ]
+                                          }
+                                      , R.option
+                                          { value: "nations"
+                                          , children: [ R.text "Nations" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Tile Details (Layers, Climate, Population & Ancestry)" ]
+                                  }
+                              , R.div
+                                  { id: "world-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text worldInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Planet Size" ]
+                                  }
+                              , R.select
+                                  { id: "world-size-select"
+                                  , className: "control-select"
+                                  , disabled: worldInfo.isRunning
+                                  , value: show worldSize
+                                  , onChange: handler targetValue handleWorldSizeChange
+                                  , children:
+                                      [ R.option
+                                          { value: "4"
+                                          , children: [ R.text "Very Small (2,100 km — 812 tiles)" ]
+                                          }
+                                      , R.option
+                                          { value: "5"
+                                          , children: [ R.text "Small (3,700 km — 2,432 tiles)" ]
+                                          }
+                                      , R.option
+                                          { value: "6"
+                                          , children: [ R.text "Medium / Earth (6,400 km — 7,292 tiles)" ]
+                                          }
+                                      , R.option
+                                          { value: "7"
+                                          , children: [ R.text "Large (11,000 km — 21,872 tiles)" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "world-randomize-btn"
+                                  , className: if worldRandomize then "action-btn" else "action-btn secondary"
+                                  , disabled: worldInfo.isRunning
+                                  , onClick: capture_ handleToggleWorldRandomize
+                                  , children: [ R.text (if worldRandomize then "Randomize: On" else "Randomize: Off") ]
+                                  }
+                              , R.button
+                                  { id: "world-create-btn"
+                                  , className: "action-btn"
+                                  , disabled: worldInfo.isRunning
+                                  , onClick: capture_ handleCreateWorld
+                                  , children: [ R.text "Create" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Hours/day:" ]
+                                  }
+                              , R.select
+                                  { id: "world-spin-select"
+                                  , className: "control-select"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldDayHours
+                                  , onChange: handler targetValue handleWorldDayHoursChange
+                                  , children:
+                                      [ R.option { value: "8", children: [ R.text "8 h" ] }
+                                      , R.option { value: "12", children: [ R.text "12 h" ] }
+                                      , R.option { value: "24", children: [ R.text "24 h" ] }
+                                      , R.option { value: "48", children: [ R.text "48 h" ] }
+                                      ]
+                                  }
+                              , R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text ("Tilt: " <> show worldTiltDeg <> "°") ]
+                                  }
+                              , R.input
+                                  { id: "world-tilt-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "45"
+                                  , step: "1"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldTiltDeg
+                                  , onChange: handler targetValue handleWorldTiltChange
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Land %:" ]
+                                  }
+                              , R.input
+                                  { id: "world-land-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "1"
+                                  , max: "50"
+                                  , step: "1"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldLandPct
+                                  , onChange: handler targetValue handleWorldLandChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show worldLandPct <> "%") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Atm Δt:" ]
+                                  }
+                              , R.input
+                                  { id: "world-atmdt-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "5"
+                                  , max: "500"
+                                  , step: "5"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldAtmDt
+                                  , onChange: handler targetValue handleWorldAtmDtChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show worldAtmDt <> "M") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Life Δt:" ]
+                                  }
+                              , R.input
+                                  { id: "world-lifedt-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "5"
+                                  , max: "500"
+                                  , step: "5"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldLifeDt
+                                  , onChange: handler targetValue handleWorldLifeDtChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show worldLifeDt <> "M") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "People Δt:" ]
+                                  }
+                              , R.input
+                                  { id: "world-peopledt-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "5"
+                                  , max: "500"
+                                  , step: "5"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldPeopleDt
+                                  , onChange: handler targetValue handleWorldPeopleDtChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show worldPeopleDt <> "M") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "world-start-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (toggleWorldRunning setWorldInfo)
+                                  , children: [ R.text (if worldInfo.isRunning then "Pause" else "Start") ]
+                                  }
+                              , R.button
+                                  { id: "world-step-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: worldInfo.isRunning
+                                  , onClick: capture_ (stepWorld setWorldInfo)
+                                  , children: [ R.text "Step" ]
+                                  }
+                              , R.button
+                                  { id: "world-next-stage-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: worldInfo.isRunning || worldInfo.stageIndex >= 2
+                                  , onClick: capture_ (advanceWorldStage setWorldInfo)
+                                  , children: [ R.text "Next Stage" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "world-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "world-stage-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text worldInfo.stageName ]
+                                  }
+                              , R.div
+                                  { id: "world-years-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (worldInfo.yearsText <> " years") ]
+                                  }
+                              , R.div
+                                  { id: "world-population-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (worldInfo.populationText <> " people") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "world-load-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: worldInfo.isRunning
+                                  , onClick: capture_ (loadFilePlanetIntoWorld setWorldInfo)
+                                  , children: [ R.text "Load..." ]
+                                  }
+                              , R.button
+                                  { id: "world-saved-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: worldInfo.isRunning || not worldInfo.hasSavedPlanet
+                                  , onClick: capture_ (loadSavedPlanetIntoWorld setWorldInfo)
+                                  , children: [ R.text "Load Saved" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "world-save-btn"
+                                  , className: "action-btn"
+                                  , disabled: worldInfo.isRunning
+                                  , onClick: capture_ (saveWorldPlanet setWorldInfo)
+                                  , children: [ R.text "Save..." ]
                                   }
                               , R.button
                                   { id: "done-btn"

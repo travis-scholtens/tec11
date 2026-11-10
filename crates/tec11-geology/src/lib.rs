@@ -13,6 +13,7 @@ pub mod rock;
 pub mod split_sandbox;
 pub mod tectonics;
 pub mod tile;
+pub mod world;
 
 pub use erosion_sandbox::ErosionSandbox;
 pub use history::{Community, ConceptKey, HistorySimulation, LanguageRecord, StateRecord};
@@ -38,3 +39,4 @@ pub use rock::{Rock, RockKind, RockLayer};
 pub use split_sandbox::SplitSandbox;
 pub use tectonics::{LithosphericGroup, TectonicsSimulation};
 pub use tile::TileGeology;
+pub use world::{WorldCreateParams, WorldSimulation, WorldStageState};

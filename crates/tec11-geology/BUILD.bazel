@@ -19,6 +19,7 @@ rust_library(
         "src/split_sandbox.rs",
         "src/tectonics.rs",
         "src/tile.rs",
+        "src/world.rs",
     ],
     compile_data = [
         "data/animals.tsv",

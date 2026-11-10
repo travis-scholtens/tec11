@@ -68,6 +68,18 @@ impl TectonicsSimulation {
     /// and surrounding ocean floor (`TectonicsPresenter` defaults: `grid_size = 6`, `land_pct = 29.0`,
     /// `dt = 5 Myr`, `atmdt = 125 Myr`, `lifedt = 125 Myr`).
     pub fn new(grid_size: u32, land_percent: f64, seed: u64) -> Self {
+        Self::new_with_params(grid_size, 24.0, 23.0, land_percent, 125, 125, seed)
+    }
+
+    pub fn new_with_params(
+        grid_size: u32,
+        day_hours: f64,
+        tilt_deg: f64,
+        land_percent: f64,
+        atm_dt_myr: u32,
+        life_dt_myr: u32,
+        seed: u64,
+    ) -> Self {
         let mut rng = Pcg64Mcg::from_seed_u64(seed);
         let pangea = PangeaWorld::generate(grid_size, land_percent, &mut rng);
         let radius_km = pangea.radius_km;
@@ -83,9 +95,16 @@ impl TectonicsSimulation {
             .collect();
         let tree = PointTree::new(&indexed_pts);
 
-        let spin = 1.0;
-        let cells = 3;
-        let tilt_deg = 23.0;
+        let spin = 24.0 / day_hours.max(1.0);
+        let cells = if spin >= 3.0 {
+            7
+        } else if spin >= 2.0 {
+            5
+        } else if spin >= 1.0 {
+            3
+        } else {
+            1
+        };
         let dt = 5.0;
         let dp = (100.0 / radius_km) * dt;
         let build_rate = dt / 5.0;
@@ -97,8 +116,8 @@ impl TectonicsSimulation {
         let earth_area_km2 = 4.0 * PI * 6400.0 * 6400.0;
         let splitnum = (25.0e6 / earth_area_km2) * (n as f64);
 
-        let atmosphere_ticks_remaining = (125.0 / dt) as u32;
-        let life_ticks_remaining = (125.0 / dt) as u32;
+        let atmosphere_ticks_remaining = (atm_dt_myr / 5).max(1);
+        let life_ticks_remaining = (life_dt_myr / 5).max(1);
 
         let groups = vec![LithosphericGroup {
             tiles: pangea.continent_tiles,
@@ -187,6 +206,14 @@ impl TectonicsSimulation {
 
     pub fn tile_life(&self) -> &[f32] {
         &self.tile_life
+    }
+
+    pub fn tile_temp_c(&self) -> &[f32] {
+        &self.tile_temp_c
+    }
+
+    pub fn tile_precip_norm(&self) -> &[f32] {
+        &self.tile_precip_norm
     }
 
     /// Advance the tectonic simulation by one 5 Myr timestep (`PlanetSimulation.update`

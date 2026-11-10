@@ -14,6 +14,7 @@ import initWasmModule, {
   WasmRiversSession,
   WasmSplitSession,
   WasmTectonicsSession,
+  WasmWorldSession,
 } from "tec11-wasm";
 
 const _yAxis = new THREE.Vector3(0, 1, 0);
@@ -3012,6 +3013,255 @@ export const loadFilePlanetIntoHistory = (setHistoryInfo) => () => {
       activeView.selectedTileIdx = -1;
       updateHistoryDataBuffers(activeView, true);
       setHistoryInfo(buildHistoryInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Mode 14: Complete World Simulation (`worldsimulation.py`, `worlddisplay.py`, `worldpresenter.py`)
+// ============================================================================
+
+function computeWorldVertexColors(view) {
+  const { vertexTileIds, tileColors } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    colors[v * 3] = tileColors[t * 3];
+    colors[v * 3 + 1] = tileColors[t * 3 + 1];
+    colors[v * 3 + 2] = tileColors[t * 3 + 2];
+  }
+  return colors;
+}
+
+function updateWorldDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileColors = session.tile_colors_rgb(view.aspect, view.selectedTileIdx);
+  const colors = computeWorldVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildWorldInfo(view) {
+  const s = view.session;
+  const selectedReport =
+    view.selectedTileIdx >= 0
+      ? s.inspect_tile(view.selectedTileIdx)
+      : "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree.";
+  return {
+    stageIndex: s.stage_index(),
+    stageName: s.stage_name(),
+    tileCount: s.tile_count(),
+    yearsText: s.years_formatted(),
+    populationText: formatPopulationThousands(s.total_population_thousands()),
+    gridSize: s.param_grid_size(),
+    dayHours: s.param_day_hours(),
+    tiltDeg: s.param_tilt_deg(),
+    landPct: s.param_land_pct(),
+    atmDtMyr: s.param_atm_dt_myr(),
+    lifeDtMyr: s.param_life_dt_myr(),
+    peopleDtMyr: s.param_people_dt_myr(),
+    isRunning: Boolean(view.isRunning),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    selectedReport,
+  };
+}
+
+function stopWorldLoop(view) {
+  view.isRunning = false;
+  if (view.timerId !== null && view.timerId !== undefined) {
+    clearTimeout(view.timerId);
+    view.timerId = null;
+  }
+}
+
+function scheduleWorldTick(view) {
+  if (!view.isRunning || activeView !== view) return;
+  view.timerId = setTimeout(() => {
+    if (!view.isRunning || activeView !== view) return;
+    view.session.step();
+    updateWorldDataBuffers(view, false);
+    if (view.setWorldInfo) {
+      view.setWorldInfo(buildWorldInfo(view))();
+    }
+    if (view.isRunning) {
+      scheduleWorldTick(view);
+    }
+  }, 120);
+}
+
+export const mountWorldView =
+  (gridSize) =>
+  (dayHours) =>
+  (tiltDeg) =>
+  (landPct) =>
+  (atmDt) =>
+  (lifeDt) =>
+  (peopleDt) =>
+  (aspect) =>
+  (setWorldInfo) =>
+  () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.session = new WasmWorldSession(
+      gridSize,
+      dayHours,
+      tiltDeg,
+      landPct,
+      atmDt,
+      lifeDt,
+      peopleDt
+    );
+    view.aspect = aspect;
+    view.selectedTileIdx = -1;
+    view.isRunning = false;
+    view.timerId = null;
+    view.setWorldInfo = setWorldInfo;
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateWorldDataBuffers(view, false);
+        view.setWorldInfo(buildWorldInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateWorldDataBuffers(view, true);
+    setWorldInfo(buildWorldInfo(view))();
+
+    return () => {
+      canvas.removeEventListener("click", handleCanvasClick);
+      stopWorldLoop(view);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const createWorld =
+  (gridSize) =>
+  (dayHours) =>
+  (tiltDeg) =>
+  (landPct) =>
+  (atmDt) =>
+  (lifeDt) =>
+  (peopleDt) =>
+  (randomize) =>
+  (setWorldInfo) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    stopWorldLoop(activeView);
+    activeView.session.create_world(
+      gridSize,
+      dayHours,
+      tiltDeg,
+      landPct,
+      atmDt,
+      lifeDt,
+      peopleDt,
+      randomize
+    );
+    activeView.selectedTileIdx = -1;
+    updateWorldDataBuffers(activeView, true);
+    setWorldInfo(buildWorldInfo(activeView))();
+  };
+
+export const stepWorld = (setWorldInfo) => () => {
+  if (!activeView || !activeView.session || activeView.isRunning) return;
+  activeView.session.step();
+  updateWorldDataBuffers(activeView, false);
+  setWorldInfo(buildWorldInfo(activeView))();
+};
+
+export const advanceWorldStage = (setWorldInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.advance_stage();
+  updateWorldDataBuffers(activeView, false);
+  setWorldInfo(buildWorldInfo(activeView))();
+};
+
+export const toggleWorldRunning = (setWorldInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  if (activeView.isRunning) {
+    stopWorldLoop(activeView);
+    setWorldInfo(buildWorldInfo(activeView))();
+  } else {
+    activeView.isRunning = true;
+    setWorldInfo(buildWorldInfo(activeView))();
+    scheduleWorldTick(activeView);
+  }
+};
+
+export const setWorldAspect = (aspect) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.aspect = aspect;
+  updateWorldDataBuffers(activeView, false);
+};
+
+export const saveWorldPlanet = (setWorldInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const bytes = activeView.session.encode_snapshot();
+  if (!bytes || bytes.length === 0) return;
+  storeSavedSnapshotBytes(bytes);
+  activeClimateSnapshotBytes = bytes;
+  triggerBinaryDownload("tec11-world.tec11", bytes);
+  setWorldInfo(buildWorldInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoWorld = (setWorldInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  stopWorldLoop(activeView);
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.selectedTileIdx = -1;
+    updateWorldDataBuffers(activeView, true);
+    setWorldInfo(buildWorldInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoWorld = (setWorldInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    stopWorldLoop(activeView);
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.selectedTileIdx = -1;
+      updateWorldDataBuffers(activeView, true);
+      setWorldInfo(buildWorldInfo(activeView))();
     }
   });
 };
