@@ -26,6 +26,7 @@ data Screen
   | RiversScreen
   | LifeformsScreen
   | PopulationScreen
+  | RacinationScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -115,6 +116,13 @@ type PopulationInfo =
   , hasSavedPlanet :: Boolean
   }
 
+type RacinationInfo =
+  { tileCount :: Int
+  , peoples :: Int
+  , populatedCount :: Int
+  , isolations :: Int
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -194,6 +202,12 @@ foreign import setPopulationTravelRange :: Int -> Effect Unit
 foreign import loadEarthIntoPopulation :: (PopulationInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoPopulation :: (PopulationInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoPopulation :: (PopulationInfo -> Effect Unit) -> Effect Unit
+
+-- Racination mode FFI
+foreign import mountRacinationView :: Int -> (RacinationInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import isolateRacination :: (RacinationInfo -> Effect Unit) -> Effect Unit
+foreign import resetRacination :: (RacinationInfo -> Effect Unit) -> Effect Unit
+foreign import setRacinationTravelRange :: Int -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -313,6 +327,15 @@ mkApp = do
       , hasSavedPlanet: false
       }
 
+    -- Racination mode state
+    racinationTravelRange /\ setRacinationTravelRangeState <- useState' 6
+    racinationInfo /\ setRacinationInfo <- useState'
+      { tileCount: 7292
+      , peoples: 1
+      , populatedCount: 0
+      , isolations: 0
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -350,6 +373,9 @@ mkApp = do
         PopulationScreen -> do
           setRotationDeg 0
           mountPopulationView populationCoastProx populationTravelRange setPopulationInfo
+        RacinationScreen -> do
+          setRotationDeg 0
+          mountRacinationView racinationTravelRange setRacinationInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -534,6 +560,13 @@ mkApp = do
           setPopulationTravelRangeState tr
           setPopulationTravelRange tr
 
+      handleRacinationTravelRangeChange :: Maybe String -> Effect Unit
+      handleRacinationTravelRangeChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just tr -> do
+          setRacinationTravelRangeState tr
+          setRacinationTravelRange tr
+
     pure case screen of
       MainMenu ->
         R.div
@@ -612,6 +645,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen PopulationScreen)
                           , children: [ R.text "Population" ]
+                          }
+                      , R.button
+                          { id: "racination-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen RacinationScreen)
+                          , children: [ R.text "Racination" ]
                           }
                       ]
                   }
@@ -2172,6 +2212,119 @@ mkApp = do
                                   , className: "action-btn secondary"
                                   , disabled: populationInfo.isRunning
                                   , onClick: capture_ (resetPopulation setPopulationInfo)
+                                  , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      RacinationScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Travel range:" ]
+                                  }
+                              , R.input
+                                  { id: "racination-range-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "1"
+                                  , max: "12"
+                                  , step: "1"
+                                  , value: show racinationTravelRange
+                                  , onChange: handler targetValue handleRacinationTravelRangeChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show racinationTravelRange) ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column pangea-sidebar"
+                  , children:
+                      [ R.button
+                          { id: "racination-isolate-btn"
+                          , className: "action-btn"
+                          , onClick: capture_ (isolateRacination setRacinationInfo)
+                          , children: [ R.text "Isolate" ]
+                          }
+                      , R.div
+                          { id: "racination-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "racination-races-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Races: " <> show racinationInfo.peoples) ]
+                                  }
+                              , R.div
+                                  { id: "racination-isolations-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Isolations: " <> show racinationInfo.isolations) ]
+                                  }
+                              , R.div
+                                  { id: "racination-populated-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Populated: " <> show racinationInfo.populatedCount <> " tiles") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "racination-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (resetRacination setRacinationInfo)
                                   , children: [ R.text "Reset" ]
                                   }
                               , R.button

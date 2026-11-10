@@ -135,6 +135,16 @@ impl SphericalPolygon {
         }
     }
 
+    pub fn new_with_interior(vectors: &[Vec3], interior_vector: Vec3) -> Self {
+        let mut poly = Self::new(vectors);
+        poly.external_vector = normal([
+            -interior_vector[0],
+            -interior_vector[1],
+            -interior_vector[2],
+        ]);
+        poly
+    }
+
     pub fn contains(&self, vector: Vec3) -> bool {
         let ray = GreatCircleArc::new(vector, self.external_vector);
         let count = self.arcs.iter().filter(|a| ray.intersects(a)).count();

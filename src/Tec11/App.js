@@ -7,6 +7,7 @@ import initWasmModule, {
   WasmMoveSession,
   WasmPangeaSession,
   WasmPopulationSession,
+  WasmRacinationSession,
   WasmRiversSession,
   WasmSplitSession,
   WasmTectonicsSession,
@@ -2418,6 +2419,91 @@ export const loadFilePlanetIntoPopulation = (setPopulationInfo) => () => {
       setPopulationInfo(buildPopulationInfo(activeView))();
     }
   });
+};
+
+// ============================================================================
+// Mode 10: Racination Simulation (`racinatemethod.py`, `racinationdisplay.py`, `racinationpresenter.py`)
+// ============================================================================
+
+function computeRacinationVertexColors(view) {
+  const { vertexTileIds, tileColors } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    colors[v * 3] = tileColors[t * 3];
+    colors[v * 3 + 1] = tileColors[t * 3 + 1];
+    colors[v * 3 + 2] = tileColors[t * 3 + 2];
+  }
+  return colors;
+}
+
+function updateRacinationDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileColors = session.tile_colors_rgb();
+  const colors = computeRacinationVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildRacinationInfo(view) {
+  const s = view.session;
+  return {
+    tileCount: s.tile_count(),
+    peoples: s.peoples(),
+    populatedCount: s.populated_count(),
+    isolations: s.isolations(),
+  };
+}
+
+export const mountRacinationView = (travelRange) => (setRacinationInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  view.session = new WasmRacinationSession(travelRange);
+  view.setRacinationInfo = setRacinationInfo;
+
+  activeView = view;
+  updateRacinationDataBuffers(view, true);
+  setRacinationInfo(buildRacinationInfo(view))();
+
+  return () => {
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const isolateRacination = (setRacinationInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.isolate();
+  updateRacinationDataBuffers(activeView, false);
+  setRacinationInfo(buildRacinationInfo(activeView))();
+};
+
+export const resetRacination = (setRacinationInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.reset();
+  updateRacinationDataBuffers(activeView, false);
+  setRacinationInfo(buildRacinationInfo(activeView))();
+};
+
+export const setRacinationTravelRange = (travelRange) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_travel_range(travelRange);
 };
 
 export const rotateGrid = (deg) => () => {

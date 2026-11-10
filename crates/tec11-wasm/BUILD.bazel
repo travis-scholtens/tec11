@@ -13,6 +13,7 @@ rust_shared_library(
         "src/move_session.rs",
         "src/pangea_session.rs",
         "src/population_session.rs",
+        "src/racination_session.rs",
         "src/rivers_session.rs",
         "src/split_session.rs",
         "src/tectonics_session.rs",
