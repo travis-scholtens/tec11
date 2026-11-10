@@ -386,7 +386,7 @@ impl ClimateModel {
 
                 let ins = insolation(lat, season_val, self.tilt_deg);
                 let base_t = if h > 0.0 {
-                    ins * (1.0 - h / 10.0)
+                    ins * (1.0 - (h / 10.0).min(1.0))
                 } else {
                     ins
                 };

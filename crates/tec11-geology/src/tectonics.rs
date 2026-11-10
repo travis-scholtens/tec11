@@ -529,23 +529,8 @@ impl TectonicsSimulation {
 
         // 5. Simulate coupled climate and erosion if the atmosphere has formed (`planetsimulation.py:275-315`).
         if self.has_atmosphere() {
-            let land_elevs: Vec<f32> = self
-                .tiles
-                .iter()
-                .map(|t| t.elevation().max(0.0))
-                .collect();
             let has_life = self.has_life();
-            self.climate_model.update_for_tectonics(&land_elevs, has_life);
-
-            for (v, c) in self.climate_model.classifications().iter().enumerate() {
-                self.tile_koeppen[v] = c.koeppen as u8;
-                self.tile_life[v] = if c.life { 1.0 } else { 0.0 };
-                let temp_norm = c.mean_temperature as f32;
-                self.tile_temp_norm[v] = temp_norm;
-                // Convert normalized temperature to Celsius using Tectonics temprange (-20..55 C at glaciation 0.5)
-                self.tile_temp_c[v] = temp_norm * 75.0 - 20.0;
-                self.tile_precip_norm[v] = c.mean_precipitation as f32;
-            }
+            self.refresh_climate_fields();
 
             // Build downhill erosion graph (`erodemethod.py:21-38` with physical local base-level bounds):
             // Each land tile (elevation > 0) erodes only into strictly lower neighbors (`h_u < h_v`),
@@ -998,6 +983,346 @@ impl TectonicsSimulation {
 
         lines.join("\n")
     }
+
+    fn refresh_climate_fields(&mut self) {
+        let land_elevs: Vec<f32> = self
+            .tiles
+            .iter()
+            .map(|t| t.elevation().max(0.0))
+            .collect();
+        let has_life = self.has_life();
+        self.climate_model
+            .update_for_tectonics(&land_elevs, has_life);
+
+        for (v, c) in self.climate_model.classifications().iter().enumerate() {
+            self.tile_koeppen[v] = c.koeppen as u8;
+            self.tile_life[v] = if c.life { 1.0 } else { 0.0 };
+            let temp_norm = c.mean_temperature as f32;
+            self.tile_temp_norm[v] = temp_norm;
+            // Convert normalized temperature to Celsius using Tectonics temprange (-20..55 C at glaciation 0.5)
+            self.tile_temp_c[v] = temp_norm * 75.0 - 20.0;
+            self.tile_precip_norm[v] = c.mean_precipitation as f32;
+        }
+    }
+
+    /// Convert the current tectonic simulation state into a `tec11_proto::PlanetSnapshot`
+    /// (`Section 7` of the design document).
+    pub fn to_snapshot(&self) -> tec11_proto::PlanetSnapshot {
+        let proto_tiles: Vec<tec11_proto::GeologicalTile> = self
+            .tiles
+            .iter()
+            .map(|t| {
+                let layers = t
+                    .layers
+                    .iter()
+                    .map(|l| {
+                        let r = &l.rock;
+                        let kind = match r.kind {
+                            RockKind::Igneous => {
+                                let is_intrusive =
+                                    matches!(r.name, "gabbro" | "andesite" | "granite");
+                                tec11_proto::RockKindOneof::Igneous(tec11_proto::IgneousRock {
+                                    is_intrusive,
+                                    felsity: r.felsity,
+                                })
+                            }
+                            RockKind::Sedimentary => {
+                                tec11_proto::RockKindOneof::Sedimentary(
+                                    tec11_proto::SedimentaryRock {
+                                        clasticity: r.clasticity.unwrap_or(1.0),
+                                        felsity: Some(r.felsity),
+                                        calcity: r.calcity,
+                                        bogginess: r.bogginess,
+                                    },
+                                )
+                            }
+                            RockKind::Metamorphic => {
+                                tec11_proto::RockKindOneof::Metamorphic(
+                                    tec11_proto::MetamorphicRock {
+                                        facies: tec11_proto::MetamorphicFacies::from_rock_name(
+                                            r.name,
+                                        ),
+                                        toughness: r.toughness,
+                                        felsity: Some(r.felsity),
+                                        calcity: r.calcity,
+                                        bogginess: r.bogginess,
+                                    },
+                                )
+                            }
+                        };
+                        tec11_proto::RockLayer {
+                            rock: Some(tec11_proto::Rock { kind: Some(kind) }),
+                            thickness: l.thickness,
+                        }
+                    })
+                    .collect();
+                tec11_proto::GeologicalTile {
+                    bottom: t.bottom,
+                    mountainosity: t.mountainosity,
+                    layers,
+                }
+            })
+            .collect();
+
+        let proto_groups: Vec<tec11_proto::LithosphericGroup> = self
+            .groups
+            .iter()
+            .map(|g| tec11_proto::LithosphericGroup {
+                tile_ids: g.tiles.iter().map(|&id| id as u32).collect(),
+                velocity: Some(tec11_proto::Vec3 {
+                    x: g.velocity[0] as f32,
+                    y: g.velocity[1] as f32,
+                    z: g.velocity[2] as f32,
+                }),
+            })
+            .collect();
+
+        let proto_ridges: Vec<tec11_proto::SpreadingRidgeArc> = self
+            .ridges
+            .iter()
+            .map(|r| tec11_proto::SpreadingRidgeArc {
+                start: Some(tec11_proto::Vec3 {
+                    x: r.start[0] as f32,
+                    y: r.start[1] as f32,
+                    z: r.start[2] as f32,
+                }),
+                end: Some(tec11_proto::Vec3 {
+                    x: r.end[0] as f32,
+                    y: r.end[1] as f32,
+                    z: r.end[2] as f32,
+                }),
+                velocity: Some(tec11_proto::Vec3 {
+                    x: r.velocity[0] as f32,
+                    y: r.velocity[1] as f32,
+                    z: r.velocity[2] as f32,
+                }),
+                age_ticks: r.age_ticks,
+            })
+            .collect();
+
+        tec11_proto::PlanetSnapshot {
+            rng_state_16b: self.rng.to_bytes().to_vec(),
+            grid_size: self.grid.size,
+            radius_km: self.radius_km as f32,
+            spin: 1.0,
+            tilt_deg: 23.0,
+            stage: Some(tec11_proto::PlanetStageOneof::Tectonics(
+                tec11_proto::TectonicsStage {
+                    tectonics_ticks: self.geoticks,
+                    atmosphere_ticks_remaining: self.atmosphere_ticks_remaining,
+                    life_ticks_remaining: self.life_ticks_remaining,
+                    people_ticks_remaining: 0,
+                    tiles: proto_tiles,
+                    groups: proto_groups,
+                    ridges: proto_ridges,
+                },
+            )),
+        }
+    }
+
+    /// Encode the current tectonic simulation state to `.tec11` binary Protocol Buffer bytes.
+    pub fn encode_snapshot(&self) -> Vec<u8> {
+        self.to_snapshot().encode_to_vec()
+    }
+
+    /// Reconstruct a `TectonicsSimulation` from a `tec11_proto::PlanetSnapshot`.
+    pub fn from_snapshot(snap: &tec11_proto::PlanetSnapshot, fallback_seed: u64) -> Option<Self> {
+        let grid_size = snap.grid_size;
+        if !(4..=7).contains(&grid_size) {
+            return None;
+        }
+        let tec11_proto::PlanetStageOneof::Tectonics(ref tec) = snap.stage.as_ref()? else {
+            return None;
+        };
+
+        let grid = SphericalGrid::with_size(grid_size);
+        let n = grid.faces.len();
+        if tec.tiles.len() != n {
+            return None;
+        }
+        let adjacency = grid.adjacency();
+        let indexed_pts: Vec<(Vec3, usize)> = grid
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(i, (c, _))| (*c, i))
+            .collect();
+        let tree = PointTree::new(&indexed_pts);
+        let radius_km = if snap.radius_km > 0.0 {
+            snap.radius_km as f64
+        } else {
+            PangeaWorld::planet_radius_km(grid_size)
+        };
+
+        let spin = if snap.spin > 0.0 {
+            snap.spin as f64
+        } else {
+            1.0
+        };
+        let cells = if spin >= 3.0 {
+            7
+        } else if spin >= 2.0 {
+            5
+        } else if spin >= 1.0 {
+            3
+        } else {
+            1
+        };
+        let tilt_deg = if snap.tilt_deg > 0.0 {
+            snap.tilt_deg as f64
+        } else {
+            23.0
+        };
+        let dt = 5.0;
+        let dp = (100.0 / radius_km) * dt;
+        let build_rate = dt / 5.0;
+        let erode_rate = dt;
+        let earth_area_km2 = 4.0 * PI * 6400.0 * 6400.0;
+        let splitnum = (25.0e6 / earth_area_km2) * (n as f64);
+
+        let mut tiles = Vec::with_capacity(n);
+        for pt in &tec.tiles {
+            let mut layers = Vec::with_capacity(pt.layers.len());
+            for pl in &pt.layers {
+                let pr = pl.rock.as_ref()?;
+                let rock = match pr.kind.as_ref()? {
+                    tec11_proto::RockKindOneof::Igneous(ig) => {
+                        if ig.is_intrusive {
+                            Rock::intrusive(ig.felsity)
+                        } else {
+                            Rock::extrusive(ig.felsity)
+                        }
+                    }
+                    tec11_proto::RockKindOneof::Sedimentary(sed) => {
+                        let clasticity = sed.clasticity.max(1e-6);
+                        let felsity = sed.felsity.unwrap_or(0.5);
+                        let calcity = sed.calcity;
+                        let bogginess = sed.bogginess;
+                        let name = if calcity.unwrap_or(0.0) > 0.99 {
+                            "chalk"
+                        } else if calcity.unwrap_or(0.0) > 0.75 {
+                            "limestone"
+                        } else {
+                            let grain = 1e-3 / clasticity;
+                            if grain < 4e-6 {
+                                "claystone"
+                            } else if grain < 60e-6 {
+                                "siltstone"
+                            } else if grain < 2e-3 {
+                                "sandstone"
+                            } else {
+                                "conglomerate"
+                            }
+                        };
+                        Rock {
+                            kind: RockKind::Sedimentary,
+                            name,
+                            felsity,
+                            toughness: 0.0,
+                            clasticity: Some(clasticity),
+                            calcity,
+                            bogginess,
+                        }
+                    }
+                    tec11_proto::RockKindOneof::Metamorphic(met) => Rock {
+                        kind: RockKind::Metamorphic,
+                        name: met.facies.rock_name(),
+                        felsity: met.felsity.unwrap_or(0.5),
+                        toughness: met.toughness,
+                        clasticity: None,
+                        calcity: met.calcity,
+                        bogginess: met.bogginess,
+                    },
+                };
+                layers.push(RockLayer {
+                    rock,
+                    thickness: pl.thickness,
+                });
+            }
+            tiles.push(TileGeology {
+                bottom: pt.bottom,
+                mountainosity: pt.mountainosity,
+                subduction: 0.0,
+                intrusion: None,
+                layers,
+            });
+        }
+
+        let groups: Vec<LithosphericGroup> = tec
+            .groups
+            .iter()
+            .map(|pg| {
+                let v = pg.velocity.unwrap_or_default();
+                LithosphericGroup {
+                    tiles: pg
+                        .tile_ids
+                        .iter()
+                        .map(|&id| id as usize)
+                        .filter(|&id| id < n)
+                        .collect(),
+                    velocity: [v.x as f64, v.y as f64, v.z as f64],
+                }
+            })
+            .collect();
+
+        let ridges: Vec<SpreadingRidgeArc> = tec
+            .ridges
+            .iter()
+            .map(|pr| {
+                let s = pr.start.unwrap_or_default();
+                let e = pr.end.unwrap_or_default();
+                let v = pr.velocity.unwrap_or_default();
+                SpreadingRidgeArc {
+                    start: [s.x as f64, s.y as f64, s.z as f64],
+                    end: [e.x as f64, e.y as f64, e.z as f64],
+                    velocity: [v.x as f64, v.y as f64, v.z as f64],
+                    age_ticks: pr.age_ticks,
+                }
+            })
+            .collect();
+
+        let rng = if let Ok(bytes_16) = <[u8; 16]>::try_from(snap.rng_state_16b.as_slice()) {
+            Pcg64Mcg::from_bytes(bytes_16)
+        } else {
+            Pcg64Mcg::from_seed_u64(fallback_seed.wrapping_add(tec.tectonics_ticks as u64))
+        };
+
+        let climate_model = ClimateModel::new_for_tectonics(grid.clone(), cells, spin, tilt_deg);
+
+        let mut sim = Self {
+            grid,
+            adjacency,
+            tree,
+            radius_km,
+            dp,
+            build_rate,
+            erode_rate,
+            splitnum,
+            atmosphere_ticks_remaining: tec.atmosphere_ticks_remaining,
+            life_ticks_remaining: tec.life_ticks_remaining,
+            geoticks: tec.tectonics_ticks,
+            tiles,
+            groups,
+            ridges,
+            climate_model,
+            tile_koeppen: vec![0; n],
+            tile_life: vec![0.0; n],
+            tile_temp_norm: vec![0.5; n],
+            tile_temp_c: vec![15.0; n],
+            tile_precip_norm: vec![0.5; n],
+            rng,
+        };
+        if sim.has_atmosphere() {
+            sim.refresh_climate_fields();
+        }
+        Some(sim)
+    }
+
+    /// Decode `.tec11` binary Protocol Buffer bytes into a `TectonicsSimulation`.
+    pub fn decode_snapshot(bytes: &[u8], fallback_seed: u64) -> Option<Self> {
+        let snap = tec11_proto::PlanetSnapshot::decode(bytes).ok()?;
+        Self::from_snapshot(&snap, fallback_seed)
+    }
 }
 
 #[cfg(test)]
@@ -1184,5 +1509,53 @@ mod tests {
             mean_land_elev,
             max_land_elev
         );
+    }
+
+    #[test]
+    fn test_proto_snapshot_roundtrip_and_climate_load() {
+        let mut sim = TectonicsSimulation::new(4, 30.0, 99);
+        for _ in 0..30 {
+            sim.step();
+        }
+        let bytes = sim.encode_snapshot();
+        // Verify Protobuf header starts with field 1 (`rng_state_16b`, tag 0x0A, len 0x10)
+        assert_eq!(bytes[0], 0x0A);
+        assert_eq!(bytes[1], 0x10);
+
+        let mut restored =
+            TectonicsSimulation::decode_snapshot(&bytes, 99).expect("valid .tec11 proto snapshot");
+        assert_eq!(restored.grid().size, sim.grid().size);
+        assert_eq!(restored.geoticks(), sim.geoticks());
+        assert_eq!(restored.continent_count(), sim.continent_count());
+        assert_eq!(restored.land_percent(), sim.land_percent());
+        assert_eq!(restored.has_atmosphere(), sim.has_atmosphere());
+        assert_eq!(restored.has_life(), sim.has_life());
+        for i in 0..sim.tile_count() {
+            assert!((restored.tiles()[i].elevation() - sim.tiles()[i].elevation()).abs() < 1e-5);
+            assert_eq!(restored.tiles()[i].layers.len(), sim.tiles()[i].layers.len());
+        }
+
+        // Verify loading the decoded PlanetSnapshot into ClimateModel produces seasonal climate and ocean currents:
+        let snap = tec11_proto::PlanetSnapshot::decode(&bytes).unwrap();
+        let elevs: Vec<f32> = snap
+            .geological_tiles()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.elevation())
+            .collect();
+        let climate = ClimateModel::with_elevations(restored.grid().clone(), elevs, 3, 0.5);
+        assert_eq!(climate.tile_count(), restored.tile_count());
+        assert_eq!(climate.season_count(), 8);
+        assert!(climate.ocean_for_season(0).is_some());
+        assert!(climate.ocean_for_season(4).is_some());
+
+        // Verify exact PRNG continuation: stepping both simulations 5 more ticks produces identical state!
+        for _ in 0..5 {
+            sim.step();
+            restored.step();
+        }
+        assert_eq!(restored.geoticks(), sim.geoticks());
+        assert_eq!(restored.continent_count(), sim.continent_count());
+        assert_eq!(restored.land_percent(), sim.land_percent());
     }
 }

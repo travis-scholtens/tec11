@@ -77,6 +77,35 @@ impl Rock {
         Self::intrusive(0.45)
     }
 
+    /// Map a serialized rock name string back to its static `'static str` literal.
+    pub fn intern_name(name: &str) -> &'static str {
+        match name {
+            "rhyolite" => "rhyolite",
+            "dacite" => "dacite",
+            "basalt" => "basalt",
+            "granite" => "granite",
+            "andesite" => "andesite",
+            "gabbro" => "gabbro",
+            "chalk" => "chalk",
+            "limestone" => "limestone",
+            "claystone" => "claystone",
+            "siltstone" => "siltstone",
+            "sandstone" => "sandstone",
+            "conglomerate" => "conglomerate",
+            "pelite" => "pelite",
+            "psammite" => "psammite",
+            "psephite" => "psephite",
+            "blueschist" => "blueschist",
+            "greenschist" => "greenschist",
+            "amphibolite" => "amphibolite",
+            "eclogite" => "eclogite",
+            "hornfels" => "hornfels",
+            "granulite" => "granulite",
+            "marble" => "marble",
+            _ => "basalt",
+        }
+    }
+
     /// Intrinsic density in `kg/m^3` based on composition (`Section 5.4.5` of design doc).
     pub fn density_kg_m3(&self) -> f32 {
         match self.kind {

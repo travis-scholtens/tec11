@@ -110,6 +110,19 @@ impl WasmTectonicsSession {
         self.sim.inspect_tile(tile_idx)
     }
 
+    pub fn export_snapshot_bytes(&self) -> Vec<u8> {
+        self.sim.encode_snapshot()
+    }
+
+    pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
+        if let Some(loaded) = TectonicsSimulation::decode_snapshot(bytes, self.seed) {
+            self.sim = loaded;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn mesh_positions(&self) -> Vec<f32> {
         build_mesh_positions(self.sim.grid())
     }

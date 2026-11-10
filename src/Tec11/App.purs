@@ -34,6 +34,12 @@ type PangeaInfo =
   , actualLandPercent :: Int
   }
 
+type ClimateInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , hasSavedPlanet :: Boolean
+  }
+
 type TectonicsInfo =
   { gridSize :: Int
   , tileCount :: Int
@@ -58,10 +64,13 @@ foreign import regeneratePangea :: Int -> Int -> (PangeaInfo -> Effect Unit) -> 
 foreign import setPangeaRenderMode :: String -> Effect Unit
 
 -- Climate mode FFI
-foreign import mountClimateView :: Int -> Int -> String -> Int -> Effect (Effect Unit)
+foreign import mountClimateView :: Int -> Int -> String -> Int -> (ClimateInfo -> Effect Unit) -> Effect (Effect Unit)
 foreign import setClimateAttribute :: String -> Effect Unit
 foreign import setClimateSeason :: Int -> Effect Unit
 foreign import setClimateParams :: Int -> Int -> Effect Unit
+foreign import loadEarthIntoClimate :: (ClimateInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoClimate :: (ClimateInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoClimate :: (ClimateInfo -> Effect Unit) -> Effect Unit
 
 -- Tectonics mode FFI
 foreign import mountTectonicsView :: Int -> Int -> String -> (TectonicsInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -69,6 +78,8 @@ foreign import stepTectonics :: (TectonicsInfo -> Effect Unit) -> Effect Unit
 foreign import toggleTectonicsRunning :: (TectonicsInfo -> Effect Unit) -> Effect Unit
 foreign import resetTectonics :: Int -> Int -> (TectonicsInfo -> Effect Unit) -> Effect Unit
 foreign import setTectonicsAspect :: String -> Effect Unit
+foreign import saveTectonicsPlanet :: (TectonicsInfo -> Effect Unit) -> Effect Unit
+foreign import loadTectonicsPlanetFromFile :: (Int -> Effect Unit) -> (TectonicsInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -94,6 +105,11 @@ mkApp = do
     climateSeason /\ setClimateSeasonState <- useState' 0
     climateGlaciation /\ setClimateGlaciationState <- useState' 50
     climateCells /\ setClimateCellsState <- useState' 3
+    climateInfo /\ setClimateInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , hasSavedPlanet: false
+      }
 
     -- Tectonics mode state
     tectonicsSize /\ setTectonicsSize <- useState' 5
@@ -126,7 +142,7 @@ mkApp = do
           mountPangeaView planetSize targetLandPct renderMode setPangeaInfo
         ClimateScreen -> do
           setRotationDeg 0
-          mountClimateView climateCells climateGlaciation climateAttribute climateSeason
+          mountClimateView climateCells climateGlaciation climateAttribute climateSeason setClimateInfo
         TectonicsScreen -> do
           setRotationDeg 0
           mountTectonicsView tectonicsSize tectonicsLandPct tectonicsAspect setTectonicsInfo
@@ -572,12 +588,14 @@ mkApp = do
                           , className: "grid-stats"
                           , children:
                               [ R.div
-                                  { className: "stat-line"
-                                  , children: [ R.text "Earth (ETOPO2)" ]
+                                  { id: "climate-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text climateInfo.planetName ]
                                   }
                               , R.div
-                                  { className: "stat-line"
-                                  , children: [ R.text "7,292 tiles" ]
+                                  { id: "climate-tiles-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show climateInfo.tileCount <> " tiles") ]
                                   }
                               ]
                           }
@@ -602,6 +620,30 @@ mkApp = do
                                       ]
                                   }
                               ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "climate-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadEarthIntoClimate setClimateInfo)
+                                  , children: [ R.text "Earth" ]
+                                  }
+                              , R.button
+                                  { id: "climate-load-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadFilePlanetIntoClimate setClimateInfo)
+                                  , children: [ R.text "Load File" ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "climate-saved-btn"
+                          , className: "action-btn"
+                          , disabled: not climateInfo.hasSavedPlanet
+                          , onClick: capture_ (loadSavedPlanetIntoClimate setClimateInfo)
+                          , children: [ R.text "Load Saved" ]
                           }
                       , R.button
                           { id: "done-btn"
@@ -781,6 +823,25 @@ mkApp = do
                                   , disabled: tectonicsInfo.isRunning
                                   , value: show tectonicsLandPct
                                   , onChange: handler targetValue handleTectonicsLandPctChange
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "tectonics-save-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: tectonicsInfo.isRunning
+                                  , onClick: capture_ (saveTectonicsPlanet setTectonicsInfo)
+                                  , children: [ R.text "Save" ]
+                                  }
+                              , R.button
+                                  { id: "tectonics-load-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: tectonicsInfo.isRunning
+                                  , onClick: capture_ (loadTectonicsPlanetFromFile setTectonicsSize setTectonicsInfo)
+                                  , children: [ R.text "Load" ]
                                   }
                               ]
                           }

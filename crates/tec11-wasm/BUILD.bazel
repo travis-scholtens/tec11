@@ -16,6 +16,7 @@ rust_shared_library(
         "//crates/tec11-climate:tec11_climate",
         "//crates/tec11-geology:tec11_geology",
         "//crates/tec11-math-grid:tec11_math_grid",
+        "//crates/tec11-proto:tec11_proto",
         "@rules_rust_wasm_bindgen//3rdparty:wasm_bindgen",
     ],
 )

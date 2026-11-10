@@ -1,0 +1,215 @@
+syntax = "proto3";
+package tec11;
+
+message Vec3 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+// --- Compositional Rock & Stratigraphy Messages ---
+
+message IgneousRock {
+  bool is_intrusive = 1; // false = extrusive (basalt/dacite/rhyolite), true = intrusive (gabbro/andesite/granite)
+  float felsity = 2;     // [0.0, 1.0]; determines both rock name and toughness (== felsity)
+}
+
+message SedimentaryRock {
+  float clasticity = 1;          // Grain-size divisor (determines claystone/siltstone/sandstone/conglomerate)
+  optional float felsity = 2;    // Inherited weighted silica content
+  optional float calcity = 3;    // [0.0, 1.0]; >0.75 = limestone, >0.99 = chalk
+  optional float bogginess = 4;  // [0.0, 1.0]; C-climate wetland peat fraction
+}
+
+enum MetamorphicFacies {
+  METAMORPHIC_FACIES_PELITE = 0;
+  METAMORPHIC_FACIES_PSAMMITE = 1;
+  METAMORPHIC_FACIES_PSEPHITE = 2;
+  METAMORPHIC_FACIES_BLUESCHIST = 3;
+  METAMORPHIC_FACIES_GREENSCHIST = 4;
+  METAMORPHIC_FACIES_AMPHIBOLITE = 5;
+  METAMORPHIC_FACIES_ECLOGITE = 6;
+  METAMORPHIC_FACIES_HORNFELS = 7;
+  METAMORPHIC_FACIES_GRANULITE = 8;
+  METAMORPHIC_FACIES_MARBLE = 9;
+}
+
+message MetamorphicRock {
+  MetamorphicFacies facies = 1;
+  float toughness = 2;
+  optional float felsity = 3;
+  optional float calcity = 4;
+  optional float bogginess = 5;
+}
+
+message Rock {
+  oneof kind {
+    IgneousRock igneous = 1;
+    SedimentaryRock sedimentary = 2;
+    MetamorphicRock metamorphic = 3;
+  }
+}
+
+message RockLayer {
+  Rock rock = 1;
+  float thickness = 2;
+}
+
+message LithosphericGroup {
+  repeated uint32 tile_ids = 1 [packed = true];
+  Vec3 velocity = 2;
+}
+
+message SpreadingRidgeArc {
+  Vec3 start = 1;
+  Vec3 end = 2;
+  Vec3 velocity = 3;
+  uint32 age_ticks = 4;
+}
+
+// --- Composable Tile Messages by Stage ---
+
+// 1. Base geological tile (used in Tectonics; climate/ocean/Koeppen are derived on load)
+message GeologicalTile {
+  float bottom = 1;
+  float mountainosity = 2;
+  repeated RockLayer layers = 3;
+}
+
+// 2. Prehistory tile (composes GeologicalTile + optional prehistoric human heritage)
+message PrehistoryTile {
+  GeologicalTile geology = 1;
+  optional uint32 heritage_id = 2;
+}
+
+// --- Stage 1: Tectonics ---
+
+message TectonicsStage {
+  uint32 tectonics_ticks = 1;
+  uint32 atmosphere_ticks_remaining = 2; // 0 => atmosphere active (climate computed on load)
+  uint32 life_ticks_remaining = 3;       // 0 => life active
+  uint32 people_ticks_remaining = 4;
+  repeated GeologicalTile tiles = 5;     // Stored in canonical TileId order (0..num_tiles)
+  repeated LithosphericGroup groups = 6;
+  repeated SpreadingRidgeArc ridges = 7;
+}
+
+// --- Stage 2: Prehistory ---
+
+message Heritage {
+  string name = 1;
+  repeated uint32 parent_heritage_ids = 2 [packed = true];
+  bool agricultural = 3;
+}
+
+message PrehistoryStage {
+  uint32 tectonics_ticks = 1;
+  uint32 prehistory_ticks = 2;
+  uint32 glaciation_tick = 3;
+  repeated PrehistoryTile tiles = 4;     // Stored in canonical TileId order (0..num_tiles)
+  repeated LithosphericGroup groups = 5;
+  repeated Heritage heritages = 6;
+}
+
+// --- Stage 3: History & Language Lazy Etymology ---
+
+message RaceContribution {
+  uint32 heritage_id = 1;
+  float fraction = 2;
+}
+
+message Community {
+  float thousands = 1;
+  uint32 nationality_id = 2;
+  uint32 language_id = 3;
+  bool agriculture = 4;
+  repeated RaceContribution racial_mix = 5;
+}
+
+// Only stored for populated/claimed fine faces (capacities & species are derived on load)
+message PopulatedFineFace {
+  uint32 fine_face_id = 1;
+  uint32 state_id = 2;
+  repeated Community communities = 3;
+}
+
+message Concept {
+  enum Kind {
+    KIND_SPECIES = 0;
+    KIND_NATION = 1;
+    KIND_STATE = 2;
+    KIND_LANGUAGE = 3;
+  }
+  Kind kind = 1;
+  uint32 id = 2;
+}
+
+message TickSoundChanges {
+  repeated uint32 sound_change_kinds = 1 [packed = true]; // Indexes SoundChangeKind (0..8) per concept
+}
+
+message NeologismBatch {
+  uint32 tick = 1;
+  bytes rng_state_16b = 2; // 16-byte Pcg64Mcg snapshot for deterministic lazy coinage
+  repeated uint32 concept_indices = 3 [packed = true];
+}
+
+message LoanBatch {
+  uint32 tick = 1;
+  uint32 source_language_id = 2;
+  repeated uint32 concept_indices = 3 [packed = true];
+}
+
+message DerivationEntry {
+  uint32 tick = 1;
+  Concept source_concept = 2;
+  uint32 dest_concept_index = 3;
+}
+
+message RedefinitionEntry {
+  uint32 tick = 1;
+  uint32 source_concept_index = 2;
+  uint32 dest_concept_index = 3;
+}
+
+message LanguageHistory {
+  repeated Concept concepts = 1;
+  repeated TickSoundChanges changes_per_tick = 2;
+  repeated NeologismBatch neologisms = 3;
+  repeated LoanBatch loans = 4;
+  repeated DerivationEntry derivations = 5;
+  repeated RedefinitionEntry redefinitions = 6;
+}
+
+message StatePair {
+  uint32 state_a = 1;
+  uint32 state_b = 2;
+}
+
+message HistoryStage {
+  PrehistoryStage prehistory_base = 1; // Coarse tiles, heritages, and prior stage ticks
+  uint32 history_ticks = 2;
+  repeated PopulatedFineFace populated_faces = 3;
+  repeated LanguageHistory languages = 4;
+  repeated StatePair trade_partners = 5;
+  repeated StatePair conflicts = 6;
+}
+
+// --- Top-Level Snapshot Message (.tec11 file payload) ---
+
+message PlanetSnapshot {
+  bytes rng_state_16b = 1;   // 16-byte Pcg64Mcg state
+  uint32 grid_size = 2;      // 4..8 (default 6)
+
+  // Primary Planetary & Orbital Parameters
+  float radius_km = 3;
+  float spin = 4;            // Relative rotation rate (24.0 / day_hours); determines atmospheric cells
+  float tilt_deg = 5;
+
+  // Stage-specific state: each variant only contains primary state for that stage
+  oneof stage {
+    TectonicsStage tectonics = 6;
+    PrehistoryStage prehistory = 7;
+    HistoryStage history = 8;
+  }
+}

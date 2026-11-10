@@ -1,4 +1,5 @@
 use tec11_climate::ClimateModel;
+use tec11_math_grid::SphericalGrid;
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids, rotate_axes};
@@ -6,6 +7,8 @@ use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_id
 #[wasm_bindgen]
 pub struct WasmClimateSession {
     model: ClimateModel,
+    custom_geoticks: Option<u32>,
+    custom_land_percent: Option<u32>,
 }
 
 #[wasm_bindgen]
@@ -14,7 +17,60 @@ impl WasmClimateSession {
     pub fn new(cells: u32, glaciation: f64) -> Self {
         Self {
             model: ClimateModel::new_earth(cells, glaciation),
+            custom_geoticks: None,
+            custom_land_percent: None,
         }
+    }
+
+    /// Reset to the default Earth (`ETOPO2`) planet while preserving `cells` and `glaciation`.
+    pub fn load_earth(&mut self) {
+        self.model = ClimateModel::new_earth(self.model.cells(), self.model.glaciation());
+        self.custom_geoticks = None;
+        self.custom_land_percent = None;
+    }
+
+    /// Load a `.tec11` binary Protocol Buffer `PlanetSnapshot` into the climate model.
+    pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
+        let Ok(snap) = tec11_proto::PlanetSnapshot::decode(bytes) else {
+            return false;
+        };
+        let grid_size = snap.grid_size;
+        if !(4..=7).contains(&grid_size) {
+            return false;
+        }
+        let Some(geo_tiles) = snap.geological_tiles() else {
+            return false;
+        };
+        let grid = SphericalGrid::with_size(grid_size);
+        if geo_tiles.len() != grid.faces.len() {
+            return false;
+        }
+        let elevations: Vec<f32> = geo_tiles.into_iter().map(|t| t.elevation()).collect();
+        let land_tiles = elevations.iter().filter(|&&e| e > 0.0).count();
+        let land_pct =
+            ((100.0 * (land_tiles as f64) / (elevations.len().max(1) as f64)) + 0.5) as u32;
+
+        self.model = ClimateModel::with_elevations(
+            grid,
+            elevations,
+            self.model.cells(),
+            self.model.glaciation(),
+        );
+        self.custom_geoticks = Some(snap.tectonics_ticks());
+        self.custom_land_percent = Some(land_pct);
+        true
+    }
+
+    pub fn is_custom_planet(&self) -> bool {
+        self.custom_geoticks.is_some()
+    }
+
+    pub fn loaded_geoticks(&self) -> u32 {
+        self.custom_geoticks.unwrap_or(0)
+    }
+
+    pub fn loaded_land_percent(&self) -> u32 {
+        self.custom_land_percent.unwrap_or(29)
     }
 
     /// Update atmospheric circulation `cells` (`1, 3, 5, 7, 9`) and `glaciation` (`[0.0, 1.0]`).
