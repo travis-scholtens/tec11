@@ -146,15 +146,7 @@ impl TectonicsSimulation {
             (atmosphere_ticks_remaining + life_ticks_remaining + people_ticks).max(1);
 
         let spin = 24.0 / target_day_hours;
-        let cells = if spin >= 3.0 {
-            7
-        } else if spin >= 2.0 {
-            5
-        } else if spin >= 1.0 {
-            3
-        } else {
-            1
-        };
+        let cells = tec11_climate::nominal_cells_for_spin(spin);
         let dt = 5.0;
         let dp = (100.0 / radius_km) * dt;
         let build_rate = dt / 5.0;
@@ -1373,15 +1365,7 @@ impl TectonicsSimulation {
             1.0
         };
         let target_day_hours = (24.0 / spin).clamp(1.0, 240.0);
-        let cells = if spin >= 3.0 {
-            7
-        } else if spin >= 2.0 {
-            5
-        } else if spin >= 1.0 {
-            3
-        } else {
-            1
-        };
+        let cells = tec11_climate::nominal_cells_for_spin(spin);
         let tilt_deg = if snap.tilt_deg > 0.0 {
             snap.tilt_deg as f64
         } else {

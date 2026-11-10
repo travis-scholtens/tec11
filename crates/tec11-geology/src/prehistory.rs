@@ -450,15 +450,7 @@ impl PrehistorySimulation {
         } else {
             1.0
         };
-        let cells = if spin >= 3.0 {
-            7
-        } else if spin >= 2.0 {
-            5
-        } else if spin >= 1.0 {
-            3
-        } else {
-            1
-        };
+        let cells = tec11_climate::nominal_cells_for_spin(spin);
         let tilt_deg = if snap.tilt_deg > 0.0 {
             snap.tilt_deg as f64
         } else {

@@ -189,8 +189,6 @@ impl WorldSimulation {
 
     pub fn create(&mut self, mut params: WorldCreateParams, randomize: bool) -> WorldCreateParams {
         if randomize {
-            let day_choices = [8u32, 12, 12, 24, 24, 24, 48, 48];
-            params.day_hours = day_choices[(self.rng.next_u64() as usize) % day_choices.len()];
             params.tilt_deg = random_spin_value(0, 45, 1, 23, &mut self.rng) as u32;
             params.land_pct = random_spin_value(1, 50, 1, 29, &mut self.rng) as u32;
             params.atm_dt_myr = random_time_myr(&mut self.rng);
@@ -204,12 +202,22 @@ impl WorldSimulation {
             if params.moon_count == 0 {
                 params.moon_mass = 0.0;
                 params.moon_dist_radii = 60;
+                // Moonless worlds experience no lunar rotational braking, favoring faster rotation (6..=28h, mode 12h):
+                params.day_hours = random_spin_value(6, 28, 1, 12, &mut self.rng) as u32;
             } else {
                 // Reasonably sized moon mass in Lunar masses (0.2x..=2.5x, mode 1.0x):
                 let mass_tenths = random_spin_value(2, 25, 1, 10, &mut self.rng);
                 params.moon_mass = (mass_tenths as f32) / 10.0;
                 // Target moon distance at Prehistory/History start in planetary radii (30..=90 Rp, mode 60 Rp):
                 params.moon_dist_radii = random_spin_value(30, 90, 5, 60, &mut self.rng) as u32;
+                // Continuous target day length (6..=48h) weighted by the moon's angular momentum braking:
+                let h_ang =
+                    TectonicsSimulation::harmonic_angular_momentum_multiplier(params.moon_count);
+                let braking_factor = (params.moon_mass as f64)
+                    * h_ang
+                    * ((params.moon_dist_radii as f64) / 60.0).sqrt();
+                let mode_day_h = (12.0 + 12.0 * braking_factor).round().clamp(8.0, 44.0) as i32;
+                params.day_hours = random_spin_value(6, 48, 1, mode_day_h, &mut self.rng) as u32;
             }
         }
         let seed = self.rng.next_u64();

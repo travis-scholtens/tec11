@@ -6,7 +6,8 @@ pub mod ocean;
 pub use earth_data::EARTH_SIZE6_ELEVATIONS_M;
 pub use koeppen::{classify_tile, KoeppenCode, TileClimateClassification};
 pub use model::{
-    bearing_deg, insolation, temp_range_for_glaciation, wind_direction_deg, ClimateModel,
+    bearing_deg, continuous_cell_blend, effective_cells_for_spin, insolation,
+    nominal_cells_for_spin, temp_range_for_glaciation, wind_direction_deg, ClimateModel,
     SeasonalSnapshot, BREEZE_DISTANCE, DEFAULT_SEASONS, DEFAULT_SPIN, DEFAULT_TILT_DEG,
     MEAN_TEMPRANGE_C,
 };

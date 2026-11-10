@@ -50,6 +50,55 @@ pub fn wind_direction_deg(lat_deg: f64, cells: u32, spin: f64) -> f64 {
     d.rem_euclid(360.0)
 }
 
+/// Decompose a continuous planetary rotation rate `spin = 24.0 / day_hours` into
+/// its two bracketing odd circulation cell counts `(c_lo, c_hi)` in `{1, 3, 5, 7}`
+/// and smooth interpolation weight `alpha` in `[0.0, 1.0]`.
+///
+/// Because every odd harmonic `c in {1, 3, 5, 7}` satisfies `cos(2*c*0°) = +1` (equatorial
+/// ITCZ rising air) and `cos(2*c*90°) = -1` (polar high sinking air), blending adjacent
+/// odd cell modes allows continuous rotational braking across any day length without
+/// quantized step jumps or polar boundary inversions, while matching `Tec-Nine` (`1, 3, 5, 7`)
+/// identically at `48h (spin=0.5)`, `24h (spin=1.0)`, `12h (spin=2.0)`, and `8h (spin=3.0)`.
+pub fn continuous_cell_blend(spin: f64) -> (u32, u32, f64) {
+    if spin <= 0.5 {
+        (1, 1, 0.0)
+    } else if spin < 1.0 {
+        (1, 3, ((spin - 0.5) / 0.5).clamp(0.0, 1.0))
+    } else if (spin - 1.0).abs() <= 1e-9 {
+        (3, 3, 0.0)
+    } else if spin < 2.0 {
+        (3, 5, (spin - 1.0).clamp(0.0, 1.0))
+    } else if (spin - 2.0).abs() <= 1e-9 {
+        (5, 5, 0.0)
+    } else if spin < 3.0 {
+        (5, 7, (spin - 2.0).clamp(0.0, 1.0))
+    } else {
+        (7, 7, 0.0)
+    }
+}
+
+/// Continuous effective atmospheric circulation cells per hemisphere in `[1.0, 7.0]` for `spin`.
+pub fn effective_cells_for_spin(spin: f64) -> f64 {
+    let (c_lo, c_hi, alpha) = continuous_cell_blend(spin);
+    (c_lo as f64) + ((c_hi - c_lo) as f64) * alpha
+}
+
+/// Nearest odd circulation cell count (`1, 3, 5, 7`) for `spin`, with transitions centered
+/// at `c_eff = 2.0` (`32h`), `4.0` (`16h`), and `6.0` (`9.6h`) so `24h` (`spin = 1.0`) sits
+/// squarely in the middle of the 3-cell regime rather than on a step-function cliff.
+pub fn nominal_cells_for_spin(spin: f64) -> u32 {
+    let c_eff = effective_cells_for_spin(spin);
+    if c_eff >= 6.0 {
+        7
+    } else if c_eff >= 4.0 {
+        5
+    } else if c_eff >= 2.0 {
+        3
+    } else {
+        1
+    }
+}
+
 /// Compute global temperature limits `(min_c, max_c)` shifted by `glaciation` in `[0.0, 1.0]`,
 /// matching `temprange()` in `climatemethod.py`.
 pub fn temp_range_for_glaciation(mean_range: (f64, f64), glaciation: f64) -> (f64, f64) {
@@ -77,6 +126,8 @@ pub struct ClimateModel {
     /// Scaled tile elevations matching `Tec-Nine` (`<= 0.0` for ocean, `(0.0..=10.0]` for land).
     elevations: Vec<f32>,
     cells: u32,
+    /// Bracketing odd cell modes `(c_lo, c_hi, alpha)` for smooth continuous rotational braking.
+    cell_blend: (u32, u32, f64),
     glaciation: f64,
     spin: f64,
     tilt_deg: f64,
@@ -85,6 +136,7 @@ pub struct ClimateModel {
     /// Cached ocean circulation parameters `(cells, spin_bits, tilt_bits, glaciation_bits)`.
     cached_ocean_params: Option<(u32, u64, u64, u64)>,
     dest_map: Vec<Vec<(usize, f64)>>,
+    dest_map_hi: Vec<Vec<(usize, f64)>>,
     /// Per-tile sea-breeze moisture factor `((d - breeze) / d)^2`.
     seabased: Vec<f64>,
     /// Coupled seasonal wind-driven Stommel–Ekman ocean circulation and SST anomaly.
@@ -143,19 +195,22 @@ impl ClimateModel {
             lons_deg.push(lon);
         }
 
+        let cells_clamped = cells.max(1);
         let mut model = Self {
             grid,
             adjacency,
             lats_deg,
             lons_deg,
             elevations,
-            cells: cells.max(1),
+            cells: cells_clamped,
+            cell_blend: (cells_clamped, cells_clamped, 0.0),
             glaciation: glaciation.clamp(0.0, 1.0),
             spin: DEFAULT_SPIN,
             tilt_deg: DEFAULT_TILT_DEG,
             cached_dest_params: None,
             cached_ocean_params: None,
             dest_map: vec![Vec::new(); n],
+            dest_map_hi: Vec::new(),
             seabased: vec![0.0; n],
             ocean_seasons: Vec::new(),
             seasons: Vec::new(),
@@ -179,6 +234,11 @@ impl ClimateModel {
 
     pub fn cells(&self) -> u32 {
         self.cells
+    }
+
+    pub fn effective_cells(&self) -> f64 {
+        let (c_lo, c_hi, alpha) = self.cell_blend;
+        (c_lo as f64) + ((c_hi - c_lo) as f64) * alpha
     }
 
     pub fn glaciation(&self) -> f64 {
@@ -227,10 +287,14 @@ impl ClimateModel {
     pub fn set_params(&mut self, cells: u32, glaciation: f64) {
         let cells = cells.max(1);
         let glaciation = glaciation.clamp(0.0, 1.0);
-        if self.cells == cells && (self.glaciation - glaciation).abs() < 1e-9 {
+        if self.cells == cells
+            && self.cell_blend == (cells, cells, 0.0)
+            && (self.glaciation - glaciation).abs() < 1e-9
+        {
             return;
         }
         self.cells = cells;
+        self.cell_blend = (cells, cells, 0.0);
         self.glaciation = glaciation;
         self.recompute();
     }
@@ -241,31 +305,24 @@ impl ClimateModel {
     }
 
     /// Update `spin` (relative to 24h Earth = 1.0) and `tilt_deg` during tectonic evolution,
-    /// recomputing the atmospheric cell count (`1, 3, 5, 7`) and wind `dest_map` only when
-    /// `cells` or quantized `spin` (`0.25` steps) changes.
+    /// smoothly blending adjacent odd circulation cell modes (`1 <-> 3 <-> 5 <-> 7`) and
+    /// updating wind destination graphs at fine `0.05` spin resolution.
     pub fn set_spin_and_tilt_for_tectonics(&mut self, spin: f64, tilt_deg: f64) {
-        let cells = if spin >= 3.0 {
-            7
-        } else if spin >= 2.0 {
-            5
-        } else if spin >= 1.0 {
-            3
-        } else {
-            1
-        };
-        let quant_spin = (spin * 4.0).round() / 4.0;
+        let cells = nominal_cells_for_spin(spin);
+        let quant_spin = (spin * 20.0).round() / 20.0;
         self.spin = spin;
         self.tilt_deg = tilt_deg.clamp(0.0, 90.0);
+        self.cells = cells;
+        self.cell_blend = continuous_cell_blend(spin);
         let q_bits = quant_spin.to_bits();
         if self.cached_dest_params != Some((cells, q_bits)) {
-            self.cells = cells;
             self.compute_wind_dest_map();
             self.cached_dest_params = Some((cells, q_bits));
         }
     }
 
     /// Construct a `ClimateModel` attached to a planetary grid for tectonic simulation,
-    /// precomputing the static wind destination graph `dest_map` once.
+    /// precomputing the wind destination graph `dest_map` for the planet's `spin`.
     pub fn new_for_tectonics(
         grid: SphericalGrid,
         cells: u32,
@@ -284,6 +341,13 @@ impl ClimateModel {
             lons_deg.push(lon);
         }
 
+        let cell_blend = if cells == nominal_cells_for_spin(spin) {
+            continuous_cell_blend(spin)
+        } else {
+            let c = cells.max(1);
+            (c, c, 0.0)
+        };
+
         let mut model = Self {
             grid,
             adjacency,
@@ -291,19 +355,22 @@ impl ClimateModel {
             lons_deg,
             elevations: vec![0.0; n],
             cells: cells.max(1),
+            cell_blend,
             glaciation: 0.5,
             spin,
             tilt_deg,
             cached_dest_params: None,
             cached_ocean_params: None,
             dest_map: vec![Vec::new(); n],
+            dest_map_hi: Vec::new(),
             seabased: vec![0.0; n],
             ocean_seasons: Vec::new(),
             seasons: Vec::new(),
             classifications: Vec::new(),
         };
         model.compute_wind_dest_map();
-        model.cached_dest_params = Some((model.cells, model.spin.to_bits()));
+        let quant_spin = (spin * 20.0).round() / 20.0;
+        model.cached_dest_params = Some((model.cells, quant_spin.to_bits()));
         model
     }
 
@@ -326,7 +393,9 @@ impl ClimateModel {
         let n = self.tile_count();
         let glacial_dt = 0.15 * (self.glaciation - 0.5) / 0.5;
         let glacial_dp = 0.2 * (0.5 - self.glaciation) / 0.5;
-        let c_f64 = self.cells as f64;
+        let (c_lo, c_hi, alpha) = self.cell_blend;
+        let c_lo_f64 = c_lo as f64;
+        let c_hi_f64 = c_hi as f64;
         let templimits = temp_range_for_glaciation(MEAN_TEMPRANGE_C, self.glaciation);
         let num_seasons = DEFAULT_SEASONS.len();
 
@@ -347,9 +416,19 @@ impl ClimateModel {
                     ins
                 };
                 let temp = base_t + glacial_dt + 0.06 * sst_inf;
-                let conv = (((lat * 2.0 * c_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
-                    + 1.0)
-                    / 2.0;
+                let conv_lo =
+                    (((lat * 2.0 * c_lo_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
+                        + 1.0)
+                        / 2.0;
+                let conv = if c_lo == c_hi || alpha <= 1e-6 {
+                    conv_lo
+                } else {
+                    let conv_hi =
+                        (((lat * 2.0 * c_hi_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
+                            + 1.0)
+                            / 2.0;
+                    (1.0 - alpha) * conv_lo + alpha * conv_hi
+                };
                 let precip =
                     (self.seabased[v] + conv + glacial_dp + 0.12 * sst_inf).clamp(0.0, 1.0);
 
@@ -399,7 +478,9 @@ impl ClimateModel {
         let n = self.tile_count();
         let glacial_dt = 0.15 * (self.glaciation - 0.5) / 0.5;
         let glacial_dp = 0.2 * (0.5 - self.glaciation) / 0.5;
-        let c_f64 = self.cells as f64;
+        let (c_lo, c_hi, alpha) = self.cell_blend;
+        let c_lo_f64 = c_lo as f64;
+        let c_hi_f64 = c_hi as f64;
 
         let mut snapshots = Vec::with_capacity(DEFAULT_SEASONS.len());
         for (s_idx, &season_val) in DEFAULT_SEASONS.iter().enumerate() {
@@ -423,9 +504,19 @@ impl ClimateModel {
                 // into coastal/maritime air temperatures.
                 let temp = base_t + glacial_dt + 0.06 * sst_inf;
 
-                let conv = (((lat * 2.0 * c_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
-                    + 1.0)
-                    / 2.0;
+                let conv_lo =
+                    (((lat * 2.0 * c_lo_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
+                        + 1.0)
+                        / 2.0;
+                let conv = if c_lo == c_hi || alpha <= 1e-6 {
+                    conv_lo
+                } else {
+                    let conv_hi =
+                        (((lat * 2.0 * c_hi_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
+                            + 1.0)
+                            / 2.0;
+                    (1.0 - alpha) * conv_lo + alpha * conv_hi
+                };
                 // Warm currents boost coastal evaporation/moisture; cold upwelling suppresses it.
                 let precip = (self.seabased[v] + conv + glacial_dp + 0.12 * sst_inf).clamp(0.0, 1.0);
 
@@ -467,12 +558,12 @@ impl ClimateModel {
         self.classifications = classifications;
     }
 
-    fn compute_wind_dest_map(&mut self) {
+    fn build_dest_map_for_cells(&self, cells: u32, spin: f64) -> Vec<Vec<(usize, f64)>> {
         let n = self.tile_count();
         let directions: Vec<f64> = self
             .lats_deg
             .iter()
-            .map(|&lat| wind_direction_deg(lat, self.cells, self.spin))
+            .map(|&lat| wind_direction_deg(lat, cells, spin))
             .collect();
 
         let mut dests: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -515,12 +606,21 @@ impl ClimateModel {
                 }
             }
         }
-        self.dest_map = dests;
+        dests
     }
 
-    fn compute_seabreeze(&mut self) {
+    fn compute_wind_dest_map(&mut self) {
+        let (c_lo, c_hi, alpha) = self.cell_blend;
+        self.dest_map = self.build_dest_map_for_cells(c_lo, self.spin);
+        if c_lo != c_hi && alpha > 1e-6 {
+            self.dest_map_hi = self.build_dest_map_for_cells(c_hi, self.spin);
+        } else {
+            self.dest_map_hi.clear();
+        }
+    }
+
+    fn seabreeze_from_dest_map(&self, dest_map: &[Vec<(usize, f64)>]) -> Vec<f64> {
         let n = self.tile_count();
-        // Multi-source BFS for seabreeze propagation up to BREEZE_DISTANCE.
         let mut seabreeze: Vec<Option<u32>> = vec![None; n];
         let mut frontier: Vec<usize> = Vec::new();
         for v in 0..n {
@@ -535,7 +635,7 @@ impl ClimateModel {
             d += 1;
             let mut next_frontier = Vec::new();
             for &s in &frontier {
-                for &(a, _) in &self.dest_map[s] {
+                for &(a, _) in &dest_map[s] {
                     if seabreeze[a].is_none() {
                         seabreeze[a] = Some(d);
                         next_frontier.push(a);
@@ -546,11 +646,25 @@ impl ClimateModel {
         }
 
         let d_f64 = BREEZE_DISTANCE as f64;
-        for v in 0..n {
-            self.seabased[v] = match seabreeze[v] {
+        seabreeze
+            .into_iter()
+            .map(|opt| match opt {
                 None => 0.0,
                 Some(b) => ((d_f64 - b as f64) / d_f64).powi(2),
-            };
+            })
+            .collect()
+    }
+
+    fn compute_seabreeze(&mut self) {
+        let (c_lo, c_hi, alpha) = self.cell_blend;
+        let sb_lo = self.seabreeze_from_dest_map(&self.dest_map);
+        if c_lo != c_hi && alpha > 1e-6 && !self.dest_map_hi.is_empty() {
+            let sb_hi = self.seabreeze_from_dest_map(&self.dest_map_hi);
+            for v in 0..self.tile_count() {
+                self.seabased[v] = (1.0 - alpha) * sb_lo[v] + alpha * sb_hi[v];
+            }
+        } else {
+            self.seabased = sb_lo;
         }
     }
 }
@@ -693,5 +807,60 @@ mod tests {
         model.set_params(5, 0.5);
         let five_cell_koeppen = model.koeppen_ids();
         assert_ne!(initial_koeppen, five_cell_koeppen);
+    }
+
+    #[test]
+    fn continuous_rotational_braking_transitions_smoothly_across_day_lengths() {
+        // Canonical Tec-Nine points must map to exact odd cell integers with alpha = 0.0:
+        assert_eq!(continuous_cell_blend(0.5), (1, 1, 0.0));
+        assert_eq!(continuous_cell_blend(1.0), (3, 3, 0.0));
+        assert_eq!(continuous_cell_blend(2.0), (5, 5, 0.0));
+        assert_eq!(continuous_cell_blend(3.0), (7, 7, 0.0));
+
+        // 24.5h day (spin = 24/24.5 ≈ 0.98) must remain in the 3-cell regime (c_eff ≈ 2.92)
+        // rather than collapsing to 1 cell on a step cliff at spin = 1.0:
+        let spin_24_5h = 24.0 / 24.5;
+        assert_eq!(nominal_cells_for_spin(spin_24_5h), 3);
+        assert!(effective_cells_for_spin(spin_24_5h) > 2.90);
+
+        // Verify continuous rotational braking from 8h -> 48h produces smooth precipitation
+        // transitions without any single-step cliff across the 12h (5->3) or 24h (3->1) thresholds:
+        let grid = SphericalGrid::with_size(4);
+        let elevs = vec![0.2f32; grid.faces.len()];
+        let mut model = ClimateModel::new_for_tectonics(grid, 7, 3.0, 23.0);
+        let mut prev_precip: Option<Vec<f64>> = None;
+        for day_h in 8..=48 {
+            let spin = 24.0 / (day_h as f64);
+            model.set_spin_and_tilt_for_tectonics(spin, 23.0);
+            model.update_for_tectonics(&elevs, true);
+            let cur_precip: Vec<f64> = model
+                .classifications()
+                .iter()
+                .map(|c| c.mean_precipitation)
+                .collect();
+            if let Some(prev) = prev_precip {
+                let mean_delta: f64 = cur_precip
+                    .iter()
+                    .zip(prev.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .sum::<f64>()
+                    / (cur_precip.len() as f64);
+                if day_h == 25 {
+                    assert!(
+                        mean_delta < 0.035,
+                        "Expected smooth transition across 24h -> 25h boundary (no step cliff at spin=1.0), got mean_delta = {:.4}",
+                        mean_delta
+                    );
+                }
+                assert!(
+                    mean_delta < 0.15,
+                    "Expected smooth precipitation change between {}h and {}h day, got mean_delta = {:.4}",
+                    day_h - 1,
+                    day_h,
+                    mean_delta
+                );
+            }
+            prev_precip = Some(cur_precip);
+        }
     }
 }

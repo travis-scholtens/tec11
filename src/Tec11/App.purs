@@ -3621,20 +3621,18 @@ mkApp = do
                           , children:
                               [ R.label
                                   { className: "slider-inline-label"
-                                  , children: [ R.text "Hours/day:" ]
+                                  , children: [ R.text ("Day: " <> show worldDayHours <> "h") ]
                                   }
-                              , R.select
+                              , R.input
                                   { id: "world-spin-select"
-                                  , className: "control-select"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "6"
+                                  , max: "48"
+                                  , step: "1"
                                   , disabled: worldRandomize || worldInfo.isRunning
                                   , value: show worldDayHours
                                   , onChange: handler targetValue handleWorldDayHoursChange
-                                  , children:
-                                      [ R.option { value: "8", children: [ R.text "8 h" ] }
-                                      , R.option { value: "12", children: [ R.text "12 h" ] }
-                                      , R.option { value: "24", children: [ R.text "24 h" ] }
-                                      , R.option { value: "48", children: [ R.text "48 h" ] }
-                                      ]
                                   }
                               , R.label
                                   { className: "slider-inline-label"
