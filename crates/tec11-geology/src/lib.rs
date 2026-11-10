@@ -1,4 +1,5 @@
 pub mod erosion_sandbox;
+pub mod history;
 pub mod language;
 pub mod lifeforms;
 pub mod move_sandbox;
@@ -14,6 +15,7 @@ pub mod tectonics;
 pub mod tile;
 
 pub use erosion_sandbox::ErosionSandbox;
+pub use history::{Community, ConceptKey, HistorySimulation, LanguageRecord, StateRecord};
 pub use language::{
     a_mutate, apheresize, apocopate, break_vowels, i_mutate, open_consonants, sonorize_consonants,
     syncopate, vocalize_consonants, ConsonantDef, Language, LanguageSandbox, PhonotacticConstraint,

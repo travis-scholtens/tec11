@@ -4,6 +4,7 @@ rust_library(
     name = "tec11_geology",
     srcs = [
         "src/erosion_sandbox.rs",
+        "src/history.rs",
         "src/language.rs",
         "src/lib.rs",
         "src/lifeforms.rs",

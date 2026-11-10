@@ -3,6 +3,7 @@ import initWasmModule, {
   WasmClimateSession,
   WasmErosionSession,
   WasmGridSession,
+  WasmHistorySession,
   WasmLanguageSession,
   WasmLifeformsSession,
   WasmMoveSession,
@@ -2784,6 +2785,235 @@ export const applyLanguageSoundChange = (kindId) => (setLanguageInfo) => () => {
   if (!activeLanguageSession) return;
   activeLanguageSession.apply_sound_change(kindId);
   setLanguageInfo(buildLanguageInfo(activeLanguageSession))();
+};
+
+// ============================================================================
+// Mode 13: History Simulation (`historysimulation.py`, `historydisplay.py`, `historypresenter.py`)
+// ============================================================================
+
+function computeHistoryVertexColors(view) {
+  const { vertexTileIds, tileColors } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    colors[v * 3] = tileColors[t * 3];
+    colors[v * 3 + 1] = tileColors[t * 3 + 1];
+    colors[v * 3 + 2] = tileColors[t * 3 + 2];
+  }
+  return colors;
+}
+
+function updateHistoryDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileColors = session.tile_colors_rgb(
+    view.aspect,
+    Boolean(view.showRivers),
+    view.selectedTileIdx
+  );
+  const colors = computeHistoryVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildHistoryInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Saved Planet (${s.land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  const selectedReport =
+    view.selectedTileIdx >= 0
+      ? s.inspect_tile(view.selectedTileIdx)
+      : "Click any state on the globe to highlight it (green), its trade partners (yellow), and its conflict rivals (red), and inspect its demographics and lexicon.";
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    ticks: s.history_ticks(),
+    years: s.years(),
+    activeStates: s.active_state_count(),
+    populationText: formatPopulationThousands(s.total_population_thousands()),
+    isRunning: Boolean(view.isRunning),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    selectedReport,
+  };
+}
+
+function stopHistoryLoop(view) {
+  view.isRunning = false;
+  if (view.timerId !== null && view.timerId !== undefined) {
+    clearTimeout(view.timerId);
+    view.timerId = null;
+  }
+}
+
+function scheduleHistoryTick(view) {
+  if (!view.isRunning || activeView !== view) return;
+  view.timerId = setTimeout(() => {
+    if (!view.isRunning || activeView !== view) return;
+    view.session.step();
+    updateHistoryDataBuffers(view, false);
+    if (view.setHistoryInfo) {
+      view.setHistoryInfo(buildHistoryInfo(view))();
+    }
+    if (view.isRunning) {
+      scheduleHistoryTick(view);
+    }
+  }, 150);
+}
+
+export const mountHistoryView =
+  (aspect) => (showRivers) => (setHistoryInfo) => () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.session = new WasmHistorySession();
+    view.aspect = aspect;
+    view.showRivers = showRivers;
+    view.selectedTileIdx = -1;
+    view.isRunning = false;
+    view.timerId = null;
+    view.setHistoryInfo = setHistoryInfo;
+
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateHistoryDataBuffers(view, false);
+        view.setHistoryInfo(buildHistoryInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateHistoryDataBuffers(view, true);
+    setHistoryInfo(buildHistoryInfo(view))();
+
+    return () => {
+      canvas.removeEventListener("click", handleCanvasClick);
+      stopHistoryLoop(view);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const stepHistory = (setHistoryInfo) => () => {
+  if (!activeView || !activeView.session || activeView.isRunning) return;
+  activeView.session.step();
+  updateHistoryDataBuffers(activeView, false);
+  setHistoryInfo(buildHistoryInfo(activeView))();
+};
+
+export const toggleHistoryRunning = (setHistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  if (activeView.isRunning) {
+    stopHistoryLoop(activeView);
+    setHistoryInfo(buildHistoryInfo(activeView))();
+  } else {
+    activeView.isRunning = true;
+    setHistoryInfo(buildHistoryInfo(activeView))();
+    scheduleHistoryTick(activeView);
+  }
+};
+
+export const resetHistory = (setHistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopHistoryLoop(activeView);
+  activeView.session.reset();
+  activeView.selectedTileIdx = -1;
+  updateHistoryDataBuffers(activeView, false);
+  setHistoryInfo(buildHistoryInfo(activeView))();
+};
+
+export const setHistoryAspect = (aspect) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.aspect = aspect;
+  updateHistoryDataBuffers(activeView, false);
+};
+
+export const setHistoryShowRivers = (showRivers) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.showRivers = showRivers;
+  updateHistoryDataBuffers(activeView, false);
+};
+
+export const saveHistoryPlanet = (setHistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const bytes = activeView.session.encode_snapshot();
+  if (!bytes || bytes.length === 0) return;
+  storeSavedSnapshotBytes(bytes);
+  activeClimateSnapshotBytes = bytes;
+  const yrs = activeView.session.years();
+  triggerBinaryDownload(`tec11-history-${yrs}yr.tec11`, bytes);
+  setHistoryInfo(buildHistoryInfo(activeView))();
+};
+
+export const loadEarthIntoHistory = (setHistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopHistoryLoop(activeView);
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  activeView.selectedTileIdx = -1;
+  updateHistoryDataBuffers(activeView, true);
+  setHistoryInfo(buildHistoryInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoHistory = (setHistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  stopHistoryLoop(activeView);
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.selectedTileIdx = -1;
+    updateHistoryDataBuffers(activeView, true);
+    setHistoryInfo(buildHistoryInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoHistory = (setHistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    stopHistoryLoop(activeView);
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.selectedTileIdx = -1;
+      updateHistoryDataBuffers(activeView, true);
+      setHistoryInfo(buildHistoryInfo(activeView))();
+    }
+  });
 };
 
 export const rotateGrid = (deg) => () => {

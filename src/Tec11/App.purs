@@ -29,6 +29,7 @@ data Screen
   | RacinationScreen
   | PrehistoryScreen
   | LanguageScreen
+  | HistoryScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -154,6 +155,18 @@ type LanguageInfo =
   , words :: Array LanguageWordItem
   }
 
+type HistoryInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , ticks :: Int
+  , years :: Int
+  , activeStates :: Int
+  , populationText :: String
+  , isRunning :: Boolean
+  , hasSavedPlanet :: Boolean
+  , selectedReport :: String
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -255,6 +268,18 @@ foreign import mountLanguageView :: (LanguageInfo -> Effect Unit) -> Effect (Eff
 foreign import generateLanguage :: (LanguageInfo -> Effect Unit) -> Effect Unit
 foreign import borrowLanguage :: (LanguageInfo -> Effect Unit) -> Effect Unit
 foreign import applyLanguageSoundChange :: Int -> (LanguageInfo -> Effect Unit) -> Effect Unit
+
+-- History mode FFI
+foreign import mountHistoryView :: String -> Boolean -> (HistoryInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
+foreign import toggleHistoryRunning :: (HistoryInfo -> Effect Unit) -> Effect Unit
+foreign import resetHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
+foreign import setHistoryAspect :: String -> Effect Unit
+foreign import setHistoryShowRivers :: Boolean -> Effect Unit
+foreign import saveHistoryPlanet :: (HistoryInfo -> Effect Unit) -> Effect Unit
+foreign import loadEarthIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -405,6 +430,21 @@ mkApp = do
       , words: []
       }
 
+    -- History mode state
+    historyAspect /\ setHistoryAspectState <- useState' "nations"
+    historyShowRivers /\ setHistoryShowRiversState <- useState' true
+    historyInfo /\ setHistoryInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , ticks: 0
+      , years: 0
+      , activeStates: 0
+      , populationText: "0"
+      , isRunning: false
+      , hasSavedPlanet: false
+      , selectedReport: "Click any state on the globe to inspect its demographics, diplomacy, and language lexicon."
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -450,6 +490,9 @@ mkApp = do
           mountPrehistoryView setPrehistoryInfo
         LanguageScreen -> do
           mountLanguageView setLanguageInfo
+        HistoryScreen -> do
+          setRotationDeg 0
+          mountHistoryView historyAspect historyShowRivers setHistoryInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -641,6 +684,19 @@ mkApp = do
           setRacinationTravelRangeState tr
           setRacinationTravelRange tr
 
+      handleHistoryAspectChange :: Maybe String -> Effect Unit
+      handleHistoryAspectChange maybeVal = case maybeVal of
+        Nothing -> pure unit
+        Just asp -> do
+          setHistoryAspectState asp
+          setHistoryAspect asp
+
+      handleToggleHistoryRivers :: Effect Unit
+      handleToggleHistoryRivers = do
+        let next = not historyShowRivers
+        setHistoryShowRiversState next
+        setHistoryShowRivers next
+
     pure case screen of
       MainMenu ->
         R.div
@@ -740,6 +796,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen LanguageScreen)
                           , children: [ R.text "Language" ]
+                          }
+                      , R.button
+                          { id: "history-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen HistoryScreen)
+                          , children: [ R.text "History" ]
                           }
                       ]
                   }
@@ -2789,6 +2852,196 @@ mkApp = do
                           , className: "action-btn secondary"
                           , onClick: capture_ (setScreen MainMenu)
                           , children: [ R.text "Done" ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      HistoryScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.select
+                                  { id: "history-aspect-select"
+                                  , className: "control-select"
+                                  , value: historyAspect
+                                  , onChange: handler targetValue handleHistoryAspectChange
+                                  , children:
+                                      [ R.option
+                                          { value: "nations"
+                                          , children: [ R.text "Nations & Diplomacy" ]
+                                          }
+                                      , R.option
+                                          { value: "species"
+                                          , children: [ R.text "Domesticable Species" ]
+                                          }
+                                      , R.option
+                                          { value: "population"
+                                          , children: [ R.text "Population" ]
+                                          }
+                                      , R.option
+                                          { value: "capacity"
+                                          , children: [ R.text "Carrying Capacity" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "history-rivers-btn"
+                                  , className: if historyShowRivers then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleHistoryRivers
+                                  , children: [ R.text (if historyShowRivers then "Rivers: Shown" else "Rivers: Hidden") ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "history-start-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (toggleHistoryRunning setHistoryInfo)
+                                  , children: [ R.text (if historyInfo.isRunning then "Pause" else "Start") ]
+                                  }
+                              , R.button
+                                  { id: "history-step-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: historyInfo.isRunning
+                                  , onClick: capture_ (stepHistory setHistoryInfo)
+                                  , children: [ R.text "Step" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "history-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "history-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text historyInfo.planetName ]
+                                  }
+                              , R.div
+                                  { id: "history-time-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show historyInfo.ticks <> " ticks (" <> show historyInfo.years <> " yrs)") ]
+                                  }
+                              , R.div
+                                  { id: "history-states-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("States: " <> show historyInfo.activeStates <> " | Pop: " <> historyInfo.populationText) ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "State, Diplomacy & Lexicon (click globe)" ]
+                                  }
+                              , R.div
+                                  { id: "history-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text historyInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "history-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: historyInfo.isRunning
+                                  , onClick: capture_ (loadEarthIntoHistory setHistoryInfo)
+                                  , children: [ R.text "Earth" ]
+                                  }
+                              , R.button
+                                  { id: "history-load-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: historyInfo.isRunning
+                                  , onClick: capture_ (loadFilePlanetIntoHistory setHistoryInfo)
+                                  , children: [ R.text "Load File" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "history-saved-btn"
+                                  , className: "action-btn"
+                                  , disabled: historyInfo.isRunning || not historyInfo.hasSavedPlanet
+                                  , onClick: capture_ (loadSavedPlanetIntoHistory setHistoryInfo)
+                                  , children: [ R.text "Load Saved" ]
+                                  }
+                              , R.button
+                                  { id: "history-save-btn"
+                                  , className: "action-btn"
+                                  , disabled: historyInfo.isRunning
+                                  , onClick: capture_ (saveHistoryPlanet setHistoryInfo)
+                                  , children: [ R.text "Save" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "history-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: historyInfo.isRunning
+                                  , onClick: capture_ (resetHistory setHistoryInfo)
+                                  , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
                           }
                       ]
                   }
