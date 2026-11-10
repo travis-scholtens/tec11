@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use tec11_math_grid::{
     normal, DisplayFaceSource, FineParentage, Pcg64Mcg, PointTree, SphericalGrid,
@@ -17,6 +18,7 @@ use crate::rivers::trace_coarse_rivers;
 pub const HISTORY_YEARS_PER_TICK: u32 = 200;
 pub const HISTORY_MIN_RIVER_ELEV: f32 = 2.0;
 pub const HISTORY_MIN_RIVER_PRECIP: f32 = 0.25;
+pub const MAJOR_LANGUAGE_THRESHOLD: f32 = 0.25;
 
 /// 6 distinct political map colors (`terrainmethod.py:colornations`).
 pub const NATION_PALETTE: [[f32; 3]; 6] = [
@@ -129,11 +131,53 @@ impl LanguageRecord {
         rec
     }
 
+    /// Initialize a language for state `state_id` (`historysimulation.py:1029-1039`, `langfromspecies`):
+    /// coins native species and `('nation', state_id)`, then derives `('state', state_id)` and
+    /// `('language', id)` from `('nation', state_id)`.
+    pub fn new_for_state(
+        id: u32,
+        state_id: u32,
+        species_indices: &[usize],
+        rng: &mut Pcg64Mcg,
+    ) -> Self {
+        let phonology = Language::generate(rng);
+        let mut rec = Self {
+            id,
+            phonology,
+            lexicon: BTreeMap::new(),
+            changes_per_tick: Vec::new(),
+        };
+        rec.coin_concept(ConceptKey::Nation(state_id), rng);
+        rec.derive_concept(
+            ConceptKey::Nation(state_id),
+            ConceptKey::Language(id),
+            rng,
+        );
+        rec.derive_concept(
+            ConceptKey::Nation(state_id),
+            ConceptKey::State(state_id),
+            rng,
+        );
+        // Refresh self-origins with the newly derived language name
+        let lang_name = rec.name();
+        for origin in rec.lexicon.values_mut() {
+            origin.lang_name = lang_name.clone();
+        }
+        for &sp_idx in species_indices {
+            rec.coin_concept(ConceptKey::Species(sp_idx as u32), rng);
+        }
+        rec
+    }
+
     pub fn name(&self) -> String {
         self.lexicon
             .get(&ConceptKey::Language(self.id))
             .map(|o| o.word.write(true))
             .unwrap_or_else(|| format!("Lang_{}", self.id + 1))
+    }
+
+    pub fn describes(&self, key: ConceptKey) -> bool {
+        self.lexicon.contains_key(&key)
     }
 
     pub fn coin_concept(&mut self, key: ConceptKey, rng: &mut Pcg64Mcg) -> WordOrigin {
@@ -151,6 +195,24 @@ impl LanguageRecord {
         origin
     }
 
+    /// Derive `dest_key` from `src_key` by affixation (`language/lazy.py:11-21, 90-100`).
+    pub fn derive_concept(
+        &mut self,
+        src_key: ConceptKey,
+        dest_key: ConceptKey,
+        rng: &mut Pcg64Mcg,
+    ) -> Option<WordOrigin> {
+        if let Some(existing) = self.lexicon.get(&dest_key) {
+            return Some(existing.clone());
+        }
+        let src_origin = self.lexicon.get(&src_key)?.clone();
+        let derived_word = self.phonology.derive_word(&src_origin.word, rng);
+        let my_name = self.name();
+        let origin = WordOrigin::new(derived_word, my_name, Some(src_origin));
+        self.lexicon.insert(dest_key, origin.clone());
+        Some(origin)
+    }
+
     pub fn borrow_concept(&mut self, key: ConceptKey, donor: &LanguageRecord) {
         if self.lexicon.contains_key(&key) {
             return;
@@ -161,6 +223,18 @@ impl LanguageRecord {
             let origin = WordOrigin::new(borrowed_word, my_name, Some(donor_origin.clone()));
             self.lexicon.insert(key, origin);
         }
+    }
+
+    /// Clone a dialect and redefine `Language(self.id)` to `Language(new_id)`
+    /// (`language/lazy.py:137-146, 190-194`).
+    pub fn clone_dialect(&self, new_id: u32) -> Self {
+        let mut cloned = self.clone();
+        let old_id = cloned.id;
+        cloned.id = new_id;
+        if let Some(orig) = cloned.lexicon.remove(&ConceptKey::Language(old_id)) {
+            cloned.lexicon.insert(ConceptKey::Language(new_id), orig);
+        }
+        cloned
     }
 
     pub fn mutate_tick(&mut self, rng: &mut Pcg64Mcg) {
@@ -182,6 +256,8 @@ pub struct StateRecord {
     pub capital_tile: usize,
     pub color_idx: usize,
     pub active: bool,
+    /// Turchin's collective solidarity / *asabiya* ($S_n \in [0.1, 1.0]$; *Historical Dynamics*, 2003).
+    pub asabiya: f32,
 }
 
 /// Complete History simulation (`historysimulation.py`, `historydisplay.py`, `historypresenter.py`).
@@ -456,7 +532,7 @@ impl HistorySimulation {
             }
         }
 
-        // Create initial states, nationalities, and languages at each city
+        // Create initial states, nationalities, and languages at each city (`langfromspecies`)
         let mut q = VecDeque::new();
         for &city_f in &city_tiles {
             let sid = self.next_state_id;
@@ -464,12 +540,12 @@ impl HistorySimulation {
             let lid = self.next_language_id;
             self.next_language_id += 1;
 
-            let mut lang = LanguageRecord::new(lid, &mut self.rng);
-            lang.coin_concept(ConceptKey::State(sid), &mut self.rng);
-            lang.coin_concept(ConceptKey::Nation(sid), &mut self.rng);
-            for &sp_idx in &self.tile_species[city_f] {
-                lang.coin_concept(ConceptKey::Species(sp_idx as u32), &mut self.rng);
-            }
+            let lang = LanguageRecord::new_for_state(
+                lid,
+                sid,
+                &self.tile_species[city_f],
+                &mut self.rng,
+            );
             self.languages.insert(lid, lang);
             self.nationalities.insert(sid);
             self.states.insert(
@@ -479,21 +555,22 @@ impl HistorySimulation {
                     capital_tile: city_f,
                     color_idx: (sid as usize) % NATION_PALETTE.len(),
                     active: true,
+                    asabiya: 0.5,
                 },
             );
             self.tile_states.insert(city_f, sid);
             q.push_back((city_f, sid, 0usize));
         }
 
-        // Expand state boundaries up to 14 fine steps over passable fine faces (`historysimulation.py:nearestcity`)
+        // Expand state boundaries over passable fine faces with Boulding river step costs (`nearestcity`)
         while let Some((curr, sid, dist)) = q.pop_front() {
-            if dist >= 14 {
+            if dist >= 16 {
                 continue;
             }
             for &nb in &fine_adj[curr] {
                 let c = self.terrain.primary_coarse_tile(nb, &coarse_elevs);
-                let step_cost = if self.river_tiles[nb] { 3 } else { 1 };
-                if dist + step_cost <= 14
+                let step_cost = if self.river_tiles[nb] { 10 } else { 1 };
+                if dist + step_cost <= 16
                     && !self.tile_states.contains_key(&nb)
                     && fine_elevs[nb] > 0.0
                     && is_passable(fine_elevs[nb], koeppen[c], true)
@@ -585,83 +662,726 @@ impl HistorySimulation {
         }
     }
 
-    fn update_diplomacy_and_trade(&mut self, adjacency: &[Vec<usize>]) {
-        self.trade_partners.clear();
-        self.conflicts.clear();
-
-        let mut active_states: BTreeSet<u32> = BTreeSet::new();
-        for &sid in self.tile_states.values() {
-            active_states.insert(sid);
+    /// Direct trade partners of state `n` (`historysimulation.py:lookuptradepartners`).
+    fn lookup_trade_partners(&self, n: u32) -> BTreeSet<u32> {
+        let mut out = BTreeSet::new();
+        for &(a, b) in &self.trade_partners {
+            if a == n {
+                out.insert(b);
+            } else if b == n {
+                out.insert(a);
+            }
         }
-        for st in self.states.values_mut() {
-            st.active = active_states.contains(&st.id);
-        }
+        out
+    }
 
-        // Compute per-state species sets and border adjacency (including across river fine faces: `riverneighbors`)
+    /// Transitive trade network of state `n` with shortest hop counts `h >= 1` (`recursivetradepartners`).
+    fn recursive_trade_partner_distances(&self, n: u32) -> BTreeMap<u32, usize> {
+        let mut dists = BTreeMap::new();
+        let mut q = VecDeque::new();
+        dists.insert(n, 0usize);
+        q.push_back((n, 0usize));
+        while let Some((curr, d)) = q.pop_front() {
+            for nb in self.lookup_trade_partners(curr) {
+                if !dists.contains_key(&nb) {
+                    dists.insert(nb, d + 1);
+                    q.push_back((nb, d + 1));
+                }
+            }
+        }
+        dists.remove(&n);
+        dists
+    }
+
+    /// Transitive trade network of state `n` (`historysimulation.py:recursivetradepartners`).
+    fn recursive_trade_partners(&self, n: u32) -> BTreeSet<u32> {
+        self.recursive_trade_partner_distances(n)
+            .into_keys()
+            .collect()
+    }
+
+    /// Spherical angular distance in radians `[0, pi]` between the capitals of states `s1` and `s2`,
+    /// used in Boulding's Loss-of-Strength Gradient and Tinbergen's Gravity Model.
+    fn capital_angular_distance(&self, s1: u32, s2: u32) -> f32 {
+        let c1 = self
+            .states
+            .get(&s1)
+            .and_then(|s| self.terrain.terrain_grid.faces.get(s.capital_tile))
+            .map(|(c, _)| *c)
+            .unwrap_or([1.0, 0.0, 0.0]);
+        let c2 = self
+            .states
+            .get(&s2)
+            .and_then(|s| self.terrain.terrain_grid.faces.get(s.capital_tile))
+            .map(|(c, _)| *c)
+            .unwrap_or([1.0, 0.0, 0.0]);
+        let dot = (c1[0] * c2[0] + c1[1] * c2[1] + c1[2] * c2[2]).clamp(-1.0, 1.0);
+        dot.acos() as f32
+    }
+
+    /// Total carrying capacity $K_n$ of state `state_id` across its fine faces.
+    fn state_carrying_capacity(&self, tiles: &[usize]) -> f32 {
+        tiles.iter().map(|&t| self.capacities[t]).sum::<f32>().max(0.1)
+    }
+
+    /// Collective solidarity (*asabiya*) $S_n \in [0.1, 1.0]$ of state `sid` (Turchin 2003).
+    pub fn state_asabiya(&self, sid: u32) -> f32 {
+        self.states
+            .get(&sid)
+            .map(|s| s.asabiya)
+            .unwrap_or(0.5)
+            .clamp(0.1, 1.0)
+    }
+
+    /// Metaethnic faultline intensity $I_f \in [0.0, 1.0]$ on fine face `f_idx` across political borders
+    /// (Turchin, *Historical Dynamics*, 2003, Ch. 4):
+    /// `+0.50` across the agricultural/pastoral divide, `+0.30` across nationality boundaries,
+    /// and `+0.20` across language boundaries.
+    fn tile_metaethnic_intensity(&self, f_idx: usize, fine_adj: &[Vec<usize>]) -> f32 {
+        let Some(&sid) = self.tile_states.get(&f_idx) else {
+            return 0.0;
+        };
+        let f_ag = self
+            .tile_communities
+            .get(&f_idx)
+            .is_some_and(|cs| cs.iter().any(|c| c.agriculture));
+        let f_nat = self.majority_nationality(f_idx);
+        let f_lang = self.majority_language(f_idx);
+
+        let mut max_intensity = 0.0f32;
+        for &nb in &fine_adj[f_idx] {
+            if self.tile_states.get(&nb) == Some(&sid) {
+                continue;
+            }
+            let nb_pop: f32 = self
+                .tile_communities
+                .get(&nb)
+                .map(|cs| cs.iter().map(|c| c.thousands).sum())
+                .unwrap_or(0.0);
+            if nb_pop <= 0.0 {
+                continue;
+            }
+            let nb_ag = self
+                .tile_communities
+                .get(&nb)
+                .is_some_and(|cs| cs.iter().any(|c| c.agriculture));
+            let nb_nat = self.majority_nationality(nb);
+            let nb_lang = self.majority_language(nb);
+
+            let mut intensity = 0.0f32;
+            if f_ag != nb_ag {
+                intensity += 0.50;
+            }
+            if f_nat != nb_nat {
+                intensity += 0.30;
+            }
+            if f_lang != nb_lang {
+                intensity += 0.20;
+            }
+            if intensity > max_intensity {
+                max_intensity = intensity;
+            }
+        }
+        max_intensity.clamp(0.0, 1.0)
+    }
+
+    /// Update each active state's collective solidarity (*asabiya*) $S_n$ using Turchin's logistic
+    /// metaethnic frontier equation (*Historical Dynamics*, 2003, eq. 4.3-4.6):
+    /// $S_n(t+1) = S_n(t) + r_{\text{frontier}} \bar{I}_n (1 - S_n(t)) - \delta_{\text{core}} (1 - \bar{I}_n) S_n(t)$.
+    fn update_state_asabiya(
+        &mut self,
+        extents: &BTreeMap<u32, Vec<usize>>,
+        fine_adj: &[Vec<usize>],
+    ) {
+        const R_FRONTIER: f32 = 0.45;
+        const DELTA_CORE: f32 = 0.12;
+        let mut new_asabiya: BTreeMap<u32, f32> = BTreeMap::new();
+        for (&sid, tiles) in extents {
+            if tiles.is_empty() {
+                continue;
+            }
+            let sum_i: f32 = tiles
+                .iter()
+                .map(|&f| self.tile_metaethnic_intensity(f, fine_adj))
+                .sum();
+            // Scale frontier exposure so compact frontier marcher states reach high I_bar while sprawling empires dilute I_bar
+            let mean_i = (sum_i / (tiles.len() as f32) * 2.5).clamp(0.0, 1.0);
+            let s = self.state_asabiya(sid);
+            let ds = R_FRONTIER * mean_i * (1.0 - s) - DELTA_CORE * (1.0 - mean_i) * s;
+            new_asabiya.insert(sid, (s + ds).clamp(0.10, 1.00));
+        }
+        for (sid, s) in new_asabiya {
+            if let Some(st) = self.states.get_mut(&sid) {
+                st.asabiya = s;
+            }
+        }
+    }
+
+    /// Active military opponents of state `n` (`historysimulation.py:lookupopponents`).
+    fn lookup_opponents(&self, n: u32) -> BTreeSet<u32> {
+        let mut out = BTreeSet::new();
+        for &(a, b) in &self.conflicts {
+            if a == n {
+                out.insert(b);
+            } else if b == n {
+                out.insert(a);
+            }
+        }
+        out
+    }
+
+    /// Compute per-state tile extents, native species sets, and neighboring states (including across rivers: `riverneighbors`).
+    fn state_topology(
+        &self,
+        adjacency: &[Vec<usize>],
+    ) -> (
+        BTreeMap<u32, Vec<usize>>,
+        BTreeMap<u32, BTreeSet<usize>>,
+        BTreeMap<u32, BTreeSet<u32>>,
+    ) {
+        let mut extents: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         let mut state_species: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
-        let mut border_shared: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+        let mut neighbors: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+
         for (&t, &s1) in &self.tile_states {
+            extents.entry(s1).or_default().push(t);
             let sp_set = state_species.entry(s1).or_default();
             for &sp in &self.tile_species[t] {
                 sp_set.insert(sp);
             }
+            let nb_set = neighbors.entry(s1).or_default();
+            let mut checked_river = false;
             for &nb in &adjacency[t] {
                 if let Some(&s2) = self.tile_states.get(&nb) {
                     if s1 != s2 {
-                        let pair = if s1 < s2 { (s1, s2) } else { (s2, s1) };
-                        *border_shared.entry(pair).or_insert(0) += 1;
+                        nb_set.insert(s2);
                     }
-                } else if self.river_tiles[nb] {
+                }
+                if !checked_river && self.river_tiles[nb] {
+                    checked_river = true;
                     for &r_nb in &adjacency[nb] {
                         if let Some(&s2) = self.tile_states.get(&r_nb) {
                             if s1 != s2 {
-                                let pair = if s1 < s2 { (s1, s2) } else { (s2, s1) };
-                                *border_shared.entry(pair).or_insert(0) += 1;
+                                nb_set.insert(s2);
                             }
                         }
                     }
                 }
             }
         }
+        (extents, state_species, neighbors)
+    }
 
-        let active_vec: Vec<u32> = active_states.into_iter().collect();
-        for i in 0..active_vec.len() {
-            for j in (i + 1)..active_vec.len() {
-                let s1 = active_vec[i];
-                let s2 = active_vec[j];
-                let c1 = self
-                    .states
-                    .get(&s1)
-                    .and_then(|s| self.terrain.terrain_grid.faces.get(s.capital_tile))
-                    .map(|(c, _)| *c)
-                    .unwrap_or([1.0, 0.0, 0.0]);
-                let c2 = self
-                    .states
-                    .get(&s2)
-                    .and_then(|s| self.terrain.terrain_grid.faces.get(s.capital_tile))
-                    .map(|(c, _)| *c)
-                    .unwrap_or([1.0, 0.0, 0.0]);
-                let dot = (c1[0] * c2[0] + c1[1] * c2[1] + c1[2] * c2[2]).clamp(-1.0, 1.0);
-                let angle = dot.acos();
+    /// Hop-decayed Heckscher-Ohlin & Tinbergen trade pressure $\text{Pressure}_{n \leftarrow o}$:
+    /// each novel species $s \notin S_n$ available in $o$ (at hop $h = 0$) or via $o$'s recursive trade
+    /// network at minimum hop $h \ge 1$ contributes $0.5^h$, damped by capital distance $e^{-0.25 d_{no}}$.
+    fn compute_trade_pressure(
+        &self,
+        n: u32,
+        o: u32,
+        state_species: &BTreeMap<u32, BTreeSet<usize>>,
+    ) -> f32 {
+        let Some(native) = state_species.get(&n) else {
+            return 0.0;
+        };
+        let mut min_hop_for_species: BTreeMap<usize, usize> = BTreeMap::new();
+        if let Some(osp) = state_species.get(&o) {
+            for &sp in osp.difference(native) {
+                min_hop_for_species.insert(sp, 0);
+            }
+        }
+        for (partner, hop) in self.recursive_trade_partner_distances(o) {
+            if partner == n {
+                continue;
+            }
+            if let Some(psp) = state_species.get(&partner) {
+                for &sp in psp.difference(native) {
+                    let entry = min_hop_for_species.entry(sp).or_insert(hop);
+                    if hop < *entry {
+                        *entry = hop;
+                    }
+                }
+            }
+        }
+        let raw_gain: f32 = min_hop_for_species
+            .values()
+            .map(|&h| 0.5f32.powi(h as i32))
+            .sum();
+        let dist = self.capital_angular_distance(n, o);
+        raw_gain * (-0.25 * dist).exp()
+    }
 
-                let sp1 = state_species.get(&s1);
-                let sp2 = state_species.get(&s2);
-                let diff_species = match (sp1, sp2) {
-                    (Some(a), Some(b)) => a.symmetric_difference(b).count(),
-                    _ => 0,
+    /// Update trade partnerships and military conflicts using:
+    /// 1. Heckscher-Ohlin comparative advantage + Tinbergen hop/distance gravity decay (`compute_trade_pressure`),
+    /// 2. Polachek commercial peace (active war blocks trade; trade raises war threshold by peace dividend $\tau_{\text{trade}}$),
+    /// 3. Collins resource + territorial carrying-capacity + demographic tension with Boulding distance decay (`e^{-0.5 d}`).
+    fn update_diplomacy_and_trade(&mut self, adjacency: &[Vec<usize>]) {
+        let (extents, state_species, neighbors) = self.state_topology(adjacency);
+        let active_states: BTreeSet<u32> = extents.keys().copied().collect();
+        for st in self.states.values_mut() {
+            st.active = active_states.contains(&st.id);
+        }
+
+        // Prune any stale trade partnerships or conflicts involving extinct or non-neighboring states
+        self.trade_partners.retain(|&(a, b)| {
+            active_states.contains(&a)
+                && active_states.contains(&b)
+                && a != b
+                && neighbors.get(&a).is_some_and(|nbs| nbs.contains(&b))
+        });
+        self.conflicts.retain(|&(a, b)| {
+            active_states.contains(&a)
+                && active_states.contains(&b)
+                && a != b
+                && neighbors.get(&a).is_some_and(|nbs| nbs.contains(&b))
+        });
+
+        let active_conflict_set: BTreeSet<(u32, u32)> = self.conflicts.iter().copied().collect();
+
+        // 1. Heckscher-Ohlin + Tinbergen trade pressure & mutual eligibility
+        let mut pressure_map: BTreeMap<(u32, u32), f32> = BTreeMap::new();
+        let mut eligible: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        for &n in &active_states {
+            let native_len = state_species.get(&n).map(|s| s.len()).unwrap_or(0) as f32;
+            let min_gain = (native_len * 0.05).max(0.5);
+            let mut n_elig = BTreeSet::new();
+            if let Some(nbs) = neighbors.get(&n) {
+                for &o in nbs {
+                    let pair = if n < o { (n, o) } else { (o, n) };
+                    // Polachek: states actively at war cannot simultaneously form a trade partnership
+                    if active_conflict_set.contains(&pair) {
+                        continue;
+                    }
+                    let p = self.compute_trade_pressure(n, o, &state_species);
+                    pressure_map.insert((n, o), p);
+                    if p >= min_gain {
+                        n_elig.insert(o);
+                    }
+                }
+            }
+            eligible.insert(n, n_elig);
+        }
+
+        // Re-evaluate existing trade partners (dissolve if mutual gains drop below half the threshold)
+        let mut partner_set: BTreeSet<(u32, u32)> = self
+            .trade_partners
+            .iter()
+            .copied()
+            .filter(|&(a, b)| {
+                let p_ab = pressure_map.get(&(a, b)).copied().unwrap_or(0.0);
+                let p_ba = pressure_map.get(&(b, a)).copied().unwrap_or(0.0);
+                let min_a = (state_species.get(&a).map(|s| s.len()).unwrap_or(0) as f32) * 0.025;
+                let min_b = (state_species.get(&b).map(|s| s.len()).unwrap_or(0) as f32) * 0.025;
+                p_ab >= min_a && p_ba >= min_b
+            })
+            .collect();
+
+        for (&n, n_elig) in &eligible {
+            for &o in n_elig {
+                if eligible.get(&o).is_some_and(|o_elig| o_elig.contains(&n)) {
+                    let pair = if n < o { (n, o) } else { (o, n) };
+                    partner_set.insert(pair);
+                }
+            }
+        }
+
+        // 2. Collins military tension + Turchin asabiya mobilization + Boulding Loss-of-Strength Gradient + Polachek commercial peace
+        let state_eff_pops: BTreeMap<u32, f32> = active_states
+            .iter()
+            .map(|&sid| {
+                let pop = self.state_population_thousands(sid);
+                let asabiya = self.state_asabiya(sid);
+                (sid, pop * (0.5 + asabiya))
+            })
+            .collect();
+        let state_caps: BTreeMap<u32, f32> = extents
+            .iter()
+            .map(|(&sid, tiles)| (sid, self.state_carrying_capacity(tiles)))
+            .collect();
+
+        let mut conflict_set: BTreeSet<(u32, u32)> = active_conflict_set;
+
+        for &n in &active_states {
+            let native = state_species.get(&n).cloned().unwrap_or_default();
+            let eff_n = state_eff_pops.get(&n).copied().unwrap_or(0.0);
+            let cap_n = state_caps.get(&n).copied().unwrap_or(1.0);
+            let mut best_rival: Option<(u32, f32)> = None;
+
+            if let Some(nbs) = neighbors.get(&n) {
+                for &o in nbs {
+                    let eff_o = state_eff_pops.get(&o).copied().unwrap_or(0.0);
+                    if eff_o <= 1e-4 || eff_n <= eff_o {
+                        continue;
+                    }
+                    let cap_o = state_caps.get(&o).copied().unwrap_or(1.0);
+                    let osp = state_species.get(&o).cloned().unwrap_or_default();
+
+                    // Heckscher-Ohlin resource motive + Collins territorial carrying-capacity motive
+                    let dr = if native.is_empty() {
+                        0.0
+                    } else {
+                        (osp.difference(&native).count() as f32) / (native.len() as f32)
+                    };
+                    let dk = cap_o / (cap_n + cap_o);
+                    let dp = (eff_n - eff_o) / eff_o;
+                    let dist = self.capital_angular_distance(n, o);
+                    let boulding_lsg = (-0.5 * dist).exp();
+                    let tension = (dr + 0.15 * dk + dp) * boulding_lsg;
+
+                    let pair = if n < o { (n, o) } else { (o, n) };
+                    // Polachek commercial peace dividend raises the threshold required to break peace with a trade partner
+                    let war_threshold = if partner_set.contains(&pair) {
+                        let p_no = pressure_map.get(&(n, o)).copied().unwrap_or(0.0);
+                        let p_on = pressure_map.get(&(o, n)).copied().unwrap_or(0.0);
+                        let denom =
+                            (native.len() + osp.len()).max(1) as f32;
+                        let peace_dividend = (1.5 * (p_no + p_on) / denom).max(1.0);
+                        1.0 + peace_dividend
+                    } else {
+                        1.0
+                    };
+
+                    if tension >= war_threshold
+                        && best_rival.is_none_or(|(_, best_t)| tension > best_t)
+                    {
+                        best_rival = Some((o, tension));
+                    }
+                }
+            }
+            if let Some((priority, _)) = best_rival {
+                let pair = if n < priority {
+                    (n, priority)
+                } else {
+                    (priority, n)
                 };
+                // If tension overcame Polachek commercial peace, abrogate the trade pact
+                partner_set.remove(&pair);
+                conflict_set.insert(pair);
+            }
+        }
+        self.trade_partners = partner_set.into_iter().collect();
+        self.conflicts = conflict_set.into_iter().collect();
 
-                let shared_border = border_shared.get(&(s1, s2)).copied().unwrap_or(0);
-                if shared_border >= 3 && self.rng.uniform(0.0, 1.0) < 0.35 {
-                    self.conflicts.push((s1, s2));
-                } else if angle < 1.15 && diff_species >= 2 && self.rng.uniform(0.0, 1.0) < 0.45 {
-                    self.trade_partners.push((s1, s2));
-                    // Borrow words for traded species and state names (`historysimulation.py:283-294`)
-                    let l1 = self.primary_language_for_state(s1);
-                    let l2 = self.primary_language_for_state(s2);
-                    if let (Some(lid1), Some(lid2)) = (l1, l2) {
-                        if lid1 != lid2 {
-                            self.exchange_loanwords(s1, lid1, s2, lid2);
+        // 3. Accumulate concepts and borrow missing words (`historysimulation.py:664-705`)
+        self.accumulate_and_borrow_concepts(&extents, &state_species);
+    }
+
+    /// Accumulate concepts across co-resident communities, trade partners, rivals, and recursive trade imports,
+    /// borrowing missing words from source state majority languages (`historysimulation.py:664-705`).
+    fn accumulate_and_borrow_concepts(
+        &mut self,
+        extents: &BTreeMap<u32, Vec<usize>>,
+        state_species: &BTreeMap<u32, BTreeSet<usize>>,
+    ) {
+        let mut state_langs: BTreeMap<u32, Option<u32>> = BTreeMap::new();
+        for &sid in extents.keys() {
+            state_langs.insert(sid, self.primary_language_for_state(sid));
+        }
+
+        let mut lang_concepts: BTreeMap<u32, BTreeMap<ConceptKey, Option<u32>>> = BTreeMap::new();
+        let mut state_sources: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+
+        for (&f, comms) in &self.tile_communities {
+            let Some(&sid) = self.tile_states.get(&f) else {
+                continue;
+            };
+            let nats_langs: Vec<(u32, u32)> = comms
+                .iter()
+                .filter(|c| c.thousands > 0.0)
+                .map(|c| (c.nationality_id, c.language_id))
+                .collect();
+            for &(_, lang) in &nats_langs {
+                let entry = lang_concepts.entry(lang).or_default();
+                for &(n, l) in &nats_langs {
+                    entry.insert(ConceptKey::Language(l), Some(l));
+                    entry.insert(ConceptKey::Nation(n), Some(l));
+                }
+                state_sources.entry(lang).or_default().insert(sid);
+            }
+        }
+
+        for (&lang_id, concepts) in lang_concepts.iter_mut() {
+            let Some(states_for_lang) = state_sources.get(&lang_id) else {
+                continue;
+            };
+            for &state_id in states_for_lang {
+                let native = state_species.get(&state_id).cloned().unwrap_or_default();
+                let rec_partners = self.recursive_trade_partners(state_id);
+                let direct_partners = self.lookup_trade_partners(state_id);
+                let rivals = self.lookup_opponents(state_id);
+
+                let mut related_states = BTreeSet::new();
+                related_states.insert(state_id);
+                related_states.extend(direct_partners);
+                related_states.extend(rivals);
+                related_states.extend(rec_partners.iter().copied());
+
+                for s in related_states {
+                    let s_lang = state_langs.get(&s).copied().flatten();
+                    concepts.insert(ConceptKey::State(s), s_lang);
+                }
+
+                // Imported species from recursive trade network (`imports`)
+                for partner in rec_partners {
+                    let p_lang = state_langs.get(&partner).copied().flatten();
+                    if let Some(psp) = state_species.get(&partner) {
+                        for &sp in psp.difference(&native) {
+                            concepts.insert(ConceptKey::Species(sp as u32), p_lang);
+                        }
+                    }
+                }
+
+                // Native species in `state_id`
+                let s_lang = state_langs.get(&state_id).copied().flatten();
+                for &sp in &native {
+                    concepts.insert(ConceptKey::Species(sp as u32), s_lang);
+                }
+            }
+        }
+
+        let lang_ids: Vec<u32> = lang_concepts.keys().copied().collect();
+        for lang_id in lang_ids {
+            let Some(concepts) = lang_concepts.get(&lang_id).cloned() else {
+                continue;
+            };
+            for (concept, src_lang_opt) in concepts {
+                let already = self
+                    .languages
+                    .get(&lang_id)
+                    .is_some_and(|l| l.describes(concept));
+                if already {
+                    continue;
+                }
+                let donor_opt = src_lang_opt
+                    .and_then(|src_id| self.languages.get(&src_id).cloned())
+                    .filter(|d| d.describes(concept));
+                if let Some(donor) = donor_opt {
+                    if let Some(lang) = self.languages.get_mut(&lang_id) {
+                        lang.borrow_concept(concept, &donor);
+                    }
+                } else {
+                    let mut temp_rng = self.rng.clone();
+                    if let Some(lang) = self.languages.get_mut(&lang_id) {
+                        lang.coin_concept(concept, &mut temp_rng);
+                    }
+                    self.rng = temp_rng;
+                }
+            }
+        }
+    }
+
+    /// Cubic state split probability (`historysimulation.py:497-503`), scaled by 1/9 for $N+2$ fine faces per coarse tile:
+    /// `x = (lentiles / 9.0) - 25`, `y = 3 + sign(x) * |x|^(1/3)`, `y / 600`.
+    pub fn split_probability(len_tiles: usize) -> f64 {
+        let x = (len_tiles as f64) / 9.0 - 25.0;
+        let sign = if x < 0.0 { -1.0 } else { 1.0 };
+        let root = sign * (sign * x).cbrt();
+        let y = (3.0 + root).max(0.05);
+        y / 600.0
+    }
+
+    /// Turchin-modulated state split probability: high *asabiya* ($S_n \to 1$) holds large states together,
+    /// while low *asabiya* ($S_n \to 0.1$) accelerates imperial fragmentation.
+    pub fn split_probability_with_asabiya(len_tiles: usize, asabiya: f32) -> f64 {
+        Self::split_probability(len_tiles) * ((1.5 - asabiya).clamp(0.4, 1.5) as f64)
+    }
+
+    /// City spawning probability per fine face (`historysimulation.py:846-867`), scaled by 1/9 for $N+2$ subdivision
+    /// and boosted on high-intensity metaethnic frontiers $(1 + 1.5 I_f)$ per Turchin (2003).
+    fn city_prob(
+        &self,
+        f_idx: usize,
+        coarse_elevs: &[f32],
+        koeppen: &[u8],
+        fine_adj: &[Vec<usize>],
+    ) -> f64 {
+        let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+        let k = koeppen[c];
+        if k == 11 || k == 12 {
+            // ET (tundra) or EF (ice cap)
+            return 0.0;
+        }
+        let has_ag = self
+            .tile_communities
+            .get(&f_idx)
+            .is_some_and(|cs| cs.iter().any(|cm| cm.agriculture));
+        let coarse_prob = if !has_ag {
+            0.25
+        } else if k == 0 || k == 1 || k == 2 {
+            // BW, BS, Af
+            0.15
+        } else {
+            0.05
+        };
+        let frontier_boost = 1.0 + 1.5 * (self.tile_metaethnic_intensity(f_idx, fine_adj) as f64);
+        (coarse_prob / 9.0) * frontier_boost
+    }
+
+    fn majority_nationality(&self, f_idx: usize) -> Option<u32> {
+        let comms = self.tile_communities.get(&f_idx)?;
+        let mut counts: BTreeMap<u32, f32> = BTreeMap::new();
+        for c in comms {
+            if c.thousands > 0.0 {
+                *counts.entry(c.nationality_id).or_insert(0.0) += c.thousands;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(k, _)| k)
+    }
+
+    fn majority_language(&self, f_idx: usize) -> Option<u32> {
+        let comms = self.tile_communities.get(&f_idx)?;
+        let mut counts: BTreeMap<u32, f32> = BTreeMap::new();
+        for c in comms {
+            if c.thousands > 0.0 {
+                *counts.entry(c.language_id).or_insert(0.0) += c.thousands;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(k, _)| k)
+    }
+
+    /// Multi-source Boulding Loss-of-Strength Gradient Dijkstra partitioner (`historysimulation.py:900-936`).
+    /// Assigns each tile in `tiles` to the candidate capital in `cities` with minimum cumulative
+    /// administrative friction (`+1` normal step, `+2` language boundary, `+3` nationality boundary,
+    /// `+10` river crossing, `+\infty` sea, unpopulated, or agricultural/pastoral divide).
+    fn partition_by_boulding_lsg(
+        &self,
+        tiles: &[usize],
+        cities: &[usize],
+        fine_adj: &[Vec<usize>],
+    ) -> BTreeMap<usize, usize> {
+        let tile_set: BTreeSet<usize> = tiles.iter().copied().collect();
+        let mut best_cost: BTreeMap<usize, (u32, usize)> = BTreeMap::new();
+        let mut heap: BinaryHeap<Reverse<(u32, usize, usize)>> = BinaryHeap::new();
+
+        for (city_idx, &city_tile) in cities.iter().enumerate() {
+            best_cost.insert(city_tile, (0, city_idx));
+            heap.push(Reverse((0, city_tile, city_idx)));
+        }
+
+        while let Some(Reverse((cost, curr, city_idx))) = heap.pop() {
+            if let Some(&(best_c, best_idx)) = best_cost.get(&curr) {
+                if (cost, city_idx) > (best_c, best_idx) {
+                    continue;
+                }
+            }
+            let curr_ag = self
+                .tile_communities
+                .get(&curr)
+                .is_some_and(|cs| cs.iter().any(|c| c.agriculture));
+            let curr_nat = self.majority_nationality(curr);
+            let curr_lang = self.majority_language(curr);
+
+            for &next in &fine_adj[curr] {
+                if !tile_set.contains(&next) {
+                    continue;
+                }
+                let next_pop: f32 = self
+                    .tile_communities
+                    .get(&next)
+                    .map(|cs| cs.iter().map(|c| c.thousands).sum())
+                    .unwrap_or(0.0);
+                let next_ag = self
+                    .tile_communities
+                    .get(&next)
+                    .is_some_and(|cs| cs.iter().any(|c| c.agriculture));
+                if self.terrain.fine_elevations[next] <= 0.0 || next_pop <= 0.0 || curr_ag != next_ag {
+                    continue;
+                }
+                let step_cost = if self.river_tiles[next] {
+                    10
+                } else if curr_nat != self.majority_nationality(next) {
+                    3
+                } else if curr_lang != self.majority_language(next) {
+                    2
+                } else {
+                    1
+                };
+                let next_cost = cost.saturating_add(step_cost);
+                let is_better = match best_cost.get(&next) {
+                    Some(&(bc, b_idx)) => (next_cost, city_idx) < (bc, b_idx),
+                    None => true,
+                };
+                if is_better {
+                    best_cost.insert(next, (next_cost, city_idx));
+                    heap.push(Reverse((next_cost, next, city_idx)));
+                }
+            }
+        }
+
+        best_cost
+            .into_iter()
+            .map(|(tile, (_, city_idx))| (tile, city_idx))
+            .collect()
+    }
+
+    /// Branch dialects when a language's speakers become geographically disconnected (`historysimulation.py:247-280`).
+    fn branch_disconnected_dialects(&mut self, fine_adj: &[Vec<usize>]) {
+        let mut lang_locs: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
+        for (&f, comms) in &self.tile_communities {
+            for c in comms {
+                if c.thousands > 0.0 {
+                    lang_locs.entry(c.language_id).or_default().insert(f);
+                }
+            }
+        }
+
+        for (lang_id, locs) in lang_locs {
+            if locs.len() <= 1 {
+                continue;
+            }
+            let mut visited = BTreeSet::new();
+            let mut components: Vec<Vec<usize>> = Vec::new();
+            for &start in &locs {
+                if !visited.insert(start) {
+                    continue;
+                }
+                let mut comp = Vec::new();
+                let mut q = VecDeque::new();
+                q.push_back(start);
+                while let Some(curr) = q.pop_front() {
+                    comp.push(curr);
+                    for &nb in &fine_adj[curr] {
+                        if locs.contains(&nb) && visited.insert(nb) {
+                            q.push_back(nb);
+                        }
+                    }
+                }
+                comp.sort_unstable();
+                components.push(comp);
+            }
+            if components.len() <= 1 {
+                continue;
+            }
+            // Largest connected component retains `lang_id`; smaller islands branch into new dialects
+            let source_idx = components
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, comp)| comp.len())
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            let Some(base_lang) = self.languages.get(&lang_id).cloned() else {
+                continue;
+            };
+            for (idx, faces) in components.into_iter().enumerate() {
+                if idx == source_idx {
+                    continue;
+                }
+                let new_lid = self.next_language_id;
+                self.next_language_id += 1;
+                let dialect = base_lang.clone_dialect(new_lid);
+                self.languages.insert(new_lid, dialect);
+                for f in faces {
+                    if let Some(comms) = self.tile_communities.get_mut(&f) {
+                        for c in comms.iter_mut() {
+                            if c.language_id == lang_id {
+                                c.language_id = new_lid;
+                            }
                         }
                     }
                 }
@@ -669,44 +1389,33 @@ impl HistorySimulation {
         }
     }
 
-    fn exchange_loanwords(&mut self, s1: u32, lid1: u32, s2: u32, lid2: u32) {
-        let Some(donor1) = self.languages.get(&lid1).cloned() else {
-            return;
-        };
-        let Some(donor2) = self.languages.get(&lid2).cloned() else {
-            return;
-        };
-        if let Some(lang1) = self.languages.get_mut(&lid1) {
-            lang1.borrow_concept(ConceptKey::State(s2), &donor2);
-            lang1.borrow_concept(ConceptKey::Nation(s2), &donor2);
-            lang1.borrow_concept(ConceptKey::Language(lid2), &donor2);
-            for (&k, _) in &donor2.lexicon {
-                if matches!(k, ConceptKey::Species(_)) {
-                    lang1.borrow_concept(k, &donor2);
-                }
-            }
-        }
-        if let Some(lang2) = self.languages.get_mut(&lid2) {
-            lang2.borrow_concept(ConceptKey::State(s1), &donor1);
-            lang2.borrow_concept(ConceptKey::Nation(s1), &donor1);
-            lang2.borrow_concept(ConceptKey::Language(lid1), &donor1);
-            for (&k, _) in &donor1.lexicon {
-                if matches!(k, ConceptKey::Species(_)) {
-                    lang2.borrow_concept(k, &donor1);
-                }
-            }
-        }
-    }
-
     /// Advance the History simulation by 1 tick (`200` years, matching `HistorySimulation.update`
-    /// in `historysimulation.py:222-335`).
+    /// in `historysimulation.py:504-706`).
     pub fn step(&mut self) {
         let fine_adj = self.terrain.terrain_adj.clone();
         let fine_elevs = self.terrain.fine_elevations.clone();
         let coarse_elevs = self.prehistory.tile_elevations();
         let koeppen = self.prehistory.tile_koeppen_ids().to_vec();
 
-        // 1. Logistic growth and spillover on subdivided fine faces (`historysimulation.py:168-220`)
+        // 1. Language sound changes (`historysimulation.py:511-515`, keeping tec11's per-language sound change)
+        let active_langs: BTreeSet<u32> = self
+            .tile_communities
+            .values()
+            .flat_map(|cs| cs.iter())
+            .filter(|c| c.thousands > 0.0)
+            .map(|c| c.language_id)
+            .collect();
+        for lid in active_langs {
+            if self.rng.uniform(0.0, 1.0) < 0.65 {
+                let mut temp_rng = self.rng.clone();
+                if let Some(lang) = self.languages.get_mut(&lid) {
+                    lang.mutate_tick(&mut temp_rng);
+                }
+                self.rng = temp_rng;
+            }
+        }
+
+        // 2. Verhulst logistic growth and neighborhood spillover (`historysimulation.py:168-220`)
         let tile_pops: BTreeMap<usize, f32> = self
             .tile_communities
             .iter()
@@ -716,8 +1425,13 @@ impl HistorySimulation {
         for (&t, comms) in self.tile_communities.iter_mut() {
             let cap = self.capacities[t].max(0.2);
             let total: f32 = comms.iter().map(|c| c.thousands).sum();
-            let r = 0.08f32;
-            let factor = (1.0 + r * (1.0 - total / cap)).clamp(0.85, 1.15);
+            if total <= 1e-5 {
+                continue;
+            }
+            // Verhulst logistic growth: P(t+1) = K / (1 + ((K - P0) / P0) * exp(-0.25))
+            let exp_neg_r = (-0.25f32).exp();
+            let grown = cap / (1.0 + ((cap - total) / total) * exp_neg_r);
+            let factor = (grown / total).clamp(0.85, 1.25);
             for c in comms.iter_mut() {
                 c.thousands *= factor;
             }
@@ -748,25 +1462,47 @@ impl HistorySimulation {
             self.tile_communities.entry(nb).or_default().push(migrant);
         }
 
-        // 2. Intermingle and assimilate (`people/community.py`)
-        for comms in self.tile_communities.values_mut() {
+        // 3. Intermingle and assimilate (`people/community.py:16-92`), modulated by Turchin asabiya
+        let tile_asabiya: BTreeMap<usize, f32> = self
+            .tile_states
+            .iter()
+            .map(|(&t, &sid)| (t, self.state_asabiya(sid)))
+            .collect();
+        for (&t, comms) in self.tile_communities.iter_mut() {
             if comms.len() > 1 {
                 comms.sort_by(|a, b| {
                     b.thousands
                         .partial_cmp(&a.thousands)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
+                let total_pop: f32 = comms.iter().map(|c| c.thousands).sum();
+                let ag_pop: f32 = comms
+                    .iter()
+                    .filter(|c| c.agriculture)
+                    .map(|c| c.thousands)
+                    .sum();
+                // Cultural assimilation (`assimilateculture`: >= 75% agricultural converts communities > 5%)
+                if total_pop > 0.0 && ag_pop / total_pop >= 0.75 {
+                    for c in comms.iter_mut() {
+                        if c.thousands / total_pop > 0.05 {
+                            c.agriculture = true;
+                        }
+                    }
+                }
+
+                let asabiya = tile_asabiya.get(&t).copied().unwrap_or(0.5);
+                let assim_rate = (0.02 * (0.5 + asabiya)).clamp(0.01, 0.05);
                 let dom_nat = comms[0].nationality_id;
                 let dom_lang = comms[0].language_id;
                 let mut merged = comms.remove(0);
                 let mut kept = Vec::new();
                 for mut c in comms.drain(..) {
                     if (c.nationality_id == dom_nat && c.language_id == dom_lang)
-                        || c.thousands < 0.05
+                        || (c.thousands < 1.0 && total_pop > 0.0 && c.thousands / total_pop < 0.01)
                     {
                         merged.merge_from(&c);
                     } else {
-                        let shift = c.thousands * 0.15;
+                        let shift = c.thousands * assim_rate;
                         c.thousands -= shift;
                         let mut shifted = c.clone();
                         shifted.thousands = shift;
@@ -779,46 +1515,317 @@ impl HistorySimulation {
             }
         }
 
-        // 3. Language sound changes (`historysimulation.py:242-255`)
-        let lang_ids: Vec<u32> = self.languages.keys().copied().collect();
-        for lid in lang_ids {
-            if self.rng.uniform(0.0, 1.0) < 0.65 {
+        // 4. Branch dialects for geographically disconnected language communities (`historysimulation.py:247-280`)
+        self.branch_disconnected_dialects(&fine_adj);
+
+        // 5. Update Turchin metaethnic frontier asabiya & resolve conflicts via Collins-Turchin multi-front force allocation & Boulding distance decay
+        let (extents, _, _) = self.state_topology(&fine_adj);
+        self.update_state_asabiya(&extents, &fine_adj);
+        let state_eff_pops: BTreeMap<u32, f32> = extents
+            .keys()
+            .map(|&sid| {
+                let pop = self.state_population_thousands(sid);
+                let asabiya = self.state_asabiya(sid);
+                (sid, pop * (0.5 + asabiya))
+            })
+            .collect();
+        let opp_pop_totals: BTreeMap<u32, f32> = extents
+            .keys()
+            .map(|&sid| {
+                let opps = self.lookup_opponents(sid);
+                let total: f32 = opps
+                    .iter()
+                    .map(|k| state_eff_pops.get(k).copied().unwrap_or(0.0).max(0.1))
+                    .sum();
+                (sid, total)
+            })
+            .collect();
+
+        let mut results: Vec<(u32, u32)> = Vec::new();
+        let mut border_transfers: Vec<(u32, u32)> = Vec::new();
+        for &(n, o) in &self.conflicts {
+            let pn = state_eff_pops.get(&n).copied().unwrap_or(0.0);
+            let po = state_eff_pops.get(&o).copied().unwrap_or(0.0);
+            let opp_total_n = opp_pop_totals.get(&n).copied().unwrap_or(1.0).max(0.1);
+            let opp_total_o = opp_pop_totals.get(&o).copied().unwrap_or(1.0).max(0.1);
+            let weight_n_to_o = po.max(0.1) / opp_total_n;
+            let weight_o_to_n = pn.max(0.1) / opp_total_o;
+            let dist_no = self.capital_angular_distance(n, o);
+            let lsg = (-0.5 * dist_no).exp();
+            let fn_val = pn * weight_n_to_o * lsg;
+            let fo_val = po * weight_o_to_n * lsg;
+
+            if fo_val > 0.0 && fn_val / fo_val > 1.5 {
+                results.push((n, o));
+            } else if fn_val > 0.0 && fo_val / fn_val > 1.5 {
+                results.push((o, n));
+            } else if fo_val > 0.0 && fn_val / fo_val > 1.15 {
+                border_transfers.push((n, o));
+            } else if fn_val > 0.0 && fo_val / fn_val > 1.15 {
+                border_transfers.push((o, n));
+            }
+        }
+        // All active conflicts resolve this tick (decisive annexation, marginal border transfer, or stalemate truce)
+        self.conflicts.clear();
+
+        let losers: BTreeSet<u32> = results.iter().map(|&(_, l)| l).collect();
+        let winners: BTreeSet<u32> = results.iter().map(|&(w, _)| w).collect();
+        let mut conquests: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        for &(winner, loser) in &results {
+            if !losers.contains(&winner) {
+                conquests.entry(winner).or_default().insert(loser);
+                if let Some(loser_tiles) = extents.get(&loser) {
+                    for &t in loser_tiles {
+                        self.tile_states.insert(t, winner);
+                    }
+                }
+            }
+        }
+        for &(winner, loser) in &border_transfers {
+            if losers.contains(&winner) || losers.contains(&loser) {
+                continue;
+            }
+            if let Some(loser_tiles) = extents.get(&loser) {
+                if loser_tiles.len() > 2 {
+                    let mut border_faces: Vec<usize> = loser_tiles
+                        .iter()
+                        .copied()
+                        .filter(|&t| {
+                            fine_adj[t]
+                                .iter()
+                                .any(|&nb| self.tile_states.get(&nb) == Some(&winner))
+                        })
+                        .collect();
+                    border_faces.truncate(6.min(loser_tiles.len().saturating_sub(1)));
+                    for t in border_faces {
+                        self.tile_states.insert(t, winner);
+                    }
+                }
+            }
+        }
+
+        // 6. Adapt monoglot conquests (`historysimulation.py:552-616`)
+        for (&winner, conquered_set) in &conquests {
+            let Some(winner_tiles) = extents.get(&winner) else {
+                continue;
+            };
+            let mut winner_lang_pops: BTreeMap<u32, f32> = BTreeMap::new();
+            for &t in winner_tiles {
+                if let Some(comms) = self.tile_communities.get(&t) {
+                    for c in comms {
+                        if c.thousands > 0.0 {
+                            *winner_lang_pops.entry(c.language_id).or_insert(0.0) += c.thousands;
+                        }
+                    }
+                }
+            }
+            let mut sorted_winner_langs: Vec<(u32, f32)> = winner_lang_pops.into_iter().collect();
+            sorted_winner_langs
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let winner_pop: f32 = sorted_winner_langs.iter().map(|(_, p)| *p).sum();
+            if sorted_winner_langs.is_empty() || winner_pop <= 0.0 {
+                continue;
+            }
+            let (mut winner_lang, winner_lang_pop) = sorted_winner_langs[0];
+            let winner_lang_fraction = winner_lang_pop / winner_pop;
+            if winner_lang_fraction <= MAJOR_LANGUAGE_THRESHOLD
+                || (sorted_winner_langs.len() > 1
+                    && sorted_winner_langs[1].1 / winner_pop > MAJOR_LANGUAGE_THRESHOLD)
+            {
+                // Winning state is polyglot; nothing to do
+                continue;
+            }
+
+            let winner_lang_set: BTreeSet<u32> =
+                sorted_winner_langs.iter().map(|&(l, _)| l).collect();
+            let mut loser_lang_pops: BTreeMap<u32, f32> = BTreeMap::new();
+            for &loser in conquered_set {
+                if let Some(loser_tiles) = extents.get(&loser) {
+                    for &t in loser_tiles {
+                        if let Some(comms) = self.tile_communities.get(&t) {
+                            for c in comms {
+                                if c.thousands > 0.0 && !winner_lang_set.contains(&c.language_id) {
+                                    *loser_lang_pops.entry(c.language_id).or_insert(0.0) +=
+                                        c.thousands;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut sorted_loser_langs: Vec<(u32, f32)> = loser_lang_pops.into_iter().collect();
+            sorted_loser_langs
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            let mut old_lang: Option<u32> = None;
+            let mut created_dialect = false;
+            let mut to_convert = BTreeSet::new();
+
+            for (lang, pop) in sorted_loser_langs {
+                if lang == winner_lang {
+                    continue;
+                }
+                if pop > winner_lang_pop {
+                    // Conquered language outnumbers conquerors: form a new dialect cloned from winner_lang
+                    if !created_dialect {
+                        if let Some(base_lang) = self.languages.get(&winner_lang).cloned() {
+                            let new_lid = self.next_language_id;
+                            self.next_language_id += 1;
+                            let dialect = base_lang.clone_dialect(new_lid);
+                            self.languages.insert(new_lid, dialect);
+                            old_lang = Some(winner_lang);
+                            winner_lang = new_lid;
+                            created_dialect = true;
+                        }
+                    }
+                    if let Some(donor) = self.languages.get(&lang).cloned() {
+                        if let Some(dialect) = self.languages.get_mut(&winner_lang) {
+                            let keys: Vec<ConceptKey> = donor.lexicon.keys().copied().collect();
+                            for k in keys {
+                                dialect.borrow_concept(k, &donor);
+                            }
+                        }
+                    }
+                } else {
+                    to_convert.insert(lang);
+                }
+            }
+
+            let mut affected_states: Vec<u32> = conquered_set.iter().copied().collect();
+            affected_states.push(winner);
+            for st_id in affected_states {
+                let Some(st_tiles) = extents.get(&st_id) else {
+                    continue;
+                };
+                for &t in st_tiles {
+                    let Some(comms) = self.tile_communities.get_mut(&t) else {
+                        continue;
+                    };
+                    let mut new_comms = Vec::new();
+                    for c in comms.iter_mut() {
+                        if c.thousands > 0.0
+                            && (to_convert.contains(&c.language_id)
+                                || (st_id == winner && old_lang == Some(c.language_id)))
+                        {
+                            if (winner_lang_fraction - 1.0).abs() < 1e-4 {
+                                c.language_id = winner_lang;
+                            } else {
+                                let converted = c.thousands * winner_lang_fraction;
+                                c.thousands -= converted;
+                                let mut split_c = c.clone();
+                                split_c.thousands = converted;
+                                split_c.language_id = winner_lang;
+                                new_comms.push(split_c);
+                            }
+                        }
+                    }
+                    comms.extend(new_comms);
+                }
+            }
+        }
+
+        // 7. Break up overextended peaceful states (`breaking up states`, `historysimulation.py:617-662`)
+        let state_ids: Vec<u32> = extents.keys().copied().collect();
+        for n in state_ids {
+            if winners.contains(&n) || losers.contains(&n) {
+                continue;
+            }
+            let Some(tiles) = extents.get(&n) else {
+                continue;
+            };
+            if tiles.len() < 18 {
+                continue;
+            }
+            let state_asabiya = self.state_asabiya(n);
+            if self.rng.uniform(0.0, 1.0)
+                >= Self::split_probability_with_asabiya(tiles.len(), state_asabiya)
+            {
+                continue;
+            }
+            let mut cities: Vec<usize> = Vec::new();
+            for &f in tiles {
+                let p = self.city_prob(f, &coarse_elevs, &koeppen, &fine_adj);
+                if self.rng.uniform(0.0, 1.0) < p {
+                    cities.push(f);
+                }
+            }
+            if cities.len() < 2 {
+                continue;
+            }
+            let mut partition = self.partition_by_boulding_lsg(tiles, &cities, &fine_adj);
+            for &f in tiles {
+                if !partition.contains_key(&f) {
+                    cities.push(f);
+                    partition = self.partition_by_boulding_lsg(tiles, &cities, &fine_adj);
+                }
+            }
+            let mut city_tiles_assigned: Vec<Vec<usize>> = vec![Vec::new(); cities.len()];
+            let mut state_lang_pops: Vec<BTreeMap<u32, f32>> = vec![BTreeMap::new(); cities.len()];
+            for &f in tiles {
+                let i = partition.get(&f).copied().unwrap_or(0);
+                city_tiles_assigned[i].push(f);
+                if let Some(comms) = self.tile_communities.get(&f) {
+                    for c in comms {
+                        if c.thousands > 0.0 {
+                            *state_lang_pops[i].entry(c.language_id).or_insert(0.0) += c.thousands;
+                        }
+                    }
+                }
+            }
+            for i in 1..cities.len() {
+                if city_tiles_assigned[i].is_empty() || state_lang_pops[i].is_empty() {
+                    continue;
+                }
+                let new_state = self.next_state_id;
+                self.next_state_id += 1;
+                let mut langs_by_pop: Vec<(u32, f32)> =
+                    state_lang_pops[i].iter().map(|(&l, &p)| (l, p)).collect();
+                langs_by_pop
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let maj_lang = langs_by_pop[0].0;
+
+                let mean_frontier: f32 = city_tiles_assigned[i]
+                    .iter()
+                    .map(|&f| self.tile_metaethnic_intensity(f, &fine_adj))
+                    .sum::<f32>()
+                    / (city_tiles_assigned[i].len() as f32);
+                let breakaway_asabiya = (0.5 + 0.5 * mean_frontier).clamp(0.45, 0.95);
+
+                for &f in &city_tiles_assigned[i] {
+                    self.tile_states.insert(f, new_state);
+                }
+                let color_idx = (self.rng.next_u64() as usize) % NATION_PALETTE.len();
+                self.states.insert(
+                    new_state,
+                    StateRecord {
+                        id: new_state,
+                        capital_tile: cities[i],
+                        color_idx,
+                        active: true,
+                        asabiya: breakaway_asabiya,
+                    },
+                );
+
+                // Coin the new state's name in its majority language and borrow into minority languages
                 let mut temp_rng = self.rng.clone();
-                if let Some(lang) = self.languages.get_mut(&lid) {
-                    lang.mutate_tick(&mut temp_rng);
+                if let Some(lang) = self.languages.get_mut(&maj_lang) {
+                    lang.coin_concept(ConceptKey::State(new_state), &mut temp_rng);
                 }
                 self.rng = temp_rng;
-            }
-        }
-
-        // 4. Resolve border conflicts (`historysimulation.py:305-322`)
-        let current_conflicts = self.conflicts.clone();
-        for (s1, s2) in current_conflicts {
-            let pop1 = self.state_population_thousands(s1);
-            let pop2 = self.state_population_thousands(s2);
-            let (victor, loser) = if pop1 >= pop2 { (s1, s2) } else { (s2, s1) };
-            let border_tiles: Vec<usize> = self
-                .tile_states
-                .iter()
-                .filter_map(|(&t, &st)| {
-                    if st == loser
-                        && fine_adj[t]
-                            .iter()
-                            .any(|nb| self.tile_states.get(nb) == Some(&victor))
-                    {
-                        Some(t)
-                    } else {
-                        None
+                if let Some(donor) = self.languages.get(&maj_lang).cloned() {
+                    for &(min_lang, _) in langs_by_pop.iter().skip(1) {
+                        if let Some(lang) = self.languages.get_mut(&min_lang) {
+                            lang.borrow_concept(ConceptKey::State(new_state), &donor);
+                        }
                     }
-                })
-                .take(6)
-                .collect();
-            for t in border_tiles {
-                self.tile_states.insert(t, victor);
+                }
             }
+            self.trade_partners
+                .retain(|&(a, b)| a != n && b != n);
         }
 
-        // 5. Update trade & diplomacy and recolor nations
+        // 8. Update trade, conflicts, concept accumulation, and recolor nations
         self.recolor_states(&fine_adj);
         self.update_diplomacy_and_trade(&fine_adj);
         self.history_ticks += 1;
@@ -970,10 +1977,21 @@ impl HistorySimulation {
 
         let st_name = self.state_name(sid);
         let st_pop = self.state_population_thousands(sid);
+        let st_asabiya = self.state_asabiya(sid);
+        let frontier_label = if st_asabiya >= 0.70 {
+            "Marcher Frontier"
+        } else if st_asabiya <= 0.35 {
+            "Imperial Core"
+        } else {
+            "Cohesive"
+        };
         let dom_lang = self.primary_language_for_state(sid);
         lines.push(format!(
-            "State: {st_name} | Pop: {:.0}K | Fine Face #{fine_idx} ({fine_elev:.2} km, {:.1}K / {:.1}K)",
-            st_pop, tile_pop, cap
+            "State: {st_name} | Pop: {:.0}K | Asabiya: {:.0}% ({frontier_label}) | Fine Face #{fine_idx} ({fine_elev:.2} km, {:.1}K / {:.1}K)",
+            st_pop,
+            st_asabiya * 100.0,
+            tile_pop,
+            cap
         ));
 
         // Nationalities & Languages breakdown
