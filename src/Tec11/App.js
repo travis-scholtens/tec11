@@ -930,27 +930,41 @@ export const mountTectonicsView = (gridSize) => (landPct) => (aspect) => (setTec
   view.timerId = null;
   view.setTectonicsInfo = setTectonicsInfo;
 
+  const raycaster = new THREE.Raycaster();
+  const pointerNdc = new THREE.Vector2();
+
   const handleCanvasClick = (ev) => {
     if (!view.session) return;
     const rect = canvas.getBoundingClientRect();
     const u = (ev.clientX - rect.left) / rect.width;
     const v = (ev.clientY - rect.top) / rect.height;
-    // Orthographic frustum is [-1.1, 1.1] x [-1.1, 1.1]
-    const sx = (2.0 * u - 1.0) * 1.1;
-    const sy = (1.0 - 2.0 * v) * 1.1;
-    const r2 = sx * sx + sy * sy;
-    if (r2 > 1.0) {
-      return;
-    }
-    const sz = Math.sqrt(Math.max(0.0, 1.0 - r2));
-    // Inverse-rotate around Y by -rotationAngleRad (`tectonicspresenter.py:42`)
-    const cosA = Math.cos(-view.rotationAngleRad);
-    const sinA = Math.sin(-view.rotationAngleRad);
-    const gx = sx * cosA + sz * sinA;
-    const gy = sy;
-    const gz = -sx * sinA + sz * cosA;
 
-    view.selectedTileIdx = view.session.nearest_tile(gx, gy, gz);
+    // 1. Exact 3D mesh raycast against the rendered tile triangles:
+    pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+    view.mesh.updateMatrixWorld(true);
+    view.camera.updateMatrixWorld(true);
+    raycaster.setFromCamera(pointerNdc, view.camera);
+    const hits = raycaster.intersectObject(view.mesh, false);
+    if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+      view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+    } else {
+      // 2. Analytic fallback: unproject orthographic screen coordinates to mesh space,
+      //    then invert `rotate_axes(v) = [-v1, v2, v0]` (`v0 = gz, v1 = -gx, v2 = gy`).
+      const sx = pointerNdc.x * 1.1;
+      const sy = pointerNdc.y * 1.1;
+      const r2 = sx * sx + sy * sy;
+      if (r2 > 1.0) {
+        return;
+      }
+      const sz = Math.sqrt(Math.max(0.0, 1.0 - r2));
+      const cosA = Math.cos(-view.rotationAngleRad);
+      const sinA = Math.sin(-view.rotationAngleRad);
+      const gx = sx * cosA + sz * sinA;
+      const gy = sy;
+      const gz = -sx * sinA + sz * cosA;
+      view.selectedTileIdx = view.session.nearest_tile(gz, -gx, gy);
+    }
+
     const colors = computeTectonicsVertexColors(view);
     view.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
     view.paint();
