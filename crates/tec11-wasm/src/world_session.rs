@@ -1,4 +1,4 @@
-use tec11_geology::{WorldCreateParams, WorldSimulation};
+use tec11_geology::{WorldCreateParams, WorldSimulation, WorldStageState};
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids};
@@ -135,14 +135,23 @@ impl WasmWorldSession {
     }
 
     pub fn mesh_positions(&self) -> Vec<f32> {
-        build_mesh_positions(self.sim.grid())
+        match self.sim.stage() {
+            WorldStageState::History(hist) => hist.build_display_mesh().0,
+            _ => build_mesh_positions(self.sim.grid()),
+        }
     }
 
     pub fn mesh_normals(&self) -> Vec<f32> {
-        build_mesh_normals(self.sim.grid())
+        match self.sim.stage() {
+            WorldStageState::History(hist) => hist.build_display_mesh().1,
+            _ => build_mesh_normals(self.sim.grid()),
+        }
     }
 
     pub fn vertex_tile_ids(&self) -> Vec<u32> {
-        build_vertex_tile_ids(self.sim.grid())
+        match self.sim.stage() {
+            WorldStageState::History(hist) => hist.build_display_mesh().2,
+            _ => build_vertex_tile_ids(self.sim.grid()),
+        }
     }
 }

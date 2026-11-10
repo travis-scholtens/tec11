@@ -321,7 +321,15 @@ impl WorldSimulation {
     }
 
     pub fn tile_count(&self) -> usize {
-        self.grid().faces.len()
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.tile_count(),
+            WorldStageState::Prehistory(pre) => pre.tile_count(),
+            WorldStageState::History(hist) => hist.tile_count(),
+        }
+    }
+
+    pub fn stage(&self) -> &WorldStageState {
+        &self.stage
     }
 
     pub fn total_years(&self) -> u64 {
@@ -518,15 +526,23 @@ impl WorldSimulation {
                 "climate" => {
                     let pre_snap = hist.to_snapshot();
                     if let Some(pre) = PrehistorySimulation::from_snapshot(&pre_snap, 42) {
-                        let n = pre.tile_count();
-                        let tiles = pre.tiles();
+                        let coarse_elevs = pre.tile_elevations();
                         let koeppen = pre.tile_koeppen_ids();
-                        let mut buf = Vec::with_capacity(n * 3);
-                        for t in 0..n {
-                            if tiles[t].elevation() > 0.0 {
-                                buf.extend_from_slice(&koeppen_rgb(koeppen[t]));
-                            } else {
-                                buf.extend_from_slice(&[0.0, 0.0, 0.0]);
+                        let terrain = hist.terrain();
+                        let mut buf = Vec::with_capacity(terrain.display_faces.len() * 3);
+                        for (_, _, src) in &terrain.display_faces {
+                            match *src {
+                                tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
+                                    if terrain.fine_elevations[f_idx] > 0.0 {
+                                        let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                                        buf.extend_from_slice(&koeppen_rgb(koeppen[c]));
+                                    } else {
+                                        buf.extend_from_slice(&[0.0, 0.0, 0.0]);
+                                    }
+                                }
+                                tec11_math_grid::DisplayFaceSource::OceanCoarse(_) => {
+                                    buf.extend_from_slice(&[0.0, 0.0, 0.0]);
+                                }
                             }
                         }
                         buf

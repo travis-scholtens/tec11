@@ -20,6 +20,7 @@ rust_shared_library(
         "src/rivers_session.rs",
         "src/split_session.rs",
         "src/tectonics_session.rs",
+        "src/terrain_session.rs",
         "src/world_session.rs",
     ],
     edition = "2021",

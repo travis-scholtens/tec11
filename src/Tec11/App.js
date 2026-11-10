@@ -14,6 +14,7 @@ import initWasmModule, {
   WasmRiversSession,
   WasmSplitSession,
   WasmTectonicsSession,
+  WasmTerrainSession,
   WasmWorldSession,
 } from "tec11-wasm";
 
@@ -3036,7 +3037,9 @@ function computeWorldVertexColors(view) {
 
 function updateWorldDataBuffers(view, rebuildGeometry = false) {
   const { session, geometry } = view;
-  if (rebuildGeometry) {
+  const currentTileCount = session.tile_count();
+  if (rebuildGeometry || view.lastTileCount !== currentTileCount) {
+    view.lastTileCount = currentTileCount;
     const positions = session.mesh_positions();
     const normals = session.mesh_normals();
     view.vertexTileIds = session.vertex_tile_ids();
@@ -3262,6 +3265,166 @@ export const loadFilePlanetIntoWorld = (setWorldInfo) => () => {
       activeView.selectedTileIdx = -1;
       updateWorldDataBuffers(activeView, true);
       setWorldInfo(buildWorldInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Mode 15: Subdivided Terrain & Fine River Routing (`terrainsimulation.py`, `terraindisplay.py`, `terrainpresenter.py`)
+// ============================================================================
+
+function computeTerrainVertexColors(view) {
+  const { vertexTileIds, tileColors } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    colors[v * 3] = tileColors[t * 3];
+    colors[v * 3 + 1] = tileColors[t * 3 + 1];
+    colors[v * 3 + 2] = tileColors[t * 3 + 2];
+  }
+  return colors;
+}
+
+function updateTerrainDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileColors = session.tile_colors_rgb(
+    Boolean(view.showRivers),
+    view.selectedFaceIdx
+  );
+  const colors = computeTerrainVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildTerrainInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Saved Planet (${s.land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  const selectedReport =
+    view.selectedFaceIdx >= 0
+      ? s.inspect_face(view.selectedFaceIdx)
+      : "Click any subdivided land face or routed river channel on the globe to inspect its 7-octave Simplex noise elevation and coarse tile parentage.";
+  return {
+    planetName,
+    displayFaceCount: s.display_face_count(),
+    fineFaceCount: s.fine_face_count(),
+    coarseTileCount: s.coarse_tile_count(),
+    riverCount: s.river_count(),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    selectedReport,
+  };
+}
+
+export const mountTerrainView = (showRivers) => (setTerrainInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  view.session = new WasmTerrainSession();
+  view.showRivers = showRivers;
+  view.selectedFaceIdx = -1;
+  view.setTerrainInfo = setTerrainInfo;
+
+  if (activeClimateSnapshotBytes) {
+    view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+  }
+
+  const raycaster = new THREE.Raycaster();
+  const pointerNdc = new THREE.Vector2();
+
+  const handleCanvasClick = (ev) => {
+    if (!view.session) return;
+    const rect = canvas.getBoundingClientRect();
+    const u = (ev.clientX - rect.left) / rect.width;
+    const v = (ev.clientY - rect.top) / rect.height;
+
+    pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+    view.mesh.updateMatrixWorld(true);
+    view.camera.updateMatrixWorld(true);
+    raycaster.setFromCamera(pointerNdc, view.camera);
+    const hits = raycaster.intersectObject(view.mesh, false);
+    if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+      view.selectedFaceIdx = view.vertexTileIds[hits[0].face.a];
+      updateTerrainDataBuffers(view, false);
+      view.setTerrainInfo(buildTerrainInfo(view))();
+    }
+  };
+
+  canvas.addEventListener("click", handleCanvasClick);
+
+  activeView = view;
+  updateTerrainDataBuffers(view, true);
+  setTerrainInfo(buildTerrainInfo(view))();
+
+  return () => {
+    canvas.removeEventListener("click", handleCanvasClick);
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const setTerrainShowRivers = (showRivers) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.showRivers = showRivers;
+  updateTerrainDataBuffers(activeView, false);
+};
+
+export const saveTerrainPlanet = (setTerrainInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const bytes = activeView.session.encode_snapshot();
+  if (!bytes || bytes.length === 0) return;
+  storeSavedSnapshotBytes(bytes);
+  activeClimateSnapshotBytes = bytes;
+  triggerBinaryDownload("tec11-terrain.tec11", bytes);
+  setTerrainInfo(buildTerrainInfo(activeView))();
+};
+
+export const loadEarthIntoTerrain = (setTerrainInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  activeView.selectedFaceIdx = -1;
+  updateTerrainDataBuffers(activeView, true);
+  setTerrainInfo(buildTerrainInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoTerrain = (setTerrainInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.selectedFaceIdx = -1;
+    updateTerrainDataBuffers(activeView, true);
+    setTerrainInfo(buildTerrainInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoTerrain = (setTerrainInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.selectedFaceIdx = -1;
+      updateTerrainDataBuffers(activeView, true);
+      setTerrainInfo(buildTerrainInfo(activeView))();
     }
   });
 };

@@ -1,8 +1,6 @@
 use tec11_geology::HistorySimulation;
 use wasm_bindgen::prelude::*;
 
-use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids};
-
 #[wasm_bindgen]
 pub struct WasmHistorySession {
     sim: HistorySimulation,
@@ -84,14 +82,14 @@ impl WasmHistorySession {
     }
 
     pub fn mesh_positions(&self) -> Vec<f32> {
-        build_mesh_positions(self.sim.grid())
+        self.sim.build_display_mesh().0
     }
 
     pub fn mesh_normals(&self) -> Vec<f32> {
-        build_mesh_normals(self.sim.grid())
+        self.sim.build_display_mesh().1
     }
 
     pub fn vertex_tile_ids(&self) -> Vec<u32> {
-        build_vertex_tile_ids(self.sim.grid())
+        self.sim.build_display_mesh().2
     }
 }

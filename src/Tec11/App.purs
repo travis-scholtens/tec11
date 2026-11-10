@@ -29,6 +29,7 @@ data Screen
   | RacinationScreen
   | PrehistoryScreen
   | LanguageScreen
+  | TerrainScreen
   | HistoryScreen
   | WorldScreen
 
@@ -154,6 +155,16 @@ type LanguageInfo =
   { sourcePhonemes :: String
   , destPhonemes :: String
   , words :: Array LanguageWordItem
+  }
+
+type TerrainInfo =
+  { planetName :: String
+  , displayFaceCount :: Int
+  , fineFaceCount :: Int
+  , coarseTileCount :: Int
+  , riverCount :: Int
+  , hasSavedPlanet :: Boolean
+  , selectedReport :: String
   }
 
 type HistoryInfo =
@@ -287,6 +298,14 @@ foreign import mountLanguageView :: (LanguageInfo -> Effect Unit) -> Effect (Eff
 foreign import generateLanguage :: (LanguageInfo -> Effect Unit) -> Effect Unit
 foreign import borrowLanguage :: (LanguageInfo -> Effect Unit) -> Effect Unit
 foreign import applyLanguageSoundChange :: Int -> (LanguageInfo -> Effect Unit) -> Effect Unit
+
+-- Terrain mode FFI (`terrainpresenter.py`)
+foreign import mountTerrainView :: Boolean -> (TerrainInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import setTerrainShowRivers :: Boolean -> Effect Unit
+foreign import saveTerrainPlanet :: (TerrainInfo -> Effect Unit) -> Effect Unit
+foreign import loadEarthIntoTerrain :: (TerrainInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoTerrain :: (TerrainInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoTerrain :: (TerrainInfo -> Effect Unit) -> Effect Unit
 
 -- History mode FFI
 foreign import mountHistoryView :: String -> Boolean -> (HistoryInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -460,6 +479,18 @@ mkApp = do
       , words: []
       }
 
+    -- Terrain mode state (`terrainpresenter.py`)
+    terrainShowRivers /\ setTerrainShowRiversState <- useState' true
+    terrainInfo /\ setTerrainInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , displayFaceCount: 7292
+      , fineFaceCount: 0
+      , coarseTileCount: 7292
+      , riverCount: 0
+      , hasSavedPlanet: false
+      , selectedReport: "Click any terrain face to inspect its elevation, Simplex noise perturbation, and parent coarse tile interpolation."
+      }
+
     -- History mode state
     historyAspect /\ setHistoryAspectState <- useState' "nations"
     historyShowRivers /\ setHistoryShowRiversState <- useState' true
@@ -548,6 +579,9 @@ mkApp = do
           mountPrehistoryView setPrehistoryInfo
         LanguageScreen -> do
           mountLanguageView setLanguageInfo
+        TerrainScreen -> do
+          setRotationDeg 0
+          mountTerrainView terrainShowRivers setTerrainInfo
         HistoryScreen -> do
           setRotationDeg 0
           mountHistoryView historyAspect historyShowRivers setHistoryInfo
@@ -745,6 +779,12 @@ mkApp = do
           setRacinationTravelRangeState tr
           setRacinationTravelRange tr
 
+      handleToggleTerrainRivers :: Effect Unit
+      handleToggleTerrainRivers = do
+        let next = not terrainShowRivers
+        setTerrainShowRiversState next
+        setTerrainShowRivers next
+
       handleHistoryAspectChange :: Maybe String -> Effect Unit
       handleHistoryAspectChange maybeVal = case maybeVal of
         Nothing -> pure unit
@@ -921,6 +961,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen LanguageScreen)
                           , children: [ R.text "Language" ]
+                          }
+                      , R.button
+                          { id: "terrain-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen TerrainScreen)
+                          , children: [ R.text "Terrain" ]
                           }
                       , R.button
                           { id: "history-btn"
@@ -2971,6 +3018,134 @@ mkApp = do
                           , className: "action-btn secondary"
                           , onClick: capture_ (applyLanguageSoundChange 8 setLanguageInfo)
                           , children: [ R.text "Apocope" ]
+                          }
+                      , R.button
+                          { id: "done-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (setScreen MainMenu)
+                          , children: [ R.text "Done" ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      TerrainScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.button
+                                  { id: "terrain-rivers-btn"
+                                  , className: if terrainShowRivers then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleTerrainRivers
+                                  , children: [ R.text (if terrainShowRivers then "Rivers: On" else "Rivers: Off") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Subdivided Terrain & River Routing Inspector" ]
+                                  }
+                              , R.div
+                                  { id: "terrain-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text terrainInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { id: "terrain-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "terrain-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text terrainInfo.planetName ]
+                                  }
+                              , R.div
+                                  { id: "terrain-fine-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show terrainInfo.fineFaceCount <> " fine land tiles") ]
+                                  }
+                              , R.div
+                                  { id: "terrain-display-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show terrainInfo.displayFaceCount <> " total display faces") ]
+                                  }
+                              , R.div
+                                  { id: "terrain-coarse-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show terrainInfo.coarseTileCount <> " coarse parent tiles") ]
+                                  }
+                              , R.div
+                                  { id: "terrain-rivers-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show terrainInfo.riverCount <> " fine-routed rivers") ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "terrain-earth-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (loadEarthIntoTerrain setTerrainInfo)
+                          , children: [ R.text "Use Earth (ETOPO2)" ]
+                          }
+                      , R.button
+                          { id: "terrain-saved-btn"
+                          , className: "action-btn secondary"
+                          , disabled: not terrainInfo.hasSavedPlanet
+                          , onClick: capture_ (loadSavedPlanetIntoTerrain setTerrainInfo)
+                          , children: [ R.text "Use Saved Planet" ]
+                          }
+                      , R.button
+                          { id: "terrain-load-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (loadFilePlanetIntoTerrain setTerrainInfo)
+                          , children: [ R.text "Load (.tec11)" ]
+                          }
+                      , R.button
+                          { id: "terrain-save-btn"
+                          , className: "action-btn"
+                          , onClick: capture_ (saveTerrainPlanet setTerrainInfo)
+                          , children: [ R.text "Save (.tec11)" ]
                           }
                       , R.button
                           { id: "done-btn"

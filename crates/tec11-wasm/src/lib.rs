@@ -13,6 +13,7 @@ pub mod racination_session;
 pub mod rivers_session;
 pub mod split_session;
 pub mod tectonics_session;
+pub mod terrain_session;
 pub mod world_session;
 
 pub use climate_session::WasmClimateSession;
@@ -29,4 +30,5 @@ pub use racination_session::WasmRacinationSession;
 pub use rivers_session::WasmRiversSession;
 pub use split_session::WasmSplitSession;
 pub use tectonics_session::WasmTectonicsSession;
+pub use terrain_session::WasmTerrainSession;
 pub use world_session::WasmWorldSession;

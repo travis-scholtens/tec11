@@ -12,6 +12,7 @@ pub mod rivers;
 pub mod rock;
 pub mod split_sandbox;
 pub mod tectonics;
+pub mod terrain;
 pub mod tile;
 pub mod world;
 
@@ -38,5 +39,6 @@ pub use rivers::{trace_coarse_rivers, RiversSandbox};
 pub use rock::{Rock, RockKind, RockLayer};
 pub use split_sandbox::SplitSandbox;
 pub use tectonics::{LithosphericGroup, TectonicsSimulation};
+pub use terrain::TerrainSandbox;
 pub use tile::TileGeology;
 pub use world::{WorldCreateParams, WorldSimulation, WorldStageState};

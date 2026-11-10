@@ -18,6 +18,7 @@ rust_library(
         "src/rock.rs",
         "src/split_sandbox.rs",
         "src/tectonics.rs",
+        "src/terrain.rs",
         "src/tile.rs",
         "src/world.rs",
     ],

@@ -87,6 +87,16 @@ impl SphericalGrid {
         grid
     }
 
+    /// Creates an empty spherical grid at the given subdivision `size`.
+    pub fn new_empty(size: u32) -> Self {
+        Self {
+            size,
+            faces: Vec::new(),
+            face_index: BTreeMap::new(),
+            vertices: BTreeMap::new(),
+        }
+    }
+
     /// Creates a spherical grid subdivided to `target_size`.
     pub fn with_size(target_size: u32) -> Self {
         let mut grid = Self::new();
@@ -94,6 +104,62 @@ impl SphericalGrid {
             grid = grid.subdivide();
         }
         grid
+    }
+
+    /// Populates a single face `prev_face` from `prev` into `self` (`grid.py:103-145`).
+    pub fn populate_from_parent(&mut self, prev: &SphericalGrid, prev_face: Vec3) {
+        let pf_key = Vec3Key::from_vec3(prev_face);
+        if self.face_index.contains_key(&pf_key) {
+            return;
+        }
+        let Some(&prev_idx) = prev.face_index.get(&pf_key) else {
+            return;
+        };
+        let prev_face_vertices = &prev.faces[prev_idx].1;
+        self.make_face(prev_face, prev_face_vertices);
+
+        for &vertex in prev_face_vertices {
+            let vkey = Vec3Key::from_vec3(vertex);
+            if self.face_index.contains_key(&vkey) {
+                continue;
+            }
+            let Some(adj_faces) = prev.vertices.get(&vkey) else {
+                continue;
+            };
+            let num_adj = adj_faces.len();
+            if num_adj < 3 {
+                continue;
+            }
+            let mut new_vertices = Vec::with_capacity(num_adj * 2);
+
+            for i in 0..num_adj {
+                let f1 = adj_faces[i];
+                let f2 = adj_faces[(i + 1) % num_adj];
+
+                let f1_verts = &prev.faces[prev.face_index[&Vec3Key::from_vec3(f1)]].1;
+                let f2_verts = &prev.faces[prev.face_index[&Vec3Key::from_vec3(f2)]].1;
+
+                let f1_set: BTreeSet<Vec3Key> =
+                    f1_verts.iter().map(|&v| Vec3Key::from_vec3(v)).collect();
+                let common: Vec<Vec3> = f2_verts
+                    .iter()
+                    .copied()
+                    .filter(|&v| f1_set.contains(&Vec3Key::from_vec3(v)))
+                    .collect();
+
+                debug_assert_eq!(common.len(), 2, "Adjacent faces must share 2 vertices");
+
+                for neighbor in [f1, f2] {
+                    new_vertices.push(sorted_centroid_normal([neighbor, common[0], common[1]]));
+                }
+            }
+
+            if dot(vertex, cross(new_vertices[0], new_vertices[1])) > 0.0 {
+                new_vertices.reverse();
+            }
+
+            self.insert_face(vertex, new_vertices);
+        }
     }
 
     fn add_face_vertices(&mut self, face: Vec3, face_vertices: &[Vec3]) {
