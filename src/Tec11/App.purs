@@ -23,6 +23,7 @@ data Screen
   | ErosionScreen
   | ClimateScreen
   | TectonicsScreen
+  | RiversScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -79,6 +80,13 @@ type TectonicsInfo =
   , selectedTileReport :: String
   }
 
+type RiversInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , riverCount :: Int
+  , hasSavedPlanet :: Boolean
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -130,6 +138,13 @@ foreign import resetTectonics :: Int -> Int -> (TectonicsInfo -> Effect Unit) ->
 foreign import setTectonicsAspect :: String -> Effect Unit
 foreign import saveTectonicsPlanet :: (TectonicsInfo -> Effect Unit) -> Effect Unit
 foreign import loadTectonicsPlanetFromFile :: (Int -> Effect Unit) -> (TectonicsInfo -> Effect Unit) -> Effect Unit
+
+-- Rivers mode FFI
+foreign import mountRiversView :: Int -> Int -> (RiversInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import setRiversParams :: Int -> Int -> (RiversInfo -> Effect Unit) -> Effect Unit
+foreign import loadEarthIntoRivers :: (RiversInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoRivers :: (RiversInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoRivers :: (RiversInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -212,6 +227,16 @@ mkApp = do
       , selectedTileReport: "Click any tile on the globe to inspect its rock layers."
       }
 
+    -- Rivers mode state (`hmin` slider 0..100 -> 0.0..10.0 km, `pmin` slider 0..100 -> 0.0..3.0)
+    riversHmin /\ setRiversHmin <- useState' 50
+    riversPmin /\ setRiversPmin <- useState' 17
+    riversInfo /\ setRiversInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , riverCount: 0
+      , hasSavedPlanet: false
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -240,6 +265,9 @@ mkApp = do
         TectonicsScreen -> do
           setRotationDeg 0
           mountTectonicsView tectonicsSize tectonicsLandPct tectonicsAspect setTectonicsInfo
+        RiversScreen -> do
+          setRotationDeg 0
+          mountRiversView riversHmin riversPmin setRiversInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -375,6 +403,20 @@ mkApp = do
         Just pct -> do
           setTectonicsLandPct pct
 
+      handleRiversHminChange :: Maybe String -> Effect Unit
+      handleRiversHminChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just h -> do
+          setRiversHmin h
+          setRiversParams h riversPmin setRiversInfo
+
+      handleRiversPminChange :: Maybe String -> Effect Unit
+      handleRiversPminChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just p -> do
+          setRiversPmin p
+          setRiversParams riversHmin p setRiversInfo
+
     pure case screen of
       MainMenu ->
         R.div
@@ -432,6 +474,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen TectonicsScreen)
                           , children: [ R.text "Tectonics" ]
+                          }
+                      , R.button
+                          { id: "rivers-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen RiversScreen)
+                          , children: [ R.text "Rivers" ]
                           }
                       ]
                   }
@@ -1480,6 +1529,149 @@ mkApp = do
                           , className: "action-btn secondary"
                           , disabled: not erosionInfo.hasSavedPlanet
                           , onClick: capture_ (loadSavedPlanetIntoErosion setErosionInfo)
+                          , children: [ R.text "Load Saved" ]
+                          }
+                      , R.button
+                          { id: "done-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (setScreen MainMenu)
+                          , children: [ R.text "Done" ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      RiversScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Min peak height:" ]
+                                  }
+                              , R.input
+                                  { id: "rivers-hmin-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "5"
+                                  , max: "95"
+                                  , step: "1"
+                                  , value: show riversHmin
+                                  , onChange: handler targetValue handleRiversHminChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show (Int.toNumber riversHmin / 10.0) <> " km") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Min source precip:" ]
+                                  }
+                              , R.input
+                                  { id: "rivers-pmin-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "100"
+                                  , step: "1"
+                                  , value: show riversPmin
+                                  , onChange: handler targetValue handleRiversPminChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show riversPmin <> "%") ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column pangea-sidebar"
+                  , children:
+                      [ R.div
+                          { id: "rivers-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "rivers-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text riversInfo.planetName ]
+                                  }
+                              , R.div
+                                  { id: "rivers-count-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Active rivers: " <> show riversInfo.riverCount) ]
+                                  }
+                              , R.div
+                                  { id: "rivers-tiles-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show riversInfo.tileCount <> " tiles") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "rivers-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadEarthIntoRivers setRiversInfo)
+                                  , children: [ R.text "Earth" ]
+                                  }
+                              , R.button
+                                  { id: "rivers-load-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadFilePlanetIntoRivers setRiversInfo)
+                                  , children: [ R.text "Load File" ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "rivers-saved-btn"
+                          , className: "action-btn"
+                          , disabled: not riversInfo.hasSavedPlanet
+                          , onClick: capture_ (loadSavedPlanetIntoRivers setRiversInfo)
                           , children: [ R.text "Load Saved" ]
                           }
                       , R.button

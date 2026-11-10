@@ -4,6 +4,7 @@ pub mod grid_session;
 pub mod mesh;
 pub mod move_session;
 pub mod pangea_session;
+pub mod rivers_session;
 pub mod split_session;
 pub mod tectonics_session;
 
@@ -12,5 +13,6 @@ pub use erosion_session::WasmErosionSession;
 pub use grid_session::WasmGridSession;
 pub use move_session::WasmMoveSession;
 pub use pangea_session::WasmPangeaSession;
+pub use rivers_session::WasmRiversSession;
 pub use split_session::WasmSplitSession;
 pub use tectonics_session::WasmTectonicsSession;

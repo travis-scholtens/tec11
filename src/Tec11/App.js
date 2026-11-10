@@ -5,6 +5,7 @@ import initWasmModule, {
   WasmGridSession,
   WasmMoveSession,
   WasmPangeaSession,
+  WasmRiversSession,
   WasmSplitSession,
   WasmTectonicsSession,
 } from "tec11-wasm";
@@ -1706,6 +1707,165 @@ export const loadFilePlanetIntoErosion = (setErosionInfo) => () => {
       activeView.selectedTileIdx = -1;
       updateErosionViewBuffers(activeView, true);
       setErosionInfo(buildErosionInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Rivers Sandbox Mode (`riversdisplay.py` / `riverspresenter.py`)
+// ============================================================================
+
+function computeRiversVertexColors(view) {
+  const { elevations, felsities, koeppenIds, tileLife, riverProgress, vertexTileIds } = view;
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+
+  for (let v = 0; v < numVerts; v++) {
+    const tid = vertexTileIds[v];
+    const out = v * 3;
+    const prog = riverProgress[tid];
+
+    if (prog > 0.0) {
+      // `riversdisplay.py:6-9`:
+      // `s = 1 - rts[t]`, `return (127*s, 255*s, 255*s)`
+      const s = Math.max(0.15, 1.0 - prog);
+      colors[out] = (127.0 * s) / 255.0;
+      colors[out + 1] = s;
+      colors[out + 2] = s;
+      continue;
+    }
+
+    const h = elevations[tid];
+    if (h <= 0.0) {
+      colors[out] = 0.0;
+      colors[out + 1] = 0.0;
+      colors[out + 2] = 128.0 / 255.0;
+    } else {
+      const kId = koeppenIds[tid];
+      if (kId === 12 || kId === 13) {
+        colors[out] = 1.0;
+        colors[out + 1] = 1.0;
+        colors[out + 2] = 1.0;
+      } else {
+        const f = felsities[tid];
+        const rockR = 128.0;
+        const rockG = 64.0 + 64.0 * f;
+        const rockB = 128.0 * f;
+        const lifeGreen = 255.0 * tileLife[tid];
+        colors[out] = (0.5 * rockR) / 255.0;
+        colors[out + 1] = (0.5 * (rockG + lifeGreen)) / 255.0;
+        colors[out + 2] = (0.5 * rockB) / 255.0;
+      }
+    }
+  }
+
+  return colors;
+}
+
+function updateRiversViewBuffers(view, rebuildGeometry) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    view.elevations = session.tile_elevations();
+    view.felsities = session.tile_felsities();
+    view.koeppenIds = session.tile_koeppen_ids();
+    view.tileLife = session.tile_life();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.riverProgress = session.tile_river_progress();
+  const riverLines = session.river_line_positions();
+  view.arrowMaterial.color.setHex(0x67e8f9);
+  view.arrowMaterial.opacity = 0.92;
+  view.arrowLines.visible = riverLines.length > 0;
+  view.arrowGeometry.setAttribute("position", new THREE.Float32BufferAttribute(riverLines, 3));
+
+  const colors = computeRiversVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildRiversInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Tectonics (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    riverCount: s.river_count(),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+  };
+}
+
+export const mountRiversView = (hminSlider) => (pminSlider) => (setRiversInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  const hmin = hminSlider / 10.0;
+  const pmin = (3.0 * pminSlider) / 100.0;
+  view.session = new WasmRiversSession(hmin, pmin);
+
+  if (activeClimateSnapshotBytes) {
+    view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+  }
+
+  activeView = view;
+  updateRiversViewBuffers(view, true);
+  setRiversInfo(buildRiversInfo(view))();
+
+  return () => {
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const setRiversParams = (hminSlider) => (pminSlider) => (setRiversInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const hmin = hminSlider / 10.0;
+  const pmin = (3.0 * pminSlider) / 100.0;
+  activeView.session.set_params(hmin, pmin);
+  updateRiversViewBuffers(activeView, false);
+  setRiversInfo(buildRiversInfo(activeView))();
+};
+
+export const loadEarthIntoRivers = (setRiversInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  updateRiversViewBuffers(activeView, true);
+  setRiversInfo(buildRiversInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoRivers = (setRiversInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    updateRiversViewBuffers(activeView, true);
+    setRiversInfo(buildRiversInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoRivers = (setRiversInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      updateRiversViewBuffers(activeView, true);
+      setRiversInfo(buildRiversInfo(activeView))();
     }
   });
 };

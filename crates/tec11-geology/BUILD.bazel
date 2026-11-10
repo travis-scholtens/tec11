@@ -8,6 +8,7 @@ rust_library(
         "src/move_sandbox.rs",
         "src/movement.rs",
         "src/pangea.rs",
+        "src/rivers.rs",
         "src/rock.rs",
         "src/split_sandbox.rs",
         "src/tectonics.rs",
