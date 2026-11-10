@@ -64,3 +64,15 @@ sh_binary(
     visibility = ["//visibility:public"],
 )
 
+alias(
+    name = "tec11_cli",
+    actual = "//crates/tec11-cli:tec11_cli",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "cli",
+    actual = "//crates/tec11-cli:tec11_cli",
+    visibility = ["//visibility:public"],
+)
+

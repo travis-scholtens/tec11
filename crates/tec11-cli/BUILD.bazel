@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+rust_binary(
+    name = "tec11_cli",
+    srcs = ["src/main.rs"],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/tec11-geology:tec11_geology",
+        "//crates/tec11-math-grid:tec11_math_grid",
+        "//crates/tec11-proto:tec11_proto",
+    ],
+)
+
+rust_test(
+    name = "tec11_cli_test",
+    crate = ":tec11_cli",
+)

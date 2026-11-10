@@ -254,7 +254,8 @@ impl WorldSimulation {
     fn enter_prehistory_stage(&mut self) {
         if let WorldStageState::Tectonics(tec) = &self.stage {
             let snap = tec.to_snapshot();
-            if let Some(mut pre) = PrehistorySimulation::from_snapshot(&snap, 42) {
+            let sub_seed = self.rng.next_u64();
+            if let Some(mut pre) = PrehistorySimulation::from_snapshot(&snap, sub_seed) {
                 pre.step();
                 self.prehistory_ticks = pre.prehistory_ticks();
                 self.stage = WorldStageState::Prehistory(pre);
@@ -265,12 +266,25 @@ impl WorldSimulation {
     fn enter_history_stage(&mut self) {
         if let WorldStageState::Prehistory(pre) = &self.stage {
             let snap = pre.to_snapshot();
-            if let Some(pre_copy) = PrehistorySimulation::from_snapshot(&snap, 42) {
-                let hist = HistorySimulation::from_prehistory(pre_copy, 42);
+            let sub_seed = self.rng.next_u64();
+            if let Some(pre_copy) = PrehistorySimulation::from_snapshot(&snap, sub_seed) {
+                let hist = HistorySimulation::from_prehistory(pre_copy, sub_seed as u128);
                 self.history_ticks = hist.history_ticks();
                 self.stage = WorldStageState::History(hist);
             }
         }
+    }
+
+    pub fn tectonics_ticks(&self) -> u32 {
+        self.tectonics_ticks
+    }
+
+    pub fn prehistory_ticks(&self) -> u32 {
+        self.prehistory_ticks
+    }
+
+    pub fn history_ticks(&self) -> u32 {
+        self.history_ticks
     }
 
     fn sync_counters(&mut self) {
