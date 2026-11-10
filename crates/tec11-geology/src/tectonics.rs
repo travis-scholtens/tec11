@@ -5,7 +5,7 @@ use tec11_climate::ClimateModel;
 use tec11_math_grid::{
     cross, dot, length, normal, rotate, GreatCircleArc, Pcg64Mcg, PointTree, SphericalGrid, Vec3,
 };
-use tec11_proto::{GeologicalTileExt, MetamorphicFaciesExt, PlanetSnapshotExt};
+use tec11_proto::{MetamorphicFaciesExt, PlanetSnapshotExt};
 
 use crate::movement::{center_tile, farthest_tile, move_group, split_group};
 use crate::pangea::PangeaWorld;
@@ -1329,6 +1329,7 @@ impl TectonicsSimulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tec11_proto::GeologicalTileExt;
 
     #[test]
     fn test_tectonics_simulation_lifecycle() {

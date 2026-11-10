@@ -3,10 +3,13 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 rust_library(
     name = "tec11_geology",
     srcs = [
+        "src/erosion_sandbox.rs",
         "src/lib.rs",
+        "src/move_sandbox.rs",
         "src/movement.rs",
         "src/pangea.rs",
         "src/rock.rs",
+        "src/split_sandbox.rs",
         "src/tectonics.rs",
         "src/tile.rs",
     ],

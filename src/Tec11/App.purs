@@ -18,6 +18,9 @@ data Screen
   = MainMenu
   | GridScreen
   | PangeaScreen
+  | SplitScreen
+  | MoveScreen
+  | ErosionScreen
   | ClimateScreen
   | TectonicsScreen
 
@@ -32,6 +35,30 @@ type PangeaInfo =
   { gridSize :: Int
   , tileCount :: Int
   , actualLandPercent :: Int
+  }
+
+type SplitInfo =
+  { gridSize :: Int
+  , tileCount :: Int
+  , iterations :: Int
+  , redCount :: Int
+  , blueCount :: Int
+  }
+
+type MoveInfo =
+  { gridSize :: Int
+  , tileCount :: Int
+  , groupTileCount :: Int
+  , steps :: Int
+  , isRunning :: Boolean
+  }
+
+type ErosionInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , steps :: Int
+  , hasSavedPlanet :: Boolean
+  , selectedTileReport :: String
   }
 
 type ClimateInfo =
@@ -62,6 +89,29 @@ foreign import subdivideGrid :: (GridInfo -> Effect Unit) -> Effect Unit
 foreign import mountPangeaView :: Int -> Int -> String -> (PangeaInfo -> Effect Unit) -> Effect (Effect Unit)
 foreign import regeneratePangea :: Int -> Int -> (PangeaInfo -> Effect Unit) -> Effect Unit
 foreign import setPangeaRenderMode :: String -> Effect Unit
+
+-- Split mode FFI
+foreign import mountSplitView :: Int -> Int -> (SplitInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import iterateSplit :: Int -> (SplitInfo -> Effect Unit) -> Effect Unit
+foreign import resetSplit :: Int -> (SplitInfo -> Effect Unit) -> Effect Unit
+foreign import setSplitTime :: Int -> Effect Unit
+
+-- Move mode FFI
+foreign import mountMoveView :: Int -> Number -> Number -> Boolean -> (MoveInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepMove :: (MoveInfo -> Effect Unit) -> Effect Unit
+foreign import toggleMoveRunning :: (MoveInfo -> Effect Unit) -> Effect Unit
+foreign import resetMove :: Int -> Number -> Number -> (MoveInfo -> Effect Unit) -> Effect Unit
+foreign import setMoveDirection :: Number -> Effect Unit
+foreign import setMoveSpeed :: Number -> Effect Unit
+foreign import setMoveTrail :: Boolean -> Effect Unit
+
+-- Erosion mode FFI
+foreign import mountErosionView :: Boolean -> Boolean -> (ErosionInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepErosion :: (ErosionInfo -> Effect Unit) -> Effect Unit
+foreign import setErosionOverlays :: Boolean -> Boolean -> Effect Unit
+foreign import loadEarthIntoErosion :: (ErosionInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoErosion :: (ErosionInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoErosion :: (ErosionInfo -> Effect Unit) -> Effect Unit
 
 -- Climate mode FFI
 foreign import mountClimateView :: Int -> Int -> String -> Int -> (ClimateInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -99,6 +149,41 @@ mkApp = do
     targetLandPct /\ setTargetLandPct <- useState' 29
     renderMode /\ setRenderMode <- useState' "color"
     pangeaInfo /\ setPangeaInfo <- useState' { gridSize: 6, tileCount: 7292, actualLandPercent: 29 }
+
+    -- Split mode state
+    splitSize /\ setSplitSize <- useState' 6
+    splitTime /\ setSplitTimeState <- useState' 2
+    splitInfo /\ setSplitInfo <- useState'
+      { gridSize: 6
+      , tileCount: 7292
+      , iterations: 1
+      , redCount: 1057
+      , blueCount: 1057
+      }
+
+    -- Move mode state
+    moveSize /\ setMoveSize <- useState' 6
+    moveDirection /\ setMoveDirectionState <- useState' 45
+    moveSpeed /\ setMoveSpeedState <- useState' 2
+    moveTrail /\ setMoveTrailState <- useState' true
+    moveInfo /\ setMoveInfo <- useState'
+      { gridSize: 6
+      , tileCount: 7292
+      , groupTileCount: 1823
+      , steps: 0
+      , isRunning: false
+      }
+
+    -- Erosion mode state
+    erosionShowLost /\ setErosionShowLost <- useState' true
+    erosionShowGained /\ setErosionShowGained <- useState' true
+    erosionInfo /\ setErosionInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , steps: 0
+      , hasSavedPlanet: false
+      , selectedTileReport: "Click any tile on the globe to inspect elevation, erosion, and deposition."
+      }
 
     -- Climate mode state
     climateAttribute /\ setClimateAttributeState <- useState' "koeppen"
@@ -140,6 +225,15 @@ mkApp = do
         PangeaScreen -> do
           setRotationDeg 0
           mountPangeaView planetSize targetLandPct renderMode setPangeaInfo
+        SplitScreen -> do
+          setRotationDeg 0
+          mountSplitView splitSize splitTime setSplitInfo
+        MoveScreen -> do
+          setRotationDeg 0
+          mountMoveView moveSize (Int.toNumber moveDirection) (Int.toNumber moveSpeed) moveTrail setMoveInfo
+        ErosionScreen -> do
+          setRotationDeg 0
+          mountErosionView erosionShowLost erosionShowGained setErosionInfo
         ClimateScreen -> do
           setRotationDeg 0
           mountClimateView climateCells climateGlaciation climateAttribute climateSeason setClimateInfo
@@ -179,6 +273,59 @@ mkApp = do
       handleGeneratePangea :: Effect Unit
       handleGeneratePangea =
         regeneratePangea planetSize targetLandPct setPangeaInfo
+
+      handleSplitTimeChange :: Maybe String -> Effect Unit
+      handleSplitTimeChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just t -> do
+          setSplitTimeState t
+          setSplitTime t
+
+      handleSplitSizeChange :: Maybe String -> Effect Unit
+      handleSplitSizeChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just sz -> do
+          setSplitSize sz
+          resetSplit sz setSplitInfo
+
+      handleMoveDirectionChange :: Maybe String -> Effect Unit
+      handleMoveDirectionChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just dir -> do
+          setMoveDirectionState dir
+          setMoveDirection (Int.toNumber dir)
+
+      handleMoveSpeedChange :: Maybe String -> Effect Unit
+      handleMoveSpeedChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just spd -> do
+          setMoveSpeedState spd
+          setMoveSpeed (Int.toNumber spd)
+
+      handleMoveSizeChange :: Maybe String -> Effect Unit
+      handleMoveSizeChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just sz -> do
+          setMoveSize sz
+          resetMove sz (Int.toNumber moveDirection) (Int.toNumber moveSpeed) setMoveInfo
+
+      handleToggleMoveTrail :: Effect Unit
+      handleToggleMoveTrail = do
+        let next = not moveTrail
+        setMoveTrailState next
+        setMoveTrail next
+
+      handleToggleErosionLost :: Effect Unit
+      handleToggleErosionLost = do
+        let next = not erosionShowLost
+        setErosionShowLost next
+        setErosionOverlays next erosionShowGained
+
+      handleToggleErosionGained :: Effect Unit
+      handleToggleErosionGained = do
+        let next = not erosionShowGained
+        setErosionShowGained next
+        setErosionOverlays erosionShowLost next
 
       handleClimateAttrChange :: Maybe String -> Effect Unit
       handleClimateAttrChange maybeVal = case maybeVal of
@@ -250,6 +397,27 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen PangeaScreen)
                           , children: [ R.text "Pangea" ]
+                          }
+                      , R.button
+                          { id: "split-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen SplitScreen)
+                          , children: [ R.text "Split" ]
+                          }
+                      , R.button
+                          { id: "move-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen MoveScreen)
+                          , children: [ R.text "Move" ]
+                          }
+                      , R.button
+                          { id: "erosion-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen ErosionScreen)
+                          , children: [ R.text "Erosion" ]
                           }
                       , R.button
                           { id: "climate-btn"
@@ -862,6 +1030,463 @@ mkApp = do
                                   , children: [ R.text "Done" ]
                                   }
                               ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      SplitScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Time:" ]
+                                  }
+                              , R.input
+                                  { id: "split-time-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "2"
+                                  , step: "1"
+                                  , value: show splitTime
+                                  , onChange: handler targetValue handleSplitTimeChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show splitTime) ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column pangea-sidebar"
+                  , children:
+                      [ R.div
+                          { id: "split-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "split-iterations-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Iterations: " <> show splitInfo.iterations) ]
+                                  }
+                              , R.div
+                                  { id: "split-red-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Red half: " <> show splitInfo.redCount <> " tiles") ]
+                                  }
+                              , R.div
+                                  { id: "split-blue-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Blue half: " <> show splitInfo.blueCount <> " tiles") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Planet Size" ]
+                                  }
+                              , R.select
+                                  { id: "split-size-select"
+                                  , className: "control-select"
+                                  , value: show splitSize
+                                  , onChange: handler targetValue handleSplitSizeChange
+                                  , children:
+                                      [ R.option { value: "4", children: [ R.text "Very Small (2,100 km)" ] }
+                                      , R.option { value: "5", children: [ R.text "Small (3,700 km)" ] }
+                                      , R.option { value: "6", children: [ R.text "Medium / Earth (6,400 km)" ] }
+                                      , R.option { value: "7", children: [ R.text "Large (11,000 km)" ] }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "split-iterate-btn"
+                          , className: "action-btn"
+                          , onClick: capture_ (iterateSplit 0 setSplitInfo)
+                          , children: [ R.text "Iterate" ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "split-red-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (iterateSplit 1 setSplitInfo)
+                                  , children: [ R.text "Split Red" ]
+                                  }
+                              , R.button
+                                  { id: "split-blue-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (iterateSplit 2 setSplitInfo)
+                                  , children: [ R.text "Split Blue" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "split-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (resetSplit splitSize setSplitInfo)
+                                  , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      MoveScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Direction:" ]
+                                  }
+                              , R.input
+                                  { id: "move-direction-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show moveDirection
+                                  , onChange: handler targetValue handleMoveDirectionChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show moveDirection <> "°") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Speed:" ]
+                                  }
+                              , R.input
+                                  { id: "move-speed-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "1"
+                                  , max: "15"
+                                  , step: "1"
+                                  , value: show moveSpeed
+                                  , onChange: handler targetValue handleMoveSpeedChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show moveSpeed <> "°") ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column pangea-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "move-start-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (toggleMoveRunning setMoveInfo)
+                                  , children: [ R.text (if moveInfo.isRunning then "Pause" else "Start") ]
+                                  }
+                              , R.button
+                                  { id: "move-step-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: moveInfo.isRunning
+                                  , onClick: capture_ (stepMove setMoveInfo)
+                                  , children: [ R.text "Step" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "move-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "move-count-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Count: " <> show moveInfo.groupTileCount <> " tiles") ]
+                                  }
+                              , R.div
+                                  { id: "move-steps-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Steps: " <> show moveInfo.steps) ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Planet Size" ]
+                                  }
+                              , R.select
+                                  { id: "move-size-select"
+                                  , className: "control-select"
+                                  , disabled: moveInfo.isRunning
+                                  , value: show moveSize
+                                  , onChange: handler targetValue handleMoveSizeChange
+                                  , children:
+                                      [ R.option { value: "4", children: [ R.text "Very Small (2,100 km)" ] }
+                                      , R.option { value: "5", children: [ R.text "Small (3,700 km)" ] }
+                                      , R.option { value: "6", children: [ R.text "Medium / Earth (6,400 km)" ] }
+                                      , R.option { value: "7", children: [ R.text "Large (11,000 km)" ] }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "move-trail-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ handleToggleMoveTrail
+                          , children: [ R.text (if moveTrail then "Trail: On" else "Trail: Off") ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "move-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: moveInfo.isRunning
+                                  , onClick: capture_ (resetMove moveSize (Int.toNumber moveDirection) (Int.toNumber moveSpeed) setMoveInfo)
+                                  , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      ErosionScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column pangea-sidebar"
+                  , children:
+                      [ R.button
+                          { id: "erosion-step-btn"
+                          , className: "action-btn"
+                          , onClick: capture_ (stepErosion setErosionInfo)
+                          , children: [ R.text "Erode" ]
+                          }
+                      , R.div
+                          { id: "erosion-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "erosion-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text erosionInfo.planetName ]
+                                  }
+                              , R.div
+                                  { id: "erosion-steps-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Erosion steps: " <> show erosionInfo.steps) ]
+                                  }
+                              , R.div
+                                  { id: "erosion-tiles-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show erosionInfo.tileCount <> " tiles") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "erosion-lost-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ handleToggleErosionLost
+                                  , children: [ R.text (if erosionShowLost then "Lost: On" else "Lost: Off") ]
+                                  }
+                              , R.button
+                                  { id: "erosion-gained-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ handleToggleErosionGained
+                                  , children: [ R.text (if erosionShowGained then "Gained: On" else "Gained: Off") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Selection" ]
+                                  }
+                              , R.pre
+                                  { id: "erosion-details"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text erosionInfo.selectedTileReport ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "erosion-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadEarthIntoErosion setErosionInfo)
+                                  , children: [ R.text "Earth" ]
+                                  }
+                              , R.button
+                                  { id: "erosion-load-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadFilePlanetIntoErosion setErosionInfo)
+                                  , children: [ R.text "Load File" ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "erosion-saved-btn"
+                          , className: "action-btn secondary"
+                          , disabled: not erosionInfo.hasSavedPlanet
+                          , onClick: capture_ (loadSavedPlanetIntoErosion setErosionInfo)
+                          , children: [ R.text "Load Saved" ]
+                          }
+                      , R.button
+                          { id: "done-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (setScreen MainMenu)
+                          , children: [ R.text "Done" ]
                           }
                       ]
                   }

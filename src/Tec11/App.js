@@ -1,8 +1,11 @@
 import * as THREE from "three";
 import initWasmModule, {
   WasmClimateSession,
+  WasmErosionSession,
   WasmGridSession,
+  WasmMoveSession,
   WasmPangeaSession,
+  WasmSplitSession,
   WasmTectonicsSession,
 } from "tec11-wasm";
 
@@ -1241,6 +1244,468 @@ export const loadTectonicsPlanetFromFile = (setTectonicsSize) => (setTectonicsIn
       updateTectonicsViewBuffers(activeView, sizeChanged);
       setTectonicsSize(newSize)();
       setTectonicsInfo(buildTectonicsInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Split Sandbox Mode (`splitdisplay.py` / `splitpresenter.py`)
+// ============================================================================
+
+function computeSplitVertexColors(tileStates, vertexTileIds, timeSlider) {
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+  for (let v = 0; v < numVerts; v++) {
+    const tid = vertexTileIds[v];
+    const st = tileStates[tid];
+    const out = v * 3;
+    if (st === 1) {
+      // 'R' (Red half)
+      colors[out] = timeSlider >= 1 ? 1.0 : 128.0 / 255.0;
+      colors[out + 1] = 128.0 / 255.0;
+      colors[out + 2] = 128.0 / 255.0;
+    } else if (st === 2) {
+      // 'B' (Blue half)
+      colors[out] = 128.0 / 255.0;
+      colors[out + 1] = 128.0 / 255.0;
+      colors[out + 2] = timeSlider >= 2 ? 1.0 : 128.0 / 255.0;
+    } else {
+      // 'F' (Ocean / outside)
+      colors[out] = 1.0;
+      colors[out + 1] = 1.0;
+      colors[out + 2] = 1.0;
+    }
+  }
+  return colors;
+}
+
+function updateSplitViewBuffers(view, rebuildGeometry) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileStates = session.tile_states();
+  const colors = computeSplitVertexColors(view.tileStates, view.vertexTileIds, view.timeSlider);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildSplitInfo(view) {
+  const s = view.session;
+  return {
+    gridSize: s.grid_size(),
+    tileCount: s.tile_count(),
+    iterations: s.iterations(),
+    redCount: s.red_count(),
+    blueCount: s.blue_count(),
+  };
+}
+
+export const mountSplitView = (gridSize) => (timeSlider) => (setSplitInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  const seed = BigInt(Date.now());
+  view.session = new WasmSplitSession(gridSize, seed);
+  view.currentGridSize = gridSize;
+  view.timeSlider = timeSlider;
+
+  activeView = view;
+  updateSplitViewBuffers(view, true);
+  setSplitInfo(buildSplitInfo(view))();
+
+  return () => {
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const iterateSplit = (choice) => (setSplitInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.iterate(choice);
+  updateSplitViewBuffers(activeView, false);
+  setSplitInfo(buildSplitInfo(activeView))();
+};
+
+export const resetSplit = (gridSize) => (setSplitInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const sizeChanged = activeView.currentGridSize !== gridSize;
+  activeView.session.reset(gridSize);
+  activeView.currentGridSize = gridSize;
+  updateSplitViewBuffers(activeView, sizeChanged);
+  setSplitInfo(buildSplitInfo(activeView))();
+};
+
+export const setSplitTime = (timeSlider) => () => {
+  if (!activeView || !activeView.tileStates) return;
+  activeView.timeSlider = timeSlider;
+  const colors = computeSplitVertexColors(
+    activeView.tileStates,
+    activeView.vertexTileIds,
+    activeView.timeSlider
+  );
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+};
+
+// ============================================================================
+// Move Sandbox Mode (`movedisplay.py` / `movepresenter.py`)
+// ============================================================================
+
+function computeMoveVertexColors(tileStates, vertexTileIds, showTrail) {
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+  for (let v = 0; v < numVerts; v++) {
+    const tid = vertexTileIds[v];
+    const st = tileStates[tid];
+    const out = v * 3;
+    if (st === 1) {
+      // 'T' (Active moving continent)
+      colors[out] = 128.0 / 255.0;
+      colors[out + 1] = 128.0 / 255.0;
+      colors[out + 2] = 128.0 / 255.0;
+    } else if (st === 2 && showTrail) {
+      // 'M' (Previous step trail)
+      colors[out] = 192.0 / 255.0;
+      colors[out + 1] = 192.0 / 255.0;
+      colors[out + 2] = 192.0 / 255.0;
+    } else {
+      // 'F' (Ocean / outside)
+      colors[out] = 1.0;
+      colors[out + 1] = 1.0;
+      colors[out + 2] = 1.0;
+    }
+  }
+  return colors;
+}
+
+function updateMoveViewBuffers(view, rebuildGeometry) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileStates = session.tile_states();
+  const colors = computeMoveVertexColors(view.tileStates, view.vertexTileIds, view.showTrail);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildMoveInfo(view) {
+  const s = view.session;
+  return {
+    gridSize: s.grid_size(),
+    tileCount: s.tile_count(),
+    groupTileCount: s.group_tile_count(),
+    steps: s.steps(),
+    isRunning: view.timerId !== null,
+  };
+}
+
+export const mountMoveView =
+  (gridSize) => (directionDeg) => (speedDeg) => (showTrail) => (setMoveInfo) => () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    const seed = BigInt(Date.now());
+    view.session = new WasmMoveSession(gridSize, directionDeg, speedDeg, seed);
+    view.currentGridSize = gridSize;
+    view.showTrail = showTrail;
+    view.timerId = null;
+    view.setMoveInfo = setMoveInfo;
+
+    activeView = view;
+    updateMoveViewBuffers(view, true);
+    setMoveInfo(buildMoveInfo(view))();
+
+    return () => {
+      stopTectonicsLoop(view);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const stepMove = (setMoveInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.step();
+  updateMoveViewBuffers(activeView, false);
+  setMoveInfo(buildMoveInfo(activeView))();
+};
+
+export const toggleMoveRunning = (setMoveInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const view = activeView;
+  view.setMoveInfo = setMoveInfo;
+  if (view.timerId !== null) {
+    stopTectonicsLoop(view);
+    setMoveInfo(buildMoveInfo(view))();
+  } else {
+    view.timerId = setInterval(() => {
+      if (!activeView || activeView !== view || !view.session) {
+        stopTectonicsLoop(view);
+        return;
+      }
+      view.session.step();
+      updateMoveViewBuffers(view, false);
+      view.setMoveInfo(buildMoveInfo(view))();
+    }, 100);
+    setMoveInfo(buildMoveInfo(view))();
+  }
+};
+
+export const resetMove = (gridSize) => (directionDeg) => (speedDeg) => (setMoveInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopTectonicsLoop(activeView);
+  const sizeChanged = activeView.currentGridSize !== gridSize;
+  activeView.session.reset(gridSize, directionDeg, speedDeg);
+  activeView.currentGridSize = gridSize;
+  updateMoveViewBuffers(activeView, sizeChanged);
+  setMoveInfo(buildMoveInfo(activeView))();
+};
+
+export const setMoveDirection = (directionDeg) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_direction_deg(directionDeg);
+};
+
+export const setMoveSpeed = (speedDeg) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_speed_deg(speedDeg);
+};
+
+export const setMoveTrail = (showTrail) => () => {
+  if (!activeView || !activeView.tileStates) return;
+  activeView.showTrail = showTrail;
+  const colors = computeMoveVertexColors(
+    activeView.tileStates,
+    activeView.vertexTileIds,
+    activeView.showTrail
+  );
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+};
+
+// ============================================================================
+// Erosion Sandbox Mode (`erosiondisplay.py` / `erosionpresenter.py`)
+// ============================================================================
+
+function computeErosionVertexColors(view) {
+  const { elevations, lost, gained, vertexTileIds, showLost, showGained, selectedTileIdx } = view;
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+
+  for (let v = 0; v < numVerts; v++) {
+    const tid = vertexTileIds[v];
+    const h = elevations[tid];
+    const out = v * 3;
+    let r = 0.0;
+    let g = 0.0;
+    let b = 0.0;
+    let baseV = 0.0;
+
+    if (h > 0.0) {
+      baseV = 128.0;
+      const grey = Math.min(255.0, 128.0 + 12.5 * h);
+      r = grey;
+      g = grey;
+      b = grey;
+    }
+
+    if (showLost) {
+      const l = Math.min(5.0, Math.max(0.0, lost[tid]));
+      r = Math.min(255.0, baseV + l * 25.5);
+      g = baseV;
+      b = baseV;
+    }
+
+    if (showGained) {
+      const gn = Math.min(5.0, Math.max(0.0, gained[tid]));
+      g = Math.min(255.0, baseV + gn * 25.5);
+      b = baseV;
+      if (!showLost) {
+        r = baseV;
+      }
+    }
+
+    r /= 255.0;
+    g /= 255.0;
+    b /= 255.0;
+
+    if (tid === selectedTileIdx) {
+      r = Math.min(1.0, r * 0.55 + 0.45);
+      g = Math.min(1.0, g * 0.55 + 0.42);
+      b = Math.min(1.0, b * 0.4);
+    }
+
+    colors[out] = r;
+    colors[out + 1] = g;
+    colors[out + 2] = b;
+  }
+
+  return colors;
+}
+
+function updateErosionViewBuffers(view, rebuildGeometry) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.elevations = session.tile_elevations();
+  view.lost = session.tile_lost();
+  view.gained = session.tile_gained();
+
+  const colors = computeErosionVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildErosionInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Tectonics (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  const selectedTileReport =
+    view.selectedTileIdx >= 0
+      ? s.inspect_tile(view.selectedTileIdx)
+      : "Click any tile on the globe to inspect elevation, erosion, and deposition.";
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    steps: s.steps(),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    selectedTileReport,
+  };
+}
+
+export const mountErosionView = (showLost) => (showGained) => (setErosionInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  view.session = new WasmErosionSession();
+  view.showLost = showLost;
+  view.showGained = showGained;
+  view.selectedTileIdx = -1;
+  view.setErosionInfo = setErosionInfo;
+
+  if (activeClimateSnapshotBytes) {
+    view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+  }
+
+  const raycaster = new THREE.Raycaster();
+  const pointerNdc = new THREE.Vector2();
+
+  const handleCanvasClick = (ev) => {
+    if (!view.session) return;
+    const rect = canvas.getBoundingClientRect();
+    const u = (ev.clientX - rect.left) / rect.width;
+    const v = (ev.clientY - rect.top) / rect.height;
+
+    pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+    view.mesh.updateMatrixWorld(true);
+    view.camera.updateMatrixWorld(true);
+    raycaster.setFromCamera(pointerNdc, view.camera);
+    const hits = raycaster.intersectObject(view.mesh, false);
+    if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+      view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+      const colors = computeErosionVertexColors(view);
+      view.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      view.paint();
+      view.setErosionInfo(buildErosionInfo(view))();
+    }
+  };
+
+  canvas.addEventListener("click", handleCanvasClick);
+
+  activeView = view;
+  updateErosionViewBuffers(view, true);
+  setErosionInfo(buildErosionInfo(view))();
+
+  return () => {
+    canvas.removeEventListener("click", handleCanvasClick);
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const stepErosion = (setErosionInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.step_erode();
+  updateErosionViewBuffers(activeView, false);
+  setErosionInfo(buildErosionInfo(activeView))();
+};
+
+export const setErosionOverlays = (showLost) => (showGained) => () => {
+  if (!activeView || !activeView.elevations) return;
+  activeView.showLost = showLost;
+  activeView.showGained = showGained;
+  const colors = computeErosionVertexColors(activeView);
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+};
+
+export const loadEarthIntoErosion = (setErosionInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  activeView.selectedTileIdx = -1;
+  updateErosionViewBuffers(activeView, true);
+  setErosionInfo(buildErosionInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoErosion = (setErosionInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.selectedTileIdx = -1;
+    updateErosionViewBuffers(activeView, true);
+    setErosionInfo(buildErosionInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoErosion = (setErosionInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.selectedTileIdx = -1;
+      updateErosionViewBuffers(activeView, true);
+      setErosionInfo(buildErosionInfo(activeView))();
     }
   });
 };

@@ -5,10 +5,13 @@ rust_shared_library(
     name = "tec11_wasm_lib",
     srcs = [
         "src/climate_session.rs",
+        "src/erosion_session.rs",
         "src/grid_session.rs",
         "src/lib.rs",
         "src/mesh.rs",
+        "src/move_session.rs",
         "src/pangea_session.rs",
+        "src/split_session.rs",
         "src/tectonics_session.rs",
     ],
     edition = "2021",
