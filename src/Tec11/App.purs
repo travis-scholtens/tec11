@@ -34,6 +34,7 @@ data Screen
   | WorldScreen
   | MoonScreen
   | MeteorScreen
+  | SunScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -228,6 +229,23 @@ type MeteorInfo =
   , selectedReport :: String
   }
 
+type SunInfo =
+  { galaxyTypeName :: String
+  , vantageName :: String
+  , starCount :: Int
+  , sunSpectralType :: String
+  , sunClassDesc :: String
+  , sunColorCss :: String
+  , sunBvText :: String
+  , sunTempText :: String
+  , sunRadiusText :: String
+  , sunMassText :: String
+  , sunLumText :: String
+  , sunHzText :: String
+  , summaryLine :: String
+  , selectedReport :: String
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -382,6 +400,13 @@ foreign import resetMeteorPlanet :: (MeteorInfo -> Effect Unit) -> Effect Unit
 foreign import loadEarthIntoMeteor :: (MeteorInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoMeteor :: (MeteorInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoMeteor :: (MeteorInfo -> Effect Unit) -> Effect Unit
+
+-- Sun, Plausible Galaxy & Celestial Sphere Star Map mode FFI (`SunScreen`)
+foreign import mountSunView :: Int -> Int -> Int -> String -> Boolean -> Boolean -> (SunInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import generateSunGalaxy :: Int -> Int -> Int -> (SunInfo -> Effect Unit) -> Effect Unit
+foreign import chooseNewSunInGalaxy :: Int -> (SunInfo -> Effect Unit) -> Effect Unit
+foreign import loadHipparcosIntoSun :: (SunInfo -> Effect Unit) -> Effect Unit
+foreign import setSunDisplayOptions :: String -> Boolean -> Boolean -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -636,6 +661,30 @@ mkApp = do
       , selectedReport: "Click any tile on the globe to target it for a meteor strike and inspect crater excavation, ejecta breccia, impact winter cooling, and rock strata."
       }
 
+    -- Sun, Plausible Galaxy & Celestial Sphere Star Map state (`SunScreen`)
+    sunGalaxyType /\ setSunGalaxyType <- useState' 99
+    sunVantage /\ setSunVantage <- useState' 99
+    sunStarFilter /\ setSunStarFilter <- useState' 0
+    sunAspect /\ setSunAspectState <- useState' "night_sky"
+    sunShowGalacticPlane /\ setSunShowGalacticPlane <- useState' true
+    sunShowConstellations /\ setSunShowConstellations <- useState' false
+    sunInfo /\ setSunInfo <- useState'
+      { galaxyTypeName: "Spiral Galaxy (Sb/Sc)"
+      , vantageName: "Spiral Arm (Star-Forming Disk)"
+      , starCount: 6000
+      , sunSpectralType: "G2V"
+      , sunClassDesc: "Yellow Main-Sequence Dwarf"
+      , sunColorCss: "rgb(255, 255, 119)"
+      , sunBvText: "+0.65"
+      , sunTempText: "5778 K"
+      , sunRadiusText: "1.00 R☉"
+      , sunMassText: "1.00 M☉"
+      , sunLumText: "1.00 L☉"
+      , sunHzText: "1.00 AU (365d yr)"
+      , summaryLine: "Sun: G2V (5778 K, B-V +0.65, 1.00 R☉, 1.00 L☉) | HZ: 1.00 AU (365d yr, 0.53° sky disc) | Spiral Galaxy (Sb/Sc) — Spiral Arm (R=8.1 kpc)"
+      , selectedReport: "Click any star on the celestial sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, B-V color index, and galactic latitude."
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -696,6 +745,9 @@ mkApp = do
         MeteorScreen -> do
           setRotationDeg 0
           mountMeteorView (Int.toNumber meteorDiameterKm) (Int.toNumber meteorVelocityKmS) (Int.toNumber meteorDensityKgM3) meteorAspect meteorShowEjecta meteorShowBlast setMeteorInfo
+        SunScreen -> do
+          setRotationDeg 0
+          mountSunView sunGalaxyType sunVantage sunStarFilter sunAspect sunShowGalacticPlane sunShowConstellations setSunInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -1080,6 +1132,46 @@ mkApp = do
         setMeteorShowBlast next
         setMeteorDisplayOptions meteorAspect meteorShowEjecta next
 
+      handleSunGalaxyTypeChange :: Maybe String -> Effect Unit
+      handleSunGalaxyTypeChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just g -> do
+          setSunGalaxyType g
+          generateSunGalaxy g sunVantage sunStarFilter setSunInfo
+
+      handleSunVantageChange :: Maybe String -> Effect Unit
+      handleSunVantageChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just v -> do
+          setSunVantage v
+          generateSunGalaxy sunGalaxyType v sunStarFilter setSunInfo
+
+      handleSunStarFilterChange :: Maybe String -> Effect Unit
+      handleSunStarFilterChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just f -> do
+          setSunStarFilter f
+          chooseNewSunInGalaxy f setSunInfo
+
+      handleSunAspectChange :: Maybe String -> Effect Unit
+      handleSunAspectChange maybeVal = case maybeVal of
+        Nothing -> pure unit
+        Just asp -> do
+          setSunAspectState asp
+          setSunDisplayOptions asp sunShowGalacticPlane sunShowConstellations
+
+      handleToggleSunGalacticPlane :: Effect Unit
+      handleToggleSunGalacticPlane = do
+        let next = not sunShowGalacticPlane
+        setSunShowGalacticPlane next
+        setSunDisplayOptions sunAspect next sunShowConstellations
+
+      handleToggleSunConstellations :: Effect Unit
+      handleToggleSunConstellations = do
+        let next = not sunShowConstellations
+        setSunShowConstellations next
+        setSunDisplayOptions sunAspect sunShowGalacticPlane next
+
     pure case screen of
       MainMenu ->
         R.div
@@ -1214,6 +1306,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen MeteorScreen)
                           , children: [ R.text "Meteors" ]
+                          }
+                      , R.button
+                          { id: "sun-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen SunScreen)
+                          , children: [ R.text "Sun" ]
                           }
                       ]
                   }
@@ -4607,6 +4706,337 @@ mkApp = do
                                   , className: "action-btn secondary"
                                   , onClick: capture_ (loadFilePlanetIntoMeteor setMeteorInfo)
                                   , children: [ R.text "Load..." ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      SunScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.select
+                                  { id: "sun-aspect-select"
+                                  , className: "control-select"
+                                  , value: sunAspect
+                                  , onChange: handler targetValue handleSunAspectChange
+                                  , children:
+                                      [ R.option
+                                          { value: "night_sky"
+                                          , children: [ R.text "Night Sky (Celestial Sphere)" ]
+                                          }
+                                      , R.option
+                                          { value: "home_sun"
+                                          , children: [ R.text "Home Sun (3D Photosphere & Size)" ]
+                                          }
+                                      , R.option
+                                          { value: "galaxy"
+                                          , children: [ R.text "3D Galaxy & Host Star Location" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Star & Home Sun Inspection (Magnitude, B-V Color, Distance & Habitable Zone)" ]
+                                  }
+                              , R.div
+                                  { id: "sun-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text sunInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Host Galaxy Morphology" ]
+                                  }
+                              , R.select
+                                  { id: "sun-galaxy-select"
+                                  , className: "control-select"
+                                  , value: show sunGalaxyType
+                                  , onChange: handler targetValue handleSunGalaxyTypeChange
+                                  , children:
+                                      [ R.option
+                                          { value: "99"
+                                          , children: [ R.text "Random (Any Plausible Galaxy)" ]
+                                          }
+                                      , R.option
+                                          { value: "0"
+                                          , children: [ R.text "Spiral Galaxy (Sb/Sc, Milky Way-like)" ]
+                                          }
+                                      , R.option
+                                          { value: "1"
+                                          , children: [ R.text "Barred Spiral Galaxy (SBb)" ]
+                                          }
+                                      , R.option
+                                          { value: "2"
+                                          , children: [ R.text "Lenticular Disk Galaxy (S0, Smooth Disk)" ]
+                                          }
+                                      , R.option
+                                          { value: "3"
+                                          , children: [ R.text "Elliptical Galaxy (E2, Triaxial Spheroid)" ]
+                                          }
+                                      , R.option
+                                          { value: "4"
+                                          , children: [ R.text "Irregular Starburst Galaxy (Irr, OB Knots)" ]
+                                          }
+                                      , R.option
+                                          { value: "5"
+                                          , children: [ R.text "Globular Cluster (Dense Halo Cluster)" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Galactic Vantage Region" ]
+                                  }
+                              , R.select
+                                  { id: "sun-vantage-select"
+                                  , className: "control-select"
+                                  , value: show sunVantage
+                                  , onChange: handler targetValue handleSunVantageChange
+                                  , children:
+                                      [ R.option
+                                          { value: "99"
+                                          , children: [ R.text "Auto (Weighted by Galaxy Structure)" ]
+                                          }
+                                      , R.option
+                                          { value: "0"
+                                          , children: [ R.text "Spiral Arm / Star-Forming Knot" ]
+                                          }
+                                      , R.option
+                                          { value: "1"
+                                          , children: [ R.text "Inter-Arm Thin Stellar Disk" ]
+                                          }
+                                      , R.option
+                                          { value: "2"
+                                          , children: [ R.text "Galactic Bulge / Central Bar" ]
+                                          }
+                                      , R.option
+                                          { value: "3"
+                                          , children: [ R.text "Galactic Halo (High Above Disk)" ]
+                                          }
+                                      , R.option
+                                          { value: "4"
+                                          , children: [ R.text "Triaxial Spheroid / Cluster Interior" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Home Star (Sun) Spectral Class" ]
+                                  }
+                              , R.select
+                                  { id: "sun-class-select"
+                                  , className: "control-select"
+                                  , value: show sunStarFilter
+                                  , onChange: handler targetValue handleSunStarFilterChange
+                                  , children:
+                                      [ R.option
+                                          { value: "0"
+                                          , children: [ R.text "Auto (Habitable Main Sequence)" ]
+                                          }
+                                      , R.option
+                                          { value: "2"
+                                          , children: [ R.text "G-Class Yellow Dwarf (0.85–1.1 M☉, Sol-like)" ]
+                                          }
+                                      , R.option
+                                          { value: "3"
+                                          , children: [ R.text "K-Class Orange Dwarf (0.55–0.85 M☉)" ]
+                                          }
+                                      , R.option
+                                          { value: "1"
+                                          , children: [ R.text "F-Class Yellow-White Dwarf (1.1–1.5 M☉)" ]
+                                          }
+                                      , R.option
+                                          { value: "4"
+                                          , children: [ R.text "M-Class Red Dwarf (0.20–0.55 M☉)" ]
+                                          }
+                                      , R.option
+                                          { value: "5"
+                                          , children: [ R.text "A-Class Blue-White Star (1.5–2.1 M☉)" ]
+                                          }
+                                      , R.option
+                                          { value: "6"
+                                          , children: [ R.text "Evolved Subgiant (IV, 2.1–3.2 R☉)" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "sun-generate-galaxy-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (generateSunGalaxy sunGalaxyType sunVantage sunStarFilter setSunInfo)
+                                  , children: [ R.text "New Galaxy & Sun" ]
+                                  }
+                              , R.button
+                                  { id: "sun-choose-star-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (chooseNewSunInGalaxy sunStarFilter setSunInfo)
+                                  , children: [ R.text "New Sun in Galaxy" ]
+                                  }
+                              , R.button
+                                  { id: "sun-hipparcos-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadHipparcosIntoSun setSunInfo)
+                                  , children: [ R.text "Sol (Hipparcos)" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "sun-toggle-plane-btn"
+                                  , className: if sunShowGalacticPlane then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleSunGalacticPlane
+                                  , children: [ R.text (if sunShowGalacticPlane then "Galactic Plane: On" else "Galactic Plane: Off") ]
+                                  }
+                              , R.button
+                                  { id: "sun-toggle-constellations-btn"
+                                  , className: if sunShowConstellations then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleSunConstellations
+                                  , children: [ R.text (if sunShowConstellations then "Constellations: On" else "Constellations: Off") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "sun-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { className: "stat-line"
+                                  , style: R.css { display: "flex", alignItems: "center", gap: "8px" }
+                                  , children:
+                                      [ R.span
+                                          { style:
+                                              R.css
+                                                { display: "inline-block"
+                                                , width: "16px"
+                                                , height: "16px"
+                                                , borderRadius: "50%"
+                                                , backgroundColor: sunInfo.sunColorCss
+                                                , boxShadow: "0 0 8px " <> sunInfo.sunColorCss
+                                                , flexShrink: "0"
+                                                }
+                                          , children: []
+                                          }
+                                      , R.span
+                                          { children:
+                                              [ R.text
+                                                  ( "Chosen Sun: "
+                                                      <> sunInfo.sunSpectralType
+                                                      <> " ("
+                                                      <> sunInfo.sunClassDesc
+                                                      <> ") — "
+                                                      <> sunInfo.sunTempText
+                                                      <> ", B-V "
+                                                      <> sunInfo.sunBvText
+                                                  )
+                                              ]
+                                          }
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Size & Mass: "
+                                              <> sunInfo.sunRadiusText
+                                              <> " | "
+                                              <> sunInfo.sunMassText
+                                              <> " | Lum: "
+                                              <> sunInfo.sunLumText
+                                              <> " | HZ: "
+                                              <> sunInfo.sunHzText
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { id: "sun-summary-line"
+                                  , className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Galaxy: "
+                                              <> sunInfo.galaxyTypeName
+                                              <> " — "
+                                              <> sunInfo.vantageName
+                                              <> " ("
+                                              <> show sunInfo.starCount
+                                              <> " visible stars)"
+                                          )
+                                      ]
                                   }
                               ]
                           }

@@ -19,6 +19,7 @@ rust_library(
         "src/rivers.rs",
         "src/rock.rs",
         "src/split_sandbox.rs",
+        "src/sun_sky.rs",
         "src/tectonics.rs",
         "src/terrain.rs",
         "src/tile.rs",
@@ -26,6 +27,8 @@ rust_library(
     ],
     compile_data = [
         "data/animals.tsv",
+        "data/hipparcos_naked.tsv",
+        "data/hist.pgm",
         "data/plants.tsv",
     ],
     edition = "2021",

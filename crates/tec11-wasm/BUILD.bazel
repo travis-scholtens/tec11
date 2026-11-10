@@ -21,6 +21,7 @@ rust_shared_library(
         "src/racination_session.rs",
         "src/rivers_session.rs",
         "src/split_session.rs",
+        "src/sun_session.rs",
         "src/tectonics_session.rs",
         "src/terrain_session.rs",
         "src/world_session.rs",

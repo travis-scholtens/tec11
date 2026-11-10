@@ -15,6 +15,7 @@ import initWasmModule, {
   WasmRacinationSession,
   WasmRiversSession,
   WasmSplitSession,
+  WasmSunSession,
   WasmTectonicsSession,
   WasmTerrainSession,
   WasmWorldSession,
@@ -675,17 +676,17 @@ function paintCanvasFallback(view) {
     }
   }
 
-  // Draw 3D ocean current arrows if visible
+  // Draw 3D ocean current arrows / constellation & orbit lines if visible
   if (arrowLines && arrowLines.visible && arrowGeometry) {
     const arrowPos = arrowGeometry.attributes.position;
     if (arrowPos) {
-      ctx.strokeStyle = "rgba(248, 250, 252, 0.78)";
+      ctx.strokeStyle = view.arrowStrokeStyle || "rgba(248, 250, 252, 0.78)";
       ctx.lineWidth = 1.1;
       ctx.beginPath();
       for (let i = 0; i < arrowPos.count; i += 2) {
         vA.fromBufferAttribute(arrowPos, i).applyMatrix4(mesh.matrixWorld);
         vB.fromBufferAttribute(arrowPos, i + 1).applyMatrix4(mesh.matrixWorld);
-        if (vA.z <= 0.02 && vB.z <= 0.02) {
+        if (!view.disableArrowBackfaceCull && vA.z <= 0.02 && vB.z <= 0.02) {
           continue;
         }
         pA.copy(vA).project(camera);
@@ -698,6 +699,29 @@ function paintCanvasFallback(view) {
         ctx.lineTo(x1, y1);
       }
       ctx.stroke();
+    }
+  }
+
+  // Draw 3D star points if visible (`SunScreen`)
+  if (view.starPoints && view.starPoints.visible && view.starPointsRaw) {
+    const raw = view.starPointsRaw;
+    const cullBack = view.cullStarBackface !== false;
+    for (let i = 0; i + 6 < raw.length; i += 7) {
+      vA.set(raw[i], raw[i + 1], raw[i + 2]).applyMatrix4(mesh.matrixWorld);
+      if (cullBack && vA.z < -0.02) {
+        continue;
+      }
+      pA.copy(vA).project(camera);
+      const sx = (pA.x * 0.5 + 0.5) * width;
+      const sy = (-pA.y * 0.5 + 0.5) * height;
+      const sr = Math.min(255, Math.round(raw[i + 3] * 255));
+      const sg = Math.min(255, Math.round(raw[i + 4] * 255));
+      const sb = Math.min(255, Math.round(raw[i + 5] * 255));
+      const rad = Math.max(0.75, raw[i + 6] * 0.52);
+      ctx.fillStyle = `rgb(${sr}, ${sg}, ${sb})`;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 }
@@ -747,6 +771,44 @@ function createBaseSphereView(canvas, showBorders) {
   arrowLines.visible = false;
   mesh.add(arrowLines);
 
+  const starGeometry = new THREE.BufferGeometry();
+  const starMaterial = new THREE.ShaderMaterial({
+    vertexShader: `
+      attribute float size;
+      attribute vec3 customColor;
+      varying vec3 vColor;
+      varying float vWorldZ;
+      void main() {
+        vColor = customColor;
+        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+        vWorldZ = worldPos.z;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+        gl_PointSize = size;
+      }
+    `,
+    fragmentShader: `
+      uniform float cullBackface;
+      varying vec3 vColor;
+      varying float vWorldZ;
+      void main() {
+        if (cullBackface > 0.5 && vWorldZ < -0.02) discard;
+        vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+        float r2 = dot(cxy, cxy);
+        if (r2 > 1.0) discard;
+        float alpha = 1.0 - r2 * 0.45;
+        gl_FragColor = vec4(vColor, alpha);
+      }
+    `,
+    uniforms: {
+      cullBackface: { value: 1.0 },
+    },
+    transparent: true,
+    depthTest: true,
+  });
+  const starPoints = new THREE.Points(starGeometry, starMaterial);
+  starPoints.visible = false;
+  mesh.add(starPoints);
+
   let renderer = null;
   try {
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -771,6 +833,9 @@ function createBaseSphereView(canvas, showBorders) {
     arrowGeometry,
     arrowMaterial,
     arrowLines,
+    starGeometry,
+    starMaterial,
+    starPoints,
     mesh,
     renderer,
     rotationAngleRad: 0.0,
@@ -788,6 +853,8 @@ function createBaseSphereView(canvas, showBorders) {
       if (borderMaterial) borderMaterial.dispose();
       arrowGeometry.dispose();
       arrowMaterial.dispose();
+      starGeometry.dispose();
+      starMaterial.dispose();
       if (renderer) renderer.dispose();
     },
   };
@@ -3925,6 +3992,244 @@ export const loadFilePlanetIntoMeteor = (setMeteorInfo) => () => {
     }
   });
 };
+
+// ============================================================================
+// Mode 18: Sun, Plausible Galaxy & Celestial Sphere Star Map (`SunScreen`)
+// ============================================================================
+
+function computeSunVertexColors(view) {
+  const { vertexTileIds, tileColors } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    colors[v * 3] = tileColors[t * 3];
+    colors[v * 3 + 1] = tileColors[t * 3 + 1];
+    colors[v * 3 + 2] = tileColors[t * 3 + 2];
+  }
+  return colors;
+}
+
+function updateSunDataBuffers(view, rebuildGeometry = false) {
+  const {
+    session,
+    geometry,
+    mesh,
+    starGeometry,
+    starMaterial,
+    starPoints,
+    arrowGeometry,
+    arrowMaterial,
+    arrowLines,
+  } = view;
+
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+
+  view.tileColors = session.tile_colors_rgb(
+    view.aspect,
+    Boolean(view.showGalacticPlane),
+    view.selectedTileIdx
+  );
+  const colors = computeSunVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+
+  if (view.aspect === "home_sun") {
+    const rSolar = session.sun_radius_solar();
+    const sunScale = Math.max(0.24, Math.min(1.04, rSolar * 0.68));
+    mesh.scale.set(sunScale, sunScale, sunScale);
+    starPoints.visible = false;
+    view.starPointsRaw = null;
+    arrowLines.visible = false;
+  } else {
+    mesh.scale.set(1.0, 1.0, 1.0);
+    const raw = session.star_points_data(view.aspect);
+    view.starPointsRaw = raw;
+    const count = Math.floor(raw.length / 7);
+    const posArr = new Float32Array(count * 3);
+    const colArr = new Float32Array(count * 3);
+    const sizeArr = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      const b = i * 7;
+      posArr[i * 3] = raw[b];
+      posArr[i * 3 + 1] = raw[b + 1];
+      posArr[i * 3 + 2] = raw[b + 2];
+      colArr[i * 3] = raw[b + 3];
+      colArr[i * 3 + 1] = raw[b + 4];
+      colArr[i * 3 + 2] = raw[b + 5];
+      sizeArr[i] = raw[b + 6];
+    }
+    starGeometry.setAttribute("position", new THREE.Float32BufferAttribute(posArr, 3));
+    starGeometry.setAttribute("customColor", new THREE.Float32BufferAttribute(colArr, 3));
+    starGeometry.setAttribute("size", new THREE.Float32BufferAttribute(sizeArr, 1));
+    const isGalaxy = view.aspect === "galaxy";
+    starMaterial.uniforms.cullBackface.value = isGalaxy ? 0.0 : 1.0;
+    view.cullStarBackface = !isGalaxy;
+    starPoints.visible = true;
+
+    const lineSegs = session.overlay_line_segments(
+      view.aspect,
+      Boolean(view.showGalacticPlane),
+      Boolean(view.showConstellations)
+    );
+    if (lineSegs && lineSegs.length >= 6) {
+      arrowGeometry.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(lineSegs, 3)
+      );
+      arrowMaterial.color.setHex(isGalaxy ? 0x34d399 : 0x60a5fa);
+      arrowMaterial.opacity = isGalaxy ? 0.72 : 0.42;
+      view.arrowStrokeStyle = isGalaxy
+        ? "rgba(52, 211, 153, 0.72)"
+        : "rgba(96, 165, 250, 0.42)";
+      view.disableArrowBackfaceCull = isGalaxy;
+      arrowLines.visible = true;
+    } else {
+      arrowLines.visible = false;
+    }
+  }
+
+  view.paint();
+}
+
+function buildSunInfo(view) {
+  const s = view.session;
+  const rgb = s.sun_rgb();
+  const r255 = Math.min(255, Math.round((rgb[0] || 1.0) * 255));
+  const g255 = Math.min(255, Math.round((rgb[1] || 0.9) * 255));
+  const b255 = Math.min(255, Math.round((rgb[2] || 0.7) * 255));
+  const selectedReport =
+    view.selectedTileIdx >= 0
+      ? s.inspect_tile(view.selectedTileIdx)
+      : "Click any star on the celestial sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, B-V color index, and galactic latitude.";
+  return {
+    galaxyTypeName: s.galaxy_type_name(),
+    vantageName: s.vantage_name(),
+    starCount: s.star_count(),
+    sunSpectralType: s.sun_spectral_type(),
+    sunClassDesc: s.sun_class_description(),
+    sunColorCss: `rgb(${r255}, ${g255}, ${b255})`,
+    sunBvText: `${s.sun_bv_color() >= 0 ? "+" : ""}${s.sun_bv_color().toFixed(2)}`,
+    sunTempText: `${Math.round(s.sun_temp_k())} K`,
+    sunRadiusText: `${s.sun_radius_solar().toFixed(2)} R☉`,
+    sunMassText: `${s.sun_mass_solar().toFixed(2)} M☉`,
+    sunLumText: `${s.sun_luminosity_solar().toFixed(2)} L☉`,
+    sunHzText: `${s.sun_habitable_au().toFixed(2)} AU (${Math.round(s.sun_orbital_period_days())}d yr)`,
+    summaryLine: s.summary_line(),
+    selectedReport,
+  };
+}
+
+export const mountSunView =
+  (galaxyTypeId) =>
+  (vantageId) =>
+  (starFilter) =>
+  (aspect) =>
+  (showGalacticPlane) =>
+  (showConstellations) =>
+  (setSunInfo) =>
+  () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.session = new WasmSunSession();
+    view.session.generate_galaxy_and_sun(galaxyTypeId, vantageId, starFilter);
+    view.aspect = aspect;
+    view.showGalacticPlane = showGalacticPlane;
+    view.showConstellations = showConstellations;
+    view.selectedTileIdx = -1;
+    view.setSunInfo = setSunInfo;
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateSunDataBuffers(view, false);
+        view.setSunInfo(buildSunInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateSunDataBuffers(view, true);
+    setSunInfo(buildSunInfo(view))();
+
+    return () => {
+      canvas.removeEventListener("click", handleCanvasClick);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const generateSunGalaxy =
+  (galaxyTypeId) =>
+  (vantageId) =>
+  (starFilter) =>
+  (setSunInfo) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.session.generate_galaxy_and_sun(
+      galaxyTypeId,
+      vantageId,
+      starFilter
+    );
+    activeView.selectedTileIdx = -1;
+    updateSunDataBuffers(activeView, false);
+    setSunInfo(buildSunInfo(activeView))();
+  };
+
+export const chooseNewSunInGalaxy = (starFilter) => (setSunInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.choose_sun_in_current_galaxy(starFilter);
+  activeView.selectedTileIdx = -1;
+  updateSunDataBuffers(activeView, false);
+  setSunInfo(buildSunInfo(activeView))();
+};
+
+export const loadHipparcosIntoSun = (setSunInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.load_real_hipparcos_sol();
+  activeView.selectedTileIdx = -1;
+  updateSunDataBuffers(activeView, false);
+  setSunInfo(buildSunInfo(activeView))();
+};
+
+export const setSunDisplayOptions =
+  (aspect) =>
+  (showGalacticPlane) =>
+  (showConstellations) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.aspect = aspect;
+    activeView.showGalacticPlane = showGalacticPlane;
+    activeView.showConstellations = showConstellations;
+    updateSunDataBuffers(activeView, false);
+  };
 
 export const rotateGrid = (deg) => () => {
   if (!activeView) return;

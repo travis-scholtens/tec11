@@ -13,6 +13,7 @@ pub mod racination;
 pub mod rivers;
 pub mod rock;
 pub mod split_sandbox;
+pub mod sun_sky;
 pub mod tectonics;
 pub mod terrain;
 pub mod tile;
@@ -42,6 +43,10 @@ pub use racination::{racinate, racination_shades, Heritage, RacinationSandbox};
 pub use rivers::{trace_coarse_rivers, RiversSandbox};
 pub use rock::{Rock, RockKind, RockLayer};
 pub use split_sandbox::SplitSandbox;
+pub use sun_sky::{
+    bv_to_rgb, bv_to_temp_k, classify_star, CelestialStar, GalacticVantage, GalaxyType, HomeStar,
+    SunSandbox,
+};
 pub use tectonics::{LithosphericGroup, TectonicsSimulation};
 pub use terrain::TerrainSandbox;
 pub use tile::TileGeology;
