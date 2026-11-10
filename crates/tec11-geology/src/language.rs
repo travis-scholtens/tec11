@@ -337,6 +337,24 @@ pub struct Word {
 }
 
 impl Word {
+    /// Phonemic uniqueness key (`language/lexicon.py:7-8`):
+    /// maps vowels to `(true, VOWELS[v].height)` and consonants to `(false, c as i32)`.
+    pub fn wordkey(&self) -> Vec<(bool, i32)> {
+        let mut key = Vec::new();
+        for s in &self.syllables {
+            for &c in &s.onset {
+                key.push((false, c as i32));
+            }
+            for &v in &s.nucleus {
+                key.push((true, VOWELS[v].height));
+            }
+            for &c in &s.coda {
+                key.push((false, c as i32));
+            }
+        }
+        key
+    }
+
     pub fn stressed_index(&self) -> usize {
         if self.syllables.len() <= 1 || self.stress <= 1 {
             self.syllables.len().saturating_sub(1)
@@ -416,24 +434,21 @@ pub struct Language {
     pub onsetp: Vec<f64>,
     pub codap: Vec<f64>,
     pub constraints: Vec<PhonotacticConstraint>,
+    pub attested_onsets: BTreeSet<Vec<usize>>,
+    pub attested_codae: BTreeSet<Vec<usize>>,
     pub stress: usize,
 }
 
 impl Language {
     pub fn generate(rng: &mut Pcg64Mcg) -> Self {
         let (vowels, consonants) = generate_phonemes(rng);
-        let max_onset = (rng.next_u64() % 3) as usize; // 0..=2
-        let mut onsetp = Vec::with_capacity(max_onset);
-        for _ in 0..max_onset {
-            onsetp.push(rng.uniform(0.0, 1.0));
-        }
-        let max_coda = (rng.next_u64() % 3) as usize; // 0..=2
-        let mut codap = Vec::with_capacity(max_coda);
-        for _ in 0..max_coda {
-            codap.push(rng.uniform(0.0, 1.0));
-        }
+        let onset_prob = rng.gauss(0.5, 0.1).clamp(0.15, 0.95);
+        let coda_prob = rng.gauss(0.5, 0.1).clamp(0.10, 0.85);
+        let onsetp = vec![onset_prob];
+        let codap = vec![coda_prob];
 
-        let num_constraints = 3 + ((rng.next_u64() as usize) % (PhonotacticConstraint::ALL.len() - 2));
+        let num_constraints =
+            3 + ((rng.next_u64() as usize) % (PhonotacticConstraint::ALL.len() - 2));
         let mut c_indices: Vec<usize> = (0..PhonotacticConstraint::ALL.len()).collect();
         for i in (1..c_indices.len()).rev() {
             let j = (rng.next_u64() as usize) % (i + 1);
@@ -445,7 +460,11 @@ impl Language {
             .map(|idx| PhonotacticConstraint::ALL[idx])
             .collect();
 
-        let stress = if (rng.next_u64() & 1) == 0 { 1 } else { 2 };
+        let stress = if rng.gauss(-0.5, 1.0).round() as i32 == -1 {
+            1
+        } else {
+            2
+        };
 
         Self {
             vowels,
@@ -453,8 +472,65 @@ impl Language {
             onsetp,
             codap,
             constraints,
+            attested_onsets: BTreeSet::new(),
+            attested_codae: BTreeSet::new(),
             stress,
         }
+    }
+
+    /// Recompute emergent phoneme inventory, syllable onset/coda probabilities, and attested
+    /// onset/coda cluster constraints from the living lexicon (`language/stats.py:3-33`, `phonotactics.py:9-15`).
+    pub fn refresh_from_lexicon(&mut self, words: &[Word]) {
+        if words.is_empty() {
+            return;
+        }
+        let mut vs = BTreeSet::new();
+        let mut cs = BTreeSet::new();
+        let mut onsets = BTreeSet::new();
+        let mut codae = BTreeSet::new();
+        let mut num_syllables = 0usize;
+        let mut num_onsets = 0usize;
+        let mut num_codas = 0usize;
+
+        for w in words {
+            for s in &w.syllables {
+                for &c in &s.onset {
+                    cs.insert(c);
+                }
+                for &v in &s.nucleus {
+                    vs.insert(v);
+                }
+                for &c in &s.coda {
+                    cs.insert(c);
+                }
+                if !s.onset.is_empty() {
+                    num_onsets += 1;
+                }
+                if !s.coda.is_empty() {
+                    num_codas += 1;
+                }
+                num_syllables += 1;
+                onsets.insert(s.onset.clone());
+                codae.insert(s.coda.clone());
+            }
+        }
+        onsets.insert(Vec::new());
+        codae.insert(Vec::new());
+
+        if !vs.is_empty() {
+            self.vowels = vs.into_iter().collect();
+        }
+        if !cs.is_empty() {
+            self.consonants = cs.into_iter().collect();
+        }
+        if num_syllables > 0 {
+            let op = (num_onsets as f64 / num_syllables as f64).clamp(0.1, 0.95);
+            let cp = (num_codas as f64 / num_syllables as f64).clamp(0.05, 0.90);
+            self.onsetp = vec![op];
+            self.codap = vec![cp];
+        }
+        self.attested_onsets = onsets;
+        self.attested_codae = codae;
     }
 
     pub fn epenthetic_vowel(&self) -> usize {
@@ -472,7 +548,7 @@ impl Language {
     pub fn generate_syllable(&self, rng: &mut Pcg64Mcg) -> Syllable {
         let mut onset = Vec::new();
         for &p in &self.onsetp {
-            if rng.uniform(0.0, 1.0) < p {
+            if rng.uniform(0.0, 1.0) < p && !self.consonants.is_empty() {
                 let c = self.consonants[(rng.next_u64() as usize) % self.consonants.len()];
                 onset.push(c);
             }
@@ -485,12 +561,16 @@ impl Language {
                 .collect();
         }
 
-        let v = self.vowels[(rng.next_u64() as usize) % self.vowels.len()];
+        let v = if self.vowels.is_empty() {
+            0
+        } else {
+            self.vowels[(rng.next_u64() as usize) % self.vowels.len()]
+        };
         let nucleus = vec![v];
 
         let mut coda = Vec::new();
         for &p in &self.codap {
-            if rng.uniform(0.0, 1.0) < p {
+            if rng.uniform(0.0, 1.0) < p && !self.consonants.is_empty() {
                 let c = self.consonants[(rng.next_u64() as usize) % self.consonants.len()];
                 coda.push(c);
             }
@@ -510,9 +590,50 @@ impl Language {
         }
     }
 
+    /// Grow a new word syllable-by-syllable until its `wordkey` (consonants + vowel heights) is unique
+    /// (`language/lexicon.py:10-28`).
+    pub fn generate_word_unique(
+        &self,
+        seen_keys: &mut BTreeSet<Vec<(bool, i32)>>,
+        existing_words: &BTreeSet<Word>,
+        rng: &mut Pcg64Mcg,
+    ) -> Word {
+        let mut ss = Vec::new();
+        for _ in 0..6 {
+            let s = self.generate_syllable(rng);
+            let constrained_s = self.constrain(&Word {
+                syllables: vec![s],
+                stress: self.stress,
+            });
+            ss.extend(constrained_s.syllables);
+            let w = Word {
+                syllables: ss.clone(),
+                stress: self.stress,
+            };
+            let key = w.wordkey();
+            if !seen_keys.contains(&key) && !existing_words.contains(&w) {
+                seen_keys.insert(key);
+                return w;
+            }
+            if ss.len() >= 4 {
+                ss.clear();
+            }
+        }
+        let w = Word {
+            syllables: if ss.is_empty() {
+                vec![self.generate_syllable(rng)]
+            } else {
+                ss
+            },
+            stress: self.stress,
+        };
+        seen_keys.insert(w.wordkey());
+        w
+    }
+
     pub fn generate_word(&self, rng: &mut Pcg64Mcg) -> Word {
         let mut syllables = vec![self.generate_syllable(rng)];
-        while syllables.len() < 4 && rng.uniform(0.0, 1.0) < 0.55 {
+        while syllables.len() < 4 && rng.uniform(0.0, 1.0) < 0.45 {
             syllables.push(self.generate_syllable(rng));
         }
         Word {
@@ -550,12 +671,155 @@ impl Language {
         }
     }
 
-    /// Enforce this language's syllable structure and phonotactic constraints via epenthesis (`lexicon.py:27-76`).
+    /// Constrain a syllable's onset using attested onset/coda clusters (`language/phonotactics.py:23-37`).
+    fn constrain_onset_attested(&self, syllable: &Syllable, filler: usize) -> Option<Vec<Syllable>> {
+        if syllable.onset.is_empty() {
+            return Some(vec![syllable.clone()]);
+        }
+        let len = syllable.onset.len();
+        for n in (1..=len).rev() {
+            let clusters: Vec<Vec<usize>> =
+                syllable.onset.chunks(n).map(|c| c.to_vec()).collect();
+            if clusters.iter().all(|c| self.attested_onsets.contains(c)) {
+                let mut out: Vec<Syllable> = clusters[..clusters.len() - 1]
+                    .iter()
+                    .map(|c| Syllable {
+                        onset: c.clone(),
+                        nucleus: vec![filler],
+                        coda: Vec::new(),
+                    })
+                    .collect();
+                out.push(Syllable {
+                    onset: clusters.last().cloned().unwrap_or_default(),
+                    nucleus: syllable.nucleus.clone(),
+                    coda: syllable.coda.clone(),
+                });
+                return Some(out);
+            }
+            if self.attested_codae.contains(&clusters[0])
+                && clusters[1..].iter().all(|c| self.attested_onsets.contains(c))
+            {
+                let mut out = vec![Syllable {
+                    onset: Vec::new(),
+                    nucleus: vec![filler],
+                    coda: clusters[0].clone(),
+                }];
+                if clusters.len() > 2 {
+                    for c in &clusters[1..clusters.len() - 1] {
+                        out.push(Syllable {
+                            onset: c.clone(),
+                            nucleus: vec![filler],
+                            coda: Vec::new(),
+                        });
+                    }
+                }
+                out.push(Syllable {
+                    onset: if clusters.len() > 1 {
+                        clusters.last().cloned().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
+                    nucleus: syllable.nucleus.clone(),
+                    coda: syllable.coda.clone(),
+                });
+                return Some(out);
+            }
+        }
+        None
+    }
+
+    /// Constrain a syllable's coda using attested onset/coda clusters (`language/phonotactics.py:39-53`).
+    fn constrain_coda_attested(&self, syllable: &Syllable, filler: usize) -> Option<Vec<Syllable>> {
+        if syllable.coda.is_empty() {
+            return Some(vec![syllable.clone()]);
+        }
+        let len = syllable.coda.len();
+        for n in (1..=len).rev() {
+            let clusters: Vec<Vec<usize>> =
+                syllable.coda.chunks(n).map(|c| c.to_vec()).collect();
+            if clusters.iter().all(|c| self.attested_codae.contains(c)) {
+                let mut out = vec![Syllable {
+                    onset: syllable.onset.clone(),
+                    nucleus: syllable.nucleus.clone(),
+                    coda: clusters[0].clone(),
+                }];
+                for c in &clusters[1..] {
+                    out.push(Syllable {
+                        onset: Vec::new(),
+                        nucleus: vec![filler],
+                        coda: c.clone(),
+                    });
+                }
+                return Some(out);
+            }
+            let last_idx = clusters.len() - 1;
+            if self.attested_onsets.contains(&clusters[last_idx])
+                && clusters[..last_idx]
+                    .iter()
+                    .all(|c| self.attested_codae.contains(c))
+            {
+                let mut out = vec![Syllable {
+                    onset: syllable.onset.clone(),
+                    nucleus: syllable.nucleus.clone(),
+                    coda: if clusters.len() > 1 {
+                        clusters[0].clone()
+                    } else {
+                        Vec::new()
+                    },
+                }];
+                if clusters.len() > 2 {
+                    for c in &clusters[1..last_idx] {
+                        out.push(Syllable {
+                            onset: Vec::new(),
+                            nucleus: vec![filler],
+                            coda: c.clone(),
+                        });
+                    }
+                }
+                out.push(Syllable {
+                    onset: clusters[last_idx].clone(),
+                    nucleus: vec![filler],
+                    coda: Vec::new(),
+                });
+                return Some(out);
+            }
+        }
+        None
+    }
+
+    /// Enforce this language's syllable structure and phonotactic constraints via epenthesis
+    /// (`language/phonotactics.py:23-58` and `lexicon.py:27-76`).
     pub fn constrain(&self, word: &Word) -> Word {
         let ep = self.epenthetic_vowel();
-        let max_o = self.onsetp.len();
-        let max_c = self.codap.len();
         let mut new_syllables = Vec::new();
+
+        // If emergent attested cluster constraints exist (`stats.Language`), try `constrainonset` + `constraincoda` first
+        if !self.attested_onsets.is_empty() && !self.attested_codae.is_empty() {
+            let mut all_matched = true;
+            let mut attested_syllables = Vec::new();
+            for s in &word.syllables {
+                if let Some(mut onset_ss) = self.constrain_onset_attested(s, ep) {
+                    if let Some(last_s) = onset_ss.pop() {
+                        if let Some(coda_ss) = self.constrain_coda_attested(&last_s, ep) {
+                            onset_ss.extend(coda_ss);
+                            attested_syllables.extend(onset_ss);
+                            continue;
+                        }
+                    }
+                }
+                all_matched = false;
+                break;
+            }
+            if all_matched && !attested_syllables.is_empty() {
+                return Word {
+                    syllables: attested_syllables,
+                    stress: self.stress,
+                };
+            }
+        }
+
+        let max_o = self.onsetp.len().max(1);
+        let max_c = self.codap.len().max(1);
 
         for s in &word.syllables {
             let mut onset = s.onset.clone();
@@ -660,20 +924,61 @@ impl Language {
         self.constrain(&adapted)
     }
 
-    /// Derive a new word from `base` by prepending or appending a 1-syllable affix (`lexicon.py:85-92`).
-    pub fn derive_word(&self, base: &Word, rng: &mut Pcg64Mcg) -> Word {
-        let affix = self.generate_syllable(rng);
-        let mut syllables = base.syllables.clone();
-        if (rng.next_u64() & 1) == 0 {
-            syllables.insert(0, affix);
-        } else {
-            syllables.push(affix);
+    /// Borrow `foreign` into `self`, avoiding homophone collisions with `existing_words` and falling back
+    /// to suffix derivation if adapted forms collide (`language/lazy.py:23-30`).
+    pub fn borrow_word_unique(
+        &self,
+        foreign: &Word,
+        existing_words: &BTreeSet<Word>,
+        rng: &mut Pcg64Mcg,
+    ) -> Word {
+        let borrowed = self.borrow_word(foreign);
+        if !existing_words.contains(&borrowed) {
+            return borrowed;
         }
-        let w = Word {
+        self.derive_word_unique(foreign, existing_words, rng)
+    }
+
+    /// Derive a new word from `base` by adapting sounds, constraining clusters, and appending a 1-syllable
+    /// suffix until unique (`language/lazy.py:11-21`).
+    pub fn derive_word_unique(
+        &self,
+        base: &Word,
+        existing_words: &BTreeSet<Word>,
+        rng: &mut Pcg64Mcg,
+    ) -> Word {
+        let adapted = self.constrain(&self.adapt_sounds(base));
+        for _ in 0..16 {
+            let suffix = self.constrain(&Word {
+                syllables: vec![self.generate_syllable(rng)],
+                stress: self.stress,
+            });
+            let mut syllables = adapted.syllables.clone();
+            syllables.extend(suffix.syllables);
+            let candidate = Word {
+                syllables,
+                stress: self.stress,
+            };
+            if !existing_words.contains(&candidate) {
+                return candidate;
+            }
+        }
+        self.derive_word(base, rng)
+    }
+
+    /// Derive a new word from `base` by appending a 1-syllable suffix (`language/lazy.py:11-21`).
+    pub fn derive_word(&self, base: &Word, rng: &mut Pcg64Mcg) -> Word {
+        let adapted = self.constrain(&self.adapt_sounds(base));
+        let suffix = self.constrain(&Word {
+            syllables: vec![self.generate_syllable(rng)],
+            stress: self.stress,
+        });
+        let mut syllables = adapted.syllables;
+        syllables.extend(suffix.syllables);
+        Word {
             syllables,
             stress: self.stress,
-        };
-        self.constrain(&w)
+        }
     }
 }
 
@@ -1043,14 +1348,19 @@ impl LanguageSandbox {
         self.dest_lang = Language::generate(&mut self.rng);
         self.lang_counter += 1;
         let lang_name = format!("Lang_{}", self.lang_counter);
-        let mut used = BTreeSet::new();
+        let mut seen_keys = BTreeSet::new();
+        let mut used_words = BTreeSet::new();
         let mut origins = Vec::with_capacity(Self::WORD_COUNT);
         while origins.len() < Self::WORD_COUNT {
-            let w = self.dest_lang.generate_word(&mut self.rng);
-            if used.insert(w.clone()) {
+            let w = self
+                .dest_lang
+                .generate_word_unique(&mut seen_keys, &used_words, &mut self.rng);
+            if used_words.insert(w.clone()) {
                 origins.push(WordOrigin::new(w, lang_name.clone(), None));
             }
         }
+        let words: Vec<Word> = origins.iter().map(|o| o.word.clone()).collect();
+        self.dest_lang.refresh_from_lexicon(&words);
         self.source_origins = origins.clone();
         self.dest_origins = origins;
     }
@@ -1061,30 +1371,51 @@ impl LanguageSandbox {
         let donor_name = format!("Donor_{}", self.lang_counter);
         let recip_name = format!("Lang_{}", self.lang_counter);
 
-        let mut used = BTreeSet::new();
+        let dest_words: Vec<Word> = self.dest_origins.iter().map(|o| o.word.clone()).collect();
+        self.dest_lang.refresh_from_lexicon(&dest_words);
+
+        let mut donor_keys = BTreeSet::new();
+        let mut used_donor = BTreeSet::new();
+        let mut existing_recip = BTreeSet::new();
         let mut src = Vec::with_capacity(Self::WORD_COUNT);
         let mut dst = Vec::with_capacity(Self::WORD_COUNT);
 
         while src.len() < Self::WORD_COUNT {
-            let w = donor_lang.generate_word(&mut self.rng);
-            if used.insert(w.clone()) {
+            let w = donor_lang.generate_word_unique(&mut donor_keys, &used_donor, &mut self.rng);
+            if used_donor.insert(w.clone()) {
                 let donor_origin = WordOrigin::new(w.clone(), donor_name.clone(), None);
-                let borrowed = self.dest_lang.borrow_word(&w);
-                let recip_origin = WordOrigin::new(borrowed, recip_name.clone(), Some(donor_origin.clone()));
+                let borrowed =
+                    self.dest_lang
+                        .borrow_word_unique(&w, &existing_recip, &mut self.rng);
+                existing_recip.insert(borrowed.clone());
+                let recip_origin =
+                    WordOrigin::new(borrowed, recip_name.clone(), Some(donor_origin.clone()));
                 src.push(donor_origin);
                 dst.push(recip_origin);
             }
         }
+        let new_words: Vec<Word> = dst.iter().map(|o| o.word.clone()).collect();
+        self.dest_lang.refresh_from_lexicon(&new_words);
         self.source_origins = src;
         self.dest_origins = dst;
     }
 
     pub fn apply_sound_change(&mut self, kind: SoundChangeKind) {
-        self.dest_origins = self
-            .dest_origins
-            .iter()
-            .map(|o| o.mutate(kind))
-            .collect();
+        let mut seen: BTreeSet<Word> = self.dest_origins.iter().map(|o| o.word.clone()).collect();
+        let mut updated = Vec::with_capacity(self.dest_origins.len());
+        for o in &self.dest_origins {
+            let candidate = kind.apply(&o.word);
+            if candidate != o.word && !seen.contains(&candidate) {
+                seen.remove(&o.word);
+                seen.insert(candidate);
+                updated.push(o.mutate(kind));
+            } else {
+                updated.push(o.clone());
+            }
+        }
+        self.dest_origins = updated;
+        let words: Vec<Word> = self.dest_origins.iter().map(|o| o.word.clone()).collect();
+        self.dest_lang.refresh_from_lexicon(&words);
     }
 
     pub fn source_phonemes_text(&self) -> String {

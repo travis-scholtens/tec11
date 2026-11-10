@@ -7,7 +7,7 @@ use tec11_math_grid::{
 };
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::language::{Language, SoundChangeKind, WordOrigin};
+use crate::language::{Language, SoundChangeKind, Word, WordOrigin};
 use crate::lifeforms::{settle_species_on_climate, SettledSpecies, SpeciesKind};
 use crate::population::{
     is_farmable, is_habitable, is_passable, main_ocean, tile_population_thousands,
@@ -115,6 +115,8 @@ pub struct LanguageRecord {
     pub id: u32,
     pub phonology: Language,
     pub lexicon: BTreeMap<ConceptKey, WordOrigin>,
+    pub used_words: BTreeSet<Word>,
+    pub used_wordkeys: BTreeSet<Vec<(bool, i32)>>,
     pub changes_per_tick: Vec<Vec<u32>>,
 }
 
@@ -125,9 +127,12 @@ impl LanguageRecord {
             id,
             phonology,
             lexicon: BTreeMap::new(),
+            used_words: BTreeSet::new(),
+            used_wordkeys: BTreeSet::new(),
             changes_per_tick: Vec::new(),
         };
         rec.coin_concept(ConceptKey::Language(id), rng);
+        rec.refresh_phonology();
         rec
     }
 
@@ -145,6 +150,8 @@ impl LanguageRecord {
             id,
             phonology,
             lexicon: BTreeMap::new(),
+            used_words: BTreeSet::new(),
+            used_wordkeys: BTreeSet::new(),
             changes_per_tick: Vec::new(),
         };
         rec.coin_concept(ConceptKey::Nation(state_id), rng);
@@ -166,6 +173,7 @@ impl LanguageRecord {
         for &sp_idx in species_indices {
             rec.coin_concept(ConceptKey::Species(sp_idx as u32), rng);
         }
+        rec.refresh_phonology();
         rec
     }
 
@@ -180,6 +188,16 @@ impl LanguageRecord {
         self.lexicon.contains_key(&key)
     }
 
+    /// Recompute emergent phoneme inventory, syllable onset/coda probabilities, and attested
+    /// onset/coda cluster constraints from the current living lexicon (`language/stats.py:3-33`).
+    pub fn refresh_phonology(&mut self) {
+        if self.lexicon.is_empty() {
+            return;
+        }
+        let words: Vec<Word> = self.lexicon.values().map(|o| o.word.clone()).collect();
+        self.phonology.refresh_from_lexicon(&words);
+    }
+
     pub fn coin_concept(&mut self, key: ConceptKey, rng: &mut Pcg64Mcg) -> WordOrigin {
         if let Some(existing) = self.lexicon.get(&key) {
             return existing.clone();
@@ -189,13 +207,17 @@ impl LanguageRecord {
             .get(&ConceptKey::Language(self.id))
             .map(|o| o.word.write(true))
             .unwrap_or_else(|| format!("Proto-{}", self.id + 1));
-        let word = self.phonology.generate_word(rng);
+        let word = self
+            .phonology
+            .generate_word_unique(&mut self.used_wordkeys, &self.used_words, rng);
+        self.used_words.insert(word.clone());
         let origin = WordOrigin::new(word, lang_label, None);
         self.lexicon.insert(key, origin.clone());
         origin
     }
 
-    /// Derive `dest_key` from `src_key` by affixation (`language/lazy.py:11-21, 90-100`).
+    /// Derive `dest_key` from `src_key` by adapting sounds, constraining clusters, and appending a
+    /// 1-syllable suffix (`language/lazy.py:11-21, 90-100`).
     pub fn derive_concept(
         &mut self,
         src_key: ConceptKey,
@@ -206,7 +228,11 @@ impl LanguageRecord {
             return Some(existing.clone());
         }
         let src_origin = self.lexicon.get(&src_key)?.clone();
-        let derived_word = self.phonology.derive_word(&src_origin.word, rng);
+        let derived_word = self
+            .phonology
+            .derive_word_unique(&src_origin.word, &self.used_words, rng);
+        self.used_wordkeys.insert(derived_word.wordkey());
+        self.used_words.insert(derived_word.clone());
         let my_name = self.name();
         let origin = WordOrigin::new(derived_word, my_name, Some(src_origin));
         self.lexicon.insert(dest_key, origin.clone());
@@ -218,7 +244,18 @@ impl LanguageRecord {
             return;
         }
         if let Some(donor_origin) = donor.lexicon.get(&key) {
-            let borrowed_word = self.phonology.borrow_word(&donor_origin.word);
+            let mut local_rng = Pcg64Mcg::new(
+                ((self.id as u128) << 64)
+                    ^ ((donor.id as u128) << 32)
+                    ^ (self.lexicon.len() as u128),
+            );
+            let borrowed_word = self.phonology.borrow_word_unique(
+                &donor_origin.word,
+                &self.used_words,
+                &mut local_rng,
+            );
+            self.used_wordkeys.insert(borrowed_word.wordkey());
+            self.used_words.insert(borrowed_word.clone());
             let my_name = self.name();
             let origin = WordOrigin::new(borrowed_word, my_name, Some(donor_origin.clone()));
             self.lexicon.insert(key, origin);
@@ -237,16 +274,33 @@ impl LanguageRecord {
         cloned
     }
 
+    /// Apply 2 to 4 cascaded language-wide sound changes for a 200-year tick, preventing homophonous
+    /// mergers (`language/lazy.py:47`, `languagesimulation.py:25`) and refreshing the language's
+    /// emergent phoneme inventory and cluster constraints (`language/stats.py`).
     pub fn mutate_tick(&mut self, rng: &mut Pcg64Mcg) {
-        let change_id = (rng.next_u64() as u32) % 9;
-        let change = SoundChangeKind::from_u32(change_id);
-        let my_name = self.name();
-        for origin in self.lexicon.values_mut() {
-            let mut next = origin.mutate(change);
-            next.lang_name = my_name.clone();
-            *origin = next;
+        let num_changes = 2 + ((rng.next_u64() as usize) % 3); // 2, 3, or 4 sound changes per 200 years
+        let mut tick_changes = Vec::with_capacity(num_changes);
+
+        for _ in 0..num_changes {
+            let change_id = (rng.next_u64() as u32) % 9;
+            let change = SoundChangeKind::from_u32(change_id);
+            tick_changes.push(change_id);
+            let my_name = self.name();
+
+            for origin in self.lexicon.values_mut() {
+                let candidate = change.apply(&origin.word);
+                if candidate != origin.word && !self.used_words.contains(&candidate) {
+                    self.used_words.remove(&origin.word);
+                    self.used_wordkeys.insert(candidate.wordkey());
+                    self.used_words.insert(candidate);
+                    let mut next = origin.mutate(change);
+                    next.lang_name = my_name.clone();
+                    *origin = next;
+                }
+            }
         }
-        self.changes_per_tick.push(vec![change_id]);
+        self.changes_per_tick.push(tick_changes);
+        self.refresh_phonology();
     }
 }
 
@@ -1397,7 +1451,7 @@ impl HistorySimulation {
         let coarse_elevs = self.prehistory.tile_elevations();
         let koeppen = self.prehistory.tile_koeppen_ids().to_vec();
 
-        // 1. Language sound changes (`historysimulation.py:511-515`, keeping tec11's per-language sound change)
+        // 1. Language sound changes (`historysimulation.py:511-515`: 2-4 cascaded per-language sound changes per 200-year tick)
         let active_langs: BTreeSet<u32> = self
             .tile_communities
             .values()
@@ -1406,13 +1460,11 @@ impl HistorySimulation {
             .map(|c| c.language_id)
             .collect();
         for lid in active_langs {
-            if self.rng.uniform(0.0, 1.0) < 0.65 {
-                let mut temp_rng = self.rng.clone();
-                if let Some(lang) = self.languages.get_mut(&lid) {
-                    lang.mutate_tick(&mut temp_rng);
-                }
-                self.rng = temp_rng;
+            let mut temp_rng = self.rng.clone();
+            if let Some(lang) = self.languages.get_mut(&lid) {
+                lang.mutate_tick(&mut temp_rng);
             }
+            self.rng = temp_rng;
         }
 
         // 2. Verhulst logistic growth and neighborhood spillover (`historysimulation.py:168-220`)
