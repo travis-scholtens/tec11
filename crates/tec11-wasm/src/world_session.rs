@@ -23,6 +23,7 @@ impl WasmWorldSession {
         moon_count: u32,
         moon_mass: f32,
         moon_dist_radii: u32,
+        meteor_freq: f32,
     ) -> Self {
         let params = WorldCreateParams {
             grid_size,
@@ -35,6 +36,7 @@ impl WasmWorldSession {
             moon_count,
             moon_mass,
             moon_dist_radii,
+            meteor_freq,
         };
         Self {
             sim: WorldSimulation::new(params, 42),
@@ -54,6 +56,7 @@ impl WasmWorldSession {
         moon_count: u32,
         moon_mass: f32,
         moon_dist_radii: u32,
+        meteor_freq: f32,
         randomize: bool,
     ) {
         let params = WorldCreateParams {
@@ -67,6 +70,7 @@ impl WasmWorldSession {
             moon_count,
             moon_mass,
             moon_dist_radii,
+            meteor_freq,
         };
         self.sim.create(params, randomize);
     }
@@ -145,6 +149,10 @@ impl WasmWorldSession {
 
     pub fn param_moon_dist_radii(&self) -> u32 {
         self.sim.params().moon_dist_radii
+    }
+
+    pub fn param_meteor_freq(&self) -> f32 {
+        self.sim.params().meteor_freq
     }
 
     pub fn current_day_hours(&self) -> f32 {

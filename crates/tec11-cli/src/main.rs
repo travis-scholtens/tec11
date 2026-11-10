@@ -44,6 +44,7 @@ pub struct CliConfig {
     pub moon_count: Option<u32>,
     pub moon_mass: Option<f32>,
     pub moon_dist_radii: Option<u32>,
+    pub meteor_freq: Option<f32>,
     pub target_stage: TargetStage,
     pub prehistory_ticks: u32,
     pub history_ticks: u32,
@@ -69,6 +70,7 @@ impl Default for CliConfig {
             moon_count: None,
             moon_mass: None,
             moon_dist_radii: None,
+            meteor_freq: None,
             target_stage: TargetStage::History,
             prehistory_ticks: 32,
             history_ticks: 10,
@@ -111,6 +113,7 @@ PLANET CREATION PARAMETERS (matching the World Simulation GUI):
         --moons <0..=4>          Number of moons in a 2:1 Laplace harmonic resonance chain [default: 1]
         --moon-mass <MASS>       Primary moon mass in Earth Lunar masses (0.1..=3.0) [default: 1.0]
         --moon-dist <RADII>      Target innermost moon distance at Prehistory start in R_p [default: 60]
+        --meteor-freq <MULT>     Meteor / bolide impact frequency multiplier (0.0..=5.0) [default: 1.0]
 
 SIMULATION STEPPING OPTIONS:
         --target-stage <STAGE>   Stage to run through: tectonics | prehistory | history [default: history]
@@ -240,6 +243,10 @@ where
                 let v = next_val(arg)?;
                 cfg.moon_dist_radii = Some(parse_u32_flag(arg, &v, 15, 160)?);
             }
+            "--meteor-freq" | "--meteors" | "--meteor-rate" => {
+                let v = next_val(arg)?;
+                cfg.meteor_freq = Some(parse_f32_flag(arg, &v, 0.0, 10.0)?);
+            }
             "--target-stage" | "--stage" => {
                 let v = next_val(arg)?;
                 cfg.target_stage = TargetStage::parse(&v)?;
@@ -304,6 +311,9 @@ pub fn resolve_world_params(
     if let Some(md) = cfg.moon_dist_radii {
         base_params.moon_dist_radii = md;
     }
+    if let Some(mf) = cfg.meteor_freq {
+        base_params.meteor_freq = mf;
+    }
 
     if !cfg.randomize {
         let world = WorldSimulation::new(base_params, seed);
@@ -321,7 +331,8 @@ pub fn resolve_world_params(
         || cfg.people_dt_myr.is_some()
         || cfg.moon_count.is_some()
         || cfg.moon_mass.is_some()
-        || cfg.moon_dist_radii.is_some();
+        || cfg.moon_dist_radii.is_some()
+        || cfg.meteor_freq.is_some();
 
     if has_override {
         if let Some(d) = cfg.day_hours {
@@ -355,6 +366,9 @@ pub fn resolve_world_params(
         }
         if let Some(md) = cfg.moon_dist_radii {
             resolved.moon_dist_radii = md;
+        }
+        if let Some(mf) = cfg.meteor_freq {
+            resolved.meteor_freq = mf;
         }
         world = WorldSimulation::new(resolved, seed);
     }
@@ -401,7 +415,7 @@ pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
                 "Initialized World Simulation (seed={seed}, randomize={}):\n  \
                  grid_size={} ({} coarse tiles), target_day={}h (Hadean={:.1}h), tilt={}°, land={}%, \
                  moons={} (mass={:.1}x, target_dist={} Rp, Hadean_dist={:.1} Rp, tides={:.1}x), \
-                 atm_dt={} Myr, life_dt={} Myr, people_dt={} Myr",
+                 meteors={:.1}x, atm_dt={} Myr, life_dt={} Myr, people_dt={} Myr",
                 cfg.randomize,
                 params.grid_size,
                 w.tile_count(),
@@ -414,6 +428,7 @@ pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
                 params.moon_dist_radii,
                 w.current_moon_dist_radii(),
                 w.current_tidal_strength(),
+                params.meteor_freq,
                 params.atm_dt_myr,
                 params.life_dt_myr,
                 params.people_dt_myr
@@ -591,6 +606,8 @@ mod tests {
             "1.5",
             "--moon-dist",
             "55",
+            "--meteor-freq",
+            "2.5",
             "--history-ticks",
             "3",
             "-o",
@@ -609,6 +626,7 @@ mod tests {
         assert_eq!(cfg.moon_count, Some(2));
         assert_eq!(cfg.moon_mass, Some(1.5));
         assert_eq!(cfg.moon_dist_radii, Some(55));
+        assert_eq!(cfg.meteor_freq, Some(2.5));
         assert_eq!(cfg.history_ticks, 3);
         assert_eq!(cfg.output, PathBuf::from("/tmp/test_world.tec11"));
     }
@@ -631,6 +649,7 @@ mod tests {
             moon_count: None,
             moon_mass: None,
             moon_dist_radii: None,
+            meteor_freq: None,
             target_stage: TargetStage::History,
             prehistory_ticks: 4,
             history_ticks: 2,

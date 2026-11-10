@@ -67,6 +67,7 @@ pub struct TectonicsSimulation {
     tile_temp_c: Vec<f32>,
     tile_precip_norm: Vec<f32>,
     tile_impact_scars: Vec<f32>,
+    meteor_freq: f64,
     impact_count: u32,
     impact_winter_ticks: u32,
     sterilization_delays: u32,
@@ -211,6 +212,7 @@ impl TectonicsSimulation {
             tile_temp_c: vec![15.0; n],
             tile_precip_norm: vec![0.5; n],
             tile_impact_scars: vec![0.0; n],
+            meteor_freq: 1.0,
             impact_count: 0,
             impact_winter_ticks: 0,
             sterilization_delays: 0,
@@ -398,6 +400,14 @@ impl TectonicsSimulation {
 
     pub fn impact_count(&self) -> u32 {
         self.impact_count
+    }
+
+    pub fn meteor_freq(&self) -> f64 {
+        self.meteor_freq
+    }
+
+    pub fn set_meteor_freq(&mut self, freq: f64) {
+        self.meteor_freq = freq.clamp(0.0, 10.0);
     }
 
     pub fn impact_winter_ticks(&self) -> u32 {
@@ -1287,26 +1297,33 @@ impl TectonicsSimulation {
         self.groups = next_groups;
 
         // 11. Stochastic meteor / bolide impacts (Hadean-Archean Late Heavy Bombardment decay
-        //     followed by steady Phanerozoic Chicxulub/Sudbury-scale bolide flux):
-        let p_impact = if self.geoticks < 45 {
-            0.28 * (-(self.geoticks as f64) / 16.0).exp()
-        } else {
-            0.055
-        };
-        let mut impact_rng = Pcg64Mcg::from_seed_u64(
-            (self.geoticks as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_add((n as u64).wrapping_mul(0x517C_C1B7_2722_0A95)),
-        );
-        if impact_rng.next_f64() < p_impact && n > 0 {
-            let center = (impact_rng.next_u64() as usize) % n;
-            let u = impact_rng.next_f64();
-            let crater_d_km = if self.geoticks < 45 {
-                160.0 + 420.0 * u * u
+        //     followed by steady Phanerozoic Chicxulub/Sudbury-scale bolide flux), scaled by `meteor_freq`:
+        if self.meteor_freq > 0.0 && n > 0 {
+            let base_p = if self.geoticks < 45 {
+                0.28 * (-(self.geoticks as f64) / 16.0).exp()
             } else {
-                140.0 + 180.0 * u * u
+                0.055
             };
-            self.apply_bolide_impact(center, crater_d_km);
+            let mut rem = base_p * self.meteor_freq;
+            let mut impact_rng = Pcg64Mcg::from_seed_u64(
+                (self.geoticks as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add((n as u64).wrapping_mul(0x517C_C1B7_2722_0A95)),
+            );
+            while rem > 0.0 {
+                let p_impact = rem.min(1.0);
+                if impact_rng.next_f64() < p_impact {
+                    let center = (impact_rng.next_u64() as usize) % n;
+                    let u = impact_rng.next_f64();
+                    let crater_d_km = if self.geoticks < 45 {
+                        160.0 + 420.0 * u * u
+                    } else {
+                        140.0 + 180.0 * u * u
+                    };
+                    self.apply_bolide_impact(center, crater_d_km);
+                }
+                rem -= 1.0;
+            }
         }
 
         self.geoticks += 1;
@@ -1732,6 +1749,7 @@ impl TectonicsSimulation {
             tile_temp_c: vec![15.0; n],
             tile_precip_norm: vec![0.5; n],
             tile_impact_scars: vec![0.0; n],
+            meteor_freq: 1.0,
             impact_count: 0,
             impact_winter_ticks: 0,
             sterilization_delays: 0,
@@ -2083,5 +2101,21 @@ mod tests {
         );
         let report = sim.inspect_tile(land_idx);
         assert!(report.contains("Impact Crater Basin"));
+
+        // Verify meteor_freq = 0.0 disables stochastic bolide impacts across 25 ticks,
+        // while meteor_freq = 4.0 increases impact count over meteor_freq = 1.0:
+        let mut sim_off = TectonicsSimulation::new(4, 29.0, 42);
+        sim_off.set_meteor_freq(0.0);
+        let mut sim_std = TectonicsSimulation::new(4, 29.0, 42);
+        sim_std.set_meteor_freq(1.0);
+        let mut sim_heavy = TectonicsSimulation::new(4, 29.0, 42);
+        sim_heavy.set_meteor_freq(4.0);
+        for _ in 0..25 {
+            sim_off.step();
+            sim_std.step();
+            sim_heavy.step();
+        }
+        assert_eq!(sim_off.impact_count(), 0);
+        assert!(sim_heavy.impact_count() > sim_std.impact_count());
     }
 }

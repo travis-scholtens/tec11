@@ -3093,6 +3093,7 @@ function buildWorldInfo(view) {
   const moonCount = s.param_moon_count();
   const moonMass = s.param_moon_mass();
   const moonDistTarget = s.param_moon_dist_radii();
+  const meteorFreq = s.param_meteor_freq();
   const curDay = s.current_day_hours();
   const curTilt = s.current_tilt_deg();
   const curMoonDist = s.current_moon_dist_radii();
@@ -3100,8 +3101,8 @@ function buildWorldInfo(view) {
   const impacts = s.impact_count();
   const orbitalSummaryText =
     moonCount === 0
-      ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x) | Impacts: ${impacts}`
-      : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x) | Impacts: ${impacts}`;
+      ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`
+      : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`;
   return {
     stageIndex: s.stage_index(),
     stageName: s.stage_name(),
@@ -3118,6 +3119,7 @@ function buildWorldInfo(view) {
     moonCount,
     moonMassTenths: Math.round(moonMass * 10.0),
     moonDistRadii: moonDistTarget,
+    meteorFreqTenths: Math.round(meteorFreq * 10.0),
     orbitalSummaryText,
     isRunning: Boolean(view.isRunning),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
@@ -3159,6 +3161,7 @@ export const mountWorldView =
   (moonCount) =>
   (moonMassTenths) =>
   (moonDistRadii) =>
+  (meteorFreqTenths) =>
   (aspect) =>
   (setWorldInfo) =>
   () => {
@@ -3178,7 +3181,8 @@ export const mountWorldView =
       peopleDt,
       moonCount,
       moonMassTenths / 10.0,
-      moonDistRadii
+      moonDistRadii,
+      meteorFreqTenths / 10.0
     );
     view.aspect = aspect;
     view.selectedTileIdx = -1;
@@ -3235,6 +3239,7 @@ export const createWorld =
   (moonCount) =>
   (moonMassTenths) =>
   (moonDistRadii) =>
+  (meteorFreqTenths) =>
   (randomize) =>
   (setWorldInfo) =>
   () => {
@@ -3251,6 +3256,7 @@ export const createWorld =
       moonCount,
       moonMassTenths / 10.0,
       moonDistRadii,
+      meteorFreqTenths / 10.0,
       randomize
     );
     activeView.selectedTileIdx = -1;

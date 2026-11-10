@@ -197,6 +197,7 @@ type WorldInfo =
   , moonCount :: Int
   , moonMassTenths :: Int
   , moonDistRadii :: Int
+  , meteorFreqTenths :: Int
   , orbitalSummaryText :: String
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
@@ -350,8 +351,8 @@ foreign import loadSavedPlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Eff
 foreign import loadFilePlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
 
 -- Complete World Simulation mode FFI
-foreign import mountWorldView :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> String -> (WorldInfo -> Effect Unit) -> Effect (Effect Unit)
-foreign import createWorld :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Boolean -> (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import mountWorldView :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> String -> (WorldInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import createWorld :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Boolean -> (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import stepWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import advanceWorldStage :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import toggleWorldRunning :: (WorldInfo -> Effect Unit) -> Effect Unit
@@ -569,6 +570,7 @@ mkApp = do
     worldMoonCount /\ setWorldMoonCount <- useState' 1
     worldMoonMassTenths /\ setWorldMoonMassTenths <- useState' 10
     worldMoonDistRadii /\ setWorldMoonDistRadii <- useState' 60
+    worldMeteorFreqTenths /\ setWorldMeteorFreqTenths <- useState' 10
     worldRandomize /\ setWorldRandomize <- useState' true
     worldAspect /\ setWorldAspectState <- useState' "color"
     worldInfo /\ setWorldInfo <- useState'
@@ -587,7 +589,8 @@ mkApp = do
       , moonCount: 1
       , moonMassTenths: 10
       , moonDistRadii: 60
-      , orbitalSummaryText: "Day: 11.1h (→24h) | Tilt: 23.0° | Moons: 1 (1.0x @ 23.4→60 Rp, Tides 14.5x)"
+      , meteorFreqTenths: 10
+      , orbitalSummaryText: "Day: 11.1h (→24h) | Tilt: 23.0° | Moons: 1 (1.0x @ 23.4→60 Rp, Tides 14.5x) | Meteors: 1.0x (0 hits)"
       , isRunning: false
       , hasSavedPlanet: false
       , selectedReport: "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree."
@@ -686,7 +689,7 @@ mkApp = do
           mountHistoryView historyAspect historyShowRivers setHistoryInfo
         WorldScreen -> do
           setRotationDeg 0
-          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldAspect setWorldInfo
+          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldAspect setWorldInfo
         MoonScreen -> do
           setRotationDeg 0
           mountMoonView moonCount moonMassTenths moonDistRadii moonEpochPct moonAspect moonShowTidalScour moonShowFluvial moonShowDeposition setMoonInfo
@@ -960,13 +963,18 @@ mkApp = do
         Nothing -> pure unit
         Just md -> setWorldMoonDistRadii md
 
+      handleWorldMeteorFreqChange :: Maybe String -> Effect Unit
+      handleWorldMeteorFreqChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just mf -> setWorldMeteorFreqTenths mf
+
       handleToggleWorldRandomize :: Effect Unit
       handleToggleWorldRandomize =
         setWorldRandomize (not worldRandomize)
 
       handleCreateWorld :: Effect Unit
       handleCreateWorld =
-        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldRandomize \info -> do
+        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldRandomize \info -> do
           setWorldInfo info
           setWorldDayHours info.dayHours
           setWorldTiltDeg info.tiltDeg
@@ -977,6 +985,7 @@ mkApp = do
           setWorldMoonCount info.moonCount
           setWorldMoonMassTenths info.moonMassTenths
           setWorldMoonDistRadii info.moonDistRadii
+          setWorldMeteorFreqTenths info.meteorFreqTenths
 
       handleMoonCountChange :: Maybe String -> Effect Unit
       handleMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
@@ -3910,6 +3919,37 @@ mkApp = do
                                               "0.0x"
                                             else
                                               show (worldMoonMassTenths / 10) <> "." <> show (worldMoonMassTenths `mod` 10) <> "x"
+                                          )
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Meteors:" ]
+                                  }
+                              , R.input
+                                  { id: "world-meteor-freq-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "50"
+                                  , step: "2"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldMeteorFreqTenths
+                                  , onChange: handler targetValue handleWorldMeteorFreqChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children:
+                                      [ R.text
+                                          ( if worldMeteorFreqTenths == 0 then
+                                              "0.0x (Off)"
+                                            else
+                                              show (worldMeteorFreqTenths / 10) <> "." <> show (worldMeteorFreqTenths `mod` 10) <> "x"
                                           )
                                       ]
                                   }

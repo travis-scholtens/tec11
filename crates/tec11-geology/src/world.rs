@@ -124,6 +124,7 @@ pub struct WorldCreateParams {
     pub moon_count: u32,
     pub moon_mass: f32,
     pub moon_dist_radii: u32,
+    pub meteor_freq: f32,
 }
 
 impl Default for WorldCreateParams {
@@ -139,6 +140,7 @@ impl Default for WorldCreateParams {
             moon_count: 1,
             moon_mass: 1.0,
             moon_dist_radii: 60,
+            meteor_freq: 1.0,
         }
     }
 }
@@ -162,21 +164,23 @@ pub struct WorldSimulation {
 
 impl WorldSimulation {
     pub fn new(params: WorldCreateParams, seed: u64) -> Self {
+        let mut tec = TectonicsSimulation::new_with_full_params(
+            params.grid_size,
+            params.day_hours as f64,
+            params.tilt_deg as f64,
+            params.land_pct as f64,
+            params.atm_dt_myr,
+            params.life_dt_myr,
+            params.people_dt_myr,
+            params.moon_count,
+            params.moon_mass as f64,
+            params.moon_dist_radii as f64,
+            seed,
+        );
+        tec.set_meteor_freq(params.meteor_freq as f64);
         let mut sim = Self {
             params,
-            stage: WorldStageState::Tectonics(TectonicsSimulation::new_with_full_params(
-                params.grid_size,
-                params.day_hours as f64,
-                params.tilt_deg as f64,
-                params.land_pct as f64,
-                params.atm_dt_myr,
-                params.life_dt_myr,
-                params.people_dt_myr,
-                params.moon_count,
-                params.moon_mass as f64,
-                params.moon_dist_radii as f64,
-                seed,
-            )),
+            stage: WorldStageState::Tectonics(tec),
             people_ticks_remaining: (params.people_dt_myr / 5).max(1),
             tectonics_ticks: 0,
             prehistory_ticks: 0,
@@ -219,10 +223,13 @@ impl WorldSimulation {
                 let mode_day_h = (12.0 + 12.0 * braking_factor).round().clamp(8.0, 44.0) as i32;
                 params.day_hours = random_spin_value(6, 48, 1, mode_day_h, &mut self.rng) as u32;
             }
+            // Randomize meteor bombardment frequency in Earth-like flux multiples (0.0x..=3.6x, mode 1.0x):
+            let freq_tenths = random_spin_value(0, 36, 2, 10, &mut self.rng);
+            params.meteor_freq = (freq_tenths as f32) / 10.0;
         }
         let seed = self.rng.next_u64();
         self.params = params;
-        self.stage = WorldStageState::Tectonics(TectonicsSimulation::new_with_full_params(
+        let mut tec = TectonicsSimulation::new_with_full_params(
             params.grid_size,
             params.day_hours as f64,
             params.tilt_deg as f64,
@@ -234,7 +241,9 @@ impl WorldSimulation {
             params.moon_mass as f64,
             params.moon_dist_radii as f64,
             seed,
-        ));
+        );
+        tec.set_meteor_freq(params.meteor_freq as f64);
+        self.stage = WorldStageState::Tectonics(tec);
         self.people_ticks_remaining = (params.people_dt_myr / 5).max(1);
         self.tectonics_ticks = 0;
         self.prehistory_ticks = 0;
@@ -877,6 +886,7 @@ mod tests {
             moon_count: 1,
             moon_mass: 1.0,
             moon_dist_radii: 60,
+            meteor_freq: 1.0,
         };
         let mut world = WorldSimulation::new(params, 42);
         assert_eq!(world.stage_index(), 0);
