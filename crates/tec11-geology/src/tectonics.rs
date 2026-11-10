@@ -50,7 +50,13 @@ pub struct TectonicsSimulation {
     splitnum: f64,
     atmosphere_ticks_remaining: u32,
     life_ticks_remaining: u32,
+    total_target_ticks: u32,
     geoticks: u32,
+    target_day_hours: f64,
+    base_tilt_deg: f64,
+    moon_count: u32,
+    moon_mass: f64,
+    target_moon_dist_radii: f64,
     tiles: Vec<TileGeology>,
     groups: Vec<LithosphericGroup>,
     ridges: Vec<SpreadingRidgeArc>,
@@ -66,7 +72,7 @@ pub struct TectonicsSimulation {
 impl TectonicsSimulation {
     /// Create a new tectonic simulation initialized with a random Pangaea supercontinent
     /// and surrounding ocean floor (`TectonicsPresenter` defaults: `grid_size = 6`, `land_pct = 29.0`,
-    /// `dt = 5 Myr`, `atmdt = 125 Myr`, `lifedt = 125 Myr`).
+    /// `dt = 5 Myr`, `atmdt = 125 Myr`, `lifedt = 125 Myr`, and 1 Earth-like Moon).
     pub fn new(grid_size: u32, land_percent: f64, seed: u64) -> Self {
         Self::new_with_params(grid_size, 24.0, 23.0, land_percent, 125, 125, seed)
     }
@@ -78,6 +84,35 @@ impl TectonicsSimulation {
         land_percent: f64,
         atm_dt_myr: u32,
         life_dt_myr: u32,
+        seed: u64,
+    ) -> Self {
+        Self::new_with_full_params(
+            grid_size,
+            day_hours,
+            tilt_deg,
+            land_percent,
+            atm_dt_myr,
+            life_dt_myr,
+            125,
+            1,
+            1.0,
+            60.0,
+            seed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_full_params(
+        grid_size: u32,
+        day_hours: f64,
+        tilt_deg: f64,
+        land_percent: f64,
+        atm_dt_myr: u32,
+        life_dt_myr: u32,
+        people_dt_myr: u32,
+        moon_count: u32,
+        moon_mass: f64,
+        moon_dist_radii: f64,
         seed: u64,
     ) -> Self {
         let mut rng = Pcg64Mcg::from_seed_u64(seed);
@@ -95,7 +130,22 @@ impl TectonicsSimulation {
             .collect();
         let tree = PointTree::new(&indexed_pts);
 
-        let spin = 24.0 / day_hours.max(1.0);
+        let target_day_hours = day_hours.max(1.0);
+        let base_tilt_deg = tilt_deg.clamp(0.0, 85.0);
+        let moon_mass = if moon_count == 0 {
+            0.0
+        } else {
+            moon_mass.max(0.0)
+        };
+        let target_moon_dist_radii = moon_dist_radii.clamp(15.0, 160.0);
+
+        let atmosphere_ticks_remaining = (atm_dt_myr / 5).max(1);
+        let life_ticks_remaining = (life_dt_myr / 5).max(1);
+        let people_ticks = (people_dt_myr / 5).max(1);
+        let total_target_ticks =
+            (atmosphere_ticks_remaining + life_ticks_remaining + people_ticks).max(1);
+
+        let spin = 24.0 / target_day_hours;
         let cells = if spin >= 3.0 {
             7
         } else if spin >= 2.0 {
@@ -116,9 +166,6 @@ impl TectonicsSimulation {
         let earth_area_km2 = 4.0 * PI * 6400.0 * 6400.0;
         let splitnum = (25.0e6 / earth_area_km2) * (n as f64);
 
-        let atmosphere_ticks_remaining = (atm_dt_myr / 5).max(1);
-        let life_ticks_remaining = (life_dt_myr / 5).max(1);
-
         let groups = vec![LithosphericGroup {
             tiles: pangea.continent_tiles,
             velocity: [0.0, 0.0, 0.0],
@@ -135,9 +182,10 @@ impl TectonicsSimulation {
             })
             .collect();
 
-        let climate_model = ClimateModel::new_for_tectonics(grid.clone(), cells, spin, tilt_deg);
+        let climate_model =
+            ClimateModel::new_for_tectonics(grid.clone(), cells, spin, base_tilt_deg);
 
-        Self {
+        let mut sim = Self {
             grid,
             adjacency,
             tree,
@@ -148,7 +196,13 @@ impl TectonicsSimulation {
             splitnum,
             atmosphere_ticks_remaining,
             life_ticks_remaining,
+            total_target_ticks,
             geoticks: 0,
+            target_day_hours,
+            base_tilt_deg,
+            moon_count,
+            moon_mass,
+            target_moon_dist_radii,
             tiles: pangea.tiles,
             groups,
             ridges,
@@ -159,7 +213,125 @@ impl TectonicsSimulation {
             tile_temp_c: vec![15.0; n],
             tile_precip_norm: vec![0.5; n],
             rng,
+        };
+        sim.climate_model
+            .set_spin_and_tilt_for_tectonics(sim.current_spin(), sim.current_tilt_deg());
+        sim
+    }
+
+    /// Tidal amplitude multiplier for `moon_count` moons in a 2:1 Laplace mean-motion
+    /// orbital period resonance chain (`P_k = 2^(k-1) P_1 => a_k^3 = 4^(k-1) a_1^3`).
+    /// Because tidal force scales as `M_k / a_k^3`, each successive harmonic moon out
+    /// contributes `1 / 4^(k-1)` of the innermost moon's tide (`1 + 1/4 + 1/16 + ...`).
+    pub fn harmonic_tidal_multiplier(moon_count: u32) -> f64 {
+        let mut sum = 0.0;
+        for k in 0..moon_count.min(8) {
+            sum += 4.0f64.powi(-(k as i32));
         }
+        sum
+    }
+
+    /// Orbital angular momentum multiplier for `moon_count` moons in a 2:1 Laplace
+    /// resonance chain (`L_k ~ M_k sqrt(a_k) = M_1 sqrt(a_1) * 2^((k-1)/3)`).
+    pub fn harmonic_angular_momentum_multiplier(moon_count: u32) -> f64 {
+        let mut sum = 0.0;
+        for k in 0..moon_count.min(8) {
+            sum += 2.0f64.powf((k as f64) / 3.0);
+        }
+        sum
+    }
+
+    pub fn moon_count(&self) -> u32 {
+        self.moon_count
+    }
+
+    pub fn moon_mass(&self) -> f64 {
+        self.moon_mass
+    }
+
+    pub fn target_moon_dist_radii(&self) -> f64 {
+        self.target_moon_dist_radii
+    }
+
+    /// Initial Hadean (`t = 0`) orbital distance of the innermost moon in planetary radii `R_p`,
+    /// backward-calibrated via the `a^(13/2)` tidal torque recession law so that the moon
+    /// reaches `target_moon_dist_radii` when Prehistory/History begins (`t = total_target_ticks`).
+    pub fn initial_moon_dist_radii(&self) -> f64 {
+        if self.moon_count == 0 || self.moon_mass <= 0.0 {
+            return 0.0;
+        }
+        let h_tide = Self::harmonic_tidal_multiplier(self.moon_count);
+        let factor = (1.0 + 450.0 * self.moon_mass * h_tide).powf(2.0 / 13.0);
+        (self.target_moon_dist_radii / factor).clamp(14.0, self.target_moon_dist_radii)
+    }
+
+    /// Current orbital distance of the innermost moon in planetary radii `R_p` at `geoticks`.
+    pub fn current_moon_dist_radii(&self) -> f64 {
+        if self.moon_count == 0 || self.moon_mass <= 0.0 {
+            return 0.0;
+        }
+        let a0 = self.initial_moon_dist_radii();
+        let a_tgt = self.target_moon_dist_radii;
+        let tau = ((self.geoticks as f64) / (self.total_target_ticks.max(1) as f64)).clamp(0.0, 1.25);
+        let a0_p = a0.powf(6.5);
+        let at_p = a_tgt.powf(6.5);
+        (a0_p + (at_p - a0_p) * tau).max(1.0).powf(1.0 / 6.5)
+    }
+
+    /// Current tidal amplitude relative to modern Earth (`1.0` for 1 Lunar-mass moon at `60 R_p`).
+    pub fn current_tidal_strength(&self) -> f64 {
+        if self.moon_count == 0 || self.moon_mass <= 0.0 {
+            0.15 // Solar tide only
+        } else {
+            let a = self.current_moon_dist_radii().max(12.0);
+            let h_tide = Self::harmonic_tidal_multiplier(self.moon_count);
+            let lunar_tide = self.moon_mass * (60.0 / a).powi(3) * h_tide;
+            0.15 + 0.85 * lunar_tide
+        }
+    }
+
+    /// Current planetary rotation rate `spin = 24.0 / current_day_hours`, starting faster
+    /// in the Hadean and braking via angular momentum transfer to the receding moon(s)
+    /// so that `current_day_hours == target_day_hours` when Prehistory/History begins.
+    pub fn current_spin(&self) -> f64 {
+        let target_spin = 24.0 / self.target_day_hours.max(1.0);
+        if self.moon_count == 0 || self.moon_mass <= 0.0 {
+            target_spin
+        } else {
+            let a_cur = self.current_moon_dist_radii();
+            let a_tgt = self.target_moon_dist_radii;
+            let h_ang = Self::harmonic_angular_momentum_multiplier(self.moon_count);
+            let delta_spin = 3.10
+                * self.moon_mass
+                * h_ang
+                * ((a_tgt / 60.0).sqrt() - (a_cur / 60.0).sqrt()).max(-0.2);
+            (target_spin + delta_spin).clamp(0.1, 6.0)
+        }
+    }
+
+    /// Current length of day in hours at `geoticks`.
+    pub fn current_day_hours(&self) -> f64 {
+        24.0 / self.current_spin()
+    }
+
+    /// Current axial tilt (obliquity) in degrees at `geoticks` (Laskar, Joutel & Robutel 1993):
+    /// stabilized within `+-1.2 deg` when lunar tidal torque is strong, or wandering
+    /// quasi-periodically by up to `+-14 deg` on moonless/tiny-moon worlds.
+    pub fn current_tilt_deg(&self) -> f64 {
+        let h_tide = Self::harmonic_tidal_multiplier(self.moon_count);
+        let s_obliq = if self.moon_count == 0 || self.moon_mass <= 0.0 {
+            0.0
+        } else {
+            self.moon_mass * (60.0 / self.target_moon_dist_radii.max(15.0)).powi(3) * h_tide
+        };
+        let t = self.geoticks as f64;
+        let wave = 0.65 * (0.19 * t).sin() + 0.35 * (0.31 * t + 1.1).cos();
+        let amp = if s_obliq >= 0.25 {
+            (1.2 / s_obliq.sqrt()).clamp(0.2, 2.4)
+        } else {
+            14.0 * (1.0 - 3.3 * s_obliq).clamp(0.2, 1.0)
+        };
+        (self.base_tilt_deg + amp * wave).clamp(0.0, 85.0)
     }
 
     pub fn grid(&self) -> &SphericalGrid {
@@ -567,6 +739,7 @@ impl TectonicsSimulation {
             let mut outgoing_dests: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
             let mut incoming_sources: Vec<Vec<usize>> = vec![Vec::new(); n];
             let mut max_erosion_cap: Vec<f32> = vec![0.0; n];
+            let tidal_factor = self.current_tidal_strength().sqrt().clamp(0.2, 3.5) as f32;
 
             for v in 0..n {
                 let elev_v = self.tiles[v].elevation();
@@ -579,14 +752,24 @@ impl TectonicsSimulation {
                         0.0
                     };
                     let climate_factor = (base_climate + high_relief_weathering).max(0.0);
-                    if climate_factor > 0.0 {
+                    let has_ocean_nb = self.adjacency[v]
+                        .iter()
+                        .any(|&u| self.tiles[u].elevation() <= 0.0);
+                    if climate_factor > 0.0 || has_ocean_nb {
                         let mut min_nb_elev = elev_v;
                         for &u in &self.adjacency[v] {
-                            let nb_elev = self.tiles[u].elevation().max(0.0);
+                            let raw_nb_elev = self.tiles[u].elevation();
+                            let nb_elev = raw_nb_elev.max(0.0);
                             if nb_elev < elev_v {
                                 min_nb_elev = min_nb_elev.min(nb_elev);
                                 let drop = elev_v - nb_elev;
-                                let d = (0.34 * (elev_v + drop) / 10.0) * climate_factor;
+                                let tidal_scour = if raw_nb_elev <= 0.0 {
+                                    0.008 * tidal_factor
+                                } else {
+                                    0.0
+                                };
+                                let d = (0.34 * (elev_v + drop) / 10.0) * climate_factor
+                                    + tidal_scour;
                                 if d > 0.0 {
                                     outgoing_dests[v].push((u, d));
                                     incoming_sources[u].push(v);
@@ -1013,6 +1196,8 @@ impl TectonicsSimulation {
     }
 
     fn refresh_climate_fields(&mut self) {
+        self.climate_model
+            .set_spin_and_tilt_for_tectonics(self.current_spin(), self.current_tilt_deg());
         let land_elevs: Vec<f32> = self
             .tiles
             .iter()
@@ -1132,14 +1317,14 @@ impl TectonicsSimulation {
             rng_state_16b: self.rng.to_bytes().to_vec(),
             grid_size: self.grid.size,
             radius_km: self.radius_km as f32,
-            spin: 1.0,
-            tilt_deg: 23.0,
+            spin: (24.0 / self.target_day_hours.max(1.0)) as f32,
+            tilt_deg: self.base_tilt_deg as f32,
             stage: Some(tec11_proto::PlanetStageOneof::Tectonics(
                 tec11_proto::TectonicsStage {
                     tectonics_ticks: self.geoticks,
                     atmosphere_ticks_remaining: self.atmosphere_ticks_remaining,
                     life_ticks_remaining: self.life_ticks_remaining,
-                    people_ticks_remaining: 0,
+                    people_ticks_remaining: self.total_target_ticks,
                     tiles: proto_tiles,
                     groups: proto_groups,
                     ridges: proto_ridges,
@@ -1187,6 +1372,7 @@ impl TectonicsSimulation {
         } else {
             1.0
         };
+        let target_day_hours = (24.0 / spin).clamp(1.0, 240.0);
         let cells = if spin >= 3.0 {
             7
         } else if spin >= 2.0 {
@@ -1316,6 +1502,11 @@ impl TectonicsSimulation {
         };
 
         let climate_model = ClimateModel::new_for_tectonics(grid.clone(), cells, spin, tilt_deg);
+        let total_target_ticks = if tec.people_ticks_remaining > 0 {
+            tec.people_ticks_remaining
+        } else {
+            75
+        };
 
         let mut sim = Self {
             grid,
@@ -1328,7 +1519,13 @@ impl TectonicsSimulation {
             splitnum,
             atmosphere_ticks_remaining: tec.atmosphere_ticks_remaining,
             life_ticks_remaining: tec.life_ticks_remaining,
+            total_target_ticks,
             geoticks: tec.tectonics_ticks,
+            target_day_hours,
+            base_tilt_deg: tilt_deg,
+            moon_count: 1,
+            moon_mass: 1.0,
+            target_moon_dist_radii: 60.0,
             tiles,
             groups,
             ridges,
@@ -1340,6 +1537,8 @@ impl TectonicsSimulation {
             tile_precip_norm: vec![0.5; n],
             rng,
         };
+        sim.climate_model
+            .set_spin_and_tilt_for_tectonics(sim.current_spin(), sim.current_tilt_deg());
         if sim.has_atmosphere() {
             sim.refresh_climate_fields();
         }
@@ -1586,5 +1785,64 @@ mod tests {
         assert_eq!(restored.geoticks(), sim.geoticks());
         assert_eq!(restored.continent_count(), sim.continent_count());
         assert_eq!(restored.land_percent(), sim.land_percent());
+    }
+
+    #[test]
+    fn test_lunar_recession_spin_braking_and_harmonic_orbits() {
+        // 1 Earth-like Moon (target: 24h day, 23 deg tilt, 60 Rp moon distance after 75 ticks = 375 Myr):
+        let mut earth =
+            TectonicsSimulation::new_with_full_params(4, 24.0, 23.0, 29.0, 125, 125, 125, 1, 1.0, 60.0, 42);
+        let a0 = earth.current_moon_dist_radii();
+        let day0 = earth.current_day_hours();
+        let tide0 = earth.current_tidal_strength();
+        assert!(
+            a0 > 20.0 && a0 < 30.0,
+            "Expected Hadean Moon to start near ~23.4 Rp, got {a0:.2} Rp"
+        );
+        assert!(
+            day0 > 9.5 && day0 < 13.5,
+            "Expected Hadean Earth day to start near ~11.1 hours, got {day0:.2} h"
+        );
+        assert!(
+            tide0 > 10.0,
+            "Expected Hadean tides > 10x modern Earth, got {tide0:.2}x"
+        );
+
+        // Advance to target Prehistory/History transition (75 ticks = 375 Myr):
+        earth.geoticks = 75;
+        assert!(
+            (earth.current_moon_dist_radii() - 60.0).abs() < 1e-4,
+            "Expected Moon to reach 60.0 Rp at Prehistory start, got {:.3}",
+            earth.current_moon_dist_radii()
+        );
+        assert!(
+            (earth.current_day_hours() - 24.0).abs() < 1e-4,
+            "Expected Earth day to brake to 24.0 h at Prehistory start, got {:.3}",
+            earth.current_day_hours()
+        );
+        assert!(
+            (earth.current_tidal_strength() - 1.0).abs() < 1e-4,
+            "Expected tidal strength = 1.0x modern Earth at Prehistory start, got {:.3}",
+            earth.current_tidal_strength()
+        );
+
+        // Verify 2:1 Laplace resonance chain multipliers (1 + 1/4 + 1/16 = 1.3125):
+        assert!((TectonicsSimulation::harmonic_tidal_multiplier(1) - 1.0).abs() < 1e-9);
+        assert!((TectonicsSimulation::harmonic_tidal_multiplier(2) - 1.25).abs() < 1e-9);
+        assert!((TectonicsSimulation::harmonic_tidal_multiplier(3) - 1.3125).abs() < 1e-9);
+
+        // Verify moonless planet has weak solar-only tides (0.15x) and larger obliquity excursions:
+        let mut moonless =
+            TectonicsSimulation::new_with_full_params(4, 24.0, 23.0, 29.0, 125, 125, 125, 0, 0.0, 60.0, 42);
+        assert!((moonless.current_tidal_strength() - 0.15).abs() < 1e-6);
+        assert!((moonless.current_day_hours() - 24.0).abs() < 1e-6);
+        moonless.geoticks = 8;
+        let tilt_wander = (moonless.current_tilt_deg() - 23.0).abs();
+        earth.geoticks = 8;
+        let tilt_stable = (earth.current_tilt_deg() - 23.0).abs();
+        assert!(
+            tilt_wander > 5.0 * tilt_stable,
+            "Expected moonless obliquity excursion ({tilt_wander:.2} deg) >> moon-stabilized ({tilt_stable:.2} deg)"
+        );
     }
 }

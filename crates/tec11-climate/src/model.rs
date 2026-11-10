@@ -240,6 +240,30 @@ impl ClimateModel {
         self.glaciation = glaciation.clamp(0.0, 1.0);
     }
 
+    /// Update `spin` (relative to 24h Earth = 1.0) and `tilt_deg` during tectonic evolution,
+    /// recomputing the atmospheric cell count (`1, 3, 5, 7`) and wind `dest_map` only when
+    /// `cells` or quantized `spin` (`0.25` steps) changes.
+    pub fn set_spin_and_tilt_for_tectonics(&mut self, spin: f64, tilt_deg: f64) {
+        let cells = if spin >= 3.0 {
+            7
+        } else if spin >= 2.0 {
+            5
+        } else if spin >= 1.0 {
+            3
+        } else {
+            1
+        };
+        let quant_spin = (spin * 4.0).round() / 4.0;
+        self.spin = spin;
+        self.tilt_deg = tilt_deg.clamp(0.0, 90.0);
+        let q_bits = quant_spin.to_bits();
+        if self.cached_dest_params != Some((cells, q_bits)) {
+            self.cells = cells;
+            self.compute_wind_dest_map();
+            self.cached_dest_params = Some((cells, q_bits));
+        }
+    }
+
     /// Construct a `ClimateModel` attached to a planetary grid for tectonic simulation,
     /// precomputing the static wind destination graph `dest_map` once.
     pub fn new_for_tectonics(

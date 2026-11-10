@@ -121,6 +121,9 @@ pub struct WorldCreateParams {
     pub atm_dt_myr: u32,
     pub life_dt_myr: u32,
     pub people_dt_myr: u32,
+    pub moon_count: u32,
+    pub moon_mass: f32,
+    pub moon_dist_radii: u32,
 }
 
 impl Default for WorldCreateParams {
@@ -133,6 +136,9 @@ impl Default for WorldCreateParams {
             atm_dt_myr: 125,
             life_dt_myr: 125,
             people_dt_myr: 125,
+            moon_count: 1,
+            moon_mass: 1.0,
+            moon_dist_radii: 60,
         }
     }
 }
@@ -158,13 +164,17 @@ impl WorldSimulation {
     pub fn new(params: WorldCreateParams, seed: u64) -> Self {
         let mut sim = Self {
             params,
-            stage: WorldStageState::Tectonics(TectonicsSimulation::new_with_params(
+            stage: WorldStageState::Tectonics(TectonicsSimulation::new_with_full_params(
                 params.grid_size,
                 params.day_hours as f64,
                 params.tilt_deg as f64,
                 params.land_pct as f64,
                 params.atm_dt_myr,
                 params.life_dt_myr,
+                params.people_dt_myr,
+                params.moon_count,
+                params.moon_mass as f64,
+                params.moon_dist_radii as f64,
                 seed,
             )),
             people_ticks_remaining: (params.people_dt_myr / 5).max(1),
@@ -186,16 +196,35 @@ impl WorldSimulation {
             params.atm_dt_myr = random_time_myr(&mut self.rng);
             params.life_dt_myr = random_time_myr(&mut self.rng);
             params.people_dt_myr = random_time_myr(&mut self.rng);
+
+            // Randomize number of moons (0 or more, weighted toward 1 Earth-like moon or 2 harmonic moons):
+            let moon_count_choices = [0u32, 0, 1, 1, 1, 1, 2, 2, 3, 4];
+            params.moon_count =
+                moon_count_choices[(self.rng.next_u64() as usize) % moon_count_choices.len()];
+            if params.moon_count == 0 {
+                params.moon_mass = 0.0;
+                params.moon_dist_radii = 60;
+            } else {
+                // Reasonably sized moon mass in Lunar masses (0.2x..=2.5x, mode 1.0x):
+                let mass_tenths = random_spin_value(2, 25, 1, 10, &mut self.rng);
+                params.moon_mass = (mass_tenths as f32) / 10.0;
+                // Target moon distance at Prehistory/History start in planetary radii (30..=90 Rp, mode 60 Rp):
+                params.moon_dist_radii = random_spin_value(30, 90, 5, 60, &mut self.rng) as u32;
+            }
         }
         let seed = self.rng.next_u64();
         self.params = params;
-        self.stage = WorldStageState::Tectonics(TectonicsSimulation::new_with_params(
+        self.stage = WorldStageState::Tectonics(TectonicsSimulation::new_with_full_params(
             params.grid_size,
             params.day_hours as f64,
             params.tilt_deg as f64,
             params.land_pct as f64,
             params.atm_dt_myr,
             params.life_dt_myr,
+            params.people_dt_myr,
+            params.moon_count,
+            params.moon_mass as f64,
+            params.moon_dist_radii as f64,
             seed,
         ));
         self.people_ticks_remaining = (params.people_dt_myr / 5).max(1);
@@ -366,6 +395,50 @@ impl WorldSimulation {
 
     pub fn params(&self) -> WorldCreateParams {
         self.params
+    }
+
+    pub fn current_day_hours(&self) -> f32 {
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.current_day_hours() as f32,
+            _ => self.params.day_hours as f32,
+        }
+    }
+
+    pub fn current_tilt_deg(&self) -> f32 {
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.current_tilt_deg() as f32,
+            _ => self.params.tilt_deg as f32,
+        }
+    }
+
+    pub fn current_moon_dist_radii(&self) -> f32 {
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.current_moon_dist_radii() as f32,
+            _ => {
+                if self.params.moon_count == 0 {
+                    0.0
+                } else {
+                    self.params.moon_dist_radii as f32
+                }
+            }
+        }
+    }
+
+    pub fn current_tidal_strength(&self) -> f32 {
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.current_tidal_strength() as f32,
+            _ => {
+                if self.params.moon_count == 0 || self.params.moon_mass <= 0.0 {
+                    0.15
+                } else {
+                    let a = (self.params.moon_dist_radii.max(12)) as f64;
+                    let h_tide =
+                        TectonicsSimulation::harmonic_tidal_multiplier(self.params.moon_count);
+                    let lunar = (self.params.moon_mass as f64) * (60.0 / a).powi(3) * h_tide;
+                    (0.15 + 0.85 * lunar) as f32
+                }
+            }
+        }
     }
 
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
@@ -663,6 +736,9 @@ mod tests {
             atm_dt_myr: 5,
             life_dt_myr: 5,
             people_dt_myr: 5,
+            moon_count: 1,
+            moon_mass: 1.0,
+            moon_dist_radii: 60,
         };
         let mut world = WorldSimulation::new(params, 42);
         assert_eq!(world.stage_index(), 0);

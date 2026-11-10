@@ -41,6 +41,9 @@ pub struct CliConfig {
     pub atm_dt_myr: Option<u32>,
     pub life_dt_myr: Option<u32>,
     pub people_dt_myr: Option<u32>,
+    pub moon_count: Option<u32>,
+    pub moon_mass: Option<f32>,
+    pub moon_dist_radii: Option<u32>,
     pub target_stage: TargetStage,
     pub prehistory_ticks: u32,
     pub history_ticks: u32,
@@ -63,6 +66,9 @@ impl Default for CliConfig {
             atm_dt_myr: None,
             life_dt_myr: None,
             people_dt_myr: None,
+            moon_count: None,
+            moon_mass: None,
+            moon_dist_radii: None,
             target_stage: TargetStage::History,
             prehistory_ticks: 32,
             history_ticks: 10,
@@ -86,7 +92,7 @@ OPTIONS:
     -i, --input <PATH>           Load an existing .tec11 snapshot file and continue stepping
     -s, --seed <U64>             RNG seed (defaults to system clock entropy)
     -r, --randomize              Randomize planet parameters (day length, axial tilt, land %,
-                                 and atmosphere/life/people evolutionary intervals) just like
+                                 moons, and atmosphere/life/people evolutionary intervals) just like
                                  the GUI's 'Randomize: On' button. Any explicit parameter flag
                                  passed alongside --randomize overrides that specific parameter.
 
@@ -96,12 +102,15 @@ PLANET CREATION PARAMETERS (matching the World Simulation GUI):
                                    5 = Small      (3,700 km —  2,432 coarse tiles)
                                    6 = Medium     (6,400 km —  7,292 coarse tiles, Earth)
                                    7 = Large      (11,000 km — 21,872 coarse tiles)
-        --day-hours <HOURS>      Rotation period in hours/day (e.g. 8, 12, 24, 48) [default: 24]
-        --tilt <DEG>             Axial tilt in degrees (0..=45) [default: 23]
+        --day-hours <HOURS>      Target rotation period in hours/day at Prehistory start [default: 24]
+        --tilt <DEG>             Base axial tilt in degrees (0..=45) [default: 23]
         --land-pct <PCT>         Initial continental land percentage (1..=65) [default: 29]
         --atm-dt <MYR>           Time until atmosphere formation in Myr (5..=500) [default: 125]
         --life-dt <MYR>          Time from atmosphere to biosphere in Myr (5..=500) [default: 125]
         --people-dt <MYR>        Time from biosphere to people in Myr (5..=500) [default: 125]
+        --moons <0..=4>          Number of moons in a 2:1 Laplace harmonic resonance chain [default: 1]
+        --moon-mass <MASS>       Primary moon mass in Earth Lunar masses (0.1..=3.0) [default: 1.0]
+        --moon-dist <RADII>      Target innermost moon distance at Prehistory start in R_p [default: 60]
 
 SIMULATION STEPPING OPTIONS:
         --target-stage <STAGE>   Stage to run through: tectonics | prehistory | history [default: history]
@@ -118,6 +127,18 @@ fn parse_u32_flag(flag: &str, val: &str, min: u32, max: u32) -> Result<u32, Stri
         .parse()
         .map_err(|_| format!("Invalid integer value '{val}' for {flag}"))?;
     if parsed < min || parsed > max {
+        return Err(format!(
+            "Value {parsed} for {flag} is out of range [{min}..={max}]"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_f32_flag(flag: &str, val: &str, min: f32, max: f32) -> Result<f32, String> {
+    let parsed: f32 = val
+        .parse()
+        .map_err(|_| format!("Invalid float value '{val}' for {flag}"))?;
+    if !parsed.is_finite() || parsed < min || parsed > max {
         return Err(format!(
             "Value {parsed} for {flag} is out of range [{min}..={max}]"
         ));
@@ -207,6 +228,18 @@ where
                 let v = next_val(arg)?;
                 cfg.people_dt_myr = Some(parse_u32_flag(arg, &v, 5, 2000)?);
             }
+            "--moons" | "--moon-count" => {
+                let v = next_val(arg)?;
+                cfg.moon_count = Some(parse_u32_flag(arg, &v, 0, 8)?);
+            }
+            "--moon-mass" => {
+                let v = next_val(arg)?;
+                cfg.moon_mass = Some(parse_f32_flag(arg, &v, 0.0, 10.0)?);
+            }
+            "--moon-dist" | "--moon-distance" => {
+                let v = next_val(arg)?;
+                cfg.moon_dist_radii = Some(parse_u32_flag(arg, &v, 15, 160)?);
+            }
             "--target-stage" | "--stage" => {
                 let v = next_val(arg)?;
                 cfg.target_stage = TargetStage::parse(&v)?;
@@ -259,6 +292,18 @@ pub fn resolve_world_params(
     if let Some(p) = cfg.people_dt_myr {
         base_params.people_dt_myr = p;
     }
+    if let Some(mc) = cfg.moon_count {
+        base_params.moon_count = mc;
+        if mc == 0 && cfg.moon_mass.is_none() {
+            base_params.moon_mass = 0.0;
+        }
+    }
+    if let Some(mm) = cfg.moon_mass {
+        base_params.moon_mass = mm;
+    }
+    if let Some(md) = cfg.moon_dist_radii {
+        base_params.moon_dist_radii = md;
+    }
 
     if !cfg.randomize {
         let world = WorldSimulation::new(base_params, seed);
@@ -273,7 +318,10 @@ pub fn resolve_world_params(
         || cfg.land_pct.is_some()
         || cfg.atm_dt_myr.is_some()
         || cfg.life_dt_myr.is_some()
-        || cfg.people_dt_myr.is_some();
+        || cfg.people_dt_myr.is_some()
+        || cfg.moon_count.is_some()
+        || cfg.moon_mass.is_some()
+        || cfg.moon_dist_radii.is_some();
 
     if has_override {
         if let Some(d) = cfg.day_hours {
@@ -293,6 +341,20 @@ pub fn resolve_world_params(
         }
         if let Some(p) = cfg.people_dt_myr {
             resolved.people_dt_myr = p;
+        }
+        if let Some(mc) = cfg.moon_count {
+            resolved.moon_count = mc;
+            if mc == 0 && cfg.moon_mass.is_none() {
+                resolved.moon_mass = 0.0;
+            } else if mc > 0 && resolved.moon_mass <= 0.0 && cfg.moon_mass.is_none() {
+                resolved.moon_mass = 1.0;
+            }
+        }
+        if let Some(mm) = cfg.moon_mass {
+            resolved.moon_mass = mm;
+        }
+        if let Some(md) = cfg.moon_dist_radii {
+            resolved.moon_dist_radii = md;
         }
         world = WorldSimulation::new(resolved, seed);
     }
@@ -337,14 +399,21 @@ pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
         if !cfg.quiet {
             println!(
                 "Initialized World Simulation (seed={seed}, randomize={}):\n  \
-                 grid_size={} ({} coarse tiles), day={}h, tilt={}°, land={}%, \
+                 grid_size={} ({} coarse tiles), target_day={}h (Hadean={:.1}h), tilt={}°, land={}%, \
+                 moons={} (mass={:.1}x, target_dist={} Rp, Hadean_dist={:.1} Rp, tides={:.1}x), \
                  atm_dt={} Myr, life_dt={} Myr, people_dt={} Myr",
                 cfg.randomize,
                 params.grid_size,
                 w.tile_count(),
                 params.day_hours,
+                w.current_day_hours(),
                 params.tilt_deg,
                 params.land_pct,
+                params.moon_count,
+                params.moon_mass,
+                params.moon_dist_radii,
+                w.current_moon_dist_radii(),
+                w.current_tidal_strength(),
                 params.atm_dt_myr,
                 params.life_dt_myr,
                 params.people_dt_myr
@@ -516,6 +585,12 @@ mod tests {
             "15",
             "--people-dt",
             "20",
+            "--moons",
+            "2",
+            "--moon-mass",
+            "1.5",
+            "--moon-dist",
+            "55",
             "--history-ticks",
             "3",
             "-o",
@@ -531,6 +606,9 @@ mod tests {
         assert_eq!(cfg.atm_dt_myr, Some(10));
         assert_eq!(cfg.life_dt_myr, Some(15));
         assert_eq!(cfg.people_dt_myr, Some(20));
+        assert_eq!(cfg.moon_count, Some(2));
+        assert_eq!(cfg.moon_mass, Some(1.5));
+        assert_eq!(cfg.moon_dist_radii, Some(55));
         assert_eq!(cfg.history_ticks, 3);
         assert_eq!(cfg.output, PathBuf::from("/tmp/test_world.tec11"));
     }
@@ -550,6 +628,9 @@ mod tests {
             atm_dt_myr: Some(5),
             life_dt_myr: Some(5),
             people_dt_myr: Some(5),
+            moon_count: None,
+            moon_mass: None,
+            moon_dist_radii: None,
             target_stage: TargetStage::History,
             prehistory_ticks: 4,
             history_ticks: 2,

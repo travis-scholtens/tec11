@@ -11,6 +11,7 @@ pub struct WasmWorldSession {
 #[wasm_bindgen]
 impl WasmWorldSession {
     #[wasm_bindgen(constructor)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         grid_size: u32,
         day_hours: u32,
@@ -19,6 +20,9 @@ impl WasmWorldSession {
         atm_dt_myr: u32,
         life_dt_myr: u32,
         people_dt_myr: u32,
+        moon_count: u32,
+        moon_mass: f32,
+        moon_dist_radii: u32,
     ) -> Self {
         let params = WorldCreateParams {
             grid_size,
@@ -28,12 +32,16 @@ impl WasmWorldSession {
             atm_dt_myr,
             life_dt_myr,
             people_dt_myr,
+            moon_count,
+            moon_mass,
+            moon_dist_radii,
         };
         Self {
             sim: WorldSimulation::new(params, 42),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_world(
         &mut self,
         grid_size: u32,
@@ -43,6 +51,9 @@ impl WasmWorldSession {
         atm_dt_myr: u32,
         life_dt_myr: u32,
         people_dt_myr: u32,
+        moon_count: u32,
+        moon_mass: f32,
+        moon_dist_radii: u32,
         randomize: bool,
     ) {
         let params = WorldCreateParams {
@@ -53,6 +64,9 @@ impl WasmWorldSession {
             atm_dt_myr,
             life_dt_myr,
             people_dt_myr,
+            moon_count,
+            moon_mass,
+            moon_dist_radii,
         };
         self.sim.create(params, randomize);
     }
@@ -119,6 +133,34 @@ impl WasmWorldSession {
 
     pub fn param_people_dt_myr(&self) -> u32 {
         self.sim.params().people_dt_myr
+    }
+
+    pub fn param_moon_count(&self) -> u32 {
+        self.sim.params().moon_count
+    }
+
+    pub fn param_moon_mass(&self) -> f32 {
+        self.sim.params().moon_mass
+    }
+
+    pub fn param_moon_dist_radii(&self) -> u32 {
+        self.sim.params().moon_dist_radii
+    }
+
+    pub fn current_day_hours(&self) -> f32 {
+        self.sim.current_day_hours()
+    }
+
+    pub fn current_tilt_deg(&self) -> f32 {
+        self.sim.current_tilt_deg()
+    }
+
+    pub fn current_moon_dist_radii(&self) -> f32 {
+        self.sim.current_moon_dist_radii()
+    }
+
+    pub fn current_tidal_strength(&self) -> f32 {
+        self.sim.current_tidal_strength()
     }
 
     pub fn inspect_tile(&self, tile_idx: usize) -> String {

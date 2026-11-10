@@ -6,6 +6,7 @@ import initWasmModule, {
   WasmHistorySession,
   WasmLanguageSession,
   WasmLifeformsSession,
+  WasmMoonSession,
   WasmMoveSession,
   WasmPangeaSession,
   WasmPopulationSession,
@@ -3059,6 +3060,17 @@ function buildWorldInfo(view) {
     view.selectedTileIdx >= 0
       ? s.inspect_tile(view.selectedTileIdx)
       : "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree.";
+  const moonCount = s.param_moon_count();
+  const moonMass = s.param_moon_mass();
+  const moonDistTarget = s.param_moon_dist_radii();
+  const curDay = s.current_day_hours();
+  const curTilt = s.current_tilt_deg();
+  const curMoonDist = s.current_moon_dist_radii();
+  const curTides = s.current_tidal_strength();
+  const orbitalSummaryText =
+    moonCount === 0
+      ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x)`
+      : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x)`;
   return {
     stageIndex: s.stage_index(),
     stageName: s.stage_name(),
@@ -3072,6 +3084,10 @@ function buildWorldInfo(view) {
     atmDtMyr: s.param_atm_dt_myr(),
     lifeDtMyr: s.param_life_dt_myr(),
     peopleDtMyr: s.param_people_dt_myr(),
+    moonCount,
+    moonMassTenths: Math.round(moonMass * 10.0),
+    moonDistRadii: moonDistTarget,
+    orbitalSummaryText,
     isRunning: Boolean(view.isRunning),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
     selectedReport,
@@ -3109,6 +3125,9 @@ export const mountWorldView =
   (atmDt) =>
   (lifeDt) =>
   (peopleDt) =>
+  (moonCount) =>
+  (moonMassTenths) =>
+  (moonDistRadii) =>
   (aspect) =>
   (setWorldInfo) =>
   () => {
@@ -3125,7 +3144,10 @@ export const mountWorldView =
       landPct,
       atmDt,
       lifeDt,
-      peopleDt
+      peopleDt,
+      moonCount,
+      moonMassTenths / 10.0,
+      moonDistRadii
     );
     view.aspect = aspect;
     view.selectedTileIdx = -1;
@@ -3179,6 +3201,9 @@ export const createWorld =
   (atmDt) =>
   (lifeDt) =>
   (peopleDt) =>
+  (moonCount) =>
+  (moonMassTenths) =>
+  (moonDistRadii) =>
   (randomize) =>
   (setWorldInfo) =>
   () => {
@@ -3192,6 +3217,9 @@ export const createWorld =
       atmDt,
       lifeDt,
       peopleDt,
+      moonCount,
+      moonMassTenths / 10.0,
+      moonDistRadii,
       randomize
     );
     activeView.selectedTileIdx = -1;
@@ -3425,6 +3453,225 @@ export const loadFilePlanetIntoTerrain = (setTerrainInfo) => () => {
       activeView.selectedFaceIdx = -1;
       updateTerrainDataBuffers(activeView, true);
       setTerrainInfo(buildTerrainInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Mode 16: Moons, Harmonic Orbits & Tidal Erosion Sandbox (`MoonScreen`)
+// ============================================================================
+
+function computeMoonVertexColors(view) {
+  const { vertexTileIds, tileColors } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    colors[v * 3] = tileColors[t * 3];
+    colors[v * 3 + 1] = tileColors[t * 3 + 1];
+    colors[v * 3 + 2] = tileColors[t * 3 + 2];
+  }
+  return colors;
+}
+
+function updateMoonDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileColors = session.tile_colors_rgb(
+    view.aspect,
+    Boolean(view.showTidalScour),
+    Boolean(view.showFluvial),
+    Boolean(view.showDeposition),
+    view.selectedTileIdx
+  );
+  const colors = computeMoonVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildMoonInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Loaded Planet (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  const selectedReport =
+    view.selectedTileIdx >= 0
+      ? s.inspect_tile(view.selectedTileIdx)
+      : "Click any coastal, ocean, or inland tile on the globe to inspect local tidal range (m), tidal scour vs. rainfall erosion rates, shelf deposition, and rock strata.";
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    steps: s.steps(),
+    harmonicSummary: s.harmonic_chain_summary(),
+    tidalSharePctText: `${s.coastal_tidal_erosion_share_pct().toFixed(1)}%`,
+    meanCoastalScourText: `${s.mean_coastal_tidal_scour().toFixed(4)} km/tick`,
+    maxTidalRangeText: `${s.max_tidal_range_m().toFixed(1)} m`,
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    selectedReport,
+  };
+}
+
+export const mountMoonView =
+  (moonCount) =>
+  (moonMassTenths) =>
+  (moonDistRadii) =>
+  (epochPct) =>
+  (aspect) =>
+  (showTidalScour) =>
+  (showFluvial) =>
+  (showDeposition) =>
+  (setMoonInfo) =>
+  () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.session = new WasmMoonSession(
+      moonCount,
+      moonMassTenths / 10.0,
+      moonDistRadii,
+      epochPct
+    );
+    view.aspect = aspect;
+    view.showTidalScour = showTidalScour;
+    view.showFluvial = showFluvial;
+    view.showDeposition = showDeposition;
+    view.selectedTileIdx = -1;
+    view.setMoonInfo = setMoonInfo;
+
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+      view.session.set_moon_params(
+        moonCount,
+        moonMassTenths / 10.0,
+        moonDistRadii,
+        epochPct
+      );
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateMoonDataBuffers(view, false);
+        view.setMoonInfo(buildMoonInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateMoonDataBuffers(view, true);
+    setMoonInfo(buildMoonInfo(view))();
+
+    return () => {
+      canvas.removeEventListener("click", handleCanvasClick);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const setMoonParams =
+  (moonCount) =>
+  (moonMassTenths) =>
+  (moonDistRadii) =>
+  (epochPct) =>
+  (setMoonInfo) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.session.set_moon_params(
+      moonCount,
+      moonMassTenths / 10.0,
+      moonDistRadii,
+      epochPct
+    );
+    updateMoonDataBuffers(activeView, false);
+    setMoonInfo(buildMoonInfo(activeView))();
+  };
+
+export const setMoonDisplayOptions =
+  (aspect) =>
+  (showTidalScour) =>
+  (showFluvial) =>
+  (showDeposition) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.aspect = aspect;
+    activeView.showTidalScour = showTidalScour;
+    activeView.showFluvial = showFluvial;
+    activeView.showDeposition = showDeposition;
+    updateMoonDataBuffers(activeView, false);
+  };
+
+export const stepMoonErode = (setMoonInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.step_erode();
+  updateMoonDataBuffers(activeView, false);
+  setMoonInfo(buildMoonInfo(activeView))();
+};
+
+export const resetMoonLayers = (setMoonInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.reset_layers();
+  updateMoonDataBuffers(activeView, false);
+  setMoonInfo(buildMoonInfo(activeView))();
+};
+
+export const loadEarthIntoMoon = (setMoonInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  activeView.selectedTileIdx = -1;
+  updateMoonDataBuffers(activeView, true);
+  setMoonInfo(buildMoonInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoMoon = (setMoonInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.selectedTileIdx = -1;
+    updateMoonDataBuffers(activeView, true);
+    setMoonInfo(buildMoonInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoMoon = (setMoonInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.selectedTileIdx = -1;
+      updateMoonDataBuffers(activeView, true);
+      setMoonInfo(buildMoonInfo(activeView))();
     }
   });
 };

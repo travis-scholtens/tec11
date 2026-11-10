@@ -32,6 +32,7 @@ data Screen
   | TerrainScreen
   | HistoryScreen
   | WorldScreen
+  | MoonScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -192,7 +193,23 @@ type WorldInfo =
   , atmDtMyr :: Int
   , lifeDtMyr :: Int
   , peopleDtMyr :: Int
+  , moonCount :: Int
+  , moonMassTenths :: Int
+  , moonDistRadii :: Int
+  , orbitalSummaryText :: String
   , isRunning :: Boolean
+  , hasSavedPlanet :: Boolean
+  , selectedReport :: String
+  }
+
+type MoonInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , steps :: Int
+  , harmonicSummary :: String
+  , tidalSharePctText :: String
+  , meanCoastalScourText :: String
+  , maxTidalRangeText :: String
   , hasSavedPlanet :: Boolean
   , selectedReport :: String
   }
@@ -320,8 +337,8 @@ foreign import loadSavedPlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Eff
 foreign import loadFilePlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
 
 -- Complete World Simulation mode FFI
-foreign import mountWorldView :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> String -> (WorldInfo -> Effect Unit) -> Effect (Effect Unit)
-foreign import createWorld :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Boolean -> (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import mountWorldView :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> String -> (WorldInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import createWorld :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Boolean -> (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import stepWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import advanceWorldStage :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import toggleWorldRunning :: (WorldInfo -> Effect Unit) -> Effect Unit
@@ -329,6 +346,16 @@ foreign import setWorldAspect :: String -> Effect Unit
 foreign import saveWorldPlanet :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
+
+-- Moons & Tidal Erosion Sandbox mode FFI (`MoonScreen`)
+foreign import mountMoonView :: Int -> Int -> Int -> Int -> String -> Boolean -> Boolean -> Boolean -> (MoonInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import setMoonParams :: Int -> Int -> Int -> Int -> (MoonInfo -> Effect Unit) -> Effect Unit
+foreign import setMoonDisplayOptions :: String -> Boolean -> Boolean -> Boolean -> Effect Unit
+foreign import stepMoonErode :: (MoonInfo -> Effect Unit) -> Effect Unit
+foreign import resetMoonLayers :: (MoonInfo -> Effect Unit) -> Effect Unit
+foreign import loadEarthIntoMoon :: (MoonInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoMoon :: (MoonInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoMoon :: (MoonInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -514,6 +541,9 @@ mkApp = do
     worldAtmDt /\ setWorldAtmDt <- useState' 125
     worldLifeDt /\ setWorldLifeDt <- useState' 125
     worldPeopleDt /\ setWorldPeopleDt <- useState' 125
+    worldMoonCount /\ setWorldMoonCount <- useState' 1
+    worldMoonMassTenths /\ setWorldMoonMassTenths <- useState' 10
+    worldMoonDistRadii /\ setWorldMoonDistRadii <- useState' 60
     worldRandomize /\ setWorldRandomize <- useState' true
     worldAspect /\ setWorldAspectState <- useState' "color"
     worldInfo /\ setWorldInfo <- useState'
@@ -529,9 +559,34 @@ mkApp = do
       , atmDtMyr: 125
       , lifeDtMyr: 125
       , peopleDtMyr: 125
+      , moonCount: 1
+      , moonMassTenths: 10
+      , moonDistRadii: 60
+      , orbitalSummaryText: "Day: 11.1h (→24h) | Tilt: 23.0° | Moons: 1 (1.0x @ 23.4→60 Rp, Tides 14.5x)"
       , isRunning: false
       , hasSavedPlanet: false
       , selectedReport: "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree."
+      }
+
+    -- Moons & Tidal Erosion Sandbox state (`MoonScreen`)
+    moonCount /\ setMoonCountState <- useState' 1
+    moonMassTenths /\ setMoonMassTenthsState <- useState' 10
+    moonDistRadii /\ setMoonDistRadiiState <- useState' 60
+    moonEpochPct /\ setMoonEpochPctState <- useState' 100
+    moonAspect /\ setMoonAspectState <- useState' "tidal_erosion"
+    moonShowTidalScour /\ setMoonShowTidalScour <- useState' true
+    moonShowFluvial /\ setMoonShowFluvial <- useState' true
+    moonShowDeposition /\ setMoonShowDeposition <- useState' true
+    moonInfo /\ setMoonInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , steps: 0
+      , harmonicSummary: "Day: 24.0h (→24h) | Tilt: 23.0° | Tides: 1.00x Earth | M1: 60.0 Rp (1:1, 100% tide)"
+      , tidalSharePctText: "0.0%"
+      , meanCoastalScourText: "0.0000 km/tick"
+      , maxTidalRangeText: "0.0 m"
+      , hasSavedPlanet: false
+      , selectedReport: "Click any coastal, ocean, or inland tile on the globe to inspect local tidal range (m), tidal scour vs. rainfall erosion rates, shelf deposition, and rock strata."
       }
 
     useEffectOnce do
@@ -587,7 +642,10 @@ mkApp = do
           mountHistoryView historyAspect historyShowRivers setHistoryInfo
         WorldScreen -> do
           setRotationDeg 0
-          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldAspect setWorldInfo
+          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldAspect setWorldInfo
+        MoonScreen -> do
+          setRotationDeg 0
+          mountMoonView moonCount moonMassTenths moonDistRadii moonEpochPct moonAspect moonShowTidalScour moonShowFluvial moonShowDeposition setMoonInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -840,13 +898,28 @@ mkApp = do
         Nothing -> pure unit
         Just dt -> setWorldPeopleDt dt
 
+      handleWorldMoonCountChange :: Maybe String -> Effect Unit
+      handleWorldMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just mc -> setWorldMoonCount mc
+
+      handleWorldMoonMassChange :: Maybe String -> Effect Unit
+      handleWorldMoonMassChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just mm -> setWorldMoonMassTenths mm
+
+      handleWorldMoonDistChange :: Maybe String -> Effect Unit
+      handleWorldMoonDistChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just md -> setWorldMoonDistRadii md
+
       handleToggleWorldRandomize :: Effect Unit
       handleToggleWorldRandomize =
         setWorldRandomize (not worldRandomize)
 
       handleCreateWorld :: Effect Unit
       handleCreateWorld =
-        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldRandomize \info -> do
+        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldRandomize \info -> do
           setWorldInfo info
           setWorldDayHours info.dayHours
           setWorldTiltDeg info.tiltDeg
@@ -854,6 +927,62 @@ mkApp = do
           setWorldAtmDt info.atmDtMyr
           setWorldLifeDt info.lifeDtMyr
           setWorldPeopleDt info.peopleDtMyr
+          setWorldMoonCount info.moonCount
+          setWorldMoonMassTenths info.moonMassTenths
+          setWorldMoonDistRadii info.moonDistRadii
+
+      handleMoonCountChange :: Maybe String -> Effect Unit
+      handleMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just mc -> do
+          setMoonCountState mc
+          setMoonParams mc moonMassTenths moonDistRadii moonEpochPct setMoonInfo
+
+      handleMoonMassChange :: Maybe String -> Effect Unit
+      handleMoonMassChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just mm -> do
+          setMoonMassTenthsState mm
+          setMoonParams moonCount mm moonDistRadii moonEpochPct setMoonInfo
+
+      handleMoonDistChange :: Maybe String -> Effect Unit
+      handleMoonDistChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just md -> do
+          setMoonDistRadiiState md
+          setMoonParams moonCount moonMassTenths md moonEpochPct setMoonInfo
+
+      handleMoonEpochChange :: Maybe String -> Effect Unit
+      handleMoonEpochChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just ep -> do
+          setMoonEpochPctState ep
+          setMoonParams moonCount moonMassTenths moonDistRadii ep setMoonInfo
+
+      handleMoonAspectChange :: Maybe String -> Effect Unit
+      handleMoonAspectChange maybeVal = case maybeVal of
+        Nothing -> pure unit
+        Just asp -> do
+          setMoonAspectState asp
+          setMoonDisplayOptions asp moonShowTidalScour moonShowFluvial moonShowDeposition
+
+      handleToggleMoonTidalScour :: Effect Unit
+      handleToggleMoonTidalScour = do
+        let next = not moonShowTidalScour
+        setMoonShowTidalScour next
+        setMoonDisplayOptions moonAspect next moonShowFluvial moonShowDeposition
+
+      handleToggleMoonFluvial :: Effect Unit
+      handleToggleMoonFluvial = do
+        let next = not moonShowFluvial
+        setMoonShowFluvial next
+        setMoonDisplayOptions moonAspect moonShowTidalScour next moonShowDeposition
+
+      handleToggleMoonDeposition :: Effect Unit
+      handleToggleMoonDeposition = do
+        let next = not moonShowDeposition
+        setMoonShowDeposition next
+        setMoonDisplayOptions moonAspect moonShowTidalScour moonShowFluvial next
 
     pure case screen of
       MainMenu ->
@@ -975,6 +1104,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen HistoryScreen)
                           , children: [ R.text "History" ]
+                          }
+                      , R.button
+                          { id: "moon-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen MoonScreen)
+                          , children: [ R.text "Moons" ]
                           }
                       ]
                   }
@@ -3614,6 +3750,75 @@ mkApp = do
                               ]
                           }
                       , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Moons:" ]
+                                  }
+                              , R.select
+                                  { id: "world-moons-select"
+                                  , className: "control-select"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldMoonCount
+                                  , onChange: handler targetValue handleWorldMoonCountChange
+                                  , children:
+                                      [ R.option { value: "0", children: [ R.text "0 (None)" ] }
+                                      , R.option { value: "1", children: [ R.text "1 (Earth-like)" ] }
+                                      , R.option { value: "2", children: [ R.text "2 (2:1 Harmonic)" ] }
+                                      , R.option { value: "3", children: [ R.text "3 (4:2:1 Laplace)" ] }
+                                      , R.option { value: "4", children: [ R.text "4 (8:4:2:1 Chain)" ] }
+                                      ]
+                                  }
+                              , R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text ("Dist: " <> show worldMoonDistRadii <> " Rp") ]
+                                  }
+                              , R.input
+                                  { id: "world-moon-dist-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "25"
+                                  , max: "95"
+                                  , step: "5"
+                                  , disabled: worldRandomize || worldInfo.isRunning || worldMoonCount == 0
+                                  , value: show worldMoonDistRadii
+                                  , onChange: handler targetValue handleWorldMoonDistChange
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Moon Mass:" ]
+                                  }
+                              , R.input
+                                  { id: "world-moon-mass-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "2"
+                                  , max: "25"
+                                  , step: "1"
+                                  , disabled: worldRandomize || worldInfo.isRunning || worldMoonCount == 0
+                                  , value: show worldMoonMassTenths
+                                  , onChange: handler targetValue handleWorldMoonMassChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children:
+                                      [ R.text
+                                          ( if worldMoonCount == 0 then
+                                              "0.0x"
+                                            else
+                                              show (worldMoonMassTenths / 10) <> "." <> show (worldMoonMassTenths `mod` 10) <> "x"
+                                          )
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
                           { className: "button-row"
                           , children:
                               [ R.button
@@ -3646,6 +3851,11 @@ mkApp = do
                                   { id: "world-stage-label"
                                   , className: "stat-line"
                                   , children: [ R.text worldInfo.stageName ]
+                                  }
+                              , R.div
+                                  { id: "world-orbital-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text worldInfo.orbitalSummaryText ]
                                   }
                               , R.div
                                   { id: "world-years-label"
@@ -3689,6 +3899,313 @@ mkApp = do
                                   , children: [ R.text "Save..." ]
                                   }
                               , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      MoonScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.select
+                                  { id: "moon-aspect-select"
+                                  , className: "control-select"
+                                  , value: moonAspect
+                                  , onChange: handler targetValue handleMoonAspectChange
+                                  , children:
+                                      [ R.option
+                                          { value: "tidal_erosion"
+                                          , children: [ R.text "Tidal Scour & Shelf Deposition" ]
+                                          }
+                                      , R.option
+                                          { value: "tidal_range"
+                                          , children: [ R.text "Tidal Range (m) & Bulge" ]
+                                          }
+                                      , R.option
+                                          { value: "climate"
+                                          , children: [ R.text "Climate (Spin & Tilt)" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Tile Inspection (Local Tidal Range, Coastal Scour vs. Rain Erosion & Strata)" ]
+                                  }
+                              , R.div
+                                  { id: "moon-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text moonInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Harmonic Moons (2:1 Laplace Chain)" ]
+                                  }
+                              , R.select
+                                  { id: "moon-count-select"
+                                  , className: "control-select"
+                                  , value: show moonCount
+                                  , onChange: handler targetValue handleMoonCountChange
+                                  , children:
+                                      [ R.option
+                                          { value: "0"
+                                          , children: [ R.text "0 Moons (Solar Tides Only)" ]
+                                          }
+                                      , R.option
+                                          { value: "1"
+                                          , children: [ R.text "1 Moon (Earth-like)" ]
+                                          }
+                                      , R.option
+                                          { value: "2"
+                                          , children: [ R.text "2 Moons (2:1 Harmonic Resonance)" ]
+                                          }
+                                      , R.option
+                                          { value: "3"
+                                          , children: [ R.text "3 Moons (4:2:1 Laplace Chain)" ]
+                                          }
+                                      , R.option
+                                          { value: "4"
+                                          , children: [ R.text "4 Moons (8:4:2:1 Laplace Chain)" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Primary Mass:" ]
+                                  }
+                              , R.input
+                                  { id: "moon-mass-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "1"
+                                  , max: "30"
+                                  , step: "1"
+                                  , disabled: moonCount == 0
+                                  , value: show moonMassTenths
+                                  , onChange: handler targetValue handleMoonMassChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children:
+                                      [ R.text
+                                          ( if moonCount == 0 then
+                                              "0.0x"
+                                            else
+                                              show (moonMassTenths / 10) <> "." <> show (moonMassTenths `mod` 10) <> "x"
+                                          )
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Target Dist:" ]
+                                  }
+                              , R.input
+                                  { id: "moon-dist-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "20"
+                                  , max: "100"
+                                  , step: "2"
+                                  , disabled: moonCount == 0
+                                  , value: show moonDistRadii
+                                  , onChange: handler targetValue handleMoonDistChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show moonDistRadii <> " Rp") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Epoch (Recession):" ]
+                                  }
+                              , R.input
+                                  { id: "moon-epoch-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "100"
+                                  , step: "5"
+                                  , value: show moonEpochPct
+                                  , onChange: handler targetValue handleMoonEpochChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children:
+                                      [ R.text
+                                          ( if moonEpochPct == 0 then
+                                              "0% (Hadean)"
+                                            else if moonEpochPct == 100 then
+                                              "100% (Mature)"
+                                            else
+                                              show moonEpochPct <> "%"
+                                          )
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "moon-toggle-scour-btn"
+                                  , className: if moonShowTidalScour then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleMoonTidalScour
+                                  , children: [ R.text (if moonShowTidalScour then "Tidal Scour (Gold): On" else "Tidal Scour: Off") ]
+                                  }
+                              , R.button
+                                  { id: "moon-toggle-dep-btn"
+                                  , className: if moonShowDeposition then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleMoonDeposition
+                                  , children: [ R.text (if moonShowDeposition then "Shelf Dep (Cyan): On" else "Shelf Dep: Off") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "moon-toggle-fluvial-btn"
+                                  , className: if moonShowFluvial then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleMoonFluvial
+                                  , children: [ R.text (if moonShowFluvial then "Rain Erosion (Red): On" else "Rain Erosion: Off") ]
+                                  }
+                              , R.button
+                                  { id: "moon-erode-step-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (stepMoonErode setMoonInfo)
+                                  , children: [ R.text "Erode Step" ]
+                                  }
+                              , R.button
+                                  { id: "moon-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (resetMoonLayers setMoonInfo)
+                                  , children: [ R.text "Reset Strata" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "moon-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { className: "stat-line"
+                                  , children: [ R.text ("Planet: " <> moonInfo.planetName <> " (Step " <> show moonInfo.steps <> ")") ]
+                                  }
+                              , R.div
+                                  { id: "moon-harmonic-summary"
+                                  , className: "stat-line"
+                                  , children: [ R.text moonInfo.harmonicSummary ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Coastal Tidal Scour: "
+                                              <> moonInfo.meanCoastalScourText
+                                              <> " ("
+                                              <> moonInfo.tidalSharePctText
+                                              <> " of coastal erosion) | Max Range: "
+                                              <> moonInfo.maxTidalRangeText
+                                          )
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "moon-load-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadEarthIntoMoon setMoonInfo)
+                                  , children: [ R.text "Load Earth" ]
+                                  }
+                              , R.button
+                                  { id: "moon-load-saved-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: not moonInfo.hasSavedPlanet
+                                  , onClick: capture_ (loadSavedPlanetIntoMoon setMoonInfo)
+                                  , children: [ R.text "Load Saved" ]
+                                  }
+                              , R.button
+                                  { id: "moon-load-file-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadFilePlanetIntoMoon setMoonInfo)
+                                  , children: [ R.text "Load..." ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
                                   { id: "done-btn"
                                   , className: "action-btn secondary"
                                   , onClick: capture_ (setScreen MainMenu)
