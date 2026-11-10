@@ -27,6 +27,7 @@ data Screen
   | LifeformsScreen
   | PopulationScreen
   | RacinationScreen
+  | PrehistoryScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -123,6 +124,20 @@ type RacinationInfo =
   , isolations :: Int
   }
 
+type PrehistoryInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , ticks :: Int
+  , kyr :: Int
+  , glaciationPct :: Int
+  , races :: Int
+  , agRaces :: Int
+  , populatedCount :: Int
+  , populationText :: String
+  , isRunning :: Boolean
+  , hasSavedPlanet :: Boolean
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -208,6 +223,16 @@ foreign import mountRacinationView :: Int -> (RacinationInfo -> Effect Unit) -> 
 foreign import isolateRacination :: (RacinationInfo -> Effect Unit) -> Effect Unit
 foreign import resetRacination :: (RacinationInfo -> Effect Unit) -> Effect Unit
 foreign import setRacinationTravelRange :: Int -> Effect Unit
+
+-- Prehistory mode FFI
+foreign import mountPrehistoryView :: (PrehistoryInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepPrehistory :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
+foreign import togglePrehistoryRunning :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
+foreign import resetPrehistory :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
+foreign import savePrehistoryPlanet :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
+foreign import loadEarthIntoPrehistory :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoPrehistory :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoPrehistory :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -336,6 +361,21 @@ mkApp = do
       , isolations: 0
       }
 
+    -- Prehistory mode state
+    prehistoryInfo /\ setPrehistoryInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , ticks: 0
+      , kyr: 0
+      , glaciationPct: 50
+      , races: 0
+      , agRaces: 0
+      , populatedCount: 0
+      , populationText: "0"
+      , isRunning: false
+      , hasSavedPlanet: false
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -376,6 +416,9 @@ mkApp = do
         RacinationScreen -> do
           setRotationDeg 0
           mountRacinationView racinationTravelRange setRacinationInfo
+        PrehistoryScreen -> do
+          setRotationDeg 0
+          mountPrehistoryView setPrehistoryInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -652,6 +695,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen RacinationScreen)
                           , children: [ R.text "Racination" ]
+                          }
+                      , R.button
+                          { id: "prehistory-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen PrehistoryScreen)
+                          , children: [ R.text "Prehistory" ]
                           }
                       ]
                   }
@@ -2325,6 +2375,164 @@ mkApp = do
                                   { id: "racination-reset-btn"
                                   , className: "action-btn secondary"
                                   , onClick: capture_ (resetRacination setRacinationInfo)
+                                  , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      PrehistoryScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column pangea-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "prehistory-start-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (togglePrehistoryRunning setPrehistoryInfo)
+                                  , children: [ R.text (if prehistoryInfo.isRunning then "Pause" else "Start") ]
+                                  }
+                              , R.button
+                                  { id: "prehistory-step-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: prehistoryInfo.isRunning
+                                  , onClick: capture_ (stepPrehistory setPrehistoryInfo)
+                                  , children: [ R.text "Step" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "prehistory-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "prehistory-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text prehistoryInfo.planetName ]
+                                  }
+                              , R.div
+                                  { id: "prehistory-time-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (show prehistoryInfo.ticks <> " ticks (" <> show prehistoryInfo.kyr <> " kyr)") ]
+                                  }
+                              , R.div
+                                  { id: "prehistory-glaciation-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Glaciation: " <> show prehistoryInfo.glaciationPct <> "%") ]
+                                  }
+                              , R.div
+                                  { id: "prehistory-races-label"
+                                  , className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( show prehistoryInfo.races
+                                              <> " races ("
+                                              <> show prehistoryInfo.agRaces
+                                              <> " agricultural)"
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { id: "prehistory-population-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Population: " <> prehistoryInfo.populationText) ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "prehistory-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: prehistoryInfo.isRunning
+                                  , onClick: capture_ (loadEarthIntoPrehistory setPrehistoryInfo)
+                                  , children: [ R.text "Earth" ]
+                                  }
+                              , R.button
+                                  { id: "prehistory-load-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: prehistoryInfo.isRunning
+                                  , onClick: capture_ (loadFilePlanetIntoPrehistory setPrehistoryInfo)
+                                  , children: [ R.text "Load File" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "prehistory-saved-btn"
+                                  , className: "action-btn"
+                                  , disabled: prehistoryInfo.isRunning || not prehistoryInfo.hasSavedPlanet
+                                  , onClick: capture_ (loadSavedPlanetIntoPrehistory setPrehistoryInfo)
+                                  , children: [ R.text "Load Saved" ]
+                                  }
+                              , R.button
+                                  { id: "prehistory-save-btn"
+                                  , className: "action-btn"
+                                  , disabled: prehistoryInfo.isRunning
+                                  , onClick: capture_ (savePrehistoryPlanet setPrehistoryInfo)
+                                  , children: [ R.text "Save" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "prehistory-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: prehistoryInfo.isRunning
+                                  , onClick: capture_ (resetPrehistory setPrehistoryInfo)
                                   , children: [ R.text "Reset" ]
                                   }
                               , R.button

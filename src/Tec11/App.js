@@ -7,6 +7,7 @@ import initWasmModule, {
   WasmMoveSession,
   WasmPangeaSession,
   WasmPopulationSession,
+  WasmPrehistorySession,
   WasmRacinationSession,
   WasmRiversSession,
   WasmSplitSession,
@@ -2504,6 +2505,227 @@ export const resetRacination = (setRacinationInfo) => () => {
 export const setRacinationTravelRange = (travelRange) => () => {
   if (!activeView || !activeView.session) return;
   activeView.session.set_travel_range(travelRange);
+};
+
+// ============================================================================
+// Mode 11: Prehistory Simulation (`prehistorysimulation.py`, `prehistorydisplay.py`, `prehistorypresenter.py`)
+// ============================================================================
+
+function formatPopulationThousands(thousands) {
+  if (!thousands || thousands <= 0.0) {
+    return "0";
+  }
+  if (thousands < 0.95) {
+    return String(Math.round(thousands * 1000.0));
+  }
+  if (thousands < 999.5) {
+    return `${Math.round(thousands)}K`;
+  }
+  return `${Math.round(thousands / 1000.0)}M`;
+}
+
+function computePrehistoryVertexColors(view) {
+  const {
+    vertexTileIds,
+    elevations,
+    felsities,
+    koeppenIds,
+    lifeValues,
+    overlayColors,
+  } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    const ovR = overlayColors[t * 3];
+    if (ovR >= 0.0) {
+      colors[v * 3] = ovR;
+      colors[v * 3 + 1] = overlayColors[t * 3 + 1];
+      colors[v * 3 + 2] = overlayColors[t * 3 + 2];
+    } else if (elevations[t] <= 0.0) {
+      colors[v * 3] = 0.0;
+      colors[v * 3 + 1] = 0.0;
+      colors[v * 3 + 2] = 1.0;
+    } else {
+      const rgb = computeNaturalTileColor(
+        elevations[t],
+        felsities[t],
+        koeppenIds[t],
+        lifeValues[t]
+      );
+      colors[v * 3] = rgb[0];
+      colors[v * 3 + 1] = rgb[1];
+      colors[v * 3 + 2] = rgb[2];
+    }
+  }
+  return colors;
+}
+
+function updatePrehistoryDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.elevations = session.tile_elevations();
+  view.felsities = session.tile_felsities();
+  view.koeppenIds = session.tile_koeppen_ids();
+  view.lifeValues = session.tile_life();
+  view.overlayColors = session.population_overlay_colors();
+  const colors = computePrehistoryVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildPrehistoryInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Saved Planet (${s.tectonics_ticks() * 5} Myr, ${s.land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  const ticks = s.prehistory_ticks();
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    ticks,
+    kyr: ticks * 4,
+    glaciationPct: Math.round(s.glaciation() * 100.0),
+    races: s.active_race_count(),
+    agRaces: s.active_agricultural_race_count(),
+    populatedCount: s.populated_count(),
+    populationText: formatPopulationThousands(s.total_population_thousands()),
+    isRunning: Boolean(view.isRunning),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+  };
+}
+
+function stopPrehistoryLoop(view) {
+  view.isRunning = false;
+  if (view.timerId !== null && view.timerId !== undefined) {
+    clearTimeout(view.timerId);
+    view.timerId = null;
+  }
+}
+
+function schedulePrehistoryTick(view) {
+  if (!view.isRunning || activeView !== view) return;
+  view.timerId = setTimeout(() => {
+    if (!view.isRunning || activeView !== view) return;
+    view.session.step();
+    updatePrehistoryDataBuffers(view, false);
+    if (view.setPrehistoryInfo) {
+      view.setPrehistoryInfo(buildPrehistoryInfo(view))();
+    }
+    if (view.isRunning) {
+      schedulePrehistoryTick(view);
+    }
+  }, 120);
+}
+
+export const mountPrehistoryView = (setPrehistoryInfo) => () => {
+  const canvas = document.getElementById("sphere-canvas");
+  if (!canvas) {
+    return () => {};
+  }
+
+  const view = createBaseSphereView(canvas, false);
+  view.session = new WasmPrehistorySession();
+  view.isRunning = false;
+  view.timerId = null;
+  view.setPrehistoryInfo = setPrehistoryInfo;
+
+  if (activeClimateSnapshotBytes) {
+    view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+  }
+
+  activeView = view;
+  updatePrehistoryDataBuffers(view, true);
+  setPrehistoryInfo(buildPrehistoryInfo(view))();
+
+  return () => {
+    stopPrehistoryLoop(view);
+    if (activeView === view) {
+      activeView = null;
+    }
+    view.dispose();
+    view.session.free();
+  };
+};
+
+export const stepPrehistory = (setPrehistoryInfo) => () => {
+  if (!activeView || !activeView.session || activeView.isRunning) return;
+  activeView.session.step();
+  updatePrehistoryDataBuffers(activeView, false);
+  setPrehistoryInfo(buildPrehistoryInfo(activeView))();
+};
+
+export const togglePrehistoryRunning = (setPrehistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  if (activeView.isRunning) {
+    stopPrehistoryLoop(activeView);
+    setPrehistoryInfo(buildPrehistoryInfo(activeView))();
+  } else {
+    activeView.isRunning = true;
+    setPrehistoryInfo(buildPrehistoryInfo(activeView))();
+    schedulePrehistoryTick(activeView);
+  }
+};
+
+export const resetPrehistory = (setPrehistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopPrehistoryLoop(activeView);
+  activeView.session.reset();
+  updatePrehistoryDataBuffers(activeView, false);
+  setPrehistoryInfo(buildPrehistoryInfo(activeView))();
+};
+
+export const savePrehistoryPlanet = (setPrehistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const bytes = activeView.session.encode_snapshot();
+  if (!bytes || bytes.length === 0) return;
+  storeSavedSnapshotBytes(bytes);
+  activeClimateSnapshotBytes = bytes;
+  const kyr = activeView.session.prehistory_ticks() * 4;
+  triggerBinaryDownload(`tec11-prehistory-${kyr}kyr.tec11`, bytes);
+  setPrehistoryInfo(buildPrehistoryInfo(activeView))();
+};
+
+export const loadEarthIntoPrehistory = (setPrehistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopPrehistoryLoop(activeView);
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  updatePrehistoryDataBuffers(activeView, true);
+  setPrehistoryInfo(buildPrehistoryInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoPrehistory = (setPrehistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  stopPrehistoryLoop(activeView);
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    updatePrehistoryDataBuffers(activeView, true);
+    setPrehistoryInfo(buildPrehistoryInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoPrehistory = (setPrehistoryInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    stopPrehistoryLoop(activeView);
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      updatePrehistoryDataBuffers(activeView, true);
+      setPrehistoryInfo(buildPrehistoryInfo(activeView))();
+    }
+  });
 };
 
 export const rotateGrid = (deg) => () => {

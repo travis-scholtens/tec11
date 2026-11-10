@@ -10,6 +10,7 @@ rust_library(
         "src/movement.rs",
         "src/pangea.rs",
         "src/population.rs",
+        "src/prehistory.rs",
         "src/racination.rs",
         "src/rivers.rs",
         "src/rock.rs",

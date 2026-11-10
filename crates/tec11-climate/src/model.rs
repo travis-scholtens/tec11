@@ -235,6 +235,11 @@ impl ClimateModel {
         self.recompute();
     }
 
+    /// Set `glaciation` without triggering full 8-season ocean recomputation (used before `update_for_tectonics`).
+    pub fn set_glaciation_only(&mut self, glaciation: f64) {
+        self.glaciation = glaciation.clamp(0.0, 1.0);
+    }
+
     /// Construct a `ClimateModel` attached to a planetary grid for tectonic simulation,
     /// precomputing the static wind destination graph `dest_map` once.
     pub fn new_for_tectonics(

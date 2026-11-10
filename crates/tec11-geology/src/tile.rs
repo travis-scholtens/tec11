@@ -438,6 +438,120 @@ impl TileGeology {
         self.subduction = 0.0;
         self.intrusion = None;
     }
+
+    pub fn to_proto_geological_tile(&self) -> tec11_proto::GeologicalTile {
+        let layers = self
+            .layers
+            .iter()
+            .map(|l| {
+                let r = &l.rock;
+                let kind = match r.kind {
+                    RockKind::Igneous => {
+                        let is_intrusive = matches!(r.name, "gabbro" | "andesite" | "granite");
+                        tec11_proto::RockKindOneof::Igneous(tec11_proto::IgneousRock {
+                            is_intrusive,
+                            felsity: r.felsity,
+                        })
+                    }
+                    RockKind::Sedimentary => {
+                        tec11_proto::RockKindOneof::Sedimentary(tec11_proto::SedimentaryRock {
+                            clasticity: r.clasticity.unwrap_or(1.0),
+                            felsity: Some(r.felsity),
+                            calcity: r.calcity,
+                            bogginess: r.bogginess,
+                        })
+                    }
+                    RockKind::Metamorphic => {
+                        use tec11_proto::MetamorphicFaciesExt;
+                        tec11_proto::RockKindOneof::Metamorphic(tec11_proto::MetamorphicRock {
+                            facies: tec11_proto::MetamorphicFacies::from_rock_name(r.name) as i32,
+                            toughness: r.toughness,
+                            felsity: Some(r.felsity),
+                            calcity: r.calcity,
+                            bogginess: r.bogginess,
+                        })
+                    }
+                };
+                tec11_proto::RockLayer {
+                    rock: Some(tec11_proto::Rock { kind: Some(kind) }),
+                    thickness: l.thickness,
+                }
+            })
+            .collect();
+        tec11_proto::GeologicalTile {
+            bottom: self.bottom,
+            mountainosity: self.mountainosity,
+            layers,
+        }
+    }
+
+    pub fn from_proto_geological_tile(pt: &tec11_proto::GeologicalTile) -> Option<Self> {
+        use tec11_proto::MetamorphicFaciesExt;
+        let mut layers = Vec::with_capacity(pt.layers.len());
+        for pl in &pt.layers {
+            let pr = pl.rock.as_ref()?;
+            let rock = match pr.kind.as_ref()? {
+                tec11_proto::RockKindOneof::Igneous(ig) => {
+                    if ig.is_intrusive {
+                        Rock::intrusive(ig.felsity)
+                    } else {
+                        Rock::extrusive(ig.felsity)
+                    }
+                }
+                tec11_proto::RockKindOneof::Sedimentary(sed) => {
+                    let clasticity = sed.clasticity.max(1e-6);
+                    let felsity = sed.felsity.unwrap_or(0.5);
+                    let calcity = sed.calcity;
+                    let bogginess = sed.bogginess;
+                    let name = if calcity.unwrap_or(0.0) > 0.99 {
+                        "chalk"
+                    } else if calcity.unwrap_or(0.0) > 0.75 {
+                        "limestone"
+                    } else {
+                        let grain = 1e-3 / clasticity;
+                        if grain < 4e-6 {
+                            "claystone"
+                        } else if grain < 60e-6 {
+                            "siltstone"
+                        } else if grain < 2e-3 {
+                            "sandstone"
+                        } else {
+                            "conglomerate"
+                        }
+                    };
+                    Rock {
+                        kind: RockKind::Sedimentary,
+                        name,
+                        felsity,
+                        toughness: 0.0,
+                        clasticity: Some(clasticity),
+                        calcity,
+                        bogginess,
+                    }
+                }
+                tec11_proto::RockKindOneof::Metamorphic(met) => Rock {
+                    kind: RockKind::Metamorphic,
+                    name: met.facies().rock_name(),
+                    felsity: met.felsity.unwrap_or(0.5),
+                    toughness: met.toughness,
+                    clasticity: None,
+                    calcity: met.calcity,
+                    bogginess: met.bogginess,
+                },
+            };
+            layers.push(RockLayer {
+                rock,
+                thickness: pl.thickness,
+            });
+        }
+        Some(Self {
+            bottom: pt.bottom,
+            mountainosity: pt.mountainosity,
+            subduction: 0.0,
+            intrusion: None,
+            layers,
+        })
+    }
 }
 
 #[cfg(test)]
