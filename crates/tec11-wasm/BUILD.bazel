@@ -8,6 +8,7 @@ rust_shared_library(
         "src/erosion_session.rs",
         "src/grid_session.rs",
         "src/lib.rs",
+        "src/lifeforms_session.rs",
         "src/mesh.rs",
         "src/move_session.rs",
         "src/pangea_session.rs",

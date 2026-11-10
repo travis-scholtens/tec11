@@ -1,4 +1,5 @@
 pub mod erosion_sandbox;
+pub mod lifeforms;
 pub mod move_sandbox;
 pub mod movement;
 pub mod pangea;
@@ -9,6 +10,9 @@ pub mod tectonics;
 pub mod tile;
 
 pub use erosion_sandbox::ErosionSandbox;
+pub use lifeforms::{
+    settle_species_on_climate, LifeformsSandbox, SettledBiosphere, SettledSpecies, SpeciesKind,
+};
 pub use move_sandbox::MoveSandbox;
 pub use pangea::PangeaWorld;
 pub use rivers::{trace_coarse_rivers, RiversSandbox};

@@ -167,6 +167,37 @@
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .species-list-box {
+      background: #0b1021;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 0.45rem;
+      min-height: 180px;
+      max-height: 240px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .species-item-btn {
+      text-align: left;
+      padding: 0.35rem 0.55rem;
+      font-size: 0.8rem;
+      color: #cbd5e1;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .species-item-btn:hover {
+      background: #1e293b;
+    }
+    .species-item-btn.selected {
+      background: #064e3b;
+      border-color: #10b981;
+      color: #a7f3d0;
+      font-weight: 600;
+    }
     .control-group {
       display: flex;
       flex-direction: column;

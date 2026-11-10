@@ -24,6 +24,7 @@ data Screen
   | ClimateScreen
   | TectonicsScreen
   | RiversScreen
+  | LifeformsScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -87,6 +88,23 @@ type RiversInfo =
   , hasSavedPlanet :: Boolean
   }
 
+type LifeformsSpeciesItem =
+  { id :: Int
+  , kind :: String
+  , name :: String
+  }
+
+type LifeformsInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , settledAnimals :: Int
+  , settledPlants :: Int
+  , hasSavedPlanet :: Boolean
+  , selectedTileIdx :: Int
+  , selectedSpeciesId :: Int
+  , tileSpecies :: Array LifeformsSpeciesItem
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -145,6 +163,16 @@ foreign import setRiversParams :: Int -> Int -> (RiversInfo -> Effect Unit) -> E
 foreign import loadEarthIntoRivers :: (RiversInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoRivers :: (RiversInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoRivers :: (RiversInfo -> Effect Unit) -> Effect Unit
+
+-- Lifeforms mode FFI
+foreign import mountLifeformsView :: Int -> String -> Int -> (LifeformsInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import setLifeformsAttribute :: String -> (LifeformsInfo -> Effect Unit) -> Effect Unit
+foreign import setLifeformsSeason :: Int -> (LifeformsInfo -> Effect Unit) -> Effect Unit
+foreign import setLifeformsGlaciation :: Int -> (LifeformsInfo -> Effect Unit) -> Effect Unit
+foreign import selectLifeformsSpecies :: Int -> (LifeformsInfo -> Effect Unit) -> Effect Unit
+foreign import loadEarthIntoLifeforms :: (LifeformsInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoLifeforms :: (LifeformsInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoLifeforms :: (LifeformsInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -237,6 +265,21 @@ mkApp = do
       , hasSavedPlanet: false
       }
 
+    -- Lifeforms mode state
+    lifeformsAttribute /\ setLifeformsAttributeState <- useState' "life"
+    lifeformsSeason /\ setLifeformsSeasonState <- useState' 0
+    lifeformsGlaciation /\ setLifeformsGlaciationState <- useState' 50
+    lifeformsInfo /\ setLifeformsInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , settledAnimals: 0
+      , settledPlants: 0
+      , hasSavedPlanet: false
+      , selectedTileIdx: -1
+      , selectedSpeciesId: -1
+      , tileSpecies: []
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -268,6 +311,9 @@ mkApp = do
         RiversScreen -> do
           setRotationDeg 0
           mountRiversView riversHmin riversPmin setRiversInfo
+        LifeformsScreen -> do
+          setRotationDeg 0
+          mountLifeformsView lifeformsGlaciation lifeformsAttribute lifeformsSeason setLifeformsInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -417,6 +463,27 @@ mkApp = do
           setRiversPmin p
           setRiversParams riversHmin p setRiversInfo
 
+      handleLifeformsAttrChange :: Maybe String -> Effect Unit
+      handleLifeformsAttrChange maybeVal = case maybeVal of
+        Nothing -> pure unit
+        Just attr -> do
+          setLifeformsAttributeState attr
+          setLifeformsAttribute attr setLifeformsInfo
+
+      handleLifeformsSeasonChange :: Maybe String -> Effect Unit
+      handleLifeformsSeasonChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just s -> do
+          setLifeformsSeasonState s
+          setLifeformsSeason s setLifeformsInfo
+
+      handleLifeformsGlaciationChange :: Maybe String -> Effect Unit
+      handleLifeformsGlaciationChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just g -> do
+          setLifeformsGlaciationState g
+          setLifeformsGlaciation g setLifeformsInfo
+
     pure case screen of
       MainMenu ->
         R.div
@@ -481,6 +548,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen RiversScreen)
                           , children: [ R.text "Rivers" ]
+                          }
+                      , R.button
+                          { id: "lifeforms-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen LifeformsScreen)
+                          , children: [ R.text "Lifeforms" ]
                           }
                       ]
                   }
@@ -1672,6 +1746,202 @@ mkApp = do
                           , className: "action-btn"
                           , disabled: not riversInfo.hasSavedPlanet
                           , onClick: capture_ (loadSavedPlanetIntoRivers setRiversInfo)
+                          , children: [ R.text "Load Saved" ]
+                          }
+                      , R.button
+                          { id: "done-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (setScreen MainMenu)
+                          , children: [ R.text "Done" ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      LifeformsScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.select
+                                  { id: "lifeforms-attribute-select"
+                                  , className: "control-select"
+                                  , value: lifeformsAttribute
+                                  , onChange: handler targetValue handleLifeformsAttrChange
+                                  , children:
+                                      [ R.option
+                                          { value: "life"
+                                          , children: [ R.text "Life" ]
+                                          }
+                                      , R.option
+                                          { value: "animals"
+                                          , children: [ R.text "Animals" ]
+                                          }
+                                      , R.option
+                                          { value: "plants"
+                                          , children: [ R.text "Plants" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Season:" ]
+                                  }
+                              , R.input
+                                  { id: "lifeforms-season-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "100"
+                                  , step: "1"
+                                  , value: show lifeformsSeason
+                                  , onChange: handler targetValue handleLifeformsSeasonChange
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Glaciation:" ]
+                                  }
+                              , R.input
+                                  { id: "lifeforms-glaciation-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "100"
+                                  , step: "1"
+                                  , value: show lifeformsGlaciation
+                                  , onChange: handler targetValue handleLifeformsGlaciationChange
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { id: "lifeforms-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "lifeforms-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text lifeformsInfo.planetName ]
+                                  }
+                              , R.div
+                                  { id: "lifeforms-animals-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Settled animals: " <> show lifeformsInfo.settledAnimals) ]
+                                  }
+                              , R.div
+                                  { id: "lifeforms-plants-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Settled plants: " <> show lifeformsInfo.settledPlants) ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text
+                                          ( if lifeformsInfo.selectedTileIdx < 0 then
+                                              "Species in Selected Tile (Click Globe)"
+                                            else
+                                              "Tile #" <> show lifeformsInfo.selectedTileIdx <> " — Click species to map range"
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { id: "lifeforms-species-list"
+                                  , className: "species-list-box"
+                                  , children:
+                                      if lifeformsInfo.selectedTileIdx < 0 then
+                                        [ R.div
+                                            { className: "stat-subtle"
+                                            , children: [ R.text "Click any land tile on the globe to list its animals and plants. Click a species in the list to highlight its global range in green." ]
+                                            }
+                                        ]
+                                      else
+                                        map
+                                          ( \sp ->
+                                              R.button
+                                                { className:
+                                                    if sp.id == lifeformsInfo.selectedSpeciesId then
+                                                      "species-item-btn selected"
+                                                    else
+                                                      "species-item-btn"
+                                                , onClick: capture_ (selectLifeformsSpecies sp.id setLifeformsInfo)
+                                                , children: [ R.text ("[" <> sp.kind <> "] " <> sp.name) ]
+                                                }
+                                          )
+                                          lifeformsInfo.tileSpecies
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "lifeforms-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadEarthIntoLifeforms setLifeformsInfo)
+                                  , children: [ R.text "Earth" ]
+                                  }
+                              , R.button
+                                  { id: "lifeforms-load-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadFilePlanetIntoLifeforms setLifeformsInfo)
+                                  , children: [ R.text "Load File" ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "lifeforms-saved-btn"
+                          , className: "action-btn"
+                          , disabled: not lifeformsInfo.hasSavedPlanet
+                          , onClick: capture_ (loadSavedPlanetIntoLifeforms setLifeformsInfo)
                           , children: [ R.text "Load Saved" ]
                           }
                       , R.button

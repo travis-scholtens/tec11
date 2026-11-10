@@ -3,6 +3,7 @@ import initWasmModule, {
   WasmClimateSession,
   WasmErosionSession,
   WasmGridSession,
+  WasmLifeformsSession,
   WasmMoveSession,
   WasmPangeaSession,
   WasmRiversSession,
@@ -1866,6 +1867,350 @@ export const loadFilePlanetIntoRivers = (setRiversInfo) => () => {
       activeClimateSnapshotBytes = bytes;
       updateRiversViewBuffers(activeView, true);
       setRiversInfo(buildRiversInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Lifeforms Sandbox Mode (`lifeformsdisplay.py` / `lifeformspresenter.py`)
+// ============================================================================
+
+function lifeformsColorscale(vClamped) {
+  const v = Math.max(0.0, Math.min(1.0, vClamped));
+  const m = 1275.0;
+  const r = v < 0.2 ? 255.0 - m * v : v < 0.6 ? 0.0 : v < 0.8 ? m * (v - 0.6) : 255.0;
+  const g = v < 0.2 ? 0.0 : v < 0.4 ? m * (v - 0.2) : v < 0.8 ? 255.0 : 255.0 - m * (v - 0.8);
+  const b = v < 0.4 ? 255.0 : v < 0.6 ? 255.0 - m * (v - 0.4) : 0.0;
+  return [
+    Math.max(0.0, Math.min(255.0, r)) / 255.0,
+    Math.max(0.0, Math.min(255.0, g)) / 255.0,
+    Math.max(0.0, Math.min(255.0, b)) / 255.0,
+  ];
+}
+
+function getLifeformsSeasonIndex(view) {
+  const seasonCount = view.session.season_count();
+  return Math.min(
+    seasonCount - 1,
+    Math.max(0, Math.round(((seasonCount - 1) * view.seasonSlider) / 100.0))
+  );
+}
+
+function computeLifeformsVertexColors(view) {
+  const {
+    elevations,
+    felsities,
+    koeppenIds,
+    vertexTileIds,
+    attribute,
+    selectedTileIdx,
+    selectedSpeciesId,
+    speciesPresenceMask,
+  } = view;
+  const seasonIdx = getLifeformsSeasonIndex(view);
+  const animalCounts = view.seasonalAnimalCounts[seasonIdx];
+  const plantCounts = view.seasonalPlantCounts[seasonIdx];
+  const numVerts = vertexTileIds.length;
+  const colors = new Float32Array(numVerts * 3);
+
+  for (let v = 0; v < numVerts; v++) {
+    const tid = vertexTileIds[v];
+    const out = v * 3;
+
+    if (tid === selectedTileIdx) {
+      // `lifeformsdisplay.py:77`: `(255, 0, 0)` for selected tile
+      colors[out] = 1.0;
+      colors[out + 1] = 0.0;
+      colors[out + 2] = 0.0;
+      continue;
+    }
+
+    const h = elevations[tid];
+    let baseR = 0.0;
+    let baseG = 0.0;
+    let baseB = 0.0;
+    if (h > 0.0) {
+      const kId = koeppenIds[tid];
+      if (kId === 12 || kId === 13) {
+        baseR = 1.0;
+        baseG = 1.0;
+        baseB = 1.0;
+      } else {
+        const f = felsities[tid];
+        baseR = 128.0 / 255.0;
+        baseG = (64.0 + 64.0 * f) / 255.0;
+        baseB = (128.0 * f) / 255.0;
+      }
+    }
+
+    if (selectedSpeciesId >= 0 && speciesPresenceMask) {
+      if (speciesPresenceMask[tid] === 1) {
+        colors[out] = 0.0;
+        colors[out + 1] = 1.0;
+        colors[out + 2] = 0.0;
+      } else {
+        colors[out] = baseR;
+        colors[out + 1] = baseG;
+        colors[out + 2] = baseB;
+      }
+    } else {
+      let pop = 0;
+      let denom = 100.0;
+      if (attribute === "animals") {
+        pop = animalCounts[tid];
+        denom = 100.0;
+      } else if (attribute === "plants") {
+        pop = plantCounts[tid];
+        denom = 100.0;
+      } else {
+        pop = animalCounts[tid] + plantCounts[tid];
+        denom = 200.0;
+      }
+      if (pop > 0) {
+        const [cr, cg, cb] = lifeformsColorscale(pop / denom);
+        colors[out] = cr;
+        colors[out + 1] = cg;
+        colors[out + 2] = cb;
+      } else {
+        colors[out] = baseR;
+        colors[out + 1] = baseG;
+        colors[out + 2] = baseB;
+      }
+    }
+  }
+
+  return colors;
+}
+
+function updateLifeformsDataBuffers(view, rebuildGeometry) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    view.elevations = session.tile_elevations();
+    view.felsities = session.tile_felsities();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.koeppenIds = session.tile_koeppen_ids();
+  const seasonCount = session.season_count();
+  view.seasonalAnimalCounts = [];
+  view.seasonalPlantCounts = [];
+  for (let s = 0; s < seasonCount; s++) {
+    view.seasonalAnimalCounts.push(session.tile_animal_counts(s));
+    view.seasonalPlantCounts.push(session.tile_plant_counts(s));
+  }
+  if (view.selectedSpeciesId >= 0) {
+    view.speciesPresenceMask = session.species_presence_mask(
+      view.selectedSpeciesId,
+      getLifeformsSeasonIndex(view)
+    );
+  } else {
+    view.speciesPresenceMask = null;
+  }
+  const colors = computeLifeformsVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildLifeformsInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Tectonics (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  const seasonIdx = getLifeformsSeasonIndex(view);
+  const tileSpecies = [];
+  if (view.selectedTileIdx >= 0) {
+    const tsv = s.species_on_tile_tsv(view.selectedTileIdx, seasonIdx, view.attribute);
+    const lines = tsv.split("\n");
+    for (const line of lines) {
+      if (!line) continue;
+      const parts = line.split("\t");
+      if (parts.length >= 3) {
+        tileSpecies.push({
+          id: parseInt(parts[0], 10),
+          kind: parts[1],
+          name: parts[2],
+        });
+      }
+    }
+  }
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    settledAnimals: s.settled_animal_count(),
+    settledPlants: s.settled_plant_count(),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    selectedTileIdx: view.selectedTileIdx,
+    selectedSpeciesId: view.selectedSpeciesId,
+    tileSpecies,
+  };
+}
+
+export const mountLifeformsView =
+  (glaciationSlider) => (attribute) => (seasonSlider) => (setLifeformsInfo) => () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    const glaciation = 1.0 - glaciationSlider / 100.0;
+    view.session = new WasmLifeformsSession(glaciation);
+    view.attribute = attribute;
+    view.seasonSlider = seasonSlider;
+    view.selectedTileIdx = -1;
+    view.selectedSpeciesId = -1;
+    view.speciesPresenceMask = null;
+    view.setLifeformsInfo = setLifeformsInfo;
+
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+      } else {
+        view.selectedTileIdx = -1;
+      }
+      const info = buildLifeformsInfo(view);
+      if (
+        view.selectedSpeciesId >= 0 &&
+        !info.tileSpecies.some((sp) => sp.id === view.selectedSpeciesId)
+      ) {
+        view.selectedSpeciesId = -1;
+        view.speciesPresenceMask = null;
+        info.selectedSpeciesId = -1;
+      }
+      const colors = computeLifeformsVertexColors(view);
+      view.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      view.paint();
+      view.setLifeformsInfo(info)();
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateLifeformsDataBuffers(view, true);
+    setLifeformsInfo(buildLifeformsInfo(view))();
+
+    return () => {
+      canvas.removeEventListener("click", handleCanvasClick);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const setLifeformsAttribute = (attribute) => (setLifeformsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.attribute = attribute;
+  activeView.selectedSpeciesId = -1;
+  activeView.speciesPresenceMask = null;
+  const colors = computeLifeformsVertexColors(activeView);
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+  setLifeformsInfo(buildLifeformsInfo(activeView))();
+};
+
+export const setLifeformsSeason = (seasonSlider) => (setLifeformsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.seasonSlider = seasonSlider;
+  if (activeView.selectedSpeciesId >= 0) {
+    activeView.speciesPresenceMask = activeView.session.species_presence_mask(
+      activeView.selectedSpeciesId,
+      getLifeformsSeasonIndex(activeView)
+    );
+  }
+  const colors = computeLifeformsVertexColors(activeView);
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+  setLifeformsInfo(buildLifeformsInfo(activeView))();
+};
+
+export const setLifeformsGlaciation = (glaciationSlider) => (setLifeformsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const glaciation = 1.0 - glaciationSlider / 100.0;
+  activeView.session.set_glaciation(glaciation);
+  activeView.selectedSpeciesId = -1;
+  activeView.speciesPresenceMask = null;
+  updateLifeformsDataBuffers(activeView, false);
+  setLifeformsInfo(buildLifeformsInfo(activeView))();
+};
+
+export const selectLifeformsSpecies = (speciesId) => (setLifeformsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  if (activeView.selectedSpeciesId === speciesId || speciesId < 0) {
+    activeView.selectedSpeciesId = -1;
+    activeView.speciesPresenceMask = null;
+  } else {
+    activeView.selectedSpeciesId = speciesId;
+    activeView.speciesPresenceMask = activeView.session.species_presence_mask(
+      speciesId,
+      getLifeformsSeasonIndex(activeView)
+    );
+  }
+  const colors = computeLifeformsVertexColors(activeView);
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+  setLifeformsInfo(buildLifeformsInfo(activeView))();
+};
+
+export const loadEarthIntoLifeforms = (setLifeformsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  activeView.selectedTileIdx = -1;
+  activeView.selectedSpeciesId = -1;
+  activeView.speciesPresenceMask = null;
+  updateLifeformsDataBuffers(activeView, true);
+  setLifeformsInfo(buildLifeformsInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoLifeforms = (setLifeformsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.selectedTileIdx = -1;
+    activeView.selectedSpeciesId = -1;
+    activeView.speciesPresenceMask = null;
+    updateLifeformsDataBuffers(activeView, true);
+    setLifeformsInfo(buildLifeformsInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoLifeforms = (setLifeformsInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.selectedTileIdx = -1;
+      activeView.selectedSpeciesId = -1;
+      activeView.speciesPresenceMask = null;
+      updateLifeformsDataBuffers(activeView, true);
+      setLifeformsInfo(buildLifeformsInfo(activeView))();
     }
   });
 };

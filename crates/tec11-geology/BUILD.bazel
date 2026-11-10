@@ -5,6 +5,7 @@ rust_library(
     srcs = [
         "src/erosion_sandbox.rs",
         "src/lib.rs",
+        "src/lifeforms.rs",
         "src/move_sandbox.rs",
         "src/movement.rs",
         "src/pangea.rs",
@@ -13,6 +14,10 @@ rust_library(
         "src/split_sandbox.rs",
         "src/tectonics.rs",
         "src/tile.rs",
+    ],
+    compile_data = [
+        "data/animals.tsv",
+        "data/plants.tsv",
     ],
     edition = "2021",
     visibility = ["//visibility:public"],

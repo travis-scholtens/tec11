@@ -1,6 +1,7 @@
 pub mod climate_session;
 pub mod erosion_session;
 pub mod grid_session;
+pub mod lifeforms_session;
 pub mod mesh;
 pub mod move_session;
 pub mod pangea_session;
@@ -11,6 +12,7 @@ pub mod tectonics_session;
 pub use climate_session::WasmClimateSession;
 pub use erosion_session::WasmErosionSession;
 pub use grid_session::WasmGridSession;
+pub use lifeforms_session::WasmLifeformsSession;
 pub use move_session::WasmMoveSession;
 pub use pangea_session::WasmPangeaSession;
 pub use rivers_session::WasmRiversSession;
