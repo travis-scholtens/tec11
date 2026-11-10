@@ -33,6 +33,7 @@ data Screen
   | HistoryScreen
   | WorldScreen
   | MoonScreen
+  | MeteorScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -214,6 +215,18 @@ type MoonInfo =
   , selectedReport :: String
   }
 
+type MeteorInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , impacts :: Int
+  , recoverySteps :: Int
+  , impactSummary :: String
+  , coolingText :: String
+  , biospherePctText :: String
+  , hasSavedPlanet :: Boolean
+  , selectedReport :: String
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -356,6 +369,18 @@ foreign import resetMoonLayers :: (MoonInfo -> Effect Unit) -> Effect Unit
 foreign import loadEarthIntoMoon :: (MoonInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoMoon :: (MoonInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoMoon :: (MoonInfo -> Effect Unit) -> Effect Unit
+
+-- Meteors, Crater Excavation & Impact Winter Sandbox mode FFI (`MeteorScreen`)
+foreign import mountMeteorView :: Number -> Number -> Number -> String -> Boolean -> Boolean -> (MeteorInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import setMeteorParams :: Number -> Number -> Number -> (MeteorInfo -> Effect Unit) -> Effect Unit
+foreign import setMeteorDisplayOptions :: String -> Boolean -> Boolean -> Effect Unit
+foreign import strikeMeteorTile :: Boolean -> (MeteorInfo -> Effect Unit) -> Effect Unit
+foreign import strikeMeteorBarrage :: (MeteorInfo -> Effect Unit) -> Effect Unit
+foreign import stepMeteorRecover :: (MeteorInfo -> Effect Unit) -> Effect Unit
+foreign import resetMeteorPlanet :: (MeteorInfo -> Effect Unit) -> Effect Unit
+foreign import loadEarthIntoMeteor :: (MeteorInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoMeteor :: (MeteorInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoMeteor :: (MeteorInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -589,6 +614,25 @@ mkApp = do
       , selectedReport: "Click any coastal, ocean, or inland tile on the globe to inspect local tidal range (m), tidal scour vs. rainfall erosion rates, shelf deposition, and rock strata."
       }
 
+    -- Meteors, Crater Excavation & Impact Winter Sandbox state (`MeteorScreen`)
+    meteorDiameterKm /\ setMeteorDiameterKm <- useState' 10
+    meteorVelocityKmS /\ setMeteorVelocityKmS <- useState' 20
+    meteorDensityKgM3 /\ setMeteorDensityKgM3 <- useState' 3000
+    meteorAspect /\ setMeteorAspectState <- useState' "crater_ejecta"
+    meteorShowEjecta /\ setMeteorShowEjecta <- useState' true
+    meteorShowBlast /\ setMeteorShowBlast <- useState' true
+    meteorInfo /\ setMeteorInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , impacts: 0
+      , recoverySteps: 0
+      , impactSummary: "Impactor: 10 km @ 20 km/s → Crater 186 km (75.1M MT, Chicxulub Extinction Class) | Cooling: -0.0 °C | Biosphere: 100%"
+      , coolingText: "-0.0 °C"
+      , biospherePctText: "100%"
+      , hasSavedPlanet: false
+      , selectedReport: "Click any tile on the globe to target it for a meteor strike and inspect crater excavation, ejecta breccia, impact winter cooling, and rock strata."
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -646,6 +690,9 @@ mkApp = do
         MoonScreen -> do
           setRotationDeg 0
           mountMoonView moonCount moonMassTenths moonDistRadii moonEpochPct moonAspect moonShowTidalScour moonShowFluvial moonShowDeposition setMoonInfo
+        MeteorScreen -> do
+          setRotationDeg 0
+          mountMeteorView (Int.toNumber meteorDiameterKm) (Int.toNumber meteorVelocityKmS) (Int.toNumber meteorDensityKgM3) meteorAspect meteorShowEjecta meteorShowBlast setMeteorInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -984,6 +1031,46 @@ mkApp = do
         setMoonShowDeposition next
         setMoonDisplayOptions moonAspect moonShowTidalScour moonShowFluvial next
 
+      handleMeteorDiameterChange :: Maybe String -> Effect Unit
+      handleMeteorDiameterChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just d -> do
+          setMeteorDiameterKm d
+          setMeteorParams (Int.toNumber d) (Int.toNumber meteorVelocityKmS) (Int.toNumber meteorDensityKgM3) setMeteorInfo
+
+      handleMeteorVelocityChange :: Maybe String -> Effect Unit
+      handleMeteorVelocityChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just v -> do
+          setMeteorVelocityKmS v
+          setMeteorParams (Int.toNumber meteorDiameterKm) (Int.toNumber v) (Int.toNumber meteorDensityKgM3) setMeteorInfo
+
+      handleMeteorDensityChange :: Maybe String -> Effect Unit
+      handleMeteorDensityChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just rho -> do
+          setMeteorDensityKgM3 rho
+          setMeteorParams (Int.toNumber meteorDiameterKm) (Int.toNumber meteorVelocityKmS) (Int.toNumber rho) setMeteorInfo
+
+      handleMeteorAspectChange :: Maybe String -> Effect Unit
+      handleMeteorAspectChange maybeVal = case maybeVal of
+        Nothing -> pure unit
+        Just asp -> do
+          setMeteorAspectState asp
+          setMeteorDisplayOptions asp meteorShowEjecta meteorShowBlast
+
+      handleToggleMeteorEjecta :: Effect Unit
+      handleToggleMeteorEjecta = do
+        let next = not meteorShowEjecta
+        setMeteorShowEjecta next
+        setMeteorDisplayOptions meteorAspect next meteorShowBlast
+
+      handleToggleMeteorBlast :: Effect Unit
+      handleToggleMeteorBlast = do
+        let next = not meteorShowBlast
+        setMeteorShowBlast next
+        setMeteorDisplayOptions meteorAspect meteorShowEjecta next
+
     pure case screen of
       MainMenu ->
         R.div
@@ -1111,6 +1198,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen MoonScreen)
                           , children: [ R.text "Moons" ]
+                          }
+                      , R.button
+                          { id: "meteor-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen MeteorScreen)
+                          , children: [ R.text "Meteors" ]
                           }
                       ]
                   }
@@ -1557,6 +1651,7 @@ mkApp = do
                                       , R.option { value: "rock", children: [ R.text "Rock" ] }
                                       , R.option { value: "subduction", children: [ R.text "Subduction" ] }
                                       , R.option { value: "thickness", children: [ R.text "Thickness" ] }
+                                      , R.option { value: "meteors", children: [ R.text "Meteors & Craters" ] }
                                       ]
                                   }
                               ]
@@ -3540,6 +3635,10 @@ mkApp = do
                                           { value: "nations"
                                           , children: [ R.text "Nations" ]
                                           }
+                                      , R.option
+                                          { value: "meteors"
+                                          , children: [ R.text "Meteors & Craters" ]
+                                          }
                                       ]
                                   }
                               ]
@@ -4196,6 +4295,277 @@ mkApp = do
                                   { id: "moon-load-file-btn"
                                   , className: "action-btn secondary"
                                   , onClick: capture_ (loadFilePlanetIntoMoon setMoonInfo)
+                                  , children: [ R.text "Load..." ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      MeteorScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.select
+                                  { id: "meteor-aspect-select"
+                                  , className: "control-select"
+                                  , value: meteorAspect
+                                  , onChange: handler targetValue handleMeteorAspectChange
+                                  , children:
+                                      [ R.option
+                                          { value: "crater_ejecta"
+                                          , children: [ R.text "Crater Basin, Ejecta Rim & Blast Wave" ]
+                                          }
+                                      , R.option
+                                          { value: "topography"
+                                          , children: [ R.text "Topography & Flooded Craters" ]
+                                          }
+                                      , R.option
+                                          { value: "impact_winter"
+                                          , children: [ R.text "Impact Winter & Biosphere Survival" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Tile Inspection (Crater Excavation, Ejecta Breccia, Impact Winter & Strata)" ]
+                                  }
+                              , R.div
+                                  { id: "meteor-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text meteorInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Impactor Composition & Density" ]
+                                  }
+                              , R.select
+                                  { id: "meteor-density-select"
+                                  , className: "control-select"
+                                  , value: show meteorDensityKgM3
+                                  , onChange: handler targetValue handleMeteorDensityChange
+                                  , children:
+                                      [ R.option
+                                          { value: "1000"
+                                          , children: [ R.text "Icy Comet (1,000 kg/m³)" ]
+                                          }
+                                      , R.option
+                                          { value: "3000"
+                                          , children: [ R.text "Stony Chondrite Asteroid (3,000 kg/m³)" ]
+                                          }
+                                      , R.option
+                                          { value: "7800"
+                                          , children: [ R.text "Metallic Iron-Nickel Core (7,800 kg/m³)" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Diameter:" ]
+                                  }
+                              , R.input
+                                  { id: "meteor-diameter-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "1"
+                                  , max: "100"
+                                  , step: "1"
+                                  , value: show meteorDiameterKm
+                                  , onChange: handler targetValue handleMeteorDiameterChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show meteorDiameterKm <> " km") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Velocity:" ]
+                                  }
+                              , R.input
+                                  { id: "meteor-velocity-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "11"
+                                  , max: "72"
+                                  , step: "1"
+                                  , value: show meteorVelocityKmS
+                                  , onChange: handler targetValue handleMeteorVelocityChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show meteorVelocityKmS <> " km/s") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "meteor-strike-target-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (strikeMeteorTile false setMeteorInfo)
+                                  , children: [ R.text "Strike Selected / Random" ]
+                                  }
+                              , R.button
+                                  { id: "meteor-strike-random-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (strikeMeteorTile true setMeteorInfo)
+                                  , children: [ R.text "Strike Random" ]
+                                  }
+                              , R.button
+                                  { id: "meteor-barrage-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (strikeMeteorBarrage setMeteorInfo)
+                                  , children: [ R.text "LHB Barrage (8x)" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "meteor-toggle-ejecta-btn"
+                                  , className: if meteorShowEjecta then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleMeteorEjecta
+                                  , children: [ R.text (if meteorShowEjecta then "Ejecta Rim (Gold): On" else "Ejecta Rim: Off") ]
+                                  }
+                              , R.button
+                                  { id: "meteor-toggle-blast-btn"
+                                  , className: if meteorShowBlast then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleMeteorBlast
+                                  , children: [ R.text (if meteorShowBlast then "Blast Wave (Violet): On" else "Blast Wave: Off") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "meteor-recover-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (stepMeteorRecover setMeteorInfo)
+                                  , children: [ R.text "Erode & Recover Step" ]
+                                  }
+                              , R.button
+                                  { id: "meteor-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (resetMeteorPlanet setMeteorInfo)
+                                  , children: [ R.text "Reset Planet" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "meteor-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Planet: "
+                                              <> meteorInfo.planetName
+                                              <> " | Strikes: "
+                                              <> show meteorInfo.impacts
+                                              <> " | Recovery Steps: "
+                                              <> show meteorInfo.recoverySteps
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { id: "meteor-impact-summary"
+                                  , className: "stat-line"
+                                  , children: [ R.text meteorInfo.impactSummary ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "meteor-load-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadEarthIntoMeteor setMeteorInfo)
+                                  , children: [ R.text "Load Earth" ]
+                                  }
+                              , R.button
+                                  { id: "meteor-load-saved-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: not meteorInfo.hasSavedPlanet
+                                  , onClick: capture_ (loadSavedPlanetIntoMeteor setMeteorInfo)
+                                  , children: [ R.text "Load Saved" ]
+                                  }
+                              , R.button
+                                  { id: "meteor-load-file-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadFilePlanetIntoMeteor setMeteorInfo)
                                   , children: [ R.text "Load..." ]
                                   }
                               ]

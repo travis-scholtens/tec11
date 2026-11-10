@@ -66,6 +66,12 @@ pub struct TectonicsSimulation {
     tile_temp_norm: Vec<f32>,
     tile_temp_c: Vec<f32>,
     tile_precip_norm: Vec<f32>,
+    tile_impact_scars: Vec<f32>,
+    impact_count: u32,
+    impact_winter_ticks: u32,
+    sterilization_delays: u32,
+    last_impact_tile: Option<usize>,
+    last_impact_diameter_km: f32,
     rng: Pcg64Mcg,
 }
 
@@ -204,6 +210,12 @@ impl TectonicsSimulation {
             tile_temp_norm: vec![0.5; n],
             tile_temp_c: vec![15.0; n],
             tile_precip_norm: vec![0.5; n],
+            tile_impact_scars: vec![0.0; n],
+            impact_count: 0,
+            impact_winter_ticks: 0,
+            sterilization_delays: 0,
+            last_impact_tile: None,
+            last_impact_diameter_km: 0.0,
             rng,
         };
         sim.climate_model
@@ -380,14 +392,174 @@ impl TectonicsSimulation {
         &self.tile_precip_norm
     }
 
+    pub fn tile_impact_scars(&self) -> &[f32] {
+        &self.tile_impact_scars
+    }
+
+    pub fn impact_count(&self) -> u32 {
+        self.impact_count
+    }
+
+    pub fn impact_winter_ticks(&self) -> u32 {
+        self.impact_winter_ticks
+    }
+
+    pub fn last_impact_tile(&self) -> Option<usize> {
+        self.last_impact_tile
+    }
+
+    pub fn last_impact_diameter_km(&self) -> f32 {
+        self.last_impact_diameter_km
+    }
+
+    /// Apply a bolide/asteroid impact centered at `center` with final crater diameter `crater_diameter_km`.
+    /// - Excavates upper strata at `center`, shock-metamorphoses the crater floor (`hornfels`),
+    ///   and extrudes an impact-melt `basalt` sheet for large basins (`>= 240 km`).
+    /// - Deposits an impact-breccia `conglomerate` ejecta blanket (`clasticity = 0.96`) onto
+    ///   the surrounding ring of neighbor tiles (`adjacency[center]`), raising the crater rim.
+    /// - If `crater_diameter_km >= 320 km` during early pre-biotic epochs (`life_ticks_remaining in 1..=10`),
+    ///   ocean-vaporizing sterilization delays `life_ticks_remaining` by up to 2 ticks.
+    /// - If `has_life()` and `crater_diameter_km >= 150 km`, triggers a 1-tick impact winter
+    ///   (`impact_winter_ticks = 1`) that suppresses biogenic carbonate/peat deposition.
+    pub fn apply_bolide_impact(&mut self, center: usize, crater_diameter_km: f64) {
+        if self.tiles.is_empty() {
+            return;
+        }
+        let center = center.min(self.tiles.len() - 1);
+        let d_km = crater_diameter_km.clamp(50.0, 1200.0);
+
+        self.impact_count = self.impact_count.saturating_add(1);
+        self.last_impact_tile = Some(center);
+        self.last_impact_diameter_km = d_km as f32;
+        self.tile_impact_scars[center] = 1.0;
+
+        // 1. Excavate and shock-metamorphose the crater bullseye (`center`):
+        let pre_elev = self.tiles[center].elevation();
+        let excavate_km = (0.35 * (d_km / 180.0)).clamp(0.20, 1.25) as f32;
+        if pre_elev > 0.0 {
+            let cap = (self.tiles[center].thickness() - 1.2).max(0.0).min(excavate_km);
+            if cap > 0.05 {
+                let _ = self.tiles[center].erode_column(cap, 1.0, cap);
+            }
+            // Shock-metamorphosed hornfels crater floor:
+            self.tiles[center].deposit(RockLayer {
+                rock: Rock {
+                    kind: RockKind::Metamorphic,
+                    name: "hornfels",
+                    felsity: 0.55,
+                    toughness: 0.88,
+                    clasticity: None,
+                    calcity: None,
+                    bogginess: None,
+                },
+                thickness: 0.18,
+            });
+            // Large multi-ring basins (>= 240 km, e.g. Sudbury/Vredefort) extrude an impact-melt basalt sheet:
+            if d_km >= 240.0 {
+                self.tiles[center].deposit(RockLayer {
+                    rock: Rock::extrusive(0.48),
+                    thickness: 0.22,
+                });
+            }
+            // Depress the crater basin floor relative to surrounding crust while keeping inland tiles
+            // above 0.08 km so interior continents never develop artificial ocean pinholes:
+            let depressed_elev = (pre_elev - 0.55 * excavate_km).clamp(0.08, pre_elev.max(0.08));
+            self.tiles[center].bottom = depressed_elev - self.tiles[center].thickness();
+            self.tiles[center].mountainosity *= 0.35;
+            self.tiles[center].limit();
+        } else {
+            // Marine impact: shock-metamorphose seafloor basement and deposit tsunami breccia:
+            let sea_elev = pre_elev.clamp(-6.5, -0.15);
+            self.tiles[center].deposit(RockLayer {
+                rock: Rock {
+                    kind: RockKind::Metamorphic,
+                    name: "hornfels",
+                    felsity: 0.50,
+                    toughness: 0.85,
+                    clasticity: None,
+                    calcity: None,
+                    bogginess: None,
+                },
+                thickness: 0.15,
+            });
+            self.tiles[center].bottom = sea_elev - self.tiles[center].thickness();
+            self.tiles[center].limit();
+        }
+
+        // 2. Deposit volume-conserving coarse impact-breccia `conglomerate` ejecta blanket on the surrounding rim:
+        let ring1 = self.adjacency[center].clone();
+        let rim_thick = (excavate_km / (ring1.len().max(1) as f32)).clamp(0.04, 0.16);
+        for &nb in &ring1 {
+            self.tile_impact_scars[nb] = self.tile_impact_scars[nb].max(0.55);
+            let nb_elev = self.tiles[nb].elevation();
+            if nb_elev > 0.0 {
+                self.tiles[nb].deposit(RockLayer {
+                    rock: Rock {
+                        kind: RockKind::Sedimentary,
+                        name: "conglomerate",
+                        felsity: 0.58,
+                        toughness: 0.55,
+                        clasticity: Some(0.96),
+                        calcity: None,
+                        bogginess: None,
+                    },
+                    thickness: rim_thick,
+                });
+                self.tiles[nb].isostasize(-0.85 * rim_thick);
+                if self.tiles[nb].elevation() > 5.4 {
+                    self.tiles[nb].bottom = 5.4 - self.tiles[nb].thickness();
+                }
+                self.tiles[nb].mountainosity = (self.tiles[nb].mountainosity + 0.6).min(20.0);
+                self.tiles[nb].limit();
+            }
+        }
+
+        // Multi-ring Hadean/Archean mega-basins (>= 380 km) leave an outer ejecta/shock ring:
+        if d_km >= 380.0 {
+            for &nb in &ring1 {
+                let ring2 = self.adjacency[nb].clone();
+                for &nb2 in &ring2 {
+                    if nb2 != center {
+                        self.tile_impact_scars[nb2] = self.tile_impact_scars[nb2].max(0.30);
+                    }
+                }
+            }
+        }
+
+        // 3. Biosphere & Early Life Sterilization effects:
+        if !self.has_life()
+            && self.life_ticks_remaining > 0
+            && self.life_ticks_remaining <= 10
+            && d_km >= 320.0
+            && self.sterilization_delays < 2
+        {
+            // Ocean-boiling Hadean/Archean giant impact delays nascent surface biosphere emergence:
+            self.life_ticks_remaining += 2;
+            self.sterilization_delays += 1;
+        } else if self.has_life() && d_km >= 150.0 {
+            // Chicxulub-class Phanerozoic extinction strike triggers a 1-tick impact winter:
+            self.impact_winter_ticks = 1;
+            self.tile_life[center] = 0.0;
+            for &nb in &ring1 {
+                self.tile_life[nb] = 0.0;
+            }
+        }
+    }
+
     /// Advance the tectonic simulation by one 5 Myr timestep (`PlanetSimulation.update`
     /// in `planetsimulation.py:211-381` + full ocean-floor bathymetry from Section 5.4).
     pub fn step(&mut self) {
         let n = self.tiles.len();
 
-        // 0. Clear previous tick's transient subduction & intrusion markers.
+        // 0. Clear previous tick's transient subduction & intrusion markers, and weather old impact scars.
         for tile in &mut self.tiles {
             tile.clear_temp();
+        }
+        for scar in &mut self.tile_impact_scars {
+            *scar *= 0.94;
+            if *scar < 0.03 {
+                *scar = 0.0;
+            }
         }
 
         // 1. Determine tile movements for each continental group.
@@ -721,8 +893,14 @@ impl TectonicsSimulation {
 
         // 5. Simulate coupled climate and erosion if the atmosphere has formed (`planetsimulation.py:275-315`).
         if self.has_atmosphere() {
-            let has_life = self.has_life();
+            let has_life = self.has_life() && self.impact_winter_ticks == 0;
             self.refresh_climate_fields();
+            if self.impact_winter_ticks > 0 {
+                for l in &mut self.tile_life {
+                    *l *= 0.25;
+                }
+                self.impact_winter_ticks -= 1;
+            }
 
             // Build downhill erosion graph (`erodemethod.py:21-38` with physical local base-level bounds):
             // Each land tile (elevation > 0) erodes only into strictly lower neighbors (`h_u < h_v`),
@@ -1108,6 +1286,29 @@ impl TectonicsSimulation {
         }
         self.groups = next_groups;
 
+        // 11. Stochastic meteor / bolide impacts (Hadean-Archean Late Heavy Bombardment decay
+        //     followed by steady Phanerozoic Chicxulub/Sudbury-scale bolide flux):
+        let p_impact = if self.geoticks < 45 {
+            0.28 * (-(self.geoticks as f64) / 16.0).exp()
+        } else {
+            0.055
+        };
+        let mut impact_rng = Pcg64Mcg::from_seed_u64(
+            (self.geoticks as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add((n as u64).wrapping_mul(0x517C_C1B7_2722_0A95)),
+        );
+        if impact_rng.next_f64() < p_impact && n > 0 {
+            let center = (impact_rng.next_u64() as usize) % n;
+            let u = impact_rng.next_f64();
+            let crater_d_km = if self.geoticks < 45 {
+                160.0 + 420.0 * u * u
+            } else {
+                140.0 + 180.0 * u * u
+            };
+            self.apply_bolide_impact(center, crater_d_km);
+        }
+
         self.geoticks += 1;
     }
 
@@ -1157,6 +1358,17 @@ impl TectonicsSimulation {
                 tile.subduction,
                 tile.mountainosity_norm() * 100.0
             ));
+        }
+        let scar = self.tile_impact_scars[tile_idx];
+        if scar > 0.05 {
+            let zone = if scar > 0.60 {
+                "Impact Crater Basin (Shocked Hornfels / Melt)"
+            } else if scar > 0.32 {
+                "Impact Ejecta Rim (Breccia Conglomerate)"
+            } else {
+                "Weathered Impact Ring"
+            };
+            lines.push(format!("Meteor Scar: {zone} (intensity {:.0}%)", scar * 100.0));
         }
 
         // Layers from surface (top) down to Moho (bottom):
@@ -1519,12 +1731,30 @@ impl TectonicsSimulation {
             tile_temp_norm: vec![0.5; n],
             tile_temp_c: vec![15.0; n],
             tile_precip_norm: vec![0.5; n],
+            tile_impact_scars: vec![0.0; n],
+            impact_count: 0,
+            impact_winter_ticks: 0,
+            sterilization_delays: 0,
+            last_impact_tile: None,
+            last_impact_diameter_km: 0.0,
             rng,
         };
         sim.climate_model
             .set_spin_and_tilt_for_tectonics(sim.current_spin(), sim.current_tilt_deg());
         if sim.has_atmosphere() {
             sim.refresh_climate_fields();
+        }
+        // Reconstruct visible impact scars from shock-metamorphic hornfels / coarse impact breccia in top strata:
+        for v in 0..n {
+            if let Some(top) = sim.tiles[v].layers.last() {
+                if top.rock.name == "hornfels" {
+                    sim.tile_impact_scars[v] = 0.85;
+                } else if top.rock.name == "conglomerate"
+                    && top.rock.clasticity.unwrap_or(0.0) >= 0.95
+                {
+                    sim.tile_impact_scars[v] = 0.50;
+                }
+            }
         }
         Some(sim)
     }
@@ -1828,5 +2058,30 @@ mod tests {
             tilt_wander > 5.0 * tilt_stable,
             "Expected moonless obliquity excursion ({tilt_wander:.2} deg) >> moon-stabilized ({tilt_stable:.2} deg)"
         );
+    }
+
+    #[test]
+    fn test_bolide_impact_crater_excavation_and_biosphere_effects() {
+        let mut sim = TectonicsSimulation::new(4, 30.0, 42);
+        // Find a continental tile:
+        let land_idx = (0..sim.tile_count())
+            .find(|&v| sim.tiles()[v].elevation() > 0.8)
+            .unwrap();
+        let pre_elev = sim.tiles()[land_idx].elevation();
+
+        // Apply a 200 km Chicxulub-scale bolide strike:
+        sim.apply_bolide_impact(land_idx, 200.0);
+        assert!(sim.impact_count() >= 1);
+        assert!((sim.tile_impact_scars()[land_idx] - 1.0).abs() < 1e-5);
+        assert!(
+            sim.tiles()[land_idx].elevation() < pre_elev,
+            "Expected bolide strike to excavate & depress crater floor"
+        );
+        assert!(
+            sim.tiles()[land_idx].impact_signature() >= 0.65,
+            "Expected shocked hornfels stratigraphic signature at crater floor"
+        );
+        let report = sim.inspect_tile(land_idx);
+        assert!(report.contains("Impact Crater Basin"));
     }
 }

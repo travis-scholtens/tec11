@@ -2,6 +2,7 @@ pub mod erosion_sandbox;
 pub mod history;
 pub mod language;
 pub mod lifeforms;
+pub mod meteor_sandbox;
 pub mod moon_sandbox;
 pub mod move_sandbox;
 pub mod movement;
@@ -27,6 +28,7 @@ pub use language::{
 pub use lifeforms::{
     settle_species_on_climate, LifeformsSandbox, SettledBiosphere, SettledSpecies, SpeciesKind,
 };
+pub use meteor_sandbox::MeteorSandbox;
 pub use moon_sandbox::MoonSandbox;
 pub use move_sandbox::MoveSandbox;
 pub use pangea::PangeaWorld;

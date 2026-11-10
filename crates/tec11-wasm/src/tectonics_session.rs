@@ -102,6 +102,19 @@ impl WasmTectonicsSession {
         self.sim.tile_life().to_vec()
     }
 
+    pub fn tile_impact_scars(&self) -> Vec<f32> {
+        self.sim
+            .tiles()
+            .iter()
+            .enumerate()
+            .map(|(i, t)| self.sim.tile_impact_scars()[i].max(t.impact_signature()))
+            .collect()
+    }
+
+    pub fn impact_count(&self) -> u32 {
+        self.sim.impact_count()
+    }
+
     pub fn nearest_tile(&self, x: f64, y: f64, z: f64) -> usize {
         self.sim.nearest_tile([x, y, z])
     }

@@ -6,6 +6,7 @@ import initWasmModule, {
   WasmHistorySession,
   WasmLanguageSession,
   WasmLifeformsSession,
+  WasmMeteorSession,
   WasmMoonSession,
   WasmMoveSession,
   WasmPangeaSession,
@@ -255,6 +256,7 @@ function computeTectonicsVertexColors(view) {
     topRockKinds,
     koeppenIds,
     tileLife,
+    impactScars,
     hasAtmosphere,
     aspect,
     selectedTileIdx,
@@ -403,6 +405,33 @@ function computeTectonicsVertexColors(view) {
         r = val;
         g = val;
         b = val;
+      }
+    } else if (aspect === "meteors") {
+      // Base muted natural terrain + bright crimson-orange crater basins & amber-gold ejecta rims:
+      if (h <= 0.0) {
+        r = 0.0;
+        g = 0.02;
+        b = 0.32;
+      } else {
+        const f = felsities[tid];
+        r = (0.35 * 128.0) / 255.0;
+        g = (0.35 * (64.0 + 64.0 * f + 200.0 * tileLife[tid])) / 255.0;
+        b = (0.35 * (128.0 * f)) / 255.0;
+      }
+      const scar = impactScars ? impactScars[tid] : 0.0;
+      if (scar >= 0.60) {
+        r = 0.98;
+        g = 0.24;
+        b = 0.10;
+      } else if (scar >= 0.32) {
+        r = 0.96;
+        g = 0.76;
+        b = 0.10;
+      } else if (scar > 0.05) {
+        const w = Math.min(0.75, scar * 2.5);
+        r = r * (1.0 - w) + 0.85 * w;
+        g = g * (1.0 - w) + 0.45 * w;
+        b = b * (1.0 - w) + 0.20 * w;
       }
     }
 
@@ -860,6 +889,7 @@ function updateTectonicsViewBuffers(view, rebuildGeometry) {
   view.topRockKinds = session.tile_top_rock_kinds();
   view.koeppenIds = session.tile_koeppen_ids();
   view.tileLife = session.tile_life();
+  view.impactScars = session.tile_impact_scars();
   view.hasAtmosphere = session.has_atmosphere();
   view.hasLife = session.has_life();
 
@@ -3067,10 +3097,11 @@ function buildWorldInfo(view) {
   const curTilt = s.current_tilt_deg();
   const curMoonDist = s.current_moon_dist_radii();
   const curTides = s.current_tidal_strength();
+  const impacts = s.impact_count();
   const orbitalSummaryText =
     moonCount === 0
-      ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x)`
-      : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x)`;
+      ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x) | Impacts: ${impacts}`
+      : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x) | Impacts: ${impacts}`;
   return {
     stageIndex: s.stage_index(),
     stageName: s.stage_name(),
@@ -3672,6 +3703,219 @@ export const loadFilePlanetIntoMoon = (setMoonInfo) => () => {
       activeView.selectedTileIdx = -1;
       updateMoonDataBuffers(activeView, true);
       setMoonInfo(buildMoonInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Mode 17: Meteors, Crater Excavation & Impact Winter Sandbox (`MeteorScreen`)
+// ============================================================================
+
+function computeMeteorVertexColors(view) {
+  const { vertexTileIds, tileColors } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    colors[v * 3] = tileColors[t * 3];
+    colors[v * 3 + 1] = tileColors[t * 3 + 1];
+    colors[v * 3 + 2] = tileColors[t * 3 + 2];
+  }
+  return colors;
+}
+
+function updateMeteorDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileColors = session.tile_colors_rgb(
+    view.aspect,
+    Boolean(view.showEjecta),
+    Boolean(view.showBlast),
+    view.selectedTileIdx
+  );
+  const colors = computeMeteorVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildMeteorInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Loaded Planet (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  const selectedReport =
+    view.selectedTileIdx >= 0
+      ? s.inspect_tile(view.selectedTileIdx)
+      : "Click any tile on the globe to target it for a meteor strike and inspect crater excavation, ejecta breccia, impact winter cooling, and rock strata.";
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    impacts: s.impact_count(),
+    recoverySteps: s.recovery_steps(),
+    impactSummary: s.impact_summary(),
+    coolingText: `-${s.current_cooling_c().toFixed(1)} °C`,
+    biospherePctText: `${s.biosphere_survival_pct().toFixed(0)}%`,
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    selectedReport,
+  };
+}
+
+export const mountMeteorView =
+  (diameterKm) =>
+  (velocityKmS) =>
+  (densityKgM3) =>
+  (aspect) =>
+  (showEjecta) =>
+  (showBlast) =>
+  (setMeteorInfo) =>
+  () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.session = new WasmMeteorSession(diameterKm, velocityKmS, densityKgM3);
+    view.aspect = aspect;
+    view.showEjecta = showEjecta;
+    view.showBlast = showBlast;
+    view.selectedTileIdx = -1;
+    view.setMeteorInfo = setMeteorInfo;
+
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+      view.session.set_impactor_params(diameterKm, velocityKmS, densityKgM3);
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateMeteorDataBuffers(view, false);
+        view.setMeteorInfo(buildMeteorInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateMeteorDataBuffers(view, true);
+    setMeteorInfo(buildMeteorInfo(view))();
+
+    return () => {
+      canvas.removeEventListener("click", handleCanvasClick);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const setMeteorParams =
+  (diameterKm) =>
+  (velocityKmS) =>
+  (densityKgM3) =>
+  (setMeteorInfo) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.session.set_impactor_params(diameterKm, velocityKmS, densityKgM3);
+    setMeteorInfo(buildMeteorInfo(activeView))();
+  };
+
+export const setMeteorDisplayOptions =
+  (aspect) =>
+  (showEjecta) =>
+  (showBlast) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.aspect = aspect;
+    activeView.showEjecta = showEjecta;
+    activeView.showBlast = showBlast;
+    updateMeteorDataBuffers(activeView, false);
+  };
+
+export const strikeMeteorTile = (onlyRandom) => (setMeteorInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const target = onlyRandom ? -1 : activeView.selectedTileIdx;
+  const struck = activeView.session.strike_tile(target);
+  activeView.selectedTileIdx = struck;
+  updateMeteorDataBuffers(activeView, false);
+  setMeteorInfo(buildMeteorInfo(activeView))();
+};
+
+export const strikeMeteorBarrage = (setMeteorInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const struck = activeView.session.strike_barrage(8);
+  activeView.selectedTileIdx = struck;
+  updateMeteorDataBuffers(activeView, false);
+  setMeteorInfo(buildMeteorInfo(activeView))();
+};
+
+export const stepMeteorRecover = (setMeteorInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.step_recover_and_erode();
+  updateMeteorDataBuffers(activeView, false);
+  setMeteorInfo(buildMeteorInfo(activeView))();
+};
+
+export const resetMeteorPlanet = (setMeteorInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.reset_planet();
+  updateMeteorDataBuffers(activeView, false);
+  setMeteorInfo(buildMeteorInfo(activeView))();
+};
+
+export const loadEarthIntoMeteor = (setMeteorInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  activeView.selectedTileIdx = -1;
+  updateMeteorDataBuffers(activeView, true);
+  setMeteorInfo(buildMeteorInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoMeteor = (setMeteorInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.selectedTileIdx = -1;
+    updateMeteorDataBuffers(activeView, true);
+    setMeteorInfo(buildMeteorInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoMeteor = (setMeteorInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.selectedTileIdx = -1;
+      updateMeteorDataBuffers(activeView, true);
+      setMeteorInfo(buildMeteorInfo(activeView))();
     }
   });
 };

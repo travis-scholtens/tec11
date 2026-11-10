@@ -449,6 +449,28 @@ impl WorldSimulation {
         }
     }
 
+    pub fn impact_count(&self) -> u32 {
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.impact_count(),
+            WorldStageState::Prehistory(pre) => pre
+                .tiles()
+                .iter()
+                .filter(|t| t.impact_signature() >= 0.65)
+                .count() as u32,
+            WorldStageState::History(hist) => {
+                let snap = hist.to_snapshot();
+                if let Some(pre) = PrehistorySimulation::from_snapshot(&snap, 42) {
+                    pre.tiles()
+                        .iter()
+                        .filter(|t| t.impact_signature() >= 0.65)
+                        .count() as u32
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
         match &self.stage {
             WorldStageState::Tectonics(tec) => {
@@ -516,6 +538,12 @@ impl WorldSimulation {
             }
             lines.push(clim_line);
         }
+        let sig = tile.impact_signature();
+        if sig >= 0.65 {
+            lines.push("Meteor Scar: Impact Crater Basin (Shocked Hornfels / Melt)".to_string());
+        } else if sig >= 0.35 {
+            lines.push("Meteor Scar: Impact Ejecta Rim (Breccia Conglomerate)".to_string());
+        }
         lines.push("Layers (surface -> Moho):".to_string());
         for layer in tile.layers.iter().rev() {
             let r = &layer.rock;
@@ -554,7 +582,7 @@ impl WorldSimulation {
         out
     }
 
-    /// Compute RGB vertex/tile colors for `"color"`, `"climate"`, `"population"`, or `"nations"`
+    /// Compute RGB vertex/tile colors for `"color"`, `"climate"`, `"population"`, `"nations"`, or `"meteors"`
     /// (`worlddisplay.py:7-62`).
     pub fn tile_colors_rgb(&self, aspect: &str, selected_tile: Option<usize>) -> Vec<f32> {
         let mut out = match &self.stage {
@@ -563,6 +591,7 @@ impl WorldSimulation {
                 let tiles = tec.tiles();
                 let koeppen = tec.tile_koeppen_ids();
                 let life = tec.tile_life();
+                let scars = tec.tile_impact_scars();
                 let has_atm = tec.has_atmosphere();
                 let mut buf = Vec::with_capacity(n * 3);
                 for t in 0..n {
@@ -580,6 +609,17 @@ impl WorldSimulation {
                             } else {
                                 [0.0, 0.0, 0.0]
                             }
+                        }
+                        "meteors" => {
+                            let base = Self::natural_color(
+                                h,
+                                tiles[t].top_felsity(),
+                                koeppen[t],
+                                life[t],
+                                has_atm,
+                            );
+                            let scar = scars[t].max(tiles[t].impact_signature());
+                            Self::blend_impact_scar_color(base, scar)
                         }
                         _ => Self::natural_color(h, tiles[t].top_felsity(), koeppen[t], life[t], has_atm),
                     };
@@ -610,6 +650,16 @@ impl WorldSimulation {
                             } else {
                                 Self::natural_color(h, tiles[t].top_felsity(), koeppen[t], life[t], true)
                             }
+                        }
+                        "meteors" => {
+                            let base = Self::natural_color(
+                                h,
+                                tiles[t].top_felsity(),
+                                koeppen[t],
+                                life[t],
+                                true,
+                            );
+                            Self::blend_impact_scar_color(base, tiles[t].impact_signature())
                         }
                         _ => Self::natural_color(h, tiles[t].top_felsity(), koeppen[t], life[t], true),
                     };
@@ -645,6 +695,55 @@ impl WorldSimulation {
                         hist.tile_colors_rgb("nations", true, selected_tile)
                     }
                 }
+                "meteors" => {
+                    let pre_snap = hist.to_snapshot();
+                    if let Some(pre) = PrehistorySimulation::from_snapshot(&pre_snap, 42) {
+                        let coarse_elevs = pre.tile_elevations();
+                        let tiles = pre.tiles();
+                        let koeppen = pre.tile_koeppen_ids();
+                        let life = pre.tile_life();
+                        let terrain = hist.terrain();
+                        let mut buf = Vec::with_capacity(terrain.display_faces.len() * 3);
+                        for (_, _, src) in &terrain.display_faces {
+                            match *src {
+                                tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
+                                    let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                                    let h = terrain.fine_elevations[f_idx];
+                                    let base = Self::natural_color(
+                                        h,
+                                        tiles[c].top_felsity(),
+                                        koeppen[c],
+                                        life[c],
+                                        true,
+                                    );
+                                    let rgb = Self::blend_impact_scar_color(
+                                        base,
+                                        tiles[c].impact_signature(),
+                                    );
+                                    buf.extend_from_slice(&rgb);
+                                }
+                                tec11_math_grid::DisplayFaceSource::OceanCoarse(c_idx) => {
+                                    let h = tiles[c_idx].elevation();
+                                    let base = Self::natural_color(
+                                        h,
+                                        tiles[c_idx].top_felsity(),
+                                        koeppen[c_idx],
+                                        life[c_idx],
+                                        true,
+                                    );
+                                    let rgb = Self::blend_impact_scar_color(
+                                        base,
+                                        tiles[c_idx].impact_signature(),
+                                    );
+                                    buf.extend_from_slice(&rgb);
+                                }
+                            }
+                        }
+                        buf
+                    } else {
+                        hist.tile_colors_rgb("nations", true, selected_tile)
+                    }
+                }
                 "population" => hist.tile_colors_rgb("population", true, selected_tile),
                 _ => hist.tile_colors_rgb("nations", true, selected_tile),
             },
@@ -658,6 +757,37 @@ impl WorldSimulation {
             }
         }
         out
+    }
+
+    fn blend_impact_scar_color(base: [f32; 3], scar: f32) -> [f32; 3] {
+        if scar <= 0.05 {
+            return [base[0] * 0.72, base[1] * 0.72, base[2] * 0.72];
+        }
+        if scar >= 0.60 {
+            // Crater basin bullseye (shocked hornfels / impact melt): glowing crimson-orange
+            let w = ((scar - 0.50) / 0.50).clamp(0.65, 0.96);
+            [
+                base[0] * (1.0 - w) + 0.98 * w,
+                base[1] * (1.0 - w) + 0.24 * w,
+                base[2] * (1.0 - w) + 0.10 * w,
+            ]
+        } else if scar >= 0.32 {
+            // Raised ejecta breccia rim (conglomerate): bright amber-gold
+            let w = ((scar - 0.25) / 0.35).clamp(0.55, 0.90);
+            [
+                base[0] * (1.0 - w) + 0.96 * w,
+                base[1] * (1.0 - w) + 0.76 * w,
+                base[2] * (1.0 - w) + 0.10 * w,
+            ]
+        } else {
+            // Outer shock ring / weathered crater halo: warm copper
+            let w = (scar * 2.5).clamp(0.25, 0.75);
+            [
+                base[0] * (1.0 - w) + 0.85 * w,
+                base[1] * (1.0 - w) + 0.45 * w,
+                base[2] * (1.0 - w) + 0.20 * w,
+            ]
+        }
     }
 
     fn natural_color(h: f32, felsity: f32, koeppen: u8, life: f32, has_atm: bool) -> [f32; 3] {

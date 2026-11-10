@@ -163,6 +163,10 @@ impl WasmWorldSession {
         self.sim.current_tidal_strength()
     }
 
+    pub fn impact_count(&self) -> u32 {
+        self.sim.impact_count()
+    }
+
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
         self.sim.inspect_tile(tile_idx)
     }

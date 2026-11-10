@@ -8,6 +8,7 @@ rust_library(
         "src/language.rs",
         "src/lib.rs",
         "src/lifeforms.rs",
+        "src/meteor_sandbox.rs",
         "src/moon_sandbox.rs",
         "src/move_sandbox.rs",
         "src/movement.rs",

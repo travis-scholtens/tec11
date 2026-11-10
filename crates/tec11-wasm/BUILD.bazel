@@ -12,6 +12,7 @@ rust_shared_library(
         "src/lib.rs",
         "src/lifeforms_session.rs",
         "src/mesh.rs",
+        "src/meteor_session.rs",
         "src/moon_session.rs",
         "src/move_session.rs",
         "src/pangea_session.rs",

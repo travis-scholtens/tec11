@@ -100,6 +100,24 @@ impl TileGeology {
             .unwrap_or(RockKind::Igneous)
     }
 
+    /// Detect stratigraphic impact crater / ejecta breccia signature in the upper 3 rock layers:
+    /// - `>= 0.65`: Shock-metamorphosed `hornfels` crater basin floor (fresh or shallowly buried).
+    /// - `0.35..0.60`: Coarse impact-breccia `conglomerate` (`clasticity >= 0.95`) ejecta rim.
+    pub fn impact_signature(&self) -> f32 {
+        let mut best = 0.0f32;
+        for (depth_idx, layer) in self.layers.iter().rev().take(3).enumerate() {
+            let atten = 1.0 - 0.16 * (depth_idx as f32);
+            if layer.rock.name == "hornfels" && layer.rock.toughness >= 0.82 {
+                best = best.max(0.85 * atten);
+            } else if layer.rock.name == "conglomerate"
+                && layer.rock.clasticity.unwrap_or(0.0) >= 0.95
+            {
+                best = best.max(0.52 * atten);
+            }
+        }
+        best
+    }
+
     /// Enforce `MAX_THICKNESS` (`75 km`) and `MAX_HEIGHT` (`10 km`) (`Tile.limit` in `tile.py:62-81`),
     /// without clamping negative ocean bathymetry to `0`.
     pub fn limit(&mut self) {
