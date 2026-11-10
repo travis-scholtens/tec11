@@ -191,26 +191,9 @@ pub fn solve_seasonal_ocean_circulation(
                 subsolar_lat_deg * (0.42 + 0.48 * monsoon_pull) * (1.0 - 0.15 * ice_index);
             let eff_lat = ((lat - itcz_shift_deg) * cell_lat_compression).clamp(-89.5, 89.5);
 
-            let (c_lo, c_hi, alpha) =
-                if (spin - 1.0).abs() > 1e-6 && cells == crate::model::nominal_cells_for_spin(spin)
-                {
-                    crate::model::continuous_cell_blend(spin)
-                } else {
-                    (cells, cells, 0.0)
-                };
-            let dir_lo = wind_direction_deg(eff_lat, c_lo, spin) * PI / 180.0;
-            let (mut we, mut wn) = if c_lo == c_hi || alpha <= 1e-6 {
-                (dir_lo.sin() * wind_intensity, dir_lo.cos() * wind_intensity)
-            } else {
-                let dir_hi = wind_direction_deg(eff_lat, c_hi, spin) * PI / 180.0;
-                let we_b = (1.0 - alpha) * dir_lo.sin() + alpha * dir_hi.sin();
-                let wn_b = (1.0 - alpha) * dir_lo.cos() + alpha * dir_hi.cos();
-                let norm = (we_b * we_b + wn_b * wn_b).sqrt().max(0.35);
-                (
-                    (we_b / norm) * wind_intensity,
-                    (wn_b / norm) * wind_intensity,
-                )
-            };
+            let dir_rad = wind_direction_deg(eff_lat, cells, spin) * PI / 180.0;
+            let mut we = dir_rad.sin() * wind_intensity;
+            let mut wn = dir_rad.cos() * wind_intensity;
 
             // Direct continental monsoon pressure-gradient wind:
             let hemi_summer = season_phase * ((lat + 0.4 * subsolar_lat_deg) / 20.0).tanh();

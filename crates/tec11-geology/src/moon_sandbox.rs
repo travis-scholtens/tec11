@@ -292,8 +292,8 @@ impl MoonSandbox {
         24.0 / self.current_spin()
     }
 
-    pub fn current_effective_cells(&self) -> f64 {
-        tec11_climate::effective_cells_for_spin(self.current_spin())
+    pub fn current_cells(&self) -> u32 {
+        tec11_climate::nominal_cells_for_spin(self.current_spin())
     }
 
     pub fn current_tilt_deg(&self) -> f64 {
@@ -612,9 +612,9 @@ impl MoonSandbox {
     pub fn harmonic_chain_summary(&self) -> String {
         if self.moon_count == 0 || self.moon_mass <= 0.0 {
             return format!(
-                "Moonless World (Solar tides only: 0.15x Earth) | Day: {:.1}h ({:.1} cells) | Axial Tilt: {:.1}° (Chaotic wander ±14°)",
+                "Moonless World (Solar tides only: 0.15x Earth) | Day: {:.1}h ({} cells) | Axial Tilt: {:.1}° (Chaotic wander ±14°)",
                 self.current_day_hours(),
-                self.current_effective_cells(),
+                self.current_cells(),
                 self.current_tilt_deg()
             );
         }
@@ -634,9 +634,9 @@ impl MoonSandbox {
             ));
         }
         format!(
-            "Day: {:.1}h ({:.1} cells) | Tilt: {:.1}° | Tides: {:.2}x Earth (Max {:.1}m) | {}",
+            "Day: {:.1}h ({} cells) | Tilt: {:.1}° | Tides: {:.2}x Earth (Max {:.1}m) | {}",
             self.current_day_hours(),
-            self.current_effective_cells(),
+            self.current_cells(),
             self.current_tilt_deg(),
             self.current_tidal_strength(),
             self.max_tidal_range_m(),
@@ -819,21 +819,21 @@ mod tests {
         let mut sandbox = MoonSandbox::new_earth();
         assert_eq!(sandbox.tile_count(), 7292);
         assert!((sandbox.current_day_hours() - 24.0).abs() < 0.05);
-        assert!((sandbox.current_effective_cells() - 3.0).abs() < 0.05);
+        assert_eq!(sandbox.current_cells(), 3);
         let base_scour = sandbox.mean_coastal_tidal_scour();
         let base_range = sandbox.max_tidal_range_m();
         assert!(base_scour > 0.0);
         assert!(base_range > 2.0);
 
-        // Moonless Earth at 100% epoch retains fast unbraked Hadean rotation (< 12h day, > 5 cells):
+        // Moonless Earth at 100% epoch retains fast unbraked Hadean rotation (< 12h day, 5 cells):
         sandbox.set_moon_params(0, 0.0, 60.0, 100);
         assert!(sandbox.current_day_hours() < 12.0);
-        assert!(sandbox.current_effective_cells() > 5.0);
+        assert_eq!(sandbox.current_cells(), 5);
 
-        // Heavier 1.5x moon at 100% epoch brakes rotation beyond 24h (> 32h day, < 2.0 cells):
+        // Heavier 1.5x moon at 100% epoch brakes rotation beyond 24h (> 32h day, 1 cell):
         sandbox.set_moon_params(1, 1.5, 60.0, 100);
         assert!(sandbox.current_day_hours() > 32.0);
-        assert!(sandbox.current_effective_cells() < 2.0);
+        assert_eq!(sandbox.current_cells(), 1);
 
         // Configure 2 harmonic moons of 1.5x Lunar mass at Hadean epoch (0%):
         sandbox.set_moon_params(2, 1.5, 50.0, 0);
