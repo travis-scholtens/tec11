@@ -6,6 +6,7 @@ import initWasmModule, {
   WasmLifeformsSession,
   WasmMoveSession,
   WasmPangeaSession,
+  WasmPopulationSession,
   WasmRiversSession,
   WasmSplitSession,
   WasmTectonicsSession,
@@ -2211,6 +2212,210 @@ export const loadFilePlanetIntoLifeforms = (setLifeformsInfo) => () => {
       activeView.speciesPresenceMask = null;
       updateLifeformsDataBuffers(activeView, true);
       setLifeformsInfo(buildLifeformsInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Mode 9: Population Simulation (`populationmethod.py`, `populationdisplay.py`, `populationpresenter.py`)
+// ============================================================================
+
+function computePopulationVertexColors(view) {
+  const { vertexTileIds, elevations, felsities, koeppenIds, lifeValues, populatedMask } = view;
+  const vertexCount = vertexTileIds.length;
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const t = vertexTileIds[v];
+    if (populatedMask && populatedMask[t]) {
+      // `populationdisplay.py:12-13`: populated tiles are highlighted in bright yellow `(255, 255, 0)`
+      colors[v * 3] = 1.0;
+      colors[v * 3 + 1] = 1.0;
+      colors[v * 3 + 2] = 0.0;
+    } else {
+      const [r, g, b] = naturalTileColorRgb(
+        elevations[t],
+        felsities[t],
+        true,
+        koeppenIds ? koeppenIds[t] : 0,
+        lifeValues ? lifeValues[t] : 0.0
+      );
+      colors[v * 3] = r;
+      colors[v * 3 + 1] = g;
+      colors[v * 3 + 2] = b;
+    }
+  }
+  return colors;
+}
+
+function updatePopulationDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.elevations = session.tile_elevations();
+  view.felsities = session.tile_felsities();
+  view.koeppenIds = session.tile_koeppen_ids();
+  view.lifeValues = session.tile_life();
+  view.populatedMask = session.populated_mask();
+  const colors = computePopulationVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.paint();
+}
+
+function buildPopulationInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Saved Planet (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    populatedCount: s.populated_count(),
+    ticks: s.ticks(),
+    isRunning: Boolean(view.isRunning),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+  };
+}
+
+function stopPopulationLoop(view) {
+  view.isRunning = false;
+  if (view.timerId !== null && view.timerId !== undefined) {
+    clearTimeout(view.timerId);
+    view.timerId = null;
+  }
+}
+
+function schedulePopulationTick(view) {
+  if (!view.isRunning || activeView !== view) return;
+  view.timerId = setTimeout(() => {
+    if (!view.isRunning || activeView !== view) return;
+    const expanded = view.session.step();
+    view.populatedMask = view.session.populated_mask();
+    const colors = computePopulationVertexColors(view);
+    view.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    view.paint();
+    if (!expanded) {
+      stopPopulationLoop(view);
+    }
+    if (view.setPopulationInfo) {
+      view.setPopulationInfo(buildPopulationInfo(view))();
+    }
+    if (view.isRunning) {
+      schedulePopulationTick(view);
+    }
+  }, 100);
+}
+
+export const mountPopulationView =
+  (coastProx) => (travelRange) => (setPopulationInfo) => () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.session = new WasmPopulationSession(coastProx, travelRange);
+    view.isRunning = false;
+    view.timerId = null;
+    view.setPopulationInfo = setPopulationInfo;
+
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+    }
+
+    activeView = view;
+    updatePopulationDataBuffers(view, true);
+    setPopulationInfo(buildPopulationInfo(view))();
+
+    return () => {
+      stopPopulationLoop(view);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const stepPopulation = (setPopulationInfo) => () => {
+  if (!activeView || !activeView.session || activeView.isRunning) return;
+  activeView.session.step();
+  activeView.populatedMask = activeView.session.populated_mask();
+  const colors = computePopulationVertexColors(activeView);
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+  setPopulationInfo(buildPopulationInfo(activeView))();
+};
+
+export const togglePopulationRunning = (setPopulationInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  if (activeView.isRunning) {
+    stopPopulationLoop(activeView);
+    setPopulationInfo(buildPopulationInfo(activeView))();
+  } else {
+    activeView.isRunning = true;
+    setPopulationInfo(buildPopulationInfo(activeView))();
+    schedulePopulationTick(activeView);
+  }
+};
+
+export const resetPopulation = (setPopulationInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopPopulationLoop(activeView);
+  activeView.session.reset();
+  activeView.populatedMask = activeView.session.populated_mask();
+  const colors = computePopulationVertexColors(activeView);
+  activeView.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  activeView.paint();
+  setPopulationInfo(buildPopulationInfo(activeView))();
+};
+
+export const setPopulationCoastProx = (coastProx) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_coast_prox(coastProx);
+};
+
+export const setPopulationTravelRange = (travelRange) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_travel_range(travelRange);
+};
+
+export const loadEarthIntoPopulation = (setPopulationInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopPopulationLoop(activeView);
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  updatePopulationDataBuffers(activeView, true);
+  setPopulationInfo(buildPopulationInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoPopulation = (setPopulationInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  stopPopulationLoop(activeView);
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    updatePopulationDataBuffers(activeView, true);
+    setPopulationInfo(buildPopulationInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoPopulation = (setPopulationInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    stopPopulationLoop(activeView);
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      updatePopulationDataBuffers(activeView, true);
+      setPopulationInfo(buildPopulationInfo(activeView))();
     }
   });
 };

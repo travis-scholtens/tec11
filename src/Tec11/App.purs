@@ -25,6 +25,7 @@ data Screen
   | TectonicsScreen
   | RiversScreen
   | LifeformsScreen
+  | PopulationScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -105,6 +106,15 @@ type LifeformsInfo =
   , tileSpecies :: Array LifeformsSpeciesItem
   }
 
+type PopulationInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , populatedCount :: Int
+  , ticks :: Int
+  , isRunning :: Boolean
+  , hasSavedPlanet :: Boolean
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -173,6 +183,17 @@ foreign import selectLifeformsSpecies :: Int -> (LifeformsInfo -> Effect Unit) -
 foreign import loadEarthIntoLifeforms :: (LifeformsInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoLifeforms :: (LifeformsInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoLifeforms :: (LifeformsInfo -> Effect Unit) -> Effect Unit
+
+-- Population mode FFI
+foreign import mountPopulationView :: Int -> Int -> (PopulationInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepPopulation :: (PopulationInfo -> Effect Unit) -> Effect Unit
+foreign import togglePopulationRunning :: (PopulationInfo -> Effect Unit) -> Effect Unit
+foreign import resetPopulation :: (PopulationInfo -> Effect Unit) -> Effect Unit
+foreign import setPopulationCoastProx :: Int -> Effect Unit
+foreign import setPopulationTravelRange :: Int -> Effect Unit
+foreign import loadEarthIntoPopulation :: (PopulationInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoPopulation :: (PopulationInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoPopulation :: (PopulationInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -280,6 +301,18 @@ mkApp = do
       , tileSpecies: []
       }
 
+    -- Population mode state
+    populationCoastProx /\ setPopulationCoastProxState <- useState' 2
+    populationTravelRange /\ setPopulationTravelRangeState <- useState' 6
+    populationInfo /\ setPopulationInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , populatedCount: 0
+      , ticks: 0
+      , isRunning: false
+      , hasSavedPlanet: false
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -314,6 +347,9 @@ mkApp = do
         LifeformsScreen -> do
           setRotationDeg 0
           mountLifeformsView lifeformsGlaciation lifeformsAttribute lifeformsSeason setLifeformsInfo
+        PopulationScreen -> do
+          setRotationDeg 0
+          mountPopulationView populationCoastProx populationTravelRange setPopulationInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -484,6 +520,20 @@ mkApp = do
           setLifeformsGlaciationState g
           setLifeformsGlaciation g setLifeformsInfo
 
+      handlePopulationCoastProxChange :: Maybe String -> Effect Unit
+      handlePopulationCoastProxChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just cp -> do
+          setPopulationCoastProxState cp
+          setPopulationCoastProx cp
+
+      handlePopulationTravelRangeChange :: Maybe String -> Effect Unit
+      handlePopulationTravelRangeChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just tr -> do
+          setPopulationTravelRangeState tr
+          setPopulationTravelRange tr
+
     pure case screen of
       MainMenu ->
         R.div
@@ -555,6 +605,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen LifeformsScreen)
                           , children: [ R.text "Lifeforms" ]
+                          }
+                      , R.button
+                          { id: "population-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen PopulationScreen)
+                          , children: [ R.text "Population" ]
                           }
                       ]
                   }
@@ -1949,6 +2006,181 @@ mkApp = do
                           , className: "action-btn secondary"
                           , onClick: capture_ (setScreen MainMenu)
                           , children: [ R.text "Done" ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      PopulationScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Travel range:" ]
+                                  }
+                              , R.input
+                                  { id: "population-range-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "1"
+                                  , max: "12"
+                                  , step: "1"
+                                  , value: show populationTravelRange
+                                  , onChange: handler targetValue handlePopulationTravelRangeChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show populationTravelRange) ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Coast prox:" ]
+                                  }
+                              , R.input
+                                  { id: "population-coastprox-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "1"
+                                  , max: "6"
+                                  , step: "1"
+                                  , value: show populationCoastProx
+                                  , onChange: handler targetValue handlePopulationCoastProxChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show populationCoastProx) ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column pangea-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "population-start-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (togglePopulationRunning setPopulationInfo)
+                                  , children: [ R.text (if populationInfo.isRunning then "Pause" else "Start") ]
+                                  }
+                              , R.button
+                                  { id: "population-step-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: populationInfo.isRunning
+                                  , onClick: capture_ (stepPopulation setPopulationInfo)
+                                  , children: [ R.text "Step" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "population-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "population-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text populationInfo.planetName ]
+                                  }
+                              , R.div
+                                  { id: "population-ticks-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Steps: " <> show populationInfo.ticks) ]
+                                  }
+                              , R.div
+                                  { id: "population-count-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("Populated: " <> show populationInfo.populatedCount <> " tiles") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "population-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: populationInfo.isRunning
+                                  , onClick: capture_ (loadEarthIntoPopulation setPopulationInfo)
+                                  , children: [ R.text "Earth" ]
+                                  }
+                              , R.button
+                                  { id: "population-load-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: populationInfo.isRunning
+                                  , onClick: capture_ (loadFilePlanetIntoPopulation setPopulationInfo)
+                                  , children: [ R.text "Load File" ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "population-saved-btn"
+                          , className: "action-btn"
+                          , disabled: populationInfo.isRunning || not populationInfo.hasSavedPlanet
+                          , onClick: capture_ (loadSavedPlanetIntoPopulation setPopulationInfo)
+                          , children: [ R.text "Load Saved" ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "population-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: populationInfo.isRunning
+                                  , onClick: capture_ (resetPopulation setPopulationInfo)
+                                  , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
                           }
                       ]
                   }
