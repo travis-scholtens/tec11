@@ -7,6 +7,7 @@ rust_shared_library(
         "src/climate_session.rs",
         "src/erosion_session.rs",
         "src/grid_session.rs",
+        "src/language_session.rs",
         "src/lib.rs",
         "src/lifeforms_session.rs",
         "src/mesh.rs",

@@ -28,6 +28,7 @@ data Screen
   | PopulationScreen
   | RacinationScreen
   | PrehistoryScreen
+  | LanguageScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -138,6 +139,21 @@ type PrehistoryInfo =
   , hasSavedPlanet :: Boolean
   }
 
+type LanguageWordItem =
+  { idx :: Int
+  , sourceOrth :: String
+  , sourceIpa :: String
+  , destOrth :: String
+  , destIpa :: String
+  , etymology :: String
+  }
+
+type LanguageInfo =
+  { sourcePhonemes :: String
+  , destPhonemes :: String
+  , words :: Array LanguageWordItem
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -233,6 +249,12 @@ foreign import savePrehistoryPlanet :: (PrehistoryInfo -> Effect Unit) -> Effect
 foreign import loadEarthIntoPrehistory :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoPrehistory :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoPrehistory :: (PrehistoryInfo -> Effect Unit) -> Effect Unit
+
+-- Language mode FFI
+foreign import mountLanguageView :: (LanguageInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import generateLanguage :: (LanguageInfo -> Effect Unit) -> Effect Unit
+foreign import borrowLanguage :: (LanguageInfo -> Effect Unit) -> Effect Unit
+foreign import applyLanguageSoundChange :: Int -> (LanguageInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -376,6 +398,13 @@ mkApp = do
       , hasSavedPlanet: false
       }
 
+    -- Language mode state
+    languageInfo /\ setLanguageInfo <- useState'
+      { sourcePhonemes: ""
+      , destPhonemes: ""
+      , words: []
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -419,6 +448,8 @@ mkApp = do
         PrehistoryScreen -> do
           setRotationDeg 0
           mountPrehistoryView setPrehistoryInfo
+        LanguageScreen -> do
+          mountLanguageView setLanguageInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -702,6 +733,13 @@ mkApp = do
                           , disabled: not wasmReady
                           , onClick: capture_ (setScreen PrehistoryScreen)
                           , children: [ R.text "Prehistory" ]
+                          }
+                      , R.button
+                          { id: "language-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen LanguageScreen)
+                          , children: [ R.text "Language" ]
                           }
                       ]
                   }
@@ -2542,6 +2580,215 @@ mkApp = do
                                   , children: [ R.text "Done" ]
                                   }
                               ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      LanguageScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "language-columns"
+                  , children:
+                      [ R.div
+                          { className: "language-col"
+                          , children:
+                              [ R.div
+                                  { className: "control-label"
+                                  , children: [ R.text "Source Phonemes" ]
+                                  }
+                              , R.div
+                                  { id: "language-source-phonemes"
+                                  , className: "language-phonemes-box"
+                                  , children: [ R.text languageInfo.sourcePhonemes ]
+                                  }
+                              , R.div
+                                  { className: "control-label"
+                                  , children: [ R.text "Source Lexicon" ]
+                                  }
+                              , R.div
+                                  { id: "language-source-words"
+                                  , className: "language-word-list"
+                                  , children:
+                                      map
+                                        ( \w ->
+                                            R.div
+                                              { className: "language-word-row"
+                                              , children:
+                                                  [ R.div
+                                                      { className: "language-word-main"
+                                                      , children:
+                                                          [ R.span_ [ R.text w.sourceOrth ]
+                                                          , R.span
+                                                              { className: "language-word-ipa"
+                                                              , children: [ R.text ("[" <> w.sourceIpa <> "]") ]
+                                                              }
+                                                          ]
+                                                      }
+                                                  ]
+                                              }
+                                        )
+                                        languageInfo.words
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "language-col"
+                          , children:
+                              [ R.div
+                                  { className: "control-label"
+                                  , children: [ R.text "Destination Phonemes" ]
+                                  }
+                              , R.div
+                                  { id: "language-dest-phonemes"
+                                  , className: "language-phonemes-box"
+                                  , children: [ R.text languageInfo.destPhonemes ]
+                                  }
+                              , R.div
+                                  { className: "control-label"
+                                  , children: [ R.text "Mutated / Borrowed Lexicon" ]
+                                  }
+                              , R.div
+                                  { id: "language-dest-words"
+                                  , className: "language-word-list"
+                                  , children:
+                                      map
+                                        ( \w ->
+                                            R.div
+                                              { className: "language-word-row"
+                                              , children:
+                                                  [ R.div
+                                                      { className: "language-word-main"
+                                                      , children:
+                                                          [ R.span_ [ R.text w.destOrth ]
+                                                          , R.span
+                                                              { className: "language-word-ipa"
+                                                              , children: [ R.text ("[" <> w.destIpa <> "]") ]
+                                                              }
+                                                          ]
+                                                      }
+                                                  , R.div
+                                                      { className: "language-word-etym"
+                                                      , children: [ R.text w.etymology ]
+                                                      }
+                                                  ]
+                                              }
+                                        )
+                                        languageInfo.words
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column pangea-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "language-generate-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (generateLanguage setLanguageInfo)
+                                  , children: [ R.text "Generate" ]
+                                  }
+                              , R.button
+                                  { id: "language-borrow-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (borrowLanguage setLanguageInfo)
+                                  , children: [ R.text "Borrow" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-label"
+                          , children: [ R.text "Vowel Mutations" ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "language-amutate-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (applyLanguageSoundChange 0 setLanguageInfo)
+                                  , children: [ R.text "A-Mutate" ]
+                                  }
+                              , R.button
+                                  { id: "language-imutate-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (applyLanguageSoundChange 1 setLanguageInfo)
+                                  , children: [ R.text "I-Mutate" ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "language-break-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (applyLanguageSoundChange 2 setLanguageInfo)
+                          , children: [ R.text "Break Vowels" ]
+                          }
+                      , R.div
+                          { className: "control-label"
+                          , children: [ R.text "Consonant Lenition" ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "language-open-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (applyLanguageSoundChange 3 setLanguageInfo)
+                                  , children: [ R.text "Open" ]
+                                  }
+                              , R.button
+                                  { id: "language-sonorize-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (applyLanguageSoundChange 4 setLanguageInfo)
+                                  , children: [ R.text "Sonorize" ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "language-vocalize-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (applyLanguageSoundChange 5 setLanguageInfo)
+                          , children: [ R.text "Vocalize" ]
+                          }
+                      , R.div
+                          { className: "control-label"
+                          , children: [ R.text "Vowel Elision" ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "language-apheresis-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (applyLanguageSoundChange 6 setLanguageInfo)
+                                  , children: [ R.text "Apheresis" ]
+                                  }
+                              , R.button
+                                  { id: "language-syncope-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (applyLanguageSoundChange 7 setLanguageInfo)
+                                  , children: [ R.text "Syncope" ]
+                                  }
+                              ]
+                          }
+                      , R.button
+                          { id: "language-apocope-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (applyLanguageSoundChange 8 setLanguageInfo)
+                          , children: [ R.text "Apocope" ]
+                          }
+                      , R.button
+                          { id: "done-btn"
+                          , className: "action-btn secondary"
+                          , onClick: capture_ (setScreen MainMenu)
+                          , children: [ R.text "Done" ]
                           }
                       ]
                   }

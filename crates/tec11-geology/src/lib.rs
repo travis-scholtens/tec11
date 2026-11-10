@@ -1,4 +1,5 @@
 pub mod erosion_sandbox;
+pub mod language;
 pub mod lifeforms;
 pub mod move_sandbox;
 pub mod movement;
@@ -13,6 +14,11 @@ pub mod tectonics;
 pub mod tile;
 
 pub use erosion_sandbox::ErosionSandbox;
+pub use language::{
+    a_mutate, apheresize, apocopate, break_vowels, i_mutate, open_consonants, sonorize_consonants,
+    syncopate, vocalize_consonants, ConsonantDef, Language, LanguageSandbox, PhonotacticConstraint,
+    SoundChangeKind, Syllable, VowelDef, Word, WordOrigin, CONSONANTS, VOWELS,
+};
 pub use lifeforms::{
     settle_species_on_climate, LifeformsSandbox, SettledBiosphere, SettledSpecies, SpeciesKind,
 };

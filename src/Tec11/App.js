@@ -3,6 +3,7 @@ import initWasmModule, {
   WasmClimateSession,
   WasmErosionSession,
   WasmGridSession,
+  WasmLanguageSession,
   WasmLifeformsSession,
   WasmMoveSession,
   WasmPangeaSession,
@@ -2726,6 +2727,63 @@ export const loadFilePlanetIntoPrehistory = (setPrehistoryInfo) => () => {
       setPrehistoryInfo(buildPrehistoryInfo(activeView))();
     }
   });
+};
+
+// ============================================================================
+// Mode 12: Language Simulation (`languagesimulation.py`, `languagepresenter.py`, `languageui.py`)
+// ============================================================================
+
+let activeLanguageSession = null;
+
+function buildLanguageInfo(session) {
+  const count = session.word_count();
+  const words = [];
+  for (let i = 0; i < count; i++) {
+    words.push({
+      idx: i,
+      sourceOrth: session.source_orth(i),
+      sourceIpa: session.source_ipa(i),
+      destOrth: session.dest_orth(i),
+      destIpa: session.dest_ipa(i),
+      etymology: session.dest_etymology(i),
+    });
+  }
+  return {
+    sourcePhonemes: session.source_phonemes_text(),
+    destPhonemes: session.dest_phonemes_text(),
+    words,
+  };
+}
+
+export const mountLanguageView = (setLanguageInfo) => () => {
+  const session = new WasmLanguageSession();
+  activeLanguageSession = session;
+  setLanguageInfo(buildLanguageInfo(session))();
+
+  return () => {
+    if (activeLanguageSession === session) {
+      activeLanguageSession = null;
+    }
+    session.free();
+  };
+};
+
+export const generateLanguage = (setLanguageInfo) => () => {
+  if (!activeLanguageSession) return;
+  activeLanguageSession.generate();
+  setLanguageInfo(buildLanguageInfo(activeLanguageSession))();
+};
+
+export const borrowLanguage = (setLanguageInfo) => () => {
+  if (!activeLanguageSession) return;
+  activeLanguageSession.borrow();
+  setLanguageInfo(buildLanguageInfo(activeLanguageSession))();
+};
+
+export const applyLanguageSoundChange = (kindId) => (setLanguageInfo) => () => {
+  if (!activeLanguageSession) return;
+  activeLanguageSession.apply_sound_change(kindId);
+  setLanguageInfo(buildLanguageInfo(activeLanguageSession))();
 };
 
 export const rotateGrid = (deg) => () => {
