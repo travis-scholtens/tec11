@@ -139,6 +139,9 @@ message Concept {
     KIND_NATION = 1;
     KIND_STATE = 2;
     KIND_LANGUAGE = 3;
+    KIND_SUN = 4;
+    KIND_MOON = 5;
+    KIND_PLANET = 6;
   }
   Kind kind = 1;
   uint32 id = 2;

@@ -147,6 +147,7 @@ type PrehistoryInfo =
 
 type LanguageWordItem =
   { idx :: Int
+  , concept :: String
   , sourceOrth :: String
   , sourceIpa :: String
   , destOrth :: String
@@ -200,6 +201,15 @@ type WorldInfo =
   , moonDistRadii :: Int
   , meteorFreqTenths :: Int
   , orbitalSummaryText :: String
+  , sunSpectralType :: String
+  , sunColorCss :: String
+  , atmosphereName :: String
+  , skyColorCss :: String
+  , skyColorName :: String
+  , sunsetColorCss :: String
+  , sunsetColorName :: String
+  , plantColorCss :: String
+  , plantColorName :: String
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
   , selectedReport :: String
@@ -242,6 +252,20 @@ type SunInfo =
   , sunMassText :: String
   , sunLumText :: String
   , sunHzText :: String
+  , atmosphereName :: String
+  , atmosphereFormula :: String
+  , skyColorCss :: String
+  , skyHorizonCss :: String
+  , skyColorName :: String
+  , skyMechanism :: String
+  , sunsetColorCss :: String
+  , twilightColorCss :: String
+  , sunsetColorName :: String
+  , sunsetMechanism :: String
+  , plantColorCss :: String
+  , plantHighlightCss :: String
+  , plantColorName :: String
+  , plantPigmentDesc :: String
   , summaryLine :: String
   , selectedReport :: String
   }
@@ -375,6 +399,7 @@ foreign import stepWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import advanceWorldStage :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import toggleWorldRunning :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import setWorldAspect :: String -> Effect Unit
+foreign import setWorldSunAndAtmosphere :: Int -> Int -> (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import saveWorldPlanet :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
@@ -406,6 +431,7 @@ foreign import mountSunView :: Int -> Int -> Int -> String -> Boolean -> Boolean
 foreign import generateSunGalaxy :: Int -> Int -> Int -> (SunInfo -> Effect Unit) -> Effect Unit
 foreign import chooseNewSunInGalaxy :: Int -> (SunInfo -> Effect Unit) -> Effect Unit
 foreign import loadHipparcosIntoSun :: (SunInfo -> Effect Unit) -> Effect Unit
+foreign import setSunAtmosphere :: Int -> (SunInfo -> Effect Unit) -> Effect Unit
 foreign import setSunDisplayOptions :: String -> Boolean -> Boolean -> Effect Unit
 
 -- Shared viewport rotation FFI
@@ -596,6 +622,8 @@ mkApp = do
     worldMoonMassTenths /\ setWorldMoonMassTenths <- useState' 10
     worldMoonDistRadii /\ setWorldMoonDistRadii <- useState' 60
     worldMeteorFreqTenths /\ setWorldMeteorFreqTenths <- useState' 10
+    worldSunFilter /\ setWorldSunFilter <- useState' 2
+    worldAtmosphereId /\ setWorldAtmosphereId <- useState' 0
     worldRandomize /\ setWorldRandomize <- useState' true
     worldAspect /\ setWorldAspectState <- useState' "color"
     worldInfo /\ setWorldInfo <- useState'
@@ -616,6 +644,15 @@ mkApp = do
       , moonDistRadii: 60
       , meteorFreqTenths: 10
       , orbitalSummaryText: "Day: 11.1h (→24h) | Tilt: 23.0° | Moons: 1 (1.0x @ 23.4→60 Rp, Tides 14.5x) | Meteors: 1.0x (0 hits)"
+      , sunSpectralType: "G2V"
+      , sunColorCss: "rgb(255, 255, 119)"
+      , atmosphereName: "N2-O2 + O3 Ozone (Earth-like)"
+      , skyColorCss: "rgb(41, 130, 240)"
+      , skyColorName: "Azure Blue"
+      , sunsetColorCss: "rgb(250, 97, 36)"
+      , sunsetColorName: "Crimson-Orange & Violet-Pink"
+      , plantColorCss: "rgb(36, 138, 41)"
+      , plantColorName: "Emerald Chlorophyll Green"
       , isRunning: false
       , hasSavedPlanet: false
       , selectedReport: "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree."
@@ -665,6 +702,7 @@ mkApp = do
     sunGalaxyType /\ setSunGalaxyType <- useState' 99
     sunVantage /\ setSunVantage <- useState' 99
     sunStarFilter /\ setSunStarFilter <- useState' 0
+    sunAtmosphere /\ setSunAtmosphereState <- useState' 0
     sunAspect /\ setSunAspectState <- useState' "night_sky"
     sunShowGalacticPlane /\ setSunShowGalacticPlane <- useState' true
     sunShowConstellations /\ setSunShowConstellations <- useState' false
@@ -681,8 +719,22 @@ mkApp = do
       , sunMassText: "1.00 M☉"
       , sunLumText: "1.00 L☉"
       , sunHzText: "1.00 AU (365d yr)"
-      , summaryLine: "Sun: G2V (5778 K, B-V +0.65, 1.00 R☉, 1.00 L☉) | HZ: 1.00 AU (365d yr, 0.53° sky disc) | Spiral Galaxy (Sb/Sc) — Spiral Arm (R=8.1 kpc)"
-      , selectedReport: "Click any star on the celestial sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, B-V color index, and galactic latitude."
+      , atmosphereName: "N2-O2 + O3 Ozone (Earth-like)"
+      , atmosphereFormula: "78% N2, 21% O2, 1% Ar + O3"
+      , skyColorCss: "rgb(41, 130, 240)"
+      , skyHorizonCss: "rgb(138, 194, 250)"
+      , skyColorName: "Azure Blue"
+      , skyMechanism: "Rayleigh scattering (lambda^-4) by N2/O2 + O3 Chappuis band absorption"
+      , sunsetColorCss: "rgb(250, 97, 36)"
+      , twilightColorCss: "rgb(117, 51, 133)"
+      , sunsetColorName: "Crimson-Orange & Violet-Pink"
+      , sunsetMechanism: "Long slant-path Rayleigh blue depletion + O3 Chappuis twilight purple"
+      , plantColorCss: "rgb(36, 138, 41)"
+      , plantHighlightCss: "rgb(82, 189, 71)"
+      , plantColorName: "Emerald Chlorophyll Green"
+      , plantPigmentDesc: "Chlorophyll a/b absorbs abundant 430-470 nm blue & 640-680 nm red photons while reflecting 500-560 nm green peak to prevent photo-oxidative overheating"
+      , summaryLine: "Sun: G2V (5778 K, B-V +0.65, 1.00 R☉, 1.00 L☉) | Sky: Azure Blue | Sunset: Crimson-Orange & Violet-Pink | Plants: Emerald Chlorophyll Green"
+      , selectedReport: "Click any star or planetary tile on the sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, atmospheric scattering, sunset optical depth, and photosynthetic plant pigments."
       }
 
     useEffectOnce do
@@ -1020,6 +1072,20 @@ mkApp = do
         Nothing -> pure unit
         Just mf -> setWorldMeteorFreqTenths mf
 
+      handleWorldSunFilterChange :: Maybe String -> Effect Unit
+      handleWorldSunFilterChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just sf -> do
+          setWorldSunFilter sf
+          setWorldSunAndAtmosphere sf worldAtmosphereId setWorldInfo
+
+      handleWorldAtmosphereChange :: Maybe String -> Effect Unit
+      handleWorldAtmosphereChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just atm -> do
+          setWorldAtmosphereId atm
+          setWorldSunAndAtmosphere worldSunFilter atm setWorldInfo
+
       handleToggleWorldRandomize :: Effect Unit
       handleToggleWorldRandomize =
         setWorldRandomize (not worldRandomize)
@@ -1152,6 +1218,13 @@ mkApp = do
         Just f -> do
           setSunStarFilter f
           chooseNewSunInGalaxy f setSunInfo
+
+      handleSunAtmosphereChange :: Maybe String -> Effect Unit
+      handleSunAtmosphereChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just atm -> do
+          setSunAtmosphereState atm
+          setSunAtmosphere atm setSunInfo
 
       handleSunAspectChange :: Maybe String -> Effect Unit
       handleSunAspectChange maybeVal = case maybeVal of
@@ -3195,7 +3268,11 @@ mkApp = do
                                                   [ R.div
                                                       { className: "language-word-main"
                                                       , children:
-                                                          [ R.span_ [ R.text w.sourceOrth ]
+                                                          [ R.span
+                                                              { className: "language-word-etym"
+                                                              , children: [ R.text (w.concept <> ": ") ]
+                                                              }
+                                                          , R.span_ [ R.text w.sourceOrth ]
                                                           , R.span
                                                               { className: "language-word-ipa"
                                                               , children: [ R.text ("[" <> w.sourceIpa <> "]") ]
@@ -3237,7 +3314,11 @@ mkApp = do
                                                   [ R.div
                                                       { className: "language-word-main"
                                                       , children:
-                                                          [ R.span_ [ R.text w.destOrth ]
+                                                          [ R.span
+                                                              { className: "language-word-etym"
+                                                              , children: [ R.text (w.concept <> ": ") ]
+                                                              }
+                                                          , R.span_ [ R.text w.destOrth ]
                                                           , R.span
                                                               { className: "language-word-ipa"
                                                               , children: [ R.text ("[" <> w.destIpa <> "]") ]
@@ -4055,6 +4136,50 @@ mkApp = do
                               ]
                           }
                       , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Sun:" ]
+                                  }
+                              , R.select
+                                  { id: "world-sun-select"
+                                  , className: "control-select"
+                                  , disabled: worldInfo.isRunning
+                                  , value: show worldSunFilter
+                                  , onChange: handler targetValue handleWorldSunFilterChange
+                                  , children:
+                                      [ R.option { value: "0", children: [ R.text "Auto (Habitable)" ] }
+                                      , R.option { value: "2", children: [ R.text "G-Class Yellow (Sol)" ] }
+                                      , R.option { value: "3", children: [ R.text "K-Class Orange" ] }
+                                      , R.option { value: "1", children: [ R.text "F-Class White-Yellow" ] }
+                                      , R.option { value: "4", children: [ R.text "M-Class Red Dwarf" ] }
+                                      , R.option { value: "5", children: [ R.text "A-Class Blue-White" ] }
+                                      ]
+                                  }
+                              , R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Gas:" ]
+                                  }
+                              , R.select
+                                  { id: "world-atmosphere-select"
+                                  , className: "control-select"
+                                  , disabled: worldInfo.isRunning
+                                  , value: show worldAtmosphereId
+                                  , onChange: handler targetValue handleWorldAtmosphereChange
+                                  , children:
+                                      [ R.option { value: "0", children: [ R.text "N2-O2 + O3 (Earth)" ] }
+                                      , R.option { value: "1", children: [ R.text "N2-CH4 (Methane)" ] }
+                                      , R.option { value: "2", children: [ R.text "Dense CO2-N2 (4.5 bar)" ] }
+                                      , R.option { value: "3", children: [ R.text "Tholin Haze (Titan)" ] }
+                                      , R.option { value: "4", children: [ R.text "Dusty CO2 (Mars)" ] }
+                                      , R.option { value: "5", children: [ R.text "H2-He-N2 (Hycean)" ] }
+                                      , R.option { value: "99", children: [ R.text "Random Gas Mix" ] }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
                           { className: "button-row"
                           , children:
                               [ R.button
@@ -4092,6 +4217,33 @@ mkApp = do
                                   { id: "world-orbital-label"
                                   , className: "stat-line"
                                   , children: [ R.text worldInfo.orbitalSummaryText ]
+                                  }
+                              , R.div
+                                  { id: "world-optics-label"
+                                  , className: "stat-line"
+                                  , style: R.css { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }
+                                  , children:
+                                      [ R.span
+                                          { style: R.css { display: "inline-block", width: "11px", height: "11px", borderRadius: "50%", backgroundColor: worldInfo.sunColorCss, boxShadow: "0 0 5px " <> worldInfo.sunColorCss }
+                                          , children: []
+                                          }
+                                      , R.span { children: [ R.text (worldInfo.sunSpectralType <> " |") ] }
+                                      , R.span
+                                          { style: R.css { display: "inline-block", width: "11px", height: "11px", borderRadius: "50%", backgroundColor: worldInfo.skyColorCss }
+                                          , children: []
+                                          }
+                                      , R.span { children: [ R.text ("Sky: " <> worldInfo.skyColorName <> " |") ] }
+                                      , R.span
+                                          { style: R.css { display: "inline-block", width: "11px", height: "11px", borderRadius: "50%", backgroundColor: worldInfo.sunsetColorCss }
+                                          , children: []
+                                          }
+                                      , R.span { children: [ R.text ("Sunset: " <> worldInfo.sunsetColorName <> " |") ] }
+                                      , R.span
+                                          { style: R.css { display: "inline-block", width: "11px", height: "11px", borderRadius: "50%", backgroundColor: worldInfo.plantColorCss }
+                                          , children: []
+                                          }
+                                      , R.span { children: [ R.text ("Flora: " <> worldInfo.plantColorName) ] }
+                                      ]
                                   }
                               , R.div
                                   { id: "world-years-label"
@@ -4770,6 +4922,10 @@ mkApp = do
                                           , children: [ R.text "Night Sky (Celestial Sphere)" ]
                                           }
                                       , R.option
+                                          { value: "sky_plants"
+                                          , children: [ R.text "Sky, Sunset & Plant Foliage (3D Planet)" ]
+                                          }
+                                      , R.option
                                           { value: "home_sun"
                                           , children: [ R.text "Home Sun (3D Photosphere & Size)" ]
                                           }
@@ -4786,7 +4942,7 @@ mkApp = do
                           , children:
                               [ R.label
                                   { className: "control-label"
-                                  , children: [ R.text "Star & Home Sun Inspection (Magnitude, B-V Color, Distance & Habitable Zone)" ]
+                                  , children: [ R.text "Star, Sky Scattering, Sunset & Plant Pigment Inspection" ]
                                   }
                               , R.div
                                   { id: "sun-details-box"
@@ -4932,6 +5088,51 @@ mkApp = do
                               ]
                           }
                       , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Atmospheric Gases & Aerosols (Rayleigh / Mie / Absorption)" ]
+                                  }
+                              , R.select
+                                  { id: "sun-atmosphere-select"
+                                  , className: "control-select"
+                                  , value: show sunAtmosphere
+                                  , onChange: handler targetValue handleSunAtmosphereChange
+                                  , children:
+                                      [ R.option
+                                          { value: "0"
+                                          , children: [ R.text "N2-O2 + O3 Ozone (Earth-like, 1.0 bar)" ]
+                                          }
+                                      , R.option
+                                          { value: "1"
+                                          , children: [ R.text "N2-CH4 Methane-Rich (Red-Absorbing, 1.2 bar)" ]
+                                          }
+                                      , R.option
+                                          { value: "2"
+                                          , children: [ R.text "Dense CO2-N2 (High-Pressure, 4.5 bar)" ]
+                                          }
+                                      , R.option
+                                          { value: "3"
+                                          , children: [ R.text "N2-CH4 Tholin Haze (Organic Aerosols, 1.5 bar)" ]
+                                          }
+                                      , R.option
+                                          { value: "4"
+                                          , children: [ R.text "Thin CO2 + Iron-Oxide Dust (Mars-like, 0.08 bar)" ]
+                                          }
+                                      , R.option
+                                          { value: "5"
+                                          , children: [ R.text "H2-He-N2 + H2O Vapor (Hycean, 2.5 bar)" ]
+                                          }
+                                      , R.option
+                                          { value: "99"
+                                          , children: [ R.text "Random Plausible Atmosphere" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
                           { className: "button-row"
                           , children:
                               [ R.button
@@ -4995,32 +5196,110 @@ mkApp = do
                                       , R.span
                                           { children:
                                               [ R.text
-                                                  ( "Chosen Sun: "
+                                                  ( "Sun: "
                                                       <> sunInfo.sunSpectralType
                                                       <> " ("
                                                       <> sunInfo.sunClassDesc
                                                       <> ") — "
                                                       <> sunInfo.sunTempText
-                                                      <> ", B-V "
-                                                      <> sunInfo.sunBvText
+                                                      <> ", "
+                                                      <> sunInfo.sunRadiusText
+                                                      <> ", "
+                                                      <> sunInfo.sunLumText
                                                   )
                                               ]
                                           }
                                       ]
                                   }
                               , R.div
-                                  { className: "stat-line"
+                                  { id: "sun-sky-swatch-line"
+                                  , className: "stat-line"
+                                  , style: R.css { display: "flex", alignItems: "center", gap: "8px" }
                                   , children:
-                                      [ R.text
-                                          ( "Size & Mass: "
-                                              <> sunInfo.sunRadiusText
-                                              <> " | "
-                                              <> sunInfo.sunMassText
-                                              <> " | Lum: "
-                                              <> sunInfo.sunLumText
-                                              <> " | HZ: "
-                                              <> sunInfo.sunHzText
-                                          )
+                                      [ R.span
+                                          { style:
+                                              R.css
+                                                { display: "inline-block"
+                                                , width: "16px"
+                                                , height: "16px"
+                                                , borderRadius: "50%"
+                                                , background: "linear-gradient(180deg, " <> sunInfo.skyColorCss <> " 0%, " <> sunInfo.skyHorizonCss <> " 100%)"
+                                                , border: "1px solid rgba(255,255,255,0.28)"
+                                                , flexShrink: "0"
+                                                }
+                                          , children: []
+                                          }
+                                      , R.span
+                                          { children:
+                                              [ R.text
+                                                  ( "Daytime Sky: "
+                                                      <> sunInfo.skyColorName
+                                                      <> " ("
+                                                      <> sunInfo.atmosphereFormula
+                                                      <> ")"
+                                                  )
+                                              ]
+                                          }
+                                      ]
+                                  }
+                              , R.div
+                                  { id: "sun-sunset-swatch-line"
+                                  , className: "stat-line"
+                                  , style: R.css { display: "flex", alignItems: "center", gap: "8px" }
+                                  , children:
+                                      [ R.span
+                                          { style:
+                                              R.css
+                                                { display: "inline-block"
+                                                , width: "16px"
+                                                , height: "16px"
+                                                , borderRadius: "50%"
+                                                , background: "linear-gradient(135deg, " <> sunInfo.sunsetColorCss <> " 0%, " <> sunInfo.twilightColorCss <> " 100%)"
+                                                , border: "1px solid rgba(255,255,255,0.28)"
+                                                , flexShrink: "0"
+                                                }
+                                          , children: []
+                                          }
+                                      , R.span
+                                          { children:
+                                              [ R.text
+                                                  ( "Sunset & Twilight: "
+                                                      <> sunInfo.sunsetColorName
+                                                      <> " — "
+                                                      <> sunInfo.sunsetMechanism
+                                                  )
+                                              ]
+                                          }
+                                      ]
+                                  }
+                              , R.div
+                                  { id: "sun-plant-swatch-line"
+                                  , className: "stat-line"
+                                  , style: R.css { display: "flex", alignItems: "center", gap: "8px" }
+                                  , children:
+                                      [ R.span
+                                          { style:
+                                              R.css
+                                                { display: "inline-block"
+                                                , width: "16px"
+                                                , height: "16px"
+                                                , borderRadius: "50%"
+                                                , background: "linear-gradient(135deg, " <> sunInfo.plantHighlightCss <> " 0%, " <> sunInfo.plantColorCss <> " 100%)"
+                                                , border: "1px solid rgba(255,255,255,0.28)"
+                                                , flexShrink: "0"
+                                                }
+                                          , children: []
+                                          }
+                                      , R.span
+                                          { children:
+                                              [ R.text
+                                                  ( "Main Plant Color: "
+                                                      <> sunInfo.plantColorName
+                                                      <> " — "
+                                                      <> sunInfo.plantPigmentDesc
+                                                  )
+                                              ]
+                                          }
                                       ]
                                   }
                               , R.div

@@ -5,6 +5,10 @@ use crate::history::HistorySimulation;
 use crate::population::tile_population_thousands;
 use crate::prehistory::PrehistorySimulation;
 use crate::racination::Heritage;
+use crate::sun_sky::{
+    sample_atmosphere_with_rng, sample_home_star_with_rng, AtmosphereType, HomeStar,
+    PlanetaryOptics,
+};
 use crate::tectonics::TectonicsSimulation;
 use crate::tile::TileGeology;
 
@@ -159,6 +163,11 @@ pub struct WorldSimulation {
     tectonics_ticks: u32,
     prehistory_ticks: u32,
     history_ticks: u32,
+    star_filter: u32,
+    atmosphere_id: u32,
+    home_star: HomeStar,
+    atmosphere: AtmosphereType,
+    optics: PlanetaryOptics,
     rng: Pcg64Mcg,
 }
 
@@ -178,6 +187,9 @@ impl WorldSimulation {
             seed,
         );
         tec.set_meteor_freq(params.meteor_freq as f64);
+        let home_star = HomeStar::sol();
+        let atmosphere = AtmosphereType::EarthLikeN2O2;
+        let optics = PlanetaryOptics::compute(&home_star, atmosphere);
         let mut sim = Self {
             params,
             stage: WorldStageState::Tectonics(tec),
@@ -185,10 +197,50 @@ impl WorldSimulation {
             tectonics_ticks: 0,
             prehistory_ticks: 0,
             history_ticks: 0,
+            star_filter: 2,
+            atmosphere_id: 0,
+            home_star,
+            atmosphere,
+            optics,
             rng: Pcg64Mcg::from_seed_u64(seed.wrapping_add(1000)),
         };
         sim.sync_counters();
         sim
+    }
+
+    /// Configure the world's Host Star (`star_filter`: `0` = Random Habitable, `1` = F, `2` = G Sol-like, `3` = K, `4` = M, `5` = A, `6` = Subgiant)
+    /// and Atmospheric Gas Composition (`atmosphere_id`: `0..=5` explicit, `99` = Random).
+    pub fn set_sun_and_atmosphere(&mut self, star_filter: u32, atmosphere_id: u32) {
+        self.star_filter = star_filter;
+        self.atmosphere_id = atmosphere_id;
+        let mut sky_rng = self.rng.clone();
+        self.home_star = if star_filter == 2 && atmosphere_id == 0 {
+            HomeStar::sol()
+        } else {
+            sample_home_star_with_rng(&mut sky_rng, [8.1, 0.0, 0.02], star_filter, false)
+        };
+        self.atmosphere = sample_atmosphere_with_rng(&mut sky_rng, atmosphere_id);
+        self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
+    }
+
+    pub fn home_star(&self) -> &HomeStar {
+        &self.home_star
+    }
+
+    pub fn atmosphere(&self) -> AtmosphereType {
+        self.atmosphere
+    }
+
+    pub fn optics(&self) -> &PlanetaryOptics {
+        &self.optics
+    }
+
+    pub fn star_filter(&self) -> u32 {
+        self.star_filter
+    }
+
+    pub fn atmosphere_id(&self) -> u32 {
+        self.atmosphere_id
     }
 
     pub fn create(&mut self, mut params: WorldCreateParams, randomize: bool) -> WorldCreateParams {
@@ -228,6 +280,24 @@ impl WorldSimulation {
             params.meteor_freq = (freq_tenths as f32) / 10.0;
         }
         let seed = self.rng.next_u64();
+        let mut sky_rng = Pcg64Mcg::from_seed_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
+        let eff_star_filter = if randomize && self.star_filter == 2 {
+            0 // Random habitable star in random mode unless explicitly locked
+        } else {
+            self.star_filter
+        };
+        let eff_atm_id = if randomize && self.atmosphere_id == 0 {
+            99 // Random habitable atmosphere in random mode unless explicitly locked
+        } else {
+            self.atmosphere_id
+        };
+        self.home_star = if eff_star_filter == 2 && eff_atm_id == 0 && !randomize {
+            HomeStar::sol()
+        } else {
+            sample_home_star_with_rng(&mut sky_rng, [8.1, 0.0, 0.02], eff_star_filter, false)
+        };
+        self.atmosphere = sample_atmosphere_with_rng(&mut sky_rng, eff_atm_id);
+        self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
         self.params = params;
         let mut tec = TectonicsSimulation::new_with_full_params(
             params.grid_size,
@@ -314,7 +384,11 @@ impl WorldSimulation {
             let snap = pre.to_snapshot();
             let sub_seed = self.rng.next_u64();
             if let Some(pre_copy) = PrehistorySimulation::from_snapshot(&snap, sub_seed) {
-                let hist = HistorySimulation::from_prehistory(pre_copy, sub_seed as u128);
+                let hist = HistorySimulation::from_prehistory_with_moons(
+                    pre_copy,
+                    self.params.moon_count,
+                    sub_seed as u128,
+                );
                 self.history_ticks = hist.history_ticks();
                 self.stage = WorldStageState::History(hist);
             }
@@ -620,17 +694,25 @@ impl WorldSimulation {
                             }
                         }
                         "meteors" => {
-                            let base = Self::natural_color(
+                            let base = Self::natural_color_with_optics(
                                 h,
                                 tiles[t].top_felsity(),
                                 koeppen[t],
                                 life[t],
                                 has_atm,
+                                &self.optics,
                             );
                             let scar = scars[t].max(tiles[t].impact_signature());
                             Self::blend_impact_scar_color(base, scar)
                         }
-                        _ => Self::natural_color(h, tiles[t].top_felsity(), koeppen[t], life[t], has_atm),
+                        _ => Self::natural_color_with_optics(
+                            h,
+                            tiles[t].top_felsity(),
+                            koeppen[t],
+                            life[t],
+                            has_atm,
+                            &self.optics,
+                        ),
                     };
                     buf.extend_from_slice(&rgb);
                 }
@@ -657,20 +739,35 @@ impl WorldSimulation {
                             if overlay[t * 3] >= 0.0 {
                                 [overlay[t * 3], overlay[t * 3 + 1], overlay[t * 3 + 2]]
                             } else {
-                                Self::natural_color(h, tiles[t].top_felsity(), koeppen[t], life[t], true)
+                                Self::natural_color_with_optics(
+                                    h,
+                                    tiles[t].top_felsity(),
+                                    koeppen[t],
+                                    life[t],
+                                    true,
+                                    &self.optics,
+                                )
                             }
                         }
                         "meteors" => {
-                            let base = Self::natural_color(
+                            let base = Self::natural_color_with_optics(
                                 h,
                                 tiles[t].top_felsity(),
                                 koeppen[t],
                                 life[t],
                                 true,
+                                &self.optics,
                             );
                             Self::blend_impact_scar_color(base, tiles[t].impact_signature())
                         }
-                        _ => Self::natural_color(h, tiles[t].top_felsity(), koeppen[t], life[t], true),
+                        _ => Self::natural_color_with_optics(
+                            h,
+                            tiles[t].top_felsity(),
+                            koeppen[t],
+                            life[t],
+                            true,
+                            &self.optics,
+                        ),
                     };
                     buf.extend_from_slice(&rgb);
                 }
@@ -718,12 +815,13 @@ impl WorldSimulation {
                                 tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
                                     let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
                                     let h = terrain.fine_elevations[f_idx];
-                                    let base = Self::natural_color(
+                                    let base = Self::natural_color_with_optics(
                                         h,
                                         tiles[c].top_felsity(),
                                         koeppen[c],
                                         life[c],
                                         true,
+                                        &self.optics,
                                     );
                                     let rgb = Self::blend_impact_scar_color(
                                         base,
@@ -733,12 +831,13 @@ impl WorldSimulation {
                                 }
                                 tec11_math_grid::DisplayFaceSource::OceanCoarse(c_idx) => {
                                     let h = tiles[c_idx].elevation();
-                                    let base = Self::natural_color(
+                                    let base = Self::natural_color_with_optics(
                                         h,
                                         tiles[c_idx].top_felsity(),
                                         koeppen[c_idx],
                                         life[c_idx],
                                         true,
+                                        &self.optics,
                                     );
                                     let rgb = Self::blend_impact_scar_color(
                                         base,
@@ -750,11 +849,26 @@ impl WorldSimulation {
                         }
                         buf
                     } else {
-                        hist.tile_colors_rgb("nations", true, selected_tile)
+                        hist.tile_colors_rgb_with_optics(
+                            "nations",
+                            true,
+                            selected_tile,
+                            Some(&self.optics),
+                        )
                     }
                 }
-                "population" => hist.tile_colors_rgb("population", true, selected_tile),
-                _ => hist.tile_colors_rgb("nations", true, selected_tile),
+                "population" => hist.tile_colors_rgb_with_optics(
+                    "population",
+                    true,
+                    selected_tile,
+                    Some(&self.optics),
+                ),
+                _ => hist.tile_colors_rgb_with_optics(
+                    "nations",
+                    true,
+                    selected_tile,
+                    Some(&self.optics),
+                ),
             },
         };
 
@@ -799,11 +913,24 @@ impl WorldSimulation {
         }
     }
 
-    fn natural_color(h: f32, felsity: f32, koeppen: u8, life: f32, has_atm: bool) -> [f32; 3] {
+    fn natural_color_with_optics(
+        h: f32,
+        felsity: f32,
+        koeppen: u8,
+        life: f32,
+        has_atm: bool,
+        optics: &PlanetaryOptics,
+    ) -> [f32; 3] {
         if h <= 0.0 {
             if has_atm {
                 let d = (-h / 6.0).clamp(0.0, 1.0);
-                [0.02 * (1.0 - d), 0.12 * (1.0 - d), 0.35 + 0.35 * (1.0 - d)]
+                // Ocean water reflects the planet's daytime sky color (`optics.sky_zenith_rgb`):
+                let sky = optics.sky_zenith_rgb;
+                [
+                    ((0.02 + 0.36 * sky[0]) * (1.0 - 0.75 * d)).clamp(0.0, 1.0),
+                    ((0.05 + 0.44 * sky[1]) * (1.0 - 0.70 * d)).clamp(0.0, 1.0),
+                    ((0.15 + 0.58 * sky[2]) * (1.0 - 0.50 * d)).clamp(0.0, 1.0),
+                ]
             } else {
                 let s = ((7.5 + h) / 7.5).clamp(0.12, 1.0);
                 [0.24 * s, 0.27 * s, 0.34 * s]
@@ -811,10 +938,18 @@ impl WorldSimulation {
         } else if has_atm && (koeppen == 12 || koeppen == 13) {
             [1.0, 1.0, 1.0]
         } else {
-            let r = (0.5 * 128.0) / 255.0;
-            let g = (0.5 * (64.0 + 64.0 * felsity + 255.0 * life)) / 255.0;
-            let b = (0.5 * (128.0 * felsity)) / 255.0;
-            [r, g, b]
+            // Bare rock color (mafic dark brown-grey to felsic tan-granite):
+            let rock_r = (0.5 * 128.0) / 255.0;
+            let rock_g = (0.5 * (64.0 + 64.0 * felsity)) / 255.0;
+            let rock_b = (0.5 * (128.0 * felsity)) / 255.0;
+            // Blend bare rock with the planet's photosynthetic plant foliage color (`optics.plant_foliage_rgb`):
+            let veg = life.clamp(0.0, 1.0);
+            let pf = optics.plant_foliage_rgb;
+            [
+                (rock_r * (1.0 - 0.55 * veg) + pf[0] * 0.85 * veg).clamp(0.0, 1.0),
+                (rock_g * (1.0 - 0.55 * veg) + pf[1] * 0.85 * veg).clamp(0.0, 1.0),
+                (rock_b * (1.0 - 0.55 * veg) + pf[2] * 0.85 * veg).clamp(0.0, 1.0),
+            ]
         }
     }
 

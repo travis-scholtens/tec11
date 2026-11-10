@@ -175,6 +175,54 @@ impl WasmWorldSession {
         self.sim.impact_count()
     }
 
+    pub fn set_sun_and_atmosphere(&mut self, star_filter: u32, atmosphere_id: u32) {
+        self.sim.set_sun_and_atmosphere(star_filter, atmosphere_id);
+    }
+
+    pub fn sun_spectral_type(&self) -> String {
+        self.sim.home_star().spectral_type.clone()
+    }
+
+    pub fn sun_temp_k(&self) -> f32 {
+        self.sim.home_star().temp_k
+    }
+
+    pub fn sun_rgb(&self) -> Vec<f32> {
+        self.sim.home_star().rgb.to_vec()
+    }
+
+    pub fn atmosphere_id(&self) -> u32 {
+        self.sim.atmosphere().id()
+    }
+
+    pub fn atmosphere_name(&self) -> String {
+        self.sim.atmosphere().name().to_string()
+    }
+
+    pub fn sky_zenith_rgb(&self) -> Vec<f32> {
+        self.sim.optics().sky_zenith_rgb.to_vec()
+    }
+
+    pub fn sky_color_name(&self) -> String {
+        self.sim.optics().sky_color_name.clone()
+    }
+
+    pub fn sunset_rgb(&self) -> Vec<f32> {
+        self.sim.optics().sunset_rgb.to_vec()
+    }
+
+    pub fn sunset_color_name(&self) -> String {
+        self.sim.optics().sunset_color_name.clone()
+    }
+
+    pub fn plant_foliage_rgb(&self) -> Vec<f32> {
+        self.sim.optics().plant_foliage_rgb.to_vec()
+    }
+
+    pub fn plant_color_name(&self) -> String {
+        self.sim.optics().plant_color_name.clone()
+    }
+
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
         self.sim.inspect_tile(tile_idx)
     }

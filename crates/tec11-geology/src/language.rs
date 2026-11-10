@@ -1330,6 +1330,31 @@ pub struct LanguageSandbox {
 impl LanguageSandbox {
     pub const WORD_COUNT: usize = 20;
 
+    /// Core lexical concepts in the Language sandbox, beginning with celestial concepts
+    /// for the Sun, Moons, and Planets alongside biosphere, nation, state, and language concepts.
+    pub const SANDBOX_CONCEPTS: [&'static str; Self::WORD_COUNT] = [
+        "sun (host star)",
+        "moon (primary moon)",
+        "outer moon (resonant M2)",
+        "world (home planet)",
+        "inner planet (swift star)",
+        "morning / evening planet",
+        "red outer planet",
+        "bright giant planet",
+        "ringed outer planet",
+        "sky / heavens",
+        "water / ocean",
+        "earth / stone",
+        "river / stream",
+        "grain / crop",
+        "tree / forest",
+        "herd / livestock",
+        "hound / predator",
+        "people / nation",
+        "city / state",
+        "tongue / language",
+    ];
+
     pub fn new(seed: u128) -> Self {
         let mut rng = Pcg64Mcg::new(seed);
         let dest_lang = Language::generate(&mut rng);
@@ -1432,6 +1457,14 @@ impl LanguageSandbox {
 
     pub fn word_count(&self) -> usize {
         self.dest_origins.len()
+    }
+
+    pub fn concept_label(&self, idx: usize) -> String {
+        Self::SANDBOX_CONCEPTS
+            .get(idx)
+            .copied()
+            .unwrap_or("concept")
+            .to_string()
     }
 
     pub fn source_orth(&self, idx: usize) -> String {

@@ -236,6 +236,585 @@ fn parse_hist_pgm() -> (usize, usize, &'static [u8]) {
     (100, 100, pixels)
 }
 
+/// Atmospheric gas & aerosol composition governing Rayleigh/Mie scattering, molecular absorption bands,
+/// daytime sky color, sunset color, and the surface light spectrum available for photosynthesis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtmosphereType {
+    /// Earth-like nitrogen-oxygen atmosphere with a stratospheric ozone ($\text{O}_3$) layer ($1.0\text{ bar}$).
+    /// Clean $\lambda^{-4}$ Rayleigh scattering + Chappuis band yellow-orange absorption.
+    EarthLikeN2O2 = 0,
+    /// Methane-rich nitrogen atmosphere ($90\%\text{ N}_2, 8\%\text{ CH}_4, 2\%\text{ CO}_2/\text{H}_2$, $1.2\text{ bar}$).
+    /// Methane strongly absorbs red & orange photons ($600\text{–}890\text{ nm}$), shifting skies to cyan-aquamarine and sunsets to emerald-teal.
+    MethaneRich = 1,
+    /// High-pressure carbon dioxide & nitrogen envelope ($92\%\text{ CO}_2, 8\%\text{ N}_2$, $4.5\text{ bar}$).
+    /// Heavy Rayleigh optical depth extinguishes short blue wavelengths even at midday, yielding golden-cream skies and copper-crimson sunsets.
+    DenseCO2 = 2,
+    /// Photochemical hydrocarbon haze ($\text{N}_2\text{–CH}_4\text{–CO}_2$ + organic tholin aerosols, $1.5\text{ bar}$, Archean/Titan-like).
+    /// Tholin aerosols absorb UV/blue light ($<520\text{ nm}$) and Mie-scatter warm amber/butterscotch hues.
+    TholinHaze = 3,
+    /// Thin carbon dioxide atmosphere with suspended iron-oxide ($\text{Fe}_2\text{O}_3$) silicate dust ($0.08\text{ bar}$, Mars-like).
+    /// Dust absorbs blue light to create a butterscotch-salmon daytime sky while forward-scattering a cool blue-periwinkle halo at sunset.
+    ThinDustyCO2 = 4,
+    /// Hydrogen-helium-nitrogen envelope with water-vapor clouds ($\text{H}_2\text{–He–N}_2$, $2.5\text{ bar}$, Hycean / Super-Earth).
+    /// Clean molecular $\text{H}_2$ Rayleigh scattering + mild $\text{H}_2\text{O}$ red absorption yields luminous periwinkle skies and rose-magenta sunsets.
+    HydrogenRich = 5,
+}
+
+impl Default for AtmosphereType {
+    fn default() -> Self {
+        Self::EarthLikeN2O2
+    }
+}
+
+impl AtmosphereType {
+    pub fn from_id(id: u32) -> Self {
+        match id {
+            0 => Self::EarthLikeN2O2,
+            1 => Self::MethaneRich,
+            2 => Self::DenseCO2,
+            3 => Self::TholinHaze,
+            4 => Self::ThinDustyCO2,
+            _ => Self::HydrogenRich,
+        }
+    }
+
+    pub fn id(self) -> u32 {
+        self as u32
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::EarthLikeN2O2 => "N2-O2 + O3 Ozone (Earth-like, 1.0 bar)",
+            Self::MethaneRich => "N2-CH4 Methane-Rich (Red-Absorbing, 1.2 bar)",
+            Self::DenseCO2 => "Dense CO2-N2 (High-Pressure, 4.5 bar)",
+            Self::TholinHaze => "N2-CH4 Tholin Haze (Organic Aerosols, 1.5 bar)",
+            Self::ThinDustyCO2 => "Thin CO2 + Iron-Oxide Dust (Mars-like, 0.08 bar)",
+            Self::HydrogenRich => "H2-He-N2 + H2O Vapor (Hycean, 2.5 bar)",
+        }
+    }
+
+    pub fn short_formula(self) -> &'static str {
+        match self {
+            Self::EarthLikeN2O2 => "78% N2, 21% O2, O3 (1.0 bar)",
+            Self::MethaneRich => "90% N2, 8% CH4, 2% CO2 (1.2 bar)",
+            Self::DenseCO2 => "92% CO2, 8% N2 (4.5 bar)",
+            Self::TholinHaze => "N2-CH4-CO2 + Tholin Haze (1.5 bar)",
+            Self::ThinDustyCO2 => "95% CO2 + Fe2O3 Dust (0.08 bar)",
+            Self::HydrogenRich => "H2-He-N2 + H2O Clouds (2.5 bar)",
+        }
+    }
+}
+
+/// Coupled radiative-transfer and astrobiological pigment model determining daytime sky color,
+/// sunset/twilight colors, and main photosynthetic plant foliage colors from the Host Star (`HomeStar`)
+/// and Atmospheric Gases (`AtmosphereType`).
+#[derive(Clone, Debug)]
+pub struct PlanetaryOptics {
+    pub atmosphere: AtmosphereType,
+    pub sun_rgb: [f32; 3],
+    pub sky_zenith_rgb: [f32; 3],
+    pub sky_horizon_rgb: [f32; 3],
+    pub sky_color_name: String,
+    pub sky_mechanism: String,
+    pub sunset_rgb: [f32; 3],
+    pub twilight_rgb: [f32; 3],
+    pub sunset_color_name: String,
+    pub sunset_mechanism: String,
+    pub plant_foliage_rgb: [f32; 3],
+    pub plant_highlight_rgb: [f32; 3],
+    pub plant_color_name: String,
+    pub plant_pigment_desc: String,
+}
+
+impl PlanetaryOptics {
+    /// Compute sky, sunset, and main plant colors from `home_star` and `atmosphere`.
+    pub fn compute(home_star: &HomeStar, atmosphere: AtmosphereType) -> Self {
+        let temp_k = home_star.temp_k.clamp(2500.0, 12000.0);
+        let sun_rgb = home_star.rgb;
+
+        // 1. Incident stellar photon flux in Red (650 nm), Green (535 nm), and Blue (450 nm) bands:
+        //    Blend normalized Planck blackbody irradiance with `home_star.rgb`:
+        let planck_band = |lambda_nm: f32| -> f32 {
+            let l_um = lambda_nm * 1e-3;
+            let x = (14387.77 / (l_um * temp_k)).clamp(0.2, 50.0);
+            1.0 / (l_um.powi(5) * (x.exp() - 1.0))
+        };
+        let pr = planck_band(650.0);
+        let pg = planck_band(535.0);
+        let pb = planck_band(450.0);
+        let pmax = pr.max(pg).max(pb).max(1e-6);
+        let i_star = [
+            (0.55 * (pr / pmax) + 0.45 * sun_rgb[0]).clamp(0.08, 1.0),
+            (0.55 * (pg / pmax) + 0.45 * sun_rgb[1]).clamp(0.08, 1.0),
+            (0.55 * (pb / pmax) + 0.45 * sun_rgb[2]).clamp(0.04, 1.0),
+        ];
+
+        // 2. Atmospheric Rayleigh (lambda^-4), Mie aerosol, and specific gas absorption optical depths:
+        //    Rayleigh cross-section ratio at [650nm, 535nm, 450nm] is [0.23, 0.50, 1.00].
+        let (tau_rayleigh_b, tau_mie, tau_gas_abs, sky_mech, sunset_mech) = match atmosphere {
+            AtmosphereType::EarthLikeN2O2 => (
+                0.38f32,
+                [0.04f32, 0.04, 0.04],
+                // Stratospheric O3 Chappuis absorption in yellow-orange (550-650 nm):
+                [0.055f32, 0.045, 0.005],
+                "N2/O2 Rayleigh scattering (λ⁻⁴) + O3 Chappuis band",
+                "High-airmass Rayleigh blue extinction + O3 twilight absorption",
+            ),
+            AtmosphereType::MethaneRich => (
+                0.46f32,
+                [0.05f32, 0.06, 0.06],
+                // Strong CH4 vibrational absorption in red & orange (600-890 nm):
+                [0.64f32, 0.08, 0.01],
+                "N2 Rayleigh scattering + CH4 red/orange band absorption",
+                "Long-path CH4 red stripping leaves emerald-teal/cyan dusk",
+            ),
+            AtmosphereType::DenseCO2 => (
+                1.65f32,
+                [0.24f32, 0.22, 0.18],
+                // Thick 4.5-bar extinction strips short blue photons even at zenith:
+                [0.02f32, 0.11, 0.48],
+                "High-pressure 4.5-bar CO2 multiple scattering & blue extinction",
+                "Extreme slant optical depth leaves only deep copper-red photons",
+            ),
+            AtmosphereType::TholinHaze => (
+                0.34f32,
+                [0.36f32, 0.28, 0.14],
+                // Photochemical organic tholin haze strongly absorbs UV/blue (<520 nm):
+                [0.04f32, 0.30, 0.96],
+                "Organic tholin Mie haze absorbs blue/UV & scatters warm amber",
+                "Hydrocarbon aerosol extinction yields smoldering carmine-sienna dusk",
+            ),
+            AtmosphereType::ThinDustyCO2 => (
+                0.035f32,
+                [0.42f32, 0.26, 0.12],
+                // Suspended Fe2O3 iron-oxide dust absorbs blue & scatters butterscotch:
+                [0.05f32, 0.28, 0.68],
+                "Suspended Fe2O3 dust Mie scattering dominates thin 0.08-bar CO2",
+                "Micron dust forward-scatters a cool blue halo around the setting sun",
+            ),
+            AtmosphereType::HydrogenRich => (
+                0.56f32,
+                [0.07f32, 0.07, 0.08],
+                // Mild H2-H2 CIA and H2O vapor red absorption:
+                [0.16f32, 0.03, 0.005],
+                "Clean molecular H2/He Rayleigh scattering + H2O vapor clouds",
+                "Deep H2 Rayleigh scattering with rose-magenta water-vapor glow",
+            ),
+        };
+
+        let tau_r = [
+            tau_rayleigh_b * 0.23,
+            tau_rayleigh_b * 0.50,
+            tau_rayleigh_b * 1.00,
+        ];
+
+        // 3. Daytime Sky Color (`sky_zenith_rgb` & `sky_horizon_rgb`):
+        let mut sky_raw = [0.0f32; 3];
+        let mut hor_raw = [0.0f32; 3];
+        for c in 0..3 {
+            let scat = 1.0 - (-(tau_r[c] + tau_mie[c])).exp();
+            // Multiple-scattering self-extinction in thick atmospheres (`-0.42 * tau_r[c]`):
+            let trans = (-tau_gas_abs[c] - 0.42 * tau_r[c]).exp();
+            sky_raw[c] = i_star[c] * scat * trans;
+
+            // Horizon (airmass ~ 2.6) has stronger multiple scattering & warm transmission:
+            let scat_h = 1.0 - (-2.6 * (tau_r[c] + tau_mie[c])).exp();
+            let trans_h = (-1.6 * tau_gas_abs[c] - 0.72 * tau_r[c]).exp();
+            hor_raw[c] = i_star[c] * scat_h * trans_h;
+        }
+        let sky_max = sky_raw[0].max(sky_raw[1]).max(sky_raw[2]).max(1e-4);
+        // Under very cool M-dwarfs, overall visual sky brightness is somewhat softer/dusky:
+        let star_vis_gain = ((temp_k - 2200.0) / 2800.0).clamp(0.68, 0.98);
+        let sky_zenith_rgb = [
+            (sky_raw[0] / sky_max * star_vis_gain).clamp(0.06, 0.98),
+            (sky_raw[1] / sky_max * star_vis_gain).clamp(0.06, 0.98),
+            (sky_raw[2] / sky_max * star_vis_gain).clamp(0.08, 1.00),
+        ];
+        let hor_max = hor_raw[0].max(hor_raw[1]).max(hor_raw[2]).max(1e-4);
+        let sky_horizon_rgb = [
+            (hor_raw[0] / hor_max * (star_vis_gain + 0.05).min(1.0)).clamp(0.10, 0.99),
+            (hor_raw[1] / hor_max * (star_vis_gain + 0.05).min(1.0)).clamp(0.10, 0.99),
+            (hor_raw[2] / hor_max * (star_vis_gain + 0.05).min(1.0)).clamp(0.10, 1.00),
+        ];
+
+        // 4. Sunset & Twilight Colors (`sunset_rgb` & `twilight_rgb`):
+        let (sunset_rgb, twilight_rgb) = if atmosphere == AtmosphereType::ThinDustyCO2 {
+            // Mars-like reverse sunset: micron iron-oxide dust forward-scatters blue-violet in the solar aureole!
+            let blue_halo = [
+                (0.36 * i_star[0] + 0.14).clamp(0.22, 0.78),
+                (0.58 * i_star[1] + 0.16).clamp(0.36, 0.85),
+                (0.86 * i_star[2].max(0.45) + 0.18).clamp(0.55, 0.98),
+            ];
+            let dusty_twilight = [
+                (0.48 * i_star[0]).clamp(0.20, 0.60),
+                (0.28 * i_star[1]).clamp(0.12, 0.42),
+                (0.32 * i_star[2].max(0.35)).clamp(0.14, 0.48),
+            ];
+            (blue_halo, dusty_twilight)
+        } else {
+            // Slant airmass extinction of direct + forward-scattered starlight at the horizon:
+            let airmass = match atmosphere {
+                AtmosphereType::DenseCO2 => 2.2f32,
+                AtmosphereType::TholinHaze => 2.8f32,
+                AtmosphereType::MethaneRich => 5.2f32,
+                _ => 6.8f32,
+            };
+            let mut sun_raw = [0.0f32; 3];
+            for c in 0..3 {
+                sun_raw[c] = i_star[c] * (-airmass * (tau_r[c] + 0.95 * tau_gas_abs[c])).exp();
+            }
+            // Add a touch of multiple-scattered horizon glow so hot blue stars / methane skies keep their rich secondary hue:
+            sun_raw[0] += 0.12 * sky_horizon_rgb[0];
+            sun_raw[1] += 0.10 * sky_horizon_rgb[1];
+            sun_raw[2] += 0.14 * sky_horizon_rgb[2] * (if temp_k > 6400.0 { 1.6 } else { 0.7 });
+
+            let smax = sun_raw[0].max(sun_raw[1]).max(sun_raw[2]).max(1e-4);
+            let sunset_gain = if temp_k < 3600.0 { 0.82 } else { 0.98 };
+            let s_rgb = [
+                (sun_raw[0] / smax * sunset_gain).clamp(0.08, 0.99),
+                (sun_raw[1] / smax * sunset_gain).clamp(0.06, 0.96),
+                (sun_raw[2] / smax * sunset_gain).clamp(0.05, 0.96),
+            ];
+            let tw_rgb = [
+                (0.35 * s_rgb[0] + 0.25 * sky_zenith_rgb[0]).clamp(0.05, 0.65),
+                (0.25 * s_rgb[1] + 0.30 * sky_zenith_rgb[1]).clamp(0.04, 0.65),
+                (0.30 * s_rgb[2] + 0.45 * sky_zenith_rgb[2]).clamp(0.08, 0.78),
+            ];
+            (s_rgb, tw_rgb)
+        };
+
+        // 5. Main Plant Foliage Colors (`plant_foliage_rgb` & `plant_highlight_rgb`):
+        //    Compute surface-transmitted photon spectrum `f_surf` and evolve photosynthetic pigments
+        //    following NASA Astrobiology (Kiang et al.) & the Google AI Mode reference:
+        let f_surf = [
+            i_star[0] * (-0.65 * (tau_r[0] + tau_gas_abs[0])).exp(),
+            i_star[1] * (-0.65 * (tau_r[1] + tau_gas_abs[1])).exp(),
+            i_star[2] * (-0.65 * (tau_r[2] + tau_gas_abs[2])).exp(),
+        ];
+        let blue_blocked = matches!(
+            atmosphere,
+            AtmosphereType::DenseCO2 | AtmosphereType::TholinHaze | AtmosphereType::ThinDustyCO2
+        );
+        let red_blocked = atmosphere == AtmosphereType::MethaneRich;
+
+        let (plant_foliage_rgb, plant_highlight_rgb, plant_color_name, plant_pigment_desc) =
+            if temp_k < 3850.0 {
+                // M-Type Red Dwarf: scarce visible light, peak in red/near-IR -> pan-visible absorber (jet-black / deep purple-burgundy)
+                let cool_t = ((3850.0 - temp_k) / 1200.0).clamp(0.0, 1.0);
+                let fol = [
+                    (0.28 - 0.10 * cool_t).clamp(0.14, 0.32),
+                    (0.11 - 0.04 * cool_t).clamp(0.06, 0.14),
+                    (0.30 - 0.08 * cool_t).clamp(0.18, 0.34),
+                ];
+                let hi = [
+                    (0.50 - 0.10 * cool_t).clamp(0.34, 0.54),
+                    (0.16 - 0.04 * cool_t).clamp(0.10, 0.20),
+                    (0.38 - 0.06 * cool_t).clamp(0.28, 0.42),
+                ];
+                (
+                    fol,
+                    hi,
+                    "Deep Indigo-Black / Burgundy".to_string(),
+                    "Pan-visible bacteriochlorophyll absorbs nearly all visible photons under red/IR M-dwarf light".to_string(),
+                )
+            } else if temp_k < 5300.0 {
+                // K-Type Orange Dwarf (or cool orange subgiant): peak photon flux in orange-red (580-720 nm)
+                let k_t = ((temp_k - 3850.0) / 1450.0).clamp(0.0, 1.0);
+                if red_blocked {
+                    // Methane strips red out of the K-star's light, leaving green-yellow at the surface:
+                    (
+                        [0.48 + 0.10 * k_t, 0.62 + 0.08 * k_t, 0.22],
+                        [0.68, 0.78, 0.32],
+                        "Bronze-Chartreuse / Olive".to_string(),
+                        "CH4 filters orange-red photons; plants harvest green-yellow and reflect bronze-olive".to_string(),
+                    )
+                } else {
+                    // Classic K-star autumnal foliage (yellow-orange, russet-gold, crimson-amber):
+                    (
+                        [0.84 - 0.14 * k_t, 0.44 + 0.16 * k_t, 0.13 + 0.04 * k_t],
+                        [0.95, 0.68 + 0.10 * k_t, 0.18],
+                        "Autumnal Amber-Orange / Russet".to_string(),
+                        "Xanthophyll & phycoerythrin pigments harvest orange-red & blue-green K-star light".to_string(),
+                    )
+                }
+            } else if temp_k < 6350.0 {
+                // G-Type & Late F-Type Stars (Sol-like balanced spectrum):
+                let g_t = ((temp_k - 5300.0) / 1050.0).clamp(0.0, 1.0);
+                if red_blocked {
+                    // Methane absorbs red (600-700 nm); plants absorb blue + yellow-green and reflect jade-turquoise:
+                    (
+                        [0.11, 0.68 + 0.08 * g_t, 0.50 + 0.10 * g_t],
+                        [0.24, 0.86, 0.68],
+                        "Jade-Turquoise / Cyan-Green".to_string(),
+                        "Atmospheric CH4 absorbs red light; plants shift absorption to yellow-green & reflect cyan-jade".to_string(),
+                    )
+                } else if blue_blocked {
+                    // Thick CO2 / Tholin haze / Iron dust filters out blue light before it reaches the surface:
+                    let r_surf_ratio = (f_surf[0] / (f_surf[2] + 0.15)).clamp(0.8, 2.5);
+                    let warm_shift = ((r_surf_ratio - 0.8) / 1.7).clamp(0.0, 1.0);
+                    (
+                        [0.46 + 0.18 * warm_shift, 0.68 - 0.04 * warm_shift, 0.16],
+                        [0.74, 0.82, 0.24],
+                        "Golden-Olive / Ochre-Green".to_string(),
+                        "Atmospheric haze/CO2 depletes blue photons; plants harvest yellow-red & reflect olive-gold".to_string(),
+                    )
+                } else {
+                    // Classic chlorophyll green (shifting slightly toward lime-teal for hotter F8/F9 stars):
+                    (
+                        [0.15 + 0.06 * g_t, 0.68 + 0.10 * g_t, 0.20 + 0.12 * g_t],
+                        [0.36 + 0.08 * g_t, 0.86, 0.28 + 0.14 * g_t],
+                        "Chlorophyll Emerald Green".to_string(),
+                        "Chlorophyll a/b absorbs abundant blue & red photons while reflecting the green spectral gap".to_string(),
+                    )
+                }
+            } else {
+                // Early F-Type & A-Type Hot Blue-White Stars (T >= 6350 K): intense blue & UV radiation
+                let f_t = ((temp_k - 6350.0) / 2800.0).clamp(0.0, 1.0);
+                if blue_blocked {
+                    // Thick atmospheric haze shields the surface from UV/blue, allowing bright emerald-chartreuse flora:
+                    (
+                        [0.34, 0.76, 0.28 + 0.12 * f_t],
+                        [0.58, 0.88, 0.42],
+                        "Luminous Chartreuse-Emerald".to_string(),
+                        "Atmospheric haze screens harsh UV/blue, leaving abundant green-yellow photons for photosynthesis".to_string(),
+                    )
+                } else {
+                    // Flooded with intense blue/UV photons: plants reflect excess blue/cyan and use golden-red carotenoid shields!
+                    (
+                        [0.16 + 0.12 * f_t, 0.62 - 0.06 * f_t, 0.80 + 0.12 * f_t],
+                        [0.92, 0.46 + 0.10 * f_t, 0.28],
+                        "Cerulean-Teal & Coral UV-Shield".to_string(),
+                        "Reflects excess high-energy blue photons with anthocyanin/carotenoid UV-screening canopy pigments".to_string(),
+                    )
+                }
+            };
+
+        let sky_color_name = Self::describe_sky_color(sky_zenith_rgb, atmosphere, temp_k);
+        let sunset_color_name = Self::describe_sunset_color(sunset_rgb, atmosphere, temp_k);
+
+        Self {
+            atmosphere,
+            sun_rgb,
+            sky_zenith_rgb,
+            sky_horizon_rgb,
+            sky_color_name,
+            sky_mechanism: sky_mech.to_string(),
+            sunset_rgb,
+            twilight_rgb,
+            sunset_color_name,
+            sunset_mechanism: sunset_mech.to_string(),
+            plant_foliage_rgb,
+            plant_highlight_rgb,
+            plant_color_name,
+            plant_pigment_desc,
+        }
+    }
+
+    fn describe_sky_color(rgb: [f32; 3], atm: AtmosphereType, temp_k: f32) -> String {
+        match atm {
+            AtmosphereType::MethaneRich => {
+                if temp_k < 4200.0 {
+                    "Deep Sea-Green / Jade".to_string()
+                } else {
+                    "Vivid Cyan-Aquamarine".to_string()
+                }
+            }
+            AtmosphereType::DenseCO2 => {
+                if temp_k < 4400.0 {
+                    "Hazy Amber-Copper".to_string()
+                } else {
+                    "Milky Golden-Cream".to_string()
+                }
+            }
+            AtmosphereType::TholinHaze => "Hazy Butterscotch-Amber".to_string(),
+            AtmosphereType::ThinDustyCO2 => "Rusty Butterscotch-Salmon".to_string(),
+            AtmosphereType::EarthLikeN2O2 | AtmosphereType::HydrogenRich => {
+                if temp_k >= 6500.0 {
+                    "Brilliant Sapphire-Violet".to_string()
+                } else if temp_k >= 5200.0 {
+                    if atm == AtmosphereType::HydrogenRich {
+                        "Luminous Periwinkle-Azure".to_string()
+                    } else {
+                        "Cerulean Rayleigh Blue".to_string()
+                    }
+                } else if temp_k >= 3900.0 {
+                    "Warm Turquoise-Peach".to_string()
+                } else {
+                    let _ = rgb;
+                    "Dusky Amber-Mauve".to_string()
+                }
+            }
+        }
+    }
+
+    fn describe_sunset_color(rgb: [f32; 3], atm: AtmosphereType, temp_k: f32) -> String {
+        let _ = rgb;
+        match atm {
+            AtmosphereType::MethaneRich => "Emerald-Teal & Indigo".to_string(),
+            AtmosphereType::ThinDustyCO2 => "Cool Blue-Periwinkle Halo".to_string(),
+            AtmosphereType::DenseCO2 => "Smoldering Copper-Maroon".to_string(),
+            AtmosphereType::TholinHaze => "Burnt Sienna & Carmine".to_string(),
+            AtmosphereType::HydrogenRich => {
+                if temp_k >= 6200.0 {
+                    "Electric Violet-Magenta".to_string()
+                } else {
+                    "Rose-Coral & Crimson".to_string()
+                }
+            }
+            AtmosphereType::EarthLikeN2O2 => {
+                if temp_k >= 6400.0 {
+                    "Saffron-Gold & Magenta".to_string()
+                } else if temp_k >= 5100.0 {
+                    "Crimson-Orange & Gold".to_string()
+                } else if temp_k >= 3850.0 {
+                    "Deep Blood-Orange & Ruby".to_string()
+                } else {
+                    "Dark Infrared-Ember & Purple".to_string()
+                }
+            }
+        }
+    }
+}
+
+/// Sample a plausible `HomeStar` from `rng` given `star_filter` (`0` = Auto Habitable, `1` = F, `2` = G, `3` = K, `4` = M, `5` = A, `6` = Subgiant)
+/// and `is_old_pop` (true for Elliptical/Lenticular/Globular/Bulge populations).
+pub fn sample_home_star_with_rng(
+    rng: &mut Pcg64Mcg,
+    gal_pos_kpc: [f32; 3],
+    star_filter: u32,
+    is_old_pop: bool,
+) -> HomeStar {
+    let chosen_class = if (1..=6).contains(&star_filter) {
+        star_filter
+    } else {
+        let p = rng.next_f64();
+        if is_old_pop {
+            if p < 0.06 {
+                1 // F
+            } else if p < 0.38 {
+                2 // G
+            } else if p < 0.78 {
+                3 // K
+            } else if p < 0.94 {
+                4 // M
+            } else {
+                6 // Subgiant
+            }
+        } else if p < 0.04 {
+            5 // A
+        } else if p < 0.20 {
+            1 // F
+        } else if p < 0.56 {
+            2 // G
+        } else if p < 0.86 {
+            3 // K
+        } else {
+            4 // M
+        }
+    };
+
+    let (bv, mass_solar, radius_solar, is_subgiant) = match chosen_class {
+        1 => {
+            let t = rng.uniform(0.0, 1.0) as f32;
+            (0.32 + 0.24 * t, 1.50 - 0.42 * t, 1.45 - 0.35 * t, false)
+        }
+        2 => {
+            let t = rng.uniform(0.0, 1.0) as f32;
+            (0.58 + 0.22 * t, 1.08 - 0.22 * t, 1.10 - 0.22 * t, false)
+        }
+        3 => {
+            let t = rng.uniform(0.0, 1.0) as f32;
+            (0.82 + 0.52 * t, 0.84 - 0.28 * t, 0.86 - 0.24 * t, false)
+        }
+        4 => {
+            let t = rng.uniform(0.0, 1.0) as f32;
+            (1.38 + 0.32 * t, 0.52 - 0.30 * t, 0.56 - 0.30 * t, false)
+        }
+        5 => {
+            let t = rng.uniform(0.0, 1.0) as f32;
+            (0.02 + 0.26 * t, 2.10 - 0.55 * t, 1.85 - 0.38 * t, false)
+        }
+        _ => {
+            let t = rng.uniform(0.0, 1.0) as f32;
+            (
+                0.72 + 0.45 * t,
+                1.15 + 0.35 * (1.0 - t),
+                2.10 + 1.10 * t,
+                true,
+            )
+        }
+    };
+
+    let temp_k = bv_to_temp_k(bv);
+    let rgb = bv_to_rgb(bv);
+    let temp_ratio = temp_k / 5778.0;
+    let luminosity_solar = (radius_solar * radius_solar) * temp_ratio.powi(4);
+    let habitable_au = luminosity_solar.sqrt().max(0.04);
+    let orbital_period_days = 365.25 * (habitable_au.powi(3) / mass_solar.max(0.08)).sqrt();
+    let angular_diameter_deg = 0.533 * (radius_solar / habitable_au);
+    let solar_tide_factor = (mass_solar / habitable_au.powi(3)).clamp(0.05, 50.0);
+
+    let lifespan_gyr = (10.0 * (mass_solar as f64).powf(-2.5)).clamp(0.6, 80.0) as f32;
+    let age_gyr = (lifespan_gyr * (rng.uniform(0.25, 0.75) as f32)).clamp(0.4, 12.5);
+
+    let abs_mag_est = 4.83 - 2.5 * luminosity_solar.max(1e-4).log10();
+    let (letter, sub, mut lum_cls, _) = classify_star(bv, abs_mag_est);
+    if is_subgiant {
+        lum_cls = "IV";
+    }
+    let spectral_type = format!("{letter}{sub}{lum_cls}");
+    let class_description = match (letter, is_subgiant) {
+        (_, true) => "Orange-Gold Evolved Subgiant",
+        ("A", _) => "Blue-White Main-Sequence Star",
+        ("F", _) => "Yellow-White Main-Sequence Dwarf",
+        ("G", _) => "Yellow Main-Sequence Dwarf",
+        ("K", _) => "Orange Main-Sequence Dwarf",
+        ("M", _) => "Red Main-Sequence Dwarf",
+        _ => "Main-Sequence Star",
+    }
+    .to_string();
+
+    HomeStar {
+        spectral_type,
+        class_description,
+        bv_color: bv,
+        rgb,
+        temp_k,
+        mass_solar,
+        radius_solar,
+        luminosity_solar,
+        habitable_au,
+        orbital_period_days,
+        angular_diameter_deg,
+        solar_tide_factor,
+        age_gyr,
+        lifespan_gyr,
+        gal_pos_kpc,
+    }
+}
+
+/// Sample or resolve an `AtmosphereType` (`0..=5` explicit, or `>= 99` for weighted random habitable atmosphere).
+pub fn sample_atmosphere_with_rng(rng: &mut Pcg64Mcg, atmosphere_id: u32) -> AtmosphereType {
+    if atmosphere_id <= 5 {
+        AtmosphereType::from_id(atmosphere_id)
+    } else {
+        let p = rng.next_f64();
+        if p < 0.42 {
+            AtmosphereType::EarthLikeN2O2
+        } else if p < 0.60 {
+            AtmosphereType::MethaneRich
+        } else if p < 0.74 {
+            AtmosphereType::DenseCO2
+        } else if p < 0.86 {
+            AtmosphereType::TholinHaze
+        } else if p < 0.93 {
+            AtmosphereType::ThinDustyCO2
+        } else {
+            AtmosphereType::HydrogenRich
+        }
+    }
+}
+
 /// Interactive Sun, Plausible Galaxy & Celestial Sphere Star Map model (`SunSandbox`).
 pub struct SunSandbox {
     grid: SphericalGrid,
@@ -243,6 +822,8 @@ pub struct SunSandbox {
     galaxy_type: GalaxyType,
     vantage: GalacticVantage,
     star_class_filter: u32,
+    atmosphere: AtmosphereType,
+    optics: PlanetaryOptics,
     is_real_hipparcos: bool,
     home_star: HomeStar,
     stars: Vec<CelestialStar>,
@@ -271,14 +852,19 @@ impl SunSandbox {
             .map(|(i, (c, _))| (*c, i))
             .collect();
         let tree = PointTree::new(&indexed_pts);
+        let sol = HomeStar::sol();
+        let atmosphere = AtmosphereType::EarthLikeN2O2;
+        let optics = PlanetaryOptics::compute(&sol, atmosphere);
         let mut sb = Self {
             grid,
             tree,
             galaxy_type: GalaxyType::Spiral,
             vantage: GalacticVantage::SpiralArm,
             star_class_filter: 0,
+            atmosphere,
+            optics,
             is_real_hipparcos: false,
-            home_star: HomeStar::sol(),
+            home_star: sol,
             stars: Vec::with_capacity(6000),
             galactic_pole: [0.0, 0.0, 1.0],
             galactic_center_dir: [1.0, 0.0, 0.0],
@@ -310,6 +896,21 @@ impl SunSandbox {
 
     pub fn home_star(&self) -> &HomeStar {
         &self.home_star
+    }
+
+    pub fn atmosphere(&self) -> AtmosphereType {
+        self.atmosphere
+    }
+
+    pub fn optics(&self) -> &PlanetaryOptics {
+        &self.optics
+    }
+
+    /// Update the planet's atmospheric gas composition (`0..=5` explicit, or `99` for random)
+    /// and recompute sky, sunset, and photosynthetic plant colors.
+    pub fn set_atmosphere(&mut self, atmosphere_id: u32) {
+        self.atmosphere = sample_atmosphere_with_rng(&mut self.rng, atmosphere_id);
+        self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
     }
 
     pub fn stars(&self) -> &[CelestialStar] {
@@ -403,6 +1004,7 @@ impl SunSandbox {
 
         // 2. Choose the Home Star's spectral class, color (B-V), mass, radius, and habitable zone:
         self.home_star = self.sample_home_star_properties(gal_pos_kpc, star_filter);
+        self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
 
         // 3. Build 3D galaxy visualization particle cloud:
         self.build_galaxy_particles();
@@ -418,6 +1020,8 @@ impl SunSandbox {
         self.galaxy_type = GalaxyType::Spiral;
         self.vantage = GalacticVantage::SpiralArm;
         self.home_star = HomeStar::sol();
+        self.atmosphere = AtmosphereType::EarthLikeN2O2;
+        self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
         self.galactic_pole = normal([-0.867, -0.198, 0.456]);
         self.galactic_center_dir = normal([-0.055, -0.873, -0.484]);
         self.ecliptic_pole = normal([0.0, -0.398, 0.917]);
@@ -1258,6 +1862,115 @@ impl SunSandbox {
                     // Subtle deep-space background for the 3D galaxy cloud:
                     [0.02, 0.025, 0.045]
                 }
+                "sky_plants" => {
+                    // 3D Exoplanet view showing Daytime Sky & Ocean scattering, Photosynthetic Plant Foliage
+                    // across continents, the 360° Sunset/Twilight Terminator Band, and Night-Side Starlight:
+                    let mu = dot(p, self.sun_dir) as f32; // Cosine of solar zenith angle (-1 = midnight, 0 = sunset terminator, +1 = subsolar noon)
+                    let lat = p[2].abs() as f32;
+
+                    // Procedural continents vs oceans on the sphere:
+                    let c1 = ((p[0] * 3.1 + 0.4).sin() * (p[1] * 2.8 - 0.5).cos() + (p[2] * 2.6 + 0.2).sin()) as f32;
+                    let c2 = ((p[0] * 6.7 - 1.1).cos() * (p[1] * 6.3 + 0.8).sin() * (p[2] * 5.9 - 0.3).cos()) as f32;
+                    let c3 = ((p[0] * 13.5 + 0.7).sin() * (p[2] * 14.1 + 1.2).cos()) as f32;
+                    let elev = 0.52 * c1 + 0.30 * c2 + 0.18 * c3 - 0.06;
+                    let is_land = elev > 0.0;
+                    let is_polar_ice = lat > 0.84 + 0.05 * c2;
+
+                    // Cloud wisps across mid-latitudes and ITCZ:
+                    let cloud_n = ((p[0] * 9.2 + p[1] * 4.5).sin() * (p[2] * 11.4 - p[0] * 3.8).cos()) as f32;
+                    let cloud_w = ((cloud_n - 0.58) / 0.42).clamp(0.0, 1.0) * 0.55;
+
+                    let op = &self.optics;
+                    let surface_albedo = if is_polar_ice {
+                        [0.92, 0.95, 0.98]
+                    } else if is_land {
+                        // Moisture & foliage density highest in equatorial & temperate zones, drier in subtropical horse latitudes:
+                        let arid_belt = (-((lat - 0.40) / 0.14).powi(2)).exp();
+                        let veg = ((1.0 - 0.62 * arid_belt) * (1.0 - (elev * 0.85).clamp(0.0, 0.75)) * (1.0 - (lat / 0.86).powi(3))).clamp(0.08, 1.0);
+                        let canopy_var = (0.5 + 0.5 * c3).clamp(0.0, 1.0);
+                        let plant_rgb = [
+                            op.plant_foliage_rgb[0] * (1.0 - 0.35 * canopy_var) + op.plant_highlight_rgb[0] * (0.35 * canopy_var),
+                            op.plant_foliage_rgb[1] * (1.0 - 0.35 * canopy_var) + op.plant_highlight_rgb[1] * (0.35 * canopy_var),
+                            op.plant_foliage_rgb[2] * (1.0 - 0.35 * canopy_var) + op.plant_highlight_rgb[2] * (0.35 * canopy_var),
+                        ];
+                        let rock_rgb = [0.46, 0.36, 0.28];
+                        [
+                            rock_rgb[0] * (1.0 - veg) + plant_rgb[0] * veg,
+                            rock_rgb[1] * (1.0 - veg) + plant_rgb[1] * veg,
+                            rock_rgb[2] * (1.0 - veg) + plant_rgb[2] * veg,
+                        ]
+                    } else {
+                        // Ocean reflects the overhead sky color + deep water absorption:
+                        let depth_f = (1.0 + elev * 0.9).clamp(0.25, 1.0);
+                        [
+                            (0.04 + 0.52 * op.sky_zenith_rgb[0]) * depth_f,
+                            (0.08 + 0.58 * op.sky_zenith_rgb[1]) * depth_f,
+                            (0.14 + 0.65 * op.sky_zenith_rgb[2]) * depth_f,
+                        ]
+                    };
+
+                    if mu >= 0.20 {
+                        // Sunlit daytime hemisphere:
+                        // Limb factor blends overhead sky (`sky_zenith_rgb`) near subsolar point with `sky_horizon_rgb` near the limb/terminator:
+                        let horizon_t = (1.0 - ((mu - 0.20) / 0.80).clamp(0.0, 1.0)).powi(2);
+                        let sky_atm = [
+                            op.sky_zenith_rgb[0] * (1.0 - horizon_t) + op.sky_horizon_rgb[0] * horizon_t,
+                            op.sky_zenith_rgb[1] * (1.0 - horizon_t) + op.sky_horizon_rgb[1] * horizon_t,
+                            op.sky_zenith_rgb[2] * (1.0 - horizon_t) + op.sky_horizon_rgb[2] * horizon_t,
+                        ];
+                        let illum = (0.32 + 0.68 * mu).clamp(0.35, 1.0);
+                        // Mix surface albedo with atmospheric Rayleigh/Mie sky veil (stronger over ocean & toward horizon):
+                        let sky_veil = if is_land { 0.22 + 0.28 * horizon_t } else { 0.38 + 0.32 * horizon_t };
+                        let mut day_rgb = [
+                            surface_albedo[0] * illum * (1.0 - sky_veil) + sky_atm[0] * sky_veil,
+                            surface_albedo[1] * illum * (1.0 - sky_veil) + sky_atm[1] * sky_veil,
+                            surface_albedo[2] * illum * (1.0 - sky_veil) + sky_atm[2] * sky_veil,
+                        ];
+                        // Specular solar glint on ocean near subsolar point (`mu > 0.95`):
+                        if !is_land && mu > 0.95 {
+                            let glint = ((mu - 0.95) / 0.05).powi(2) * 0.65;
+                            day_rgb[0] = (day_rgb[0] * (1.0 - glint) + op.sun_rgb[0] * glint).min(1.0);
+                            day_rgb[1] = (day_rgb[1] * (1.0 - glint) + op.sun_rgb[1] * glint).min(1.0);
+                            day_rgb[2] = (day_rgb[2] * (1.0 - glint) + op.sun_rgb[2] * glint).min(1.0);
+                        }
+                        // Sunlit cloud layer:
+                        [
+                            (day_rgb[0] * (1.0 - cloud_w) + (0.65 * op.sun_rgb[0] + 0.35 * sky_atm[0]) * cloud_w).clamp(0.0, 1.0),
+                            (day_rgb[1] * (1.0 - cloud_w) + (0.65 * op.sun_rgb[1] + 0.35 * sky_atm[1]) * cloud_w).clamp(0.0, 1.0),
+                            (day_rgb[2] * (1.0 - cloud_w) + (0.65 * op.sun_rgb[2] + 0.35 * sky_atm[2]) * cloud_w).clamp(0.0, 1.0),
+                        ]
+                    } else if mu >= -0.22 {
+                        // Sunset & Twilight Terminator Ring (`mu` in `[-0.22, +0.20]`):
+                        let band_rgb = if mu >= 0.0 {
+                            let t = (mu / 0.20).clamp(0.0, 1.0);
+                            [
+                                op.sunset_rgb[0] * (1.0 - t) + op.sky_horizon_rgb[0] * t,
+                                op.sunset_rgb[1] * (1.0 - t) + op.sky_horizon_rgb[1] * t,
+                                op.sunset_rgb[2] * (1.0 - t) + op.sky_horizon_rgb[2] * t,
+                            ]
+                        } else {
+                            let t = ((-mu) / 0.22).clamp(0.0, 1.0);
+                            [
+                                op.sunset_rgb[0] * (1.0 - t) + op.twilight_rgb[0] * t * 0.45,
+                                op.sunset_rgb[1] * (1.0 - t) + op.twilight_rgb[1] * t * 0.45,
+                                op.sunset_rgb[2] * (1.0 - t) + op.twilight_rgb[2] * t * 0.45,
+                            ]
+                        };
+                        let surf_keep = ((mu + 0.22) / 0.42).clamp(0.08, 0.55);
+                        [
+                            (surface_albedo[0] * surf_keep * 0.45 + band_rgb[0] * 0.82).clamp(0.0, 1.0),
+                            (surface_albedo[1] * surf_keep * 0.45 + band_rgb[1] * 0.82).clamp(0.0, 1.0),
+                            (surface_albedo[2] * surf_keep * 0.45 + band_rgb[2] * 0.82).clamp(0.0, 1.0),
+                        ]
+                    } else {
+                        // Night-side hemisphere (`mu < -0.22`): dark continents & oceans under faint starlight
+                        [
+                            (surface_albedo[0] * 0.09 + op.twilight_rgb[0] * 0.05).clamp(0.01, 0.25),
+                            (surface_albedo[1] * 0.09 + op.twilight_rgb[1] * 0.05).clamp(0.01, 0.25),
+                            (surface_albedo[2] * 0.11 + op.twilight_rgb[2] * 0.07).clamp(0.02, 0.28),
+                        ]
+                    }
+                }
                 _ => {
                     // "night_sky": Celestial sphere with subtle diffuse galactic band / core glow:
                     let sin_b = dot(p, self.galactic_pole);
@@ -1335,32 +2048,33 @@ impl SunSandbox {
             .map(|(i, _)| i)
     }
 
-    /// One-line summary of the generated galaxy and chosen Home Star.
+    /// One-line summary of the generated galaxy, chosen Home Star, and Sky/Sunset/Plant optics.
     pub fn summary_line(&self) -> String {
         let hs = &self.home_star;
+        let op = &self.optics;
         let r_gal = (hs.gal_pos_kpc[0] * hs.gal_pos_kpc[0]
             + hs.gal_pos_kpc[1] * hs.gal_pos_kpc[1]
             + hs.gal_pos_kpc[2] * hs.gal_pos_kpc[2])
             .sqrt();
         format!(
-            "Sun: {} ({:.0} K, B-V {:+.2}, {:.2} R☉, {:.2} L☉) | HZ: {:.2} AU ({:.0}d yr, {:.2}° sky disc) | {} — {} (R={:.1} kpc)",
+            "Sun: {} ({:.0} K, B-V {:+.2}, {:.2} R☉) | Sky: {} | Sunset: {} | Plants: {} | {} (R={:.1} kpc)",
             hs.spectral_type,
             hs.temp_k,
             hs.bv_color,
             hs.radius_solar,
-            hs.luminosity_solar,
-            hs.habitable_au,
-            hs.orbital_period_days,
-            hs.angular_diameter_deg,
+            op.sky_color_name,
+            op.sunset_color_name,
+            op.plant_color_name,
             self.galaxy_type.name(),
-            self.vantage.name(),
             r_gal
         )
     }
 
-    /// Detailed multi-line inspection of the selected star on the celestial sphere AND the Home Sun.
+    /// Detailed multi-line inspection of the selected star on the celestial sphere, the Home Sun,
+    /// and the planet's Sky, Sunset, and Photosynthetic Plant Foliage colors.
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
         let hs = &self.home_star;
+        let op = &self.optics;
         let Some(star_idx) = self.nearest_star_to_tile(tile_idx) else {
             return String::new();
         };
@@ -1375,7 +2089,10 @@ impl SunSandbox {
             "Selected Night-Sky Star: {cat_prefix}{} — {letter}{sub}{lum_cls} ({lum_desc})\n\
              Apparent Magnitude: m_V = {:+.2} | Absolute Magnitude: M_V = {:+.2} ({:.1} L☉)\n\
              Distance: {:.1} light-years ({:.1} pc) | Color Index: B-V = {:+.2} (T_eff ≈ {:.0} K) | Offset from Galactic Plane: {:.1}°\n\
-             Home Sun: {} ({}) — {:.0} K, {:.2} M☉, {:.2} R☉, {:.2} L☉ | Habitable Orbit: {:.2} AU ({:.0} Earth days/yr, Solar Tides {:.2}x)",
+             Home Sun: {} ({}) — {:.0} K, {:.2} M☉, {:.2} R☉, {:.2} L☉ | Habitable Orbit: {:.2} AU ({:.0} Earth days/yr, Solar Tides {:.2}x)\n\
+             Atmosphere: {} — Daytime Sky: {} ({})\n\
+             Sunset: {} ({})\n\
+             Main Plant Foliage: {} — {}",
             st.id,
             st.app_mag,
             st.abs_mag,
@@ -1393,7 +2110,14 @@ impl SunSandbox {
             hs.luminosity_solar,
             hs.habitable_au,
             hs.orbital_period_days,
-            hs.solar_tide_factor
+            hs.solar_tide_factor,
+            self.atmosphere.name(),
+            op.sky_color_name,
+            op.sky_mechanism,
+            op.sunset_color_name,
+            op.sunset_mechanism,
+            op.plant_color_name,
+            op.plant_pigment_desc
         )
     }
 }
@@ -1425,5 +2149,54 @@ mod tests {
         assert_eq!(sb.home_star().spectral_type, "G2V");
         let report = sb.inspect_tile(0);
         assert!(report.contains("HIP"));
+    }
+
+    #[test]
+    fn test_planetary_optics_sky_sunset_and_plant_colors() {
+        let mut sb = SunSandbox::new(77);
+
+        // 1. Sol-like G2V star + Earth-like N2-O2 atmosphere:
+        sb.load_real_hipparcos_sol();
+        sb.set_atmosphere(0); // EarthLikeN2O2
+        let op_g = sb.optics().clone();
+        // Sky zenith should be strongly blue (B > R), sunset strongly red-orange (R > B), and plants green (G > R, G > B):
+        assert!(op_g.sky_zenith_rgb[2] > op_g.sky_zenith_rgb[0]);
+        assert!(op_g.sunset_rgb[0] > op_g.sunset_rgb[2]);
+        assert!(op_g.plant_foliage_rgb[1] > op_g.plant_foliage_rgb[0]);
+        assert!(op_g.plant_foliage_rgb[1] > op_g.plant_foliage_rgb[2]);
+
+        // 2. M-class Red Dwarf (filter = 4): dark purple-black pan-visible absorbing flora:
+        sb.choose_sun_in_current_galaxy(4);
+        let op_m = sb.optics().clone();
+        assert!(op_m.plant_foliage_rgb[0] < 0.35 && op_m.plant_foliage_rgb[1] < 0.20);
+        assert!(op_m.plant_color_name.contains("Black") || op_m.plant_color_name.contains("Indigo"));
+
+        // 3. K-class Orange Dwarf (filter = 3) + N2-O2: autumnal orange-gold flora (R > B):
+        sb.choose_sun_in_current_galaxy(3);
+        sb.set_atmosphere(0);
+        let op_k = sb.optics().clone();
+        assert!(op_k.plant_foliage_rgb[0] > op_k.plant_foliage_rgb[2]);
+
+        // 4. Hot A-class Blue-White star (filter = 5) + N2-O2: blue-teal UV-shielding flora:
+        sb.choose_sun_in_current_galaxy(5);
+        sb.set_atmosphere(0);
+        let op_a = sb.optics().clone();
+        assert!(op_a.plant_foliage_rgb[2] > op_a.plant_foliage_rgb[0]);
+
+        // 5. Methane-Rich (N2-CH4) atmosphere (id = 1): cyan sky and emerald-teal sunset (G > R at sunset):
+        sb.load_real_hipparcos_sol();
+        sb.set_atmosphere(1);
+        let op_ch4 = sb.optics().clone();
+        assert!(op_ch4.sunset_rgb[1] > op_ch4.sunset_rgb[0]);
+
+        // 6. Thin Dusty CO2 (Mars-like, id = 4): butterscotch daytime sky (R > B) with cool blue sunset halo (B > R):
+        sb.set_atmosphere(4);
+        let op_mars = sb.optics().clone();
+        assert!(op_mars.sky_zenith_rgb[0] > op_mars.sky_zenith_rgb[2]);
+        assert!(op_mars.sunset_rgb[2] > op_mars.sunset_rgb[0]);
+
+        // Verify 3D "sky_plants" aspect renders all 7,292 tiles:
+        let sky_plant_colors = sb.tile_colors_rgb("sky_plants", false, Some(0));
+        assert_eq!(sky_plant_colors.len(), sb.tile_count() * 3);
     }
 }

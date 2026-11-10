@@ -32,6 +32,9 @@ pub const NATION_PALETTE: [[f32; 3]; 6] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConceptKey {
+    Sun(u32),
+    Moon(u32),
+    Planet(u32),
     Species(u32),
     Nation(u32),
     State(u32),
@@ -41,6 +44,18 @@ pub enum ConceptKey {
 impl ConceptKey {
     pub fn to_proto(self) -> tec11_proto::Concept {
         match self {
+            Self::Sun(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Sun as i32,
+                id,
+            },
+            Self::Moon(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Moon as i32,
+                id,
+            },
+            Self::Planet(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Planet as i32,
+                id,
+            },
             Self::Species(id) => tec11_proto::Concept {
                 kind: tec11_proto::ConceptKind::Species as i32,
                 id,
@@ -64,6 +79,9 @@ impl ConceptKey {
         match tec11_proto::ConceptKind::try_from(c.kind)
             .unwrap_or(tec11_proto::ConceptKind::Species)
         {
+            tec11_proto::ConceptKind::Sun => Self::Sun(c.id),
+            tec11_proto::ConceptKind::Moon => Self::Moon(c.id),
+            tec11_proto::ConceptKind::Planet => Self::Planet(c.id),
             tec11_proto::ConceptKind::Species => Self::Species(c.id),
             tec11_proto::ConceptKind::Nation => Self::Nation(c.id),
             tec11_proto::ConceptKind::State => Self::State(c.id),
@@ -137,12 +155,22 @@ impl LanguageRecord {
     }
 
     /// Initialize a language for state `state_id` (`historysimulation.py:1029-1039`, `langfromspecies`):
-    /// coins native species and `('nation', state_id)`, then derives `('state', state_id)` and
-    /// `('language', id)` from `('nation', state_id)`.
+    /// coins native species, celestial concepts (`Sun`, `Moons`, and `Planets`), and `('nation', state_id)`,
+    /// then derives `('state', state_id)` and `('language', id)` from `('nation', state_id)`.
     pub fn new_for_state(
         id: u32,
         state_id: u32,
         species_indices: &[usize],
+        rng: &mut Pcg64Mcg,
+    ) -> Self {
+        Self::new_for_state_with_celestial(id, state_id, species_indices, 1, rng)
+    }
+
+    pub fn new_for_state_with_celestial(
+        id: u32,
+        state_id: u32,
+        species_indices: &[usize],
+        moon_count: u32,
         rng: &mut Pcg64Mcg,
     ) -> Self {
         let phonology = Language::generate(rng);
@@ -169,6 +197,28 @@ impl LanguageRecord {
         let lang_name = rec.name();
         for origin in rec.lexicon.values_mut() {
             origin.lang_name = lang_name.clone();
+        }
+        // Celestial concepts: Sun, Moons (0..moon_count), and Planets (home world + classical naked-eye planets)
+        rec.coin_concept(ConceptKey::Sun(0), rng);
+        for m in 0..moon_count {
+            if m == 0 || ((id + m) % 2 == 0) {
+                rec.coin_concept(ConceptKey::Moon(m), rng);
+            } else {
+                rec.derive_concept(ConceptKey::Moon(0), ConceptKey::Moon(m), rng);
+            }
+        }
+        // Planet(0) = Home planet / world; Planet(1..=5) = classical naked-eye planets
+        rec.coin_concept(ConceptKey::Planet(0), rng);
+        rec.coin_concept(ConceptKey::Planet(1), rng);
+        rec.coin_concept(ConceptKey::Planet(2), rng);
+        if state_id % 2 == 0 {
+            rec.coin_concept(ConceptKey::Planet(3), rng);
+        }
+        if state_id % 3 == 0 {
+            rec.coin_concept(ConceptKey::Planet(4), rng);
+        }
+        if state_id % 4 == 0 {
+            rec.coin_concept(ConceptKey::Planet(5), rng);
         }
         for &sp_idx in species_indices {
             rec.coin_concept(ConceptKey::Species(sp_idx as u32), rng);
@@ -320,6 +370,7 @@ pub struct HistorySimulation {
     terrain: SubdividedTerrainGrid,
     tree: PointTree,
     history_ticks: u32,
+    moon_count: u32,
     settled_species: Vec<SettledSpecies>,
     tile_species: Vec<Vec<usize>>,
     rivers: Vec<Vec<usize>>,
@@ -344,7 +395,15 @@ impl HistorySimulation {
         Self::from_prehistory(prehistory, seed)
     }
 
-    pub fn from_prehistory(mut prehistory: PrehistorySimulation, seed: u128) -> Self {
+    pub fn from_prehistory(prehistory: PrehistorySimulation, seed: u128) -> Self {
+        Self::from_prehistory_with_moons(prehistory, 1, seed)
+    }
+
+    pub fn from_prehistory_with_moons(
+        mut prehistory: PrehistorySimulation,
+        moon_count: u32,
+        seed: u128,
+    ) -> Self {
         // Ensure prehistory has populated agricultural tiles if starting directly on Earth or an unpopulated planet.
         if prehistory.active_agricultural_race_count() == 0 {
             for _ in 0..8 {
@@ -374,6 +433,7 @@ impl HistorySimulation {
             terrain,
             tree,
             history_ticks: 0,
+            moon_count,
             settled_species: Vec::new(),
             tile_species: vec![Vec::new(); num_fine],
             rivers: Vec::new(),
@@ -594,10 +654,11 @@ impl HistorySimulation {
             let lid = self.next_language_id;
             self.next_language_id += 1;
 
-            let lang = LanguageRecord::new_for_state(
+            let lang = LanguageRecord::new_for_state_with_celestial(
                 lid,
                 sid,
                 &self.tile_species[city_f],
+                self.moon_count,
                 &mut self.rng,
             );
             self.languages.insert(lid, lang);
@@ -1170,9 +1231,20 @@ impl HistorySimulation {
                 related_states.extend(rivals);
                 related_states.extend(rec_partners.iter().copied());
 
-                for s in related_states {
-                    let s_lang = state_langs.get(&s).copied().flatten();
-                    concepts.insert(ConceptKey::State(s), s_lang);
+                for s in &related_states {
+                    let s_lang = state_langs.get(s).copied().flatten();
+                    concepts.insert(ConceptKey::State(*s), s_lang);
+                    // Share astronomical knowledge of outer wandering planets (`Planet(3..=5)`) with trading partners & neighbors
+                    if let Some(slid) = s_lang {
+                        if let Some(slang) = self.languages.get(&slid) {
+                            for p_id in 3..=5 {
+                                let pk = ConceptKey::Planet(p_id);
+                                if slang.describes(pk) {
+                                    concepts.entry(pk).or_insert(Some(slid));
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Imported species from recursive trade network (`imports`)
@@ -1185,8 +1257,15 @@ impl HistorySimulation {
                     }
                 }
 
-                // Native species in `state_id`
+                // Native species and core celestial concepts (`Sun`, `Moons`, and `Planets`) in `state_id`
                 let s_lang = state_langs.get(&state_id).copied().flatten();
+                concepts.entry(ConceptKey::Sun(0)).or_insert(s_lang);
+                for m in 0..self.moon_count {
+                    concepts.entry(ConceptKey::Moon(m)).or_insert(s_lang);
+                }
+                for p in 0..=2 {
+                    concepts.entry(ConceptKey::Planet(p)).or_insert(s_lang);
+                }
                 for &sp in &native {
                     concepts.insert(ConceptKey::Species(sp as u32), s_lang);
                 }
@@ -2134,12 +2213,36 @@ impl HistorySimulation {
             }
         ));
 
-        // Sample lexicon from primary language
+        // Sample lexicon from primary language (including celestial Sun, Moons & Planets)
         if let Some(lid) = dom_lang {
             if let Some(lang) = self.languages.get(&lid) {
                 lines.push(format!("--- {} Lexicon ---", lang.name()));
-                for (&ck, orig) in lang.lexicon.iter().take(8) {
+                for (&ck, orig) in lang.lexicon.iter().take(14) {
                     let gloss = match ck {
+                        ConceptKey::Sun(0) => "sun (host star)".to_string(),
+                        ConceptKey::Sun(id) => format!("sun #{}", id + 1),
+                        ConceptKey::Moon(m) => {
+                            if self.moon_count <= 1 && m == 0 {
+                                "moon".to_string()
+                            } else {
+                                match m {
+                                    0 => "moon #1 (inner M1)".to_string(),
+                                    1 => "moon #2 (2:1 M2)".to_string(),
+                                    2 => "moon #3 (4:1 M3)".to_string(),
+                                    3 => "moon #4 (8:1 M4)".to_string(),
+                                    _ => format!("moon #{}", m + 1),
+                                }
+                            }
+                        }
+                        ConceptKey::Planet(p) => match p {
+                            0 => "planet #1 (home world)".to_string(),
+                            1 => "planet #2 (inner swift)".to_string(),
+                            2 => "planet #3 (morning star)".to_string(),
+                            3 => "planet #4 (red outer)".to_string(),
+                            4 => "planet #5 (giant planet)".to_string(),
+                            5 => "planet #6 (ringed outer)".to_string(),
+                            _ => format!("planet #{}", p + 1),
+                        },
                         ConceptKey::Species(sp_id) => self
                             .settled_species
                             .get(sp_id as usize)
@@ -2178,11 +2281,31 @@ impl HistorySimulation {
         show_rivers: bool,
         selected_tile: Option<usize>,
     ) -> Vec<f32> {
+        self.tile_colors_rgb_with_optics(aspect, show_rivers, selected_tile, None)
+    }
+
+    pub fn tile_colors_rgb_with_optics(
+        &self,
+        aspect: &str,
+        show_rivers: bool,
+        selected_tile: Option<usize>,
+        optics: Option<&crate::sun_sky::PlanetaryOptics>,
+    ) -> Vec<f32> {
         let coarse_elevs = self.prehistory.tile_elevations();
         let felsities = self.prehistory.tile_felsities();
         let koeppen = self.prehistory.tile_koeppen_ids();
         let life = self.prehistory.tile_life();
         let num_display = self.terrain.display_faces.len();
+
+        let ocean_rgb = if let Some(op) = optics {
+            [
+                (0.02 + 0.30 * op.sky_zenith_rgb[0]).clamp(0.0, 0.70),
+                (0.05 + 0.38 * op.sky_zenith_rgb[1]).clamp(0.0, 0.75),
+                (0.14 + 0.55 * op.sky_zenith_rgb[2]).clamp(0.0, 0.85),
+            ]
+        } else {
+            [0.0, 0.0, 0.55]
+        };
 
         let selected_state = selected_tile.and_then(|d_idx| {
             match self.terrain.display_faces.get(d_idx)?.2 {
@@ -2222,14 +2345,14 @@ impl HistorySimulation {
         for (_, _, source) in &self.terrain.display_faces {
             let f_idx = match *source {
                 DisplayFaceSource::OceanCoarse(_) => {
-                    out.extend_from_slice(&[0.0, 0.0, 0.55]);
+                    out.extend_from_slice(&ocean_rgb);
                     continue;
                 }
                 DisplayFaceSource::Fine(f) => f,
             };
 
             if self.terrain.fine_elevations[f_idx] <= 0.0 {
-                out.extend_from_slice(&[0.0, 0.0, 0.55]);
+                out.extend_from_slice(&ocean_rgb);
                 continue;
             }
             if show_rivers && self.river_tiles[f_idx] {
@@ -2276,6 +2399,18 @@ impl HistorySimulation {
                         }
                     } else if koeppen[c_idx] == 12 || koeppen[c_idx] == 13 {
                         out.extend_from_slice(&[0.95, 0.97, 1.0]);
+                    } else if let Some(op) = optics {
+                        let f = felsities[c_idx];
+                        let veg = life[c_idx].clamp(0.0, 1.0);
+                        let pf = op.plant_foliage_rgb;
+                        let rock_r = 0.25;
+                        let rock_g = (32.0 + 32.0 * f) / 255.0;
+                        let rock_b = (64.0 * f) / 255.0;
+                        out.extend_from_slice(&[
+                            (rock_r * (1.0 - 0.55 * veg) + pf[0] * 0.72 * veg).clamp(0.0, 1.0),
+                            (rock_g * (1.0 - 0.55 * veg) + pf[1] * 0.72 * veg).clamp(0.0, 1.0),
+                            (rock_b * (1.0 - 0.55 * veg) + pf[2] * 0.72 * veg).clamp(0.0, 1.0),
+                        ]);
                     } else {
                         let f = felsities[c_idx];
                         let r = 0.25;
@@ -2462,5 +2597,31 @@ mod tests {
         assert!(restored.load_snapshot_bytes(&bytes));
         assert_eq!(restored.history_ticks(), 2);
         assert_eq!(restored.active_state_count(), sim.active_state_count());
+    }
+
+    #[test]
+    fn test_celestial_language_concepts_sun_moons_planets() {
+        let mut rng = Pcg64Mcg::new(12345);
+        let lang = LanguageRecord::new_for_state_with_celestial(0, 0, &[0, 1], 3, &mut rng);
+        assert!(lang.describes(ConceptKey::Sun(0)));
+        assert!(lang.describes(ConceptKey::Moon(0)));
+        assert!(lang.describes(ConceptKey::Moon(1)));
+        assert!(lang.describes(ConceptKey::Moon(2)));
+        assert!(!lang.describes(ConceptKey::Moon(3)));
+        assert!(lang.describes(ConceptKey::Planet(0)));
+        assert!(lang.describes(ConceptKey::Planet(1)));
+        assert!(lang.describes(ConceptKey::Planet(2)));
+
+        // Proto roundtrip for celestial ConceptKey variants:
+        for ck in [
+            ConceptKey::Sun(0),
+            ConceptKey::Moon(0),
+            ConceptKey::Moon(1),
+            ConceptKey::Planet(0),
+            ConceptKey::Planet(4),
+        ] {
+            let p = ck.to_proto();
+            assert_eq!(ConceptKey::from_proto(&p), ck);
+        }
     }
 }

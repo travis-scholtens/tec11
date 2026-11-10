@@ -40,6 +40,10 @@ impl WasmLanguageSession {
         self.sim.word_count()
     }
 
+    pub fn concept_label(&self, idx: usize) -> String {
+        self.sim.concept_label(idx)
+    }
+
     pub fn source_orth(&self, idx: usize) -> String {
         self.sim.source_orth(idx)
     }

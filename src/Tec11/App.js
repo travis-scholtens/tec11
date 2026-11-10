@@ -2842,6 +2842,7 @@ function buildLanguageInfo(session) {
   for (let i = 0; i < count; i++) {
     words.push({
       idx: i,
+      concept: session.concept_label(i),
       sourceOrth: session.source_orth(i),
       sourceIpa: session.source_ipa(i),
       destOrth: session.dest_orth(i),
@@ -3151,6 +3152,16 @@ function updateWorldDataBuffers(view, rebuildGeometry = false) {
   view.paint();
 }
 
+function rgbFloatToCss(rgb, fallbackR = 255, fallbackG = 230, fallbackB = 180) {
+  if (!rgb || rgb.length < 3) {
+    return `rgb(${fallbackR}, ${fallbackG}, ${fallbackB})`;
+  }
+  const r255 = Math.max(0, Math.min(255, Math.round(rgb[0] * 255)));
+  const g255 = Math.max(0, Math.min(255, Math.round(rgb[1] * 255)));
+  const b255 = Math.max(0, Math.min(255, Math.round(rgb[2] * 255)));
+  return `rgb(${r255}, ${g255}, ${b255})`;
+}
+
 function buildWorldInfo(view) {
   const s = view.session;
   const selectedReport =
@@ -3188,6 +3199,15 @@ function buildWorldInfo(view) {
     moonDistRadii: moonDistTarget,
     meteorFreqTenths: Math.round(meteorFreq * 10.0),
     orbitalSummaryText,
+    sunSpectralType: s.sun_spectral_type(),
+    sunColorCss: rgbFloatToCss(s.sun_rgb(), 255, 255, 119),
+    atmosphereName: s.atmosphere_name(),
+    skyColorCss: rgbFloatToCss(s.sky_zenith_rgb(), 41, 130, 240),
+    skyColorName: s.sky_color_name(),
+    sunsetColorCss: rgbFloatToCss(s.sunset_rgb(), 250, 97, 36),
+    sunsetColorName: s.sunset_color_name(),
+    plantColorCss: rgbFloatToCss(s.plant_foliage_rgb(), 36, 138, 41),
+    plantColorName: s.plant_color_name(),
     isRunning: Boolean(view.isRunning),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
     selectedReport,
@@ -3362,6 +3382,17 @@ export const setWorldAspect = (aspect) => () => {
   activeView.aspect = aspect;
   updateWorldDataBuffers(activeView, false);
 };
+
+export const setWorldSunAndAtmosphere =
+  (starFilter) =>
+  (atmosphereId) =>
+  (setWorldInfo) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.session.set_sun_and_atmosphere(starFilter, atmosphereId);
+    updateWorldDataBuffers(activeView, false);
+    setWorldInfo(buildWorldInfo(activeView))();
+  };
 
 export const saveWorldPlanet = (setWorldInfo) => () => {
   if (!activeView || !activeView.session) return;
@@ -4040,10 +4071,14 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
   const colors = computeSunVertexColors(view);
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
 
-  if (view.aspect === "home_sun") {
-    const rSolar = session.sun_radius_solar();
-    const sunScale = Math.max(0.24, Math.min(1.04, rSolar * 0.68));
-    mesh.scale.set(sunScale, sunScale, sunScale);
+  if (view.aspect === "home_sun" || view.aspect === "sky_plants") {
+    if (view.aspect === "home_sun") {
+      const rSolar = session.sun_radius_solar();
+      const sunScale = Math.max(0.24, Math.min(1.04, rSolar * 0.68));
+      mesh.scale.set(sunScale, sunScale, sunScale);
+    } else {
+      mesh.scale.set(1.0, 1.0, 1.0);
+    }
     starPoints.visible = false;
     view.starPointsRaw = null;
     arrowLines.visible = false;
@@ -4100,27 +4135,37 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
 
 function buildSunInfo(view) {
   const s = view.session;
-  const rgb = s.sun_rgb();
-  const r255 = Math.min(255, Math.round((rgb[0] || 1.0) * 255));
-  const g255 = Math.min(255, Math.round((rgb[1] || 0.9) * 255));
-  const b255 = Math.min(255, Math.round((rgb[2] || 0.7) * 255));
   const selectedReport =
     view.selectedTileIdx >= 0
       ? s.inspect_tile(view.selectedTileIdx)
-      : "Click any star on the celestial sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, B-V color index, and galactic latitude.";
+      : "Click any star or planetary tile on the sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, atmospheric scattering, sunset optical depth, and photosynthetic plant pigments.";
   return {
     galaxyTypeName: s.galaxy_type_name(),
     vantageName: s.vantage_name(),
     starCount: s.star_count(),
     sunSpectralType: s.sun_spectral_type(),
     sunClassDesc: s.sun_class_description(),
-    sunColorCss: `rgb(${r255}, ${g255}, ${b255})`,
+    sunColorCss: rgbFloatToCss(s.sun_rgb(), 255, 255, 119),
     sunBvText: `${s.sun_bv_color() >= 0 ? "+" : ""}${s.sun_bv_color().toFixed(2)}`,
     sunTempText: `${Math.round(s.sun_temp_k())} K`,
     sunRadiusText: `${s.sun_radius_solar().toFixed(2)} R☉`,
     sunMassText: `${s.sun_mass_solar().toFixed(2)} M☉`,
     sunLumText: `${s.sun_luminosity_solar().toFixed(2)} L☉`,
     sunHzText: `${s.sun_habitable_au().toFixed(2)} AU (${Math.round(s.sun_orbital_period_days())}d yr)`,
+    atmosphereName: s.atmosphere_name(),
+    atmosphereFormula: s.atmosphere_formula(),
+    skyColorCss: rgbFloatToCss(s.sky_zenith_rgb(), 41, 130, 240),
+    skyHorizonCss: rgbFloatToCss(s.sky_horizon_rgb(), 138, 194, 250),
+    skyColorName: s.sky_color_name(),
+    skyMechanism: s.sky_mechanism(),
+    sunsetColorCss: rgbFloatToCss(s.sunset_rgb(), 250, 97, 36),
+    twilightColorCss: rgbFloatToCss(s.twilight_rgb(), 117, 51, 133),
+    sunsetColorName: s.sunset_color_name(),
+    sunsetMechanism: s.sunset_mechanism(),
+    plantColorCss: rgbFloatToCss(s.plant_foliage_rgb(), 36, 138, 41),
+    plantHighlightCss: rgbFloatToCss(s.plant_highlight_rgb(), 82, 189, 71),
+    plantColorName: s.plant_color_name(),
+    plantPigmentDesc: s.plant_pigment_desc(),
     summaryLine: s.summary_line(),
     selectedReport,
   };
@@ -4215,6 +4260,13 @@ export const loadHipparcosIntoSun = (setSunInfo) => () => {
   if (!activeView || !activeView.session) return;
   activeView.session.load_real_hipparcos_sol();
   activeView.selectedTileIdx = -1;
+  updateSunDataBuffers(activeView, false);
+  setSunInfo(buildSunInfo(activeView))();
+};
+
+export const setSunAtmosphere = (atmosphereId) => (setSunInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_atmosphere(atmosphereId);
   updateSunDataBuffers(activeView, false);
   setSunInfo(buildSunInfo(activeView))();
 };

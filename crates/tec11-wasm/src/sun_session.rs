@@ -35,6 +35,70 @@ impl WasmSunSession {
         self.sandbox.load_real_hipparcos_sol();
     }
 
+    pub fn set_atmosphere(&mut self, atmosphere_id: u32) {
+        self.sandbox.set_atmosphere(atmosphere_id);
+    }
+
+    pub fn atmosphere_id(&self) -> u32 {
+        self.sandbox.atmosphere().id()
+    }
+
+    pub fn atmosphere_name(&self) -> String {
+        self.sandbox.atmosphere().name().to_string()
+    }
+
+    pub fn atmosphere_formula(&self) -> String {
+        self.sandbox.atmosphere().short_formula().to_string()
+    }
+
+    pub fn sky_zenith_rgb(&self) -> Vec<f32> {
+        self.sandbox.optics().sky_zenith_rgb.to_vec()
+    }
+
+    pub fn sky_horizon_rgb(&self) -> Vec<f32> {
+        self.sandbox.optics().sky_horizon_rgb.to_vec()
+    }
+
+    pub fn sky_color_name(&self) -> String {
+        self.sandbox.optics().sky_color_name.clone()
+    }
+
+    pub fn sky_mechanism(&self) -> String {
+        self.sandbox.optics().sky_mechanism.clone()
+    }
+
+    pub fn sunset_rgb(&self) -> Vec<f32> {
+        self.sandbox.optics().sunset_rgb.to_vec()
+    }
+
+    pub fn twilight_rgb(&self) -> Vec<f32> {
+        self.sandbox.optics().twilight_rgb.to_vec()
+    }
+
+    pub fn sunset_color_name(&self) -> String {
+        self.sandbox.optics().sunset_color_name.clone()
+    }
+
+    pub fn sunset_mechanism(&self) -> String {
+        self.sandbox.optics().sunset_mechanism.clone()
+    }
+
+    pub fn plant_foliage_rgb(&self) -> Vec<f32> {
+        self.sandbox.optics().plant_foliage_rgb.to_vec()
+    }
+
+    pub fn plant_highlight_rgb(&self) -> Vec<f32> {
+        self.sandbox.optics().plant_highlight_rgb.to_vec()
+    }
+
+    pub fn plant_color_name(&self) -> String {
+        self.sandbox.optics().plant_color_name.clone()
+    }
+
+    pub fn plant_pigment_desc(&self) -> String {
+        self.sandbox.optics().plant_pigment_desc.clone()
+    }
+
     pub fn tile_count(&self) -> usize {
         self.sandbox.tile_count()
     }
