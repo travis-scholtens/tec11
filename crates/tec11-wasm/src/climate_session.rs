@@ -1,5 +1,6 @@
 use tec11_climate::ClimateModel;
 use tec11_math_grid::SphericalGrid;
+use tec11_proto::{GeologicalTileExt, PlanetSnapshotExt};
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids, rotate_axes};
@@ -31,7 +32,7 @@ impl WasmClimateSession {
 
     /// Load a `.tec11` binary Protocol Buffer `PlanetSnapshot` into the climate model.
     pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
-        let Ok(snap) = tec11_proto::PlanetSnapshot::decode(bytes) else {
+        let Ok(snap) = tec11_proto::PlanetSnapshot::decode_bytes(bytes) else {
             return false;
         };
         let grid_size = snap.grid_size;

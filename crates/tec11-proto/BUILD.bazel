@@ -7,6 +7,10 @@ rust_library(
     ],
     edition = "2021",
     visibility = ["//visibility:public"],
+    deps = [
+        "//proto:tec11_rs_proto",
+        "@rules_rust_prost//private/3rdparty/crates:prost",
+    ],
 )
 
 rust_test(

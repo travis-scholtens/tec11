@@ -5,6 +5,7 @@ use tec11_climate::ClimateModel;
 use tec11_math_grid::{
     cross, dot, length, normal, rotate, GreatCircleArc, Pcg64Mcg, PointTree, SphericalGrid, Vec3,
 };
+use tec11_proto::{GeologicalTileExt, MetamorphicFaciesExt, PlanetSnapshotExt};
 
 use crate::movement::{center_tile, farthest_tile, move_group, split_group};
 use crate::pangea::PangeaWorld;
@@ -1041,7 +1042,7 @@ impl TectonicsSimulation {
                                     tec11_proto::MetamorphicRock {
                                         facies: tec11_proto::MetamorphicFacies::from_rock_name(
                                             r.name,
-                                        ),
+                                        ) as i32,
                                         toughness: r.toughness,
                                         felsity: Some(r.felsity),
                                         calcity: r.calcity,
@@ -1122,7 +1123,7 @@ impl TectonicsSimulation {
 
     /// Encode the current tectonic simulation state to `.tec11` binary Protocol Buffer bytes.
     pub fn encode_snapshot(&self) -> Vec<u8> {
-        self.to_snapshot().encode_to_vec()
+        self.to_snapshot().encode_bytes()
     }
 
     /// Reconstruct a `TectonicsSimulation` from a `tec11_proto::PlanetSnapshot`.
@@ -1226,7 +1227,7 @@ impl TectonicsSimulation {
                     }
                     tec11_proto::RockKindOneof::Metamorphic(met) => Rock {
                         kind: RockKind::Metamorphic,
-                        name: met.facies.rock_name(),
+                        name: met.facies().rock_name(),
                         felsity: met.felsity.unwrap_or(0.5),
                         toughness: met.toughness,
                         clasticity: None,
@@ -1320,7 +1321,7 @@ impl TectonicsSimulation {
 
     /// Decode `.tec11` binary Protocol Buffer bytes into a `TectonicsSimulation`.
     pub fn decode_snapshot(bytes: &[u8], fallback_seed: u64) -> Option<Self> {
-        let snap = tec11_proto::PlanetSnapshot::decode(bytes).ok()?;
+        let snap = tec11_proto::PlanetSnapshot::decode_bytes(bytes).ok()?;
         Self::from_snapshot(&snap, fallback_seed)
     }
 }
@@ -1536,7 +1537,7 @@ mod tests {
         }
 
         // Verify loading the decoded PlanetSnapshot into ClimateModel produces seasonal climate and ocean currents:
-        let snap = tec11_proto::PlanetSnapshot::decode(&bytes).unwrap();
+        let snap = tec11_proto::PlanetSnapshot::decode_bytes(&bytes).unwrap();
         let elevs: Vec<f32> = snap
             .geological_tiles()
             .unwrap()
