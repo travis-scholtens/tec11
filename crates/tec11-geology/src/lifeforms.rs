@@ -612,4 +612,41 @@ mod tests {
             sim.settled_plant_count()
         );
     }
+
+    #[test]
+    fn test_canonical_species_tables_have_no_earth_toponyms() {
+        let banned_prefixes = [
+            "african ",
+            "american ",
+            "north american ",
+            "south american ",
+            "asian ",
+            "asiatic ",
+            "australian ",
+            "european ",
+            "eurasian ",
+            "indian ",
+            "brazilian ",
+            "bolivian ",
+            "mexican ",
+            "canadian ",
+            "egyptian ",
+            "galapagos ",
+            "madagascar ",
+            "tasmanian ",
+        ];
+        for (label, tsv) in [("animals.tsv", ANIMALS_TSV), ("plants.tsv", PLANTS_TSV)] {
+            for line in tsv.lines() {
+                let Some((name, _)) = line.split_once('\t') else {
+                    continue;
+                };
+                for prefix in banned_prefixes {
+                    assert!(
+                        !name.starts_with(prefix),
+                        "{label} still contains Earth-named species '{name}' with prefix '{prefix}'"
+                    );
+                }
+            }
+        }
+    }
 }
