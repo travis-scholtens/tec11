@@ -38,6 +38,7 @@ impl ErosionSandbox {
                     mountainosity: (elev_km * 2.5).clamp(0.0, 20.0),
                     subduction: 0.0,
                     intrusion: None,
+                    impact_scar: 0.0,
                     layers: vec![RockLayer {
                         rock: Rock {
                             kind: RockKind::Sedimentary,
@@ -60,6 +61,7 @@ impl ErosionSandbox {
                     mountainosity: 0.0,
                     subduction: 0.0,
                     intrusion: None,
+                    impact_scar: 0.0,
                     layers: vec![RockLayer {
                         rock: Rock::extrusive(0.5),
                         thickness: 5.0,

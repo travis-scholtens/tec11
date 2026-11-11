@@ -107,6 +107,7 @@ impl PrehistorySimulation {
                     mountainosity: (elev_km * 2.0).clamp(0.0, 20.0),
                     subduction: 0.0,
                     intrusion: None,
+                    impact_scar: 0.0,
                     layers: vec![RockLayer {
                         rock: Rock {
                             kind: RockKind::Sedimentary,
@@ -129,6 +130,7 @@ impl PrehistorySimulation {
                     mountainosity: 0.0,
                     subduction: 0.0,
                     intrusion: None,
+                    impact_scar: 0.0,
                     layers: vec![RockLayer {
                         rock: Rock::extrusive(0.5),
                         thickness: 5.0,

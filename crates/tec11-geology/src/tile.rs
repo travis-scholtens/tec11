@@ -1,18 +1,28 @@
 use crate::rock::{Rock, RockKind, RockLayer};
 
 #[derive(Clone, Debug)]
+pub struct TileSourceColumn {
+    pub bottom: f32,
+    pub mountainosity: f32,
+    pub impact_scar: f32,
+    pub layers: Vec<RockLayer>,
+}
+
+#[derive(Clone, Debug)]
 pub struct TileGeology {
     pub bottom: f32,
     pub layers: Vec<RockLayer>,
     pub mountainosity: f32,
     pub subduction: f32,
     pub intrusion: Option<(f32, f32)>,
+    pub impact_scar: f32,
 }
 
 impl TileGeology {
     pub const MAX_HEIGHT: f32 = 10.0;
     pub const MIN_THICKNESS: f32 = 4.0;
     pub const MAX_THICKNESS: f32 = 75.0;
+    pub const IMPACT_BRECCIA_CLASTICITY: f32 = 0.4213;
 
     /// Continental column initialized with a base crust of 9 km + surface relief `h`.
     pub fn empty_land(rock: Rock, h: f32) -> Self {
@@ -25,6 +35,7 @@ impl TileGeology {
             mountainosity: 0.0,
             subduction: 0.0,
             intrusion: None,
+            impact_scar: 0.0,
         }
     }
 
@@ -45,6 +56,7 @@ impl TileGeology {
             mountainosity: 0.0,
             subduction: 0.0,
             intrusion: None,
+            impact_scar: 0.0,
         }
     }
 
@@ -67,6 +79,7 @@ impl TileGeology {
             mountainosity: 0.0,
             subduction: 0.0,
             intrusion: None,
+            impact_scar: 0.0,
         }
     }
 
@@ -100,22 +113,35 @@ impl TileGeology {
             .unwrap_or(RockKind::Igneous)
     }
 
-    /// Detect stratigraphic impact crater / ejecta breccia signature in the upper 3 rock layers:
-    /// - `>= 0.65`: Shock-metamorphosed `hornfels` crater basin floor (fresh or shallowly buried).
-    /// - `0.35..0.60`: Coarse impact-breccia `conglomerate` (`clasticity >= 0.95`) ejecta rim.
-    pub fn impact_signature(&self) -> f32 {
+    /// Detect stratigraphic impact crater / ejecta breccia signature in the near-surface rock layers:
+    /// - `>= 0.65`: Shock-metamorphosed `hornfels` (`0.82 <= toughness <= 0.94`) crater basin floor.
+    ///   (Note: plutonic contact-metamorphic `hornfels` along subduction zones has `toughness == 1.0` and is excluded.)
+    /// - `0.35..0.60`: Coarse impact-breccia `conglomerate` (`clasticity ≈ IMPACT_BRECCIA_CLASTICITY`) ejecta rim.
+    pub fn stratigraphic_impact_signature(&self) -> f32 {
         let mut best = 0.0f32;
-        for (depth_idx, layer) in self.layers.iter().rev().take(3).enumerate() {
-            let atten = 1.0 - 0.16 * (depth_idx as f32);
-            if layer.rock.name == "hornfels" && layer.rock.toughness >= 0.82 {
+        let mut buried_km = 0.0f32;
+        for layer in self.layers.iter().rev().take(3) {
+            if buried_km > 1.2 {
+                break;
+            }
+            let atten = (-0.65 * buried_km).exp();
+            if layer.rock.name == "hornfels" && (0.82..=0.94).contains(&layer.rock.toughness) {
                 best = best.max(0.85 * atten);
             } else if layer.rock.name == "conglomerate"
-                && layer.rock.clasticity.unwrap_or(0.0) >= 0.95
+                && layer
+                    .rock
+                    .clasticity
+                    .is_some_and(|c| (c - Self::IMPACT_BRECCIA_CLASTICITY).abs() < 0.005)
             {
                 best = best.max(0.52 * atten);
             }
+            buried_km += layer.thickness;
         }
         best
+    }
+
+    pub fn impact_signature(&self) -> f32 {
+        self.impact_scar.max(self.stratigraphic_impact_signature())
     }
 
     /// Enforce `MAX_THICKNESS` (`75 km`) and `MAX_HEIGHT` (`10 km`) (`Tile.limit` in `tile.py:62-81`),
@@ -271,24 +297,26 @@ impl TileGeology {
     }
 
     /// Average each group's contributing tiles with `merge_layers`, then stack colliding groups
-    /// (`Tile.mergesources` in `tile.py:185-194`).
-    pub fn merge_sources(&mut self, groups: &[Vec<(f32, f32, Vec<RockLayer>)>]) {
+    /// (`Tile.mergesources` in `tile.py:185-194`), carrying any continental `impact_scar` with the moving plate.
+    pub fn merge_sources(&mut self, groups: &[Vec<TileSourceColumn>]) {
         let mut merged_groups = Vec::with_capacity(groups.len());
         for g in groups {
             let n_src = g.len().max(1) as f32;
-            let avg_b = g.iter().map(|(b, _, _)| *b).sum::<f32>() / n_src;
+            let avg_b = g.iter().map(|s| s.bottom).sum::<f32>() / n_src;
+            let avg_scar = g.iter().map(|s| s.impact_scar).sum::<f32>() / n_src;
             let avg_t = g
                 .iter()
-                .map(|(_, _, ls)| ls.iter().map(|l| l.thickness).sum::<f32>())
+                .map(|s| s.layers.iter().map(|l| l.thickness).sum::<f32>())
                 .sum::<f32>()
                 / n_src;
             let converted: Vec<(f32, f32, Vec<(Rock, f32)>)> = g
                 .iter()
-                .map(|(b, m, ls)| {
+                .map(|s| {
                     (
-                        *b,
-                        *m,
-                        ls.iter()
+                        s.bottom,
+                        s.mountainosity,
+                        s.layers
+                            .iter()
                             .map(|l| (l.rock.clone(), l.thickness))
                             .collect(),
                     )
@@ -302,13 +330,14 @@ impl TileGeology {
                     l.1 *= scale;
                 }
             }
-            merged_groups.push((avg_b, mountainosity, layers));
+            merged_groups.push((avg_b, mountainosity, avg_scar, layers));
         }
 
         if merged_groups.len() == 1 {
-            let (b, m, ls) = merged_groups.into_iter().next().unwrap();
+            let (b, m, scar, ls) = merged_groups.into_iter().next().unwrap();
             self.bottom = b;
             self.mountainosity = m;
+            self.impact_scar = scar;
             self.layers = ls
                 .into_iter()
                 .map(|(rock, thickness)| RockLayer { rock, thickness })
@@ -318,7 +347,7 @@ impl TileGeology {
         } else {
             let max_elev = merged_groups
                 .iter()
-                .map(|(b, _, ls)| *b + ls.iter().map(|l| l.1).sum::<f32>())
+                .map(|(b, _, _, ls)| *b + ls.iter().map(|l| l.1).sum::<f32>())
                 .fold(0.5f32, f32::max);
             let mut target_elev = max_elev;
             for _ in 1..merged_groups.len() {
@@ -327,10 +356,14 @@ impl TileGeology {
             }
             self.mountainosity = merged_groups.iter().map(|g| g.1).sum::<f32>()
                 + 4.0 * (merged_groups.len().saturating_sub(1) as f32);
+            // Continental collision / orogeny partially obliterates pre-existing impact scars:
+            let mean_scar = merged_groups.iter().map(|g| g.2).sum::<f32>()
+                / (merged_groups.len().max(1) as f32);
+            self.impact_scar = mean_scar * 0.55;
             self.layers = merged_groups
                 .into_iter()
                 .flat_map(|g| {
-                    g.2.into_iter()
+                    g.3.into_iter()
                         .map(|(rock, thickness)| RockLayer { rock, thickness })
                 })
                 .collect();
@@ -409,6 +442,9 @@ impl TileGeology {
 
         let total_eroded: f32 = materials.iter().map(|m| m.thickness).sum();
         self.mountainosity = (self.mountainosity - total_eroded).max(0.0);
+        if total_eroded > 0.0 && self.impact_scar > 0.0 {
+            self.impact_scar *= (1.0 - 0.35 * total_eroded).clamp(0.25, 1.0);
+        }
         self.compact();
         (total_eroded, materials)
     }
@@ -422,6 +458,9 @@ impl TileGeology {
         self.layers.push(layer);
         self.limit();
         self.mountainosity = (self.mountainosity - 0.25 * t).max(0.0);
+        if self.impact_scar > 0.0 {
+            self.impact_scar *= (1.0 - 0.30 * t).clamp(0.30, 1.0);
+        }
         self.compact();
     }
 
@@ -562,13 +601,16 @@ impl TileGeology {
                 thickness: pl.thickness,
             });
         }
-        Some(Self {
+        let mut tile = Self {
             bottom: pt.bottom,
             mountainosity: pt.mountainosity,
             subduction: 0.0,
             intrusion: None,
+            impact_scar: 0.0,
             layers,
-        })
+        };
+        tile.impact_scar = tile.stratigraphic_impact_signature();
+        Some(tile)
     }
 }
 

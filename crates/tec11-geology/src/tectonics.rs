@@ -13,7 +13,7 @@ use crate::rock::{
     deposit_sedimentary, metamorphic_contact, metamorphic_regional, DepositClimate,
     ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
-use crate::tile::TileGeology;
+use crate::tile::{TileGeology, TileSourceColumn};
 
 /// A moving continental / lithospheric group (`Group` in `tile.py:17-20`).
 #[derive(Clone, Debug)]
@@ -33,7 +33,7 @@ pub struct SpreadingRidgeArc {
 
 #[derive(Clone, Debug)]
 struct TileMovement {
-    sources: Vec<(f32, f32, Vec<RockLayer>)>,
+    sources: Vec<TileSourceColumn>,
     speed: f64,
 }
 
@@ -471,7 +471,7 @@ impl TectonicsSimulation {
                     thickness: 0.22,
                 });
             }
-            // Depress the crater basin floor relative to surrounding crust while keeping inland tiles
+        // Depress the crater basin floor relative to surrounding crust while keeping inland tiles
             // above 0.08 km so interior continents never develop artificial ocean pinholes:
             let depressed_elev = (pre_elev - 0.55 * excavate_km).clamp(0.08, pre_elev.max(0.08));
             self.tiles[center].bottom = depressed_elev - self.tiles[center].thickness();
@@ -495,12 +495,13 @@ impl TectonicsSimulation {
             self.tiles[center].bottom = sea_elev - self.tiles[center].thickness();
             self.tiles[center].limit();
         }
+        self.tiles[center].impact_scar = 1.0;
+        self.tile_impact_scars[center] = 1.0;
 
         // 2. Deposit volume-conserving coarse impact-breccia `conglomerate` ejecta blanket on the surrounding rim:
         let ring1 = self.adjacency[center].clone();
         let rim_thick = (excavate_km / (ring1.len().max(1) as f32)).clamp(0.04, 0.16);
         for &nb in &ring1 {
-            self.tile_impact_scars[nb] = self.tile_impact_scars[nb].max(0.55);
             let nb_elev = self.tiles[nb].elevation();
             if nb_elev > 0.0 {
                 self.tiles[nb].deposit(RockLayer {
@@ -509,7 +510,7 @@ impl TectonicsSimulation {
                         name: "conglomerate",
                         felsity: 0.58,
                         toughness: 0.55,
-                        clasticity: Some(0.96),
+                        clasticity: Some(TileGeology::IMPACT_BRECCIA_CLASTICITY),
                         calcity: None,
                         bogginess: None,
                     },
@@ -522,6 +523,8 @@ impl TectonicsSimulation {
                 self.tiles[nb].mountainosity = (self.tiles[nb].mountainosity + 0.6).min(20.0);
                 self.tiles[nb].limit();
             }
+            self.tiles[nb].impact_scar = self.tiles[nb].impact_scar.max(0.55);
+            self.tile_impact_scars[nb] = self.tiles[nb].impact_signature();
         }
 
         // Multi-ring Hadean/Archean mega-basins (>= 380 km) leave an outer ejecta/shock ring:
@@ -530,7 +533,8 @@ impl TectonicsSimulation {
                 let ring2 = self.adjacency[nb].clone();
                 for &nb2 in &ring2 {
                     if nb2 != center {
-                        self.tile_impact_scars[nb2] = self.tile_impact_scars[nb2].max(0.30);
+                        self.tiles[nb2].impact_scar = self.tiles[nb2].impact_scar.max(0.30);
+                        self.tile_impact_scars[nb2] = self.tiles[nb2].impact_signature();
                     }
                 }
             }
@@ -561,14 +565,21 @@ impl TectonicsSimulation {
     pub fn step(&mut self) {
         let n = self.tiles.len();
 
-        // 0. Clear previous tick's transient subduction & intrusion markers, and weather old impact scars.
+        // 0. Clear previous tick's transient subduction & intrusion markers, and weather impact scars
+        //    on the crustal columns themselves (so scars move with continental drift).
         for tile in &mut self.tiles {
             tile.clear_temp();
-        }
-        for scar in &mut self.tile_impact_scars {
-            *scar *= 0.94;
-            if *scar < 0.03 {
-                *scar = 0.0;
+            if tile.elevation() > 0.0 {
+                tile.impact_scar *= 0.96;
+                if tile.impact_scar < 0.03 {
+                    tile.impact_scar = 0.0;
+                }
+            } else {
+                // Oceanic impacts are rapidly buried by abyssal sediment & recycled by seafloor spreading:
+                tile.impact_scar *= 0.45;
+                if tile.impact_scar < 0.05 {
+                    tile.impact_scar = 0.0;
+                }
             }
         }
 
@@ -600,11 +611,16 @@ impl TectonicsSimulation {
             };
 
             for (dest, src_indices) in moved_map {
-                let sources: Vec<(f32, f32, Vec<RockLayer>)> = src_indices
+                let sources: Vec<TileSourceColumn> = src_indices
                     .into_iter()
                     .map(|s| {
                         let st = &self.tiles[s];
-                        (st.bottom, st.mountainosity, st.layers.clone())
+                        TileSourceColumn {
+                            bottom: st.bottom,
+                            mountainosity: st.mountainosity,
+                            impact_scar: st.impact_scar,
+                            layers: st.layers.clone(),
+                        }
                     })
                     .collect();
                 new_movements
@@ -746,7 +762,7 @@ impl TectonicsSimulation {
                 }
             }
 
-            let group_sources: Vec<Vec<(f32, f32, Vec<RockLayer>)>> =
+            let group_sources: Vec<Vec<TileSourceColumn>> =
                 movements.iter().map(|m| m.sources.clone()).collect();
             self.tiles[dest].merge_sources(&group_sources);
 
@@ -882,7 +898,11 @@ impl TectonicsSimulation {
                 ((-1.15 * (1.0 - w)) + z_ridge * w) as f32
             };
 
-            if old_continental[v] || self.tiles[v].elevation() > 0.0 {
+            if old_continental[v]
+                || self.tiles[v].elevation() > 0.0
+                || (self.tiles[v].impact_scar == 0.0
+                    && self.tiles[v].stratigraphic_impact_signature() > 0.0)
+            {
                 self.tiles[v] = TileGeology::empty_ocean_with_depth(Rock::seafloor(), target_elev);
             } else {
                 self.tiles[v].bottom = target_elev.min(-0.15) - self.tiles[v].thickness();
@@ -1326,6 +1346,11 @@ impl TectonicsSimulation {
             }
         }
 
+        // Synchronize `tile_impact_scars` with the advected/weathered `TileGeology` columns:
+        for v in 0..n {
+            self.tile_impact_scars[v] = self.tiles[v].impact_signature();
+        }
+
         self.geoticks += 1;
     }
 
@@ -1607,73 +1632,11 @@ impl TectonicsSimulation {
         let earth_area_km2 = 4.0 * PI * 6400.0 * 6400.0;
         let splitnum = (25.0e6 / earth_area_km2) * (n as f64);
 
-        let mut tiles = Vec::with_capacity(n);
-        for pt in &tec.tiles {
-            let mut layers = Vec::with_capacity(pt.layers.len());
-            for pl in &pt.layers {
-                let pr = pl.rock.as_ref()?;
-                let rock = match pr.kind.as_ref()? {
-                    tec11_proto::RockKindOneof::Igneous(ig) => {
-                        if ig.is_intrusive {
-                            Rock::intrusive(ig.felsity)
-                        } else {
-                            Rock::extrusive(ig.felsity)
-                        }
-                    }
-                    tec11_proto::RockKindOneof::Sedimentary(sed) => {
-                        let clasticity = sed.clasticity.max(1e-6);
-                        let felsity = sed.felsity.unwrap_or(0.5);
-                        let calcity = sed.calcity;
-                        let bogginess = sed.bogginess;
-                        let name = if calcity.unwrap_or(0.0) > 0.99 {
-                            "chalk"
-                        } else if calcity.unwrap_or(0.0) > 0.75 {
-                            "limestone"
-                        } else {
-                            let grain = 1e-3 / clasticity;
-                            if grain < 4e-6 {
-                                "claystone"
-                            } else if grain < 60e-6 {
-                                "siltstone"
-                            } else if grain < 2e-3 {
-                                "sandstone"
-                            } else {
-                                "conglomerate"
-                            }
-                        };
-                        Rock {
-                            kind: RockKind::Sedimentary,
-                            name,
-                            felsity,
-                            toughness: 0.0,
-                            clasticity: Some(clasticity),
-                            calcity,
-                            bogginess,
-                        }
-                    }
-                    tec11_proto::RockKindOneof::Metamorphic(met) => Rock {
-                        kind: RockKind::Metamorphic,
-                        name: met.facies().rock_name(),
-                        felsity: met.felsity.unwrap_or(0.5),
-                        toughness: met.toughness,
-                        clasticity: None,
-                        calcity: met.calcity,
-                        bogginess: met.bogginess,
-                    },
-                };
-                layers.push(RockLayer {
-                    rock,
-                    thickness: pl.thickness,
-                });
-            }
-            tiles.push(TileGeology {
-                bottom: pt.bottom,
-                mountainosity: pt.mountainosity,
-                subduction: 0.0,
-                intrusion: None,
-                layers,
-            });
-        }
+        let tiles: Vec<TileGeology> = tec
+            .tiles
+            .iter()
+            .map(TileGeology::from_proto_geological_tile)
+            .collect::<Option<Vec<_>>>()?;
 
         let groups: Vec<LithosphericGroup> = tec
             .groups
@@ -1764,15 +1727,7 @@ impl TectonicsSimulation {
         }
         // Reconstruct visible impact scars from shock-metamorphic hornfels / coarse impact breccia in top strata:
         for v in 0..n {
-            if let Some(top) = sim.tiles[v].layers.last() {
-                if top.rock.name == "hornfels" {
-                    sim.tile_impact_scars[v] = 0.85;
-                } else if top.rock.name == "conglomerate"
-                    && top.rock.clasticity.unwrap_or(0.0) >= 0.95
-                {
-                    sim.tile_impact_scars[v] = 0.50;
-                }
-            }
+            sim.tile_impact_scars[v] = sim.tiles[v].impact_signature();
         }
         Some(sim)
     }
@@ -2116,6 +2071,89 @@ mod tests {
             sim_heavy.step();
         }
         assert_eq!(sim_off.impact_count(), 0);
+        assert!(
+            sim_off.tile_impact_scars().iter().all(|&s| s == 0.0),
+            "Subduction contact-metamorphic hornfels and coastal conglomerates must not produce false meteor scars when meteor_freq = 0"
+        );
         assert!(sim_heavy.impact_count() > sim_std.impact_count());
+
+        // Verify that an impact crater on a moving continental plate advects with the continent
+        // rather than remaining pinned to static grid coordinates:
+        let mut sim_move = TectonicsSimulation::new(4, 29.0, 42);
+        sim_move.set_meteor_freq(0.0);
+        // Step until Pangaea splits and plates have non-zero velocity:
+        for _ in 0..8 {
+            sim_move.step();
+        }
+        let moving_group_idx = sim_move
+            .groups
+            .iter()
+            .position(|g| {
+                let speed = (g.velocity[0].powi(2) + g.velocity[1].powi(2) + g.velocity[2].powi(2)).sqrt();
+                speed > 1e-4 && g.tiles.len() > 20
+            })
+            .expect("Expected a moving continental plate");
+        // Pick an interior tile of the moving continent:
+        let group_set: std::collections::HashSet<usize> = sim_move.groups[moving_group_idx]
+            .tiles
+            .iter()
+            .copied()
+            .collect();
+        let impact_tile = sim_move.groups[moving_group_idx]
+            .tiles
+            .iter()
+            .copied()
+            .find(|&v| {
+                sim_move.tiles()[v].elevation() > 0.5
+                    && sim_move.adjacency[v].iter().all(|nb| group_set.contains(nb))
+            })
+            .unwrap_or(sim_move.groups[moving_group_idx].tiles[0]);
+        let initial_pos = sim_move.grid().faces[impact_tile].0;
+        let vel = sim_move.groups[moving_group_idx].velocity;
+
+        sim_move.apply_bolide_impact(impact_tile, 200.0);
+        assert!(sim_move.tile_impact_scars()[impact_tile] > 0.9);
+
+        // Step 12 ticks so the continent drifts across several grid tiles:
+        for _ in 0..12 {
+            sim_move.step();
+        }
+
+        // Any tile that is now ocean must not retain the continental crater scar:
+        for v in 0..sim_move.tile_count() {
+            if sim_move.tiles()[v].elevation() <= 0.0 {
+                assert!(
+                    sim_move.tile_impact_scars()[v] < 0.05,
+                    "Vacated ocean tile {v} retained continental crater scar {:.3}",
+                    sim_move.tile_impact_scars()[v]
+                );
+            }
+        }
+
+        // The peak scar centroid should have displaced in the direction of plate tangent velocity `vel`:
+        let peak_tile = (0..sim_move.tile_count())
+            .max_by(|&a, &b| {
+                sim_move.tile_impact_scars()[a]
+                    .partial_cmp(&sim_move.tile_impact_scars()[b])
+                    .unwrap()
+            })
+            .unwrap();
+        assert!(
+            sim_move.tile_impact_scars()[peak_tile] > 0.25,
+            "Expected crater scar to persist on moving continent after 12 ticks"
+        );
+        let new_pos = sim_move.grid().faces[peak_tile].0;
+        let actual_disp = [
+            new_pos[0] - initial_pos[0],
+            new_pos[1] - initial_pos[1],
+            new_pos[2] - initial_pos[2],
+        ];
+        let dot_dir = actual_disp[0] * vel[0]
+            + actual_disp[1] * vel[1]
+            + actual_disp[2] * vel[2];
+        assert!(
+            peak_tile != impact_tile && dot_dir > 0.0,
+            "Expected crater peak tile to move from {impact_tile} to {peak_tile} along plate velocity (dot={dot_dir:.5})"
+        );
     }
 }
