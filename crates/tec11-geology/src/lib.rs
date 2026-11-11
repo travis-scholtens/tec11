@@ -44,9 +44,11 @@ pub use rivers::{trace_coarse_rivers, RiversSandbox};
 pub use rock::{Rock, RockKind, RockLayer};
 pub use split_sandbox::SplitSandbox;
 pub use sun_sky::{
-    bv_to_rgb, bv_to_temp_k, classify_star, sample_atmosphere_with_rng, sample_home_star_with_rng,
-    AtmosphereType, CelestialStar, GalacticVantage, GalaxyType, HomeStar, PlanetaryOptics,
-    SunSandbox,
+    bv_to_rgb, bv_to_temp_k, classify_star, format_solar_system_summary,
+    generate_solar_system_with_rng, recompute_planet_visibility_from_home,
+    sample_atmosphere_with_rng, sample_home_star_with_rng, substitute_simulated_planet,
+    AtmosphereType, CelestialStar, GalacticVantage, GalaxyType, HomeStar, PlanetKind,
+    PlanetaryOptics, SolarSystemPlanet, SunSandbox,
 };
 pub use tectonics::{LithosphericGroup, TectonicsSimulation};
 pub use terrain::TerrainSandbox;

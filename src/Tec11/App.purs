@@ -210,6 +210,7 @@ type WorldInfo =
   , sunsetColorName :: String
   , plantColorCss :: String
   , plantColorName :: String
+  , planetsSummaryText :: String
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
   , selectedReport :: String
@@ -266,6 +267,7 @@ type SunInfo =
   , plantHighlightCss :: String
   , plantColorName :: String
   , plantPigmentDesc :: String
+  , planetsSummaryText :: String
   , summaryLine :: String
   , selectedReport :: String
   }
@@ -653,6 +655,7 @@ mkApp = do
       , sunsetColorName: "Crimson-Orange & Violet-Pink"
       , plantColorCss: "rgb(36, 138, 41)"
       , plantColorName: "Emerald Chlorophyll Green"
+      , planetsSummaryText: "#1: Scorched Rocky (0.38 R⊕ @ 0.39 AU) | #2: Cloudy Rocky (0.95 R⊕ @ 0.72 AU) | #3 [HOME]: Temperate Rocky (1.00 R⊕ @ 1.00 AU)"
       , isRunning: false
       , hasSavedPlanet: false
       , selectedReport: "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree."
@@ -733,6 +736,7 @@ mkApp = do
       , plantHighlightCss: "rgb(82, 189, 71)"
       , plantColorName: "Emerald Chlorophyll Green"
       , plantPigmentDesc: "Chlorophyll a/b absorbs abundant 430-470 nm blue & 640-680 nm red photons while reflecting 500-560 nm green peak to prevent photo-oxidative overheating"
+      , planetsSummaryText: "#1: Scorched Rocky (0.38 R⊕ @ 0.39 AU) | #2: Cloudy Rocky (0.95 R⊕ @ 0.72 AU) | #3 [HOME]: Temperate Rocky (1.00 R⊕ @ 1.00 AU)"
       , summaryLine: "Sun: G2V (5778 K, B-V +0.65, 1.00 R☉, 1.00 L☉) | Sky: Azure Blue | Sunset: Crimson-Orange & Violet-Pink | Plants: Emerald Chlorophyll Green"
       , selectedReport: "Click any star or planetary tile on the sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, atmospheric scattering, sunset optical depth, and photosynthetic plant pigments."
       }
@@ -4246,6 +4250,11 @@ mkApp = do
                                       ]
                                   }
                               , R.div
+                                  { id: "world-planets-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text ("System: " <> worldInfo.planetsSummaryText) ]
+                                  }
+                              , R.div
                                   { id: "world-years-label"
                                   , className: "stat-line"
                                   , children: [ R.text (worldInfo.yearsText <> " years") ]
@@ -4922,6 +4931,10 @@ mkApp = do
                                           , children: [ R.text "Night Sky (Celestial Sphere)" ]
                                           }
                                       , R.option
+                                          { value: "solar_system"
+                                          , children: [ R.text "Planetary System & Orbits (Rocky, Gas Giant, Rings)" ]
+                                          }
+                                      , R.option
                                           { value: "sky_plants"
                                           , children: [ R.text "Sky, Sunset & Plant Foliage (3D Planet)" ]
                                           }
@@ -5301,6 +5314,12 @@ mkApp = do
                                               ]
                                           }
                                       ]
+                                  }
+                              , R.div
+                                  { id: "sun-planets-line"
+                                  , className: "stat-line"
+                                  , children:
+                                      [ R.text ("Planets: " <> sunInfo.planetsSummaryText) ]
                                   }
                               , R.div
                                   { id: "sun-summary-line"

@@ -6,8 +6,9 @@ use crate::population::tile_population_thousands;
 use crate::prehistory::PrehistorySimulation;
 use crate::racination::Heritage;
 use crate::sun_sky::{
-    sample_atmosphere_with_rng, sample_home_star_with_rng, AtmosphereType, HomeStar,
-    PlanetaryOptics,
+    format_solar_system_summary, generate_solar_system_with_rng, sample_atmosphere_with_rng,
+    sample_home_star_with_rng, substitute_simulated_planet, AtmosphereType, HomeStar,
+    PlanetaryOptics, SolarSystemPlanet,
 };
 use crate::tectonics::TectonicsSimulation;
 use crate::tile::TileGeology;
@@ -168,10 +169,16 @@ pub struct WorldSimulation {
     home_star: HomeStar,
     atmosphere: AtmosphereType,
     optics: PlanetaryOptics,
+    solar_system: Vec<SolarSystemPlanet>,
+    home_planet_index: usize,
     rng: Pcg64Mcg,
 }
 
 impl WorldSimulation {
+    pub fn planet_radius_km(grid_size: u32) -> f32 {
+        6400.0 * (grid_size.max(1) as f32 / 5.0)
+    }
+
     pub fn new(params: WorldCreateParams, seed: u64) -> Self {
         let mut tec = TectonicsSimulation::new_with_full_params(
             params.grid_size,
@@ -190,6 +197,18 @@ impl WorldSimulation {
         let home_star = HomeStar::sol();
         let atmosphere = AtmosphereType::EarthLikeN2O2;
         let optics = PlanetaryOptics::compute(&home_star, atmosphere);
+        let mut sys_rng = Pcg64Mcg::from_seed_u64(seed ^ 0x517C_C1B7_2722_0A95);
+        let ecliptic_pole = [0.0, -0.398, 0.917];
+        let mut solar_system =
+            generate_solar_system_with_rng(&mut sys_rng, &home_star, ecliptic_pole, true);
+        let home_planet_index = substitute_simulated_planet(
+            &mut solar_system,
+            &home_star,
+            Self::planet_radius_km(params.grid_size),
+            params.land_pct,
+            params.moon_count,
+            ecliptic_pole,
+        );
         let mut sim = Self {
             params,
             stage: WorldStageState::Tectonics(tec),
@@ -202,6 +221,8 @@ impl WorldSimulation {
             home_star,
             atmosphere,
             optics,
+            solar_system,
+            home_planet_index,
             rng: Pcg64Mcg::from_seed_u64(seed.wrapping_add(1000)),
         };
         sim.sync_counters();
@@ -214,13 +235,32 @@ impl WorldSimulation {
         self.star_filter = star_filter;
         self.atmosphere_id = atmosphere_id;
         let mut sky_rng = self.rng.clone();
-        self.home_star = if star_filter == 2 && atmosphere_id == 0 {
+        let is_sol = star_filter == 2 && atmosphere_id == 0;
+        self.home_star = if is_sol {
             HomeStar::sol()
         } else {
             sample_home_star_with_rng(&mut sky_rng, [8.1, 0.0, 0.02], star_filter, false)
         };
         self.atmosphere = sample_atmosphere_with_rng(&mut sky_rng, atmosphere_id);
         self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
+        let ecliptic_pole = [0.0, -0.398, 0.917];
+        self.solar_system = generate_solar_system_with_rng(
+            &mut sky_rng,
+            &self.home_star,
+            ecliptic_pole,
+            is_sol,
+        );
+        self.home_planet_index = substitute_simulated_planet(
+            &mut self.solar_system,
+            &self.home_star,
+            Self::planet_radius_km(self.params.grid_size),
+            self.params.land_pct,
+            self.params.moon_count,
+            ecliptic_pole,
+        );
+        if let WorldStageState::History(hist) = &mut self.stage {
+            hist.set_solar_system(self.solar_system.clone());
+        }
     }
 
     pub fn home_star(&self) -> &HomeStar {
@@ -233,6 +273,18 @@ impl WorldSimulation {
 
     pub fn optics(&self) -> &PlanetaryOptics {
         &self.optics
+    }
+
+    pub fn solar_system(&self) -> &[SolarSystemPlanet] {
+        &self.solar_system
+    }
+
+    pub fn home_planet_index(&self) -> usize {
+        self.home_planet_index
+    }
+
+    pub fn planets_summary_text(&self) -> String {
+        format_solar_system_summary(&self.solar_system)
     }
 
     pub fn star_filter(&self) -> u32 {
@@ -291,13 +343,29 @@ impl WorldSimulation {
         } else {
             self.atmosphere_id
         };
-        self.home_star = if eff_star_filter == 2 && eff_atm_id == 0 && !randomize {
+        let is_sol = eff_star_filter == 2 && eff_atm_id == 0 && !randomize;
+        self.home_star = if is_sol {
             HomeStar::sol()
         } else {
             sample_home_star_with_rng(&mut sky_rng, [8.1, 0.0, 0.02], eff_star_filter, false)
         };
         self.atmosphere = sample_atmosphere_with_rng(&mut sky_rng, eff_atm_id);
         self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
+        let ecliptic_pole = [0.0, -0.398, 0.917];
+        self.solar_system = generate_solar_system_with_rng(
+            &mut sky_rng,
+            &self.home_star,
+            ecliptic_pole,
+            is_sol,
+        );
+        self.home_planet_index = substitute_simulated_planet(
+            &mut self.solar_system,
+            &self.home_star,
+            Self::planet_radius_km(params.grid_size),
+            params.land_pct,
+            params.moon_count,
+            ecliptic_pole,
+        );
         self.params = params;
         let mut tec = TectonicsSimulation::new_with_full_params(
             params.grid_size,
@@ -384,9 +452,10 @@ impl WorldSimulation {
             let snap = pre.to_snapshot();
             let sub_seed = self.rng.next_u64();
             if let Some(pre_copy) = PrehistorySimulation::from_snapshot(&snap, sub_seed) {
-                let hist = HistorySimulation::from_prehistory_with_moons(
+                let hist = HistorySimulation::from_prehistory_with_system(
                     pre_copy,
                     self.params.moon_count,
+                    self.solar_system.clone(),
                     sub_seed as u128,
                 );
                 self.history_ticks = hist.history_ticks();
@@ -991,6 +1060,7 @@ impl WorldSimulation {
                 if !hist.load_snapshot_bytes(bytes) {
                     return false;
                 }
+                hist.set_solar_system(self.solar_system.clone());
                 if let Some(pre_base) = &hist_proto.prehistory_base {
                     self.tectonics_ticks = pre_base.tectonics_ticks;
                     self.prehistory_ticks = pre_base.prehistory_ticks;
@@ -1043,5 +1113,41 @@ mod tests {
         let mut restored = WorldSimulation::new(WorldCreateParams::default(), 99);
         assert!(restored.load_snapshot_bytes(&snap));
         assert_eq!(restored.stage_index(), 2);
+    }
+
+    #[test]
+    fn test_world_solar_system_substitution_and_history_planet_naming() {
+        let params = WorldCreateParams {
+            grid_size: 4,
+            day_hours: 20,
+            tilt_deg: 21,
+            land_pct: 70, // Arid/desert world (>65% land)
+            atm_dt_myr: 5,
+            life_dt_myr: 5,
+            people_dt_myr: 5,
+            moon_count: 2,
+            moon_mass: 1.0,
+            moon_dist_radii: 60,
+            meteor_freq: 1.0,
+        };
+        let mut world = WorldSimulation::new(params, 77);
+        world.set_sun_and_atmosphere(3, 0); // K-class orange dwarf
+        assert!(world.solar_system().len() >= 4);
+        let home_idx = world.home_planet_index();
+        let home_planet = &world.solar_system()[home_idx];
+        assert!(home_planet.is_home_world);
+        assert_eq!(home_planet.moon_count, 2);
+        assert!(!home_planet.has_rings);
+
+        for _ in 0..5 {
+            world.step();
+        }
+        world.advance_stage();
+        assert_eq!(world.stage_index(), 2);
+
+        if let WorldStageState::History(hist) = world.stage() {
+            assert_eq!(hist.solar_system().len(), world.solar_system().len());
+            assert!(hist.solar_system()[home_idx].is_home_world);
+        }
     }
 }

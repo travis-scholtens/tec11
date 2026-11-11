@@ -498,9 +498,9 @@ impl PlanetaryOptics {
         let red_blocked = atmosphere == AtmosphereType::MethaneRich;
 
         let (plant_foliage_rgb, plant_highlight_rgb, plant_color_name, plant_pigment_desc) =
-            if temp_k < 3850.0 {
+            if temp_k < 4015.0 {
                 // M-Type Red Dwarf: scarce visible light, peak in red/near-IR -> pan-visible absorber (jet-black / deep purple-burgundy)
-                let cool_t = ((3850.0 - temp_k) / 1200.0).clamp(0.0, 1.0);
+                let cool_t = ((4015.0 - temp_k) / 1300.0).clamp(0.0, 1.0);
                 let fol = [
                     (0.28 - 0.10 * cool_t).clamp(0.14, 0.32),
                     (0.11 - 0.04 * cool_t).clamp(0.06, 0.14),
@@ -519,7 +519,7 @@ impl PlanetaryOptics {
                 )
             } else if temp_k < 5300.0 {
                 // K-Type Orange Dwarf (or cool orange subgiant): peak photon flux in orange-red (580-720 nm)
-                let k_t = ((temp_k - 3850.0) / 1450.0).clamp(0.0, 1.0);
+                let k_t = ((temp_k - 4015.0) / 1285.0).clamp(0.0, 1.0);
                 if red_blocked {
                     // Methane strips red out of the K-star's light, leaving green-yellow at the surface:
                     (
@@ -815,6 +815,489 @@ pub fn sample_atmosphere_with_rng(rng: &mut Pcg64Mcg, atmosphere_id: u32) -> Atm
     }
 }
 
+/// Visual classification of a planet in a generated solar system ("what it looks like").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanetKind {
+    RockyBarren,
+    RockyCloudy,
+    RockyTemperate,
+    RockyDesert,
+    RockySuperEarth,
+    GasGiant,
+    RingedGasGiant,
+    IceGiant,
+    RingedIceGiant,
+    IcyDwarf,
+}
+
+impl PlanetKind {
+    pub fn appearance_label(self) -> &'static str {
+        match self {
+            Self::RockyBarren => "Scorched Rocky",
+            Self::RockyCloudy => "Cloudy Rocky",
+            Self::RockyTemperate => "Temperate Rocky",
+            Self::RockyDesert => "Red Rocky Desert",
+            Self::RockySuperEarth => "Rocky Super-Earth",
+            Self::GasGiant => "Gas Giant",
+            Self::RingedGasGiant => "Gas Giant with Rings",
+            Self::IceGiant => "Ice Giant",
+            Self::RingedIceGiant => "Ice Giant with Rings",
+            Self::IcyDwarf => "Icy Dwarf",
+        }
+    }
+
+    pub fn has_rings(self) -> bool {
+        matches!(self, Self::RingedGasGiant | Self::RingedIceGiant)
+    }
+
+    pub fn is_rocky(self) -> bool {
+        matches!(
+            self,
+            Self::RockyBarren
+                | Self::RockyCloudy
+                | Self::RockyTemperate
+                | Self::RockyDesert
+                | Self::RockySuperEarth
+                | Self::IcyDwarf
+        )
+    }
+
+    pub fn default_rgb(self) -> [f32; 3] {
+        match self {
+            Self::RockyBarren => [0.68, 0.64, 0.60],
+            Self::RockyCloudy => [0.94, 0.86, 0.64],
+            Self::RockyTemperate => [0.28, 0.62, 0.92],
+            Self::RockyDesert => [0.88, 0.44, 0.26],
+            Self::RockySuperEarth => [0.42, 0.76, 0.62],
+            Self::GasGiant => [0.90, 0.74, 0.52],
+            Self::RingedGasGiant => [0.94, 0.84, 0.58],
+            Self::IceGiant => [0.38, 0.72, 0.96],
+            Self::RingedIceGiant => [0.52, 0.86, 0.94],
+            Self::IcyDwarf => [0.76, 0.82, 0.90],
+        }
+    }
+
+    pub fn geometric_albedo(self) -> f32 {
+        match self {
+            Self::RockyBarren => 0.14,
+            Self::RockyCloudy => 0.68,
+            Self::RockyTemperate => 0.36,
+            Self::RockyDesert => 0.22,
+            Self::RockySuperEarth => 0.38,
+            Self::GasGiant => 0.52,
+            Self::RingedGasGiant => 0.62, // Rings boost effective brightness
+            Self::IceGiant => 0.41,
+            Self::RingedIceGiant => 0.48,
+            Self::IcyDwarf => 0.55,
+        }
+    }
+}
+
+/// A planet in the host star's planetary system.
+#[derive(Clone, Debug)]
+pub struct SolarSystemPlanet {
+    /// 0-based orbital index from innermost (`0`) to outermost (`N - 1`).
+    pub index: u32,
+    /// Semi-major axis in Astronomical Units (`AU`).
+    pub orbit_au: f32,
+    /// Keplerian orbital period in Earth days (`365.25 * sqrt(a^3 / M_star)`).
+    pub orbital_period_days: f32,
+    /// Planetary radius in Earth radii (`R⊕`, where `1.0 R⊕ = 6,371 km`).
+    pub radius_earth: f32,
+    /// Visual classification ("what it looks like": rocky, gas giant, with rings, etc.).
+    pub kind: PlanetKind,
+    /// Whether the planet has a prominent ring system.
+    pub has_rings: bool,
+    /// Number of moons orbiting this planet.
+    pub moon_count: u32,
+    /// True if this slot is the simulated / home world.
+    pub is_home_world: bool,
+    /// Apparent visual magnitude `m_V` as seen from the home world (`0.0` for the home world itself).
+    pub apparent_mag: f32,
+    /// Heliocentric orbital longitude in radians `[0, 2π)` for 3D solar system & sky rendering.
+    pub orbit_angle_rad: f32,
+    /// Unit direction on the celestial sphere along the ecliptic as seen from the home world.
+    pub sky_dir: Vec3,
+    /// Characteristic RGB color `[r, g, b]` in `[0.0, 1.0]`.
+    pub rgb: [f32; 3],
+}
+
+impl SolarSystemPlanet {
+    pub fn is_naked_eye_visible(&self) -> bool {
+        !self.is_home_world && self.apparent_mag <= 6.0
+    }
+
+    pub fn summary_entry(&self) -> String {
+        if self.is_home_world {
+            format!(
+                "#{} [HOME]: {} ({:.2} R⊕ @ {:.2} AU, {:.0}d, {} moon{})",
+                self.index + 1,
+                self.kind.appearance_label(),
+                self.radius_earth,
+                self.orbit_au,
+                self.orbital_period_days,
+                self.moon_count,
+                if self.moon_count == 1 { "" } else { "s" }
+            )
+        } else {
+            format!(
+                "#{}: {} ({:.2} R⊕ @ {:.2} AU, {:.0}d, m_V {:+.1})",
+                self.index + 1,
+                self.kind.appearance_label(),
+                self.radius_earth,
+                self.orbit_au,
+                self.orbital_period_days,
+                self.apparent_mag
+            )
+        }
+    }
+
+    /// Gloss used for `ConceptKey::Planet(self.index)` in `history.rs`.
+    pub fn lexicon_gloss(&self) -> String {
+        let look = self.kind.appearance_label().to_lowercase();
+        if self.is_home_world {
+            format!(
+                "planet #{} (home world — {}, {:.2} R⊕ @ {:.2} AU)",
+                self.index + 1,
+                look,
+                self.radius_earth,
+                self.orbit_au
+            )
+        } else {
+            format!(
+                "planet #{} ({}, {:.2} R⊕ @ {:.2} AU)",
+                self.index + 1,
+                look,
+                self.radius_earth,
+                self.orbit_au
+            )
+        }
+    }
+}
+
+/// Recompute apparent visual magnitudes (`apparent_mag`) and sky directions (`sky_dir`)
+/// for all planets in `planets` as observed from the home world (`is_home_world == true`).
+pub fn recompute_planet_visibility_from_home(
+    planets: &mut [SolarSystemPlanet],
+    home_star: &HomeStar,
+    ecliptic_pole: Vec3,
+) {
+    let home_idx = planets
+        .iter()
+        .position(|p| p.is_home_world)
+        .unwrap_or(planets.len() / 3);
+    let home_au = planets
+        .get(home_idx)
+        .map(|p| p.orbit_au)
+        .unwrap_or(home_star.habitable_au)
+        .max(0.02);
+    let home_angle = planets
+        .get(home_idx)
+        .map(|p| p.orbit_angle_rad)
+        .unwrap_or(0.0);
+
+    let n_pole = normal(ecliptic_pole);
+    let ref_axis = if n_pole[0].abs() < 0.8 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let e_u = normal(cross(n_pole, ref_axis));
+    let e_v = normal(cross(n_pole, e_u));
+    let hx = home_au * home_angle.cos();
+    let hy = home_au * home_angle.sin();
+    let lum_mag_offset = -2.5 * home_star.luminosity_solar.max(1e-4).log10();
+
+    for p in planets.iter_mut() {
+        p.orbital_period_days =
+            365.25 * (p.orbit_au.powi(3) / home_star.mass_solar.max(0.08)).sqrt();
+        if p.is_home_world {
+            p.apparent_mag = 0.0;
+            p.sky_dir = e_u;
+            continue;
+        }
+        // Characteristic favorable viewing distance (near opposition for outer planets, near greatest elongation for inner):
+        let delta_au = (p.orbit_au - home_au).abs().max(0.12 * home_au);
+        let r_km = (p.radius_earth * 6371.0).max(500.0);
+        let r_au = r_km / 1.496e8;
+        let phase_factor = if p.orbit_au < home_au { 0.45 } else { 0.85 };
+        let flux_ratio =
+            (p.kind.geometric_albedo() * phase_factor * (r_au * r_au))
+                / (p.orbit_au * p.orbit_au * delta_au * delta_au).max(1e-12);
+        p.apparent_mag =
+            (-26.74 - 2.5 * flux_ratio.max(1e-18).log10() + lum_mag_offset).clamp(-4.8, 11.5);
+
+        let px = p.orbit_au * p.orbit_angle_rad.cos();
+        let py = p.orbit_au * p.orbit_angle_rad.sin();
+        let dx = (px - hx) as f64;
+        let dy = (py - hy) as f64;
+        let norm_d = (dx * dx + dy * dy).sqrt().max(1e-6);
+        let ux = dx / norm_d;
+        let uy = dy / norm_d;
+        p.sky_dir = normal([
+            e_u[0] * ux + e_v[0] * uy,
+            e_u[1] * ux + e_v[1] * uy,
+            e_u[2] * ux + e_v[2] * uy,
+        ]);
+    }
+}
+
+/// Generate a plausible planetary system (`4..=9` planets, or the 8-planet Solar System when `is_real_sol` is true)
+/// around `home_star`, determining each planet's orbital distance (`orbit_au`) and appearance (`PlanetKind`).
+pub fn generate_solar_system_with_rng(
+    rng: &mut Pcg64Mcg,
+    home_star: &HomeStar,
+    ecliptic_pole: Vec3,
+    is_real_sol: bool,
+) -> Vec<SolarSystemPlanet> {
+    if is_real_sol {
+        let specs: [(f32, f32, PlanetKind, u32, bool, f32); 8] = [
+            (0.39, 0.38, PlanetKind::RockyBarren, 0, false, 0.8),
+            (0.72, 0.95, PlanetKind::RockyCloudy, 0, false, 2.1),
+            (1.00, 1.00, PlanetKind::RockyTemperate, 1, true, 0.0),
+            (1.52, 0.53, PlanetKind::RockyDesert, 2, false, 3.7),
+            (5.20, 11.21, PlanetKind::GasGiant, 4, false, 4.9),
+            (9.58, 9.45, PlanetKind::RingedGasGiant, 7, false, 1.4),
+            (19.20, 4.01, PlanetKind::RingedIceGiant, 5, false, 2.9),
+            (30.05, 3.88, PlanetKind::IceGiant, 1, false, 5.4),
+        ];
+        let mut planets = Vec::with_capacity(8);
+        for (idx, (au, rad, kind, moons, is_home, angle)) in specs.into_iter().enumerate() {
+            planets.push(SolarSystemPlanet {
+                index: idx as u32,
+                orbit_au: au,
+                orbital_period_days: 365.25 * (au.powi(3) / home_star.mass_solar.max(0.08)).sqrt(),
+                radius_earth: rad,
+                kind,
+                has_rings: kind.has_rings(),
+                moon_count: moons,
+                is_home_world: is_home,
+                apparent_mag: 0.0,
+                orbit_angle_rad: angle,
+                sky_dir: [1.0, 0.0, 0.0],
+                rgb: kind.default_rgb(),
+            });
+        }
+        recompute_planet_visibility_from_home(&mut planets, home_star, ecliptic_pole);
+        return planets;
+    }
+
+    let n_planets = 4 + ((rng.next_u64() as usize) % 6); // 4..=9 planets
+    let hz = home_star.habitable_au.max(0.04);
+    let hz_slot = (1 + ((rng.next_u64() as usize) % (n_planets / 2).max(1))).min(n_planets - 2);
+    let hz_orbit = hz * (rng.uniform(0.84, 1.22) as f32);
+
+    let mut orbits = vec![0.0f32; n_planets];
+    orbits[hz_slot] = hz_orbit;
+    for i in (0..hz_slot).rev() {
+        let step = rng.uniform(0.54, 0.68) as f32;
+        orbits[i] = (orbits[i + 1] * step).max(0.015 * hz);
+    }
+    for i in (hz_slot + 1)..n_planets {
+        let step = rng.uniform(1.52, 1.92) as f32;
+        orbits[i] = orbits[i - 1] * step;
+    }
+
+    let mut planets = Vec::with_capacity(n_planets);
+    for (idx, &orbit_au) in orbits.iter().enumerate() {
+        let ratio = orbit_au / hz;
+        let p_roll = rng.next_f64();
+        let (kind, radius_earth, moon_count) = if idx == hz_slot {
+            // Ensure at least one terrestrial candidate near the habitable zone:
+            let k = if p_roll < 0.55 {
+                PlanetKind::RockyTemperate
+            } else if p_roll < 0.78 {
+                PlanetKind::RockyDesert
+            } else {
+                PlanetKind::RockySuperEarth
+            };
+            let rad = if k == PlanetKind::RockySuperEarth {
+                rng.uniform(1.30, 1.85) as f32
+            } else {
+                rng.uniform(0.75, 1.25) as f32
+            };
+            let moons = (rng.next_u64() % 3) as u32;
+            (k, rad, moons)
+        } else if ratio < 0.65 {
+            // Inner hot zone (Mercury / Venus analogues):
+            if p_roll < 0.58 {
+                (
+                    PlanetKind::RockyBarren,
+                    rng.uniform(0.32, 0.78) as f32,
+                    0,
+                )
+            } else {
+                (
+                    PlanetKind::RockyCloudy,
+                    rng.uniform(0.72, 1.15) as f32,
+                    (rng.next_u64() % 2) as u32,
+                )
+            }
+        } else if ratio <= 1.75 {
+            // Outer habitable / warm zone (Mars / Super-Earth / warm giant analogues):
+            if p_roll < 0.42 {
+                (
+                    PlanetKind::RockyDesert,
+                    rng.uniform(0.45, 0.95) as f32,
+                    (rng.next_u64() % 3) as u32,
+                )
+            } else if p_roll < 0.72 {
+                (
+                    PlanetKind::RockyTemperate,
+                    rng.uniform(0.78, 1.28) as f32,
+                    (rng.next_u64() % 3) as u32,
+                )
+            } else if p_roll < 0.90 {
+                (
+                    PlanetKind::RockySuperEarth,
+                    rng.uniform(1.30, 1.95) as f32,
+                    (1 + rng.next_u64() % 3) as u32,
+                )
+            } else {
+                (
+                    PlanetKind::RingedGasGiant,
+                    rng.uniform(6.0, 10.5) as f32,
+                    (3 + rng.next_u64() % 5) as u32,
+                )
+            }
+        } else if ratio <= 8.5 {
+            // Frost-line gas giant zone (Jupiter / Saturn / Super-Earth analogues):
+            if p_roll < 0.44 {
+                (
+                    PlanetKind::GasGiant,
+                    rng.uniform(7.2, 12.8) as f32,
+                    (3 + rng.next_u64() % 6) as u32,
+                )
+            } else if p_roll < 0.82 {
+                (
+                    PlanetKind::RingedGasGiant,
+                    rng.uniform(6.2, 10.8) as f32,
+                    (4 + rng.next_u64() % 6) as u32,
+                )
+            } else {
+                (
+                    PlanetKind::RockySuperEarth,
+                    rng.uniform(1.40, 2.15) as f32,
+                    (1 + rng.next_u64() % 3) as u32,
+                )
+            }
+        } else {
+            // Outer ice giant & Kuiper dwarf zone (Uranus / Neptune / Pluto analogues):
+            if p_roll < 0.40 {
+                (
+                    PlanetKind::IceGiant,
+                    rng.uniform(3.1, 4.8) as f32,
+                    (1 + rng.next_u64() % 5) as u32,
+                )
+            } else if p_roll < 0.76 {
+                (
+                    PlanetKind::RingedIceGiant,
+                    rng.uniform(3.3, 5.1) as f32,
+                    (2 + rng.next_u64() % 5) as u32,
+                )
+            } else if p_roll < 0.88 {
+                (
+                    PlanetKind::RingedGasGiant,
+                    rng.uniform(5.5, 8.8) as f32,
+                    (3 + rng.next_u64() % 5) as u32,
+                )
+            } else {
+                (
+                    PlanetKind::IcyDwarf,
+                    rng.uniform(0.24, 0.58) as f32,
+                    (rng.next_u64() % 2) as u32,
+                )
+            }
+        };
+
+        let orbit_angle_rad = rng.uniform(0.3, 2.0 * PI - 0.3) as f32;
+        planets.push(SolarSystemPlanet {
+            index: idx as u32,
+            orbit_au,
+            orbital_period_days: 365.25
+                * (orbit_au.powi(3) / home_star.mass_solar.max(0.08)).sqrt(),
+            radius_earth,
+            kind,
+            has_rings: kind.has_rings(),
+            moon_count,
+            is_home_world: idx == hz_slot,
+            apparent_mag: 0.0,
+            orbit_angle_rad,
+            sky_dir: [1.0, 0.0, 0.0],
+            rgb: kind.default_rgb(),
+        });
+    }
+
+    recompute_planet_visibility_from_home(&mut planets, home_star, ecliptic_pole);
+    planets
+}
+
+/// Find the planet in `planets` that is the closest match to the simulated planet
+/// (matching proximity to `home_star.habitable_au`, terrestrial rocky nature, and `sim_radius_km`),
+/// substitute the simulated planet into that orbital slot, recompute sibling planet magnitudes,
+/// and return the substituted planet's 0-based index.
+pub fn substitute_simulated_planet(
+    planets: &mut [SolarSystemPlanet],
+    home_star: &HomeStar,
+    sim_radius_km: f32,
+    sim_land_pct: u32,
+    sim_moon_count: u32,
+    ecliptic_pole: Vec3,
+) -> usize {
+    if planets.is_empty() {
+        return 0;
+    }
+    let sim_radius_earth = (sim_radius_km / 6371.0).clamp(0.25, 2.5);
+    let target_au = home_star.habitable_au.max(0.04);
+
+    let mut best_idx = 0usize;
+    let mut best_score = f32::INFINITY;
+    for (idx, p) in planets.iter().enumerate() {
+        let orbit_diff = (p.orbit_au.max(0.01) / target_au).ln().abs();
+        let rad_diff = (p.radius_earth.max(0.1) / sim_radius_earth).ln().abs();
+        let type_penalty = if p.kind.is_rocky() { 0.0 } else { 3.5 };
+        let score = 2.6 * orbit_diff + 1.1 * rad_diff + type_penalty;
+        if score < best_score {
+            best_score = score;
+            best_idx = idx;
+        }
+    }
+
+    for p in planets.iter_mut() {
+        p.is_home_world = false;
+    }
+
+    let sim_kind = if sim_radius_earth >= 1.32 {
+        PlanetKind::RockySuperEarth
+    } else if sim_land_pct >= 65 {
+        PlanetKind::RockyDesert
+    } else if sim_land_pct == 0 {
+        PlanetKind::RockyCloudy
+    } else {
+        PlanetKind::RockyTemperate
+    };
+
+    let home = &mut planets[best_idx];
+    home.is_home_world = true;
+    home.radius_earth = sim_radius_earth;
+    home.moon_count = sim_moon_count;
+    home.kind = sim_kind;
+    home.has_rings = false;
+    home.rgb = sim_kind.default_rgb();
+
+    recompute_planet_visibility_from_home(planets, home_star, ecliptic_pole);
+    best_idx
+}
+
+/// Format a concise multi-line summary of the planets in a solar system.
+pub fn format_solar_system_summary(planets: &[SolarSystemPlanet]) -> String {
+    planets
+        .iter()
+        .map(|p| p.summary_entry())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 /// Interactive Sun, Plausible Galaxy & Celestial Sphere Star Map model (`SunSandbox`).
 pub struct SunSandbox {
     grid: SphericalGrid,
@@ -826,6 +1309,8 @@ pub struct SunSandbox {
     optics: PlanetaryOptics,
     is_real_hipparcos: bool,
     home_star: HomeStar,
+    planets: Vec<SolarSystemPlanet>,
+    home_planet_index: usize,
     stars: Vec<CelestialStar>,
     /// Unit normal of the galactic plane in the planet's sky coordinates.
     galactic_pole: Vec3,
@@ -865,6 +1350,8 @@ impl SunSandbox {
             optics,
             is_real_hipparcos: false,
             home_star: sol,
+            planets: Vec::new(),
+            home_planet_index: 0,
             stars: Vec::with_capacity(6000),
             galactic_pole: [0.0, 0.0, 1.0],
             galactic_center_dir: [1.0, 0.0, 0.0],
@@ -904,6 +1391,22 @@ impl SunSandbox {
 
     pub fn optics(&self) -> &PlanetaryOptics {
         &self.optics
+    }
+
+    pub fn planets(&self) -> &[SolarSystemPlanet] {
+        &self.planets
+    }
+
+    pub fn planet_count(&self) -> usize {
+        self.planets.len()
+    }
+
+    pub fn home_planet_index(&self) -> usize {
+        self.home_planet_index
+    }
+
+    pub fn planets_summary_text(&self) -> String {
+        format_solar_system_summary(&self.planets)
     }
 
     /// Update the planet's atmospheric gas composition (`0..=5` explicit, or `99` for random)
@@ -1012,6 +1515,22 @@ impl SunSandbox {
         // 4. Generate 6,000 surrounding naked-eye stars in the planet's sky:
         self.generate_surrounding_starmap(6000);
         self.build_constellation_edges();
+
+        // 5. Generate the planetary system around the Home Star and substitute the simulated home world:
+        self.planets = generate_solar_system_with_rng(
+            &mut self.rng,
+            &self.home_star,
+            self.ecliptic_pole,
+            false,
+        );
+        self.home_planet_index = substitute_simulated_planet(
+            &mut self.planets,
+            &self.home_star,
+            6400.0,
+            29,
+            1,
+            self.ecliptic_pole,
+        );
     }
 
     /// Load the real ESA Hipparcos naked-eye star catalogue (`5,179` stars around Sol, `starmap.py r`).
@@ -1075,6 +1594,20 @@ impl SunSandbox {
         }
         self.build_galaxy_particles();
         self.build_constellation_edges();
+        self.planets = generate_solar_system_with_rng(
+            &mut self.rng,
+            &self.home_star,
+            self.ecliptic_pole,
+            true,
+        );
+        self.home_planet_index = substitute_simulated_planet(
+            &mut self.planets,
+            &self.home_star,
+            6400.0,
+            29,
+            1,
+            self.ecliptic_pole,
+        );
     }
 
     fn sample_home_star_galactic_position(&mut self) -> [f32; 3] {
@@ -1696,6 +2229,21 @@ impl SunSandbox {
                 out.extend_from_slice(&[hx, hy, hz, 0.15, 1.0, 0.45, 7.5]);
                 out
             }
+            "solar_system" => {
+                let mut out = Vec::with_capacity((self.planets.len() + 1) * 7);
+                let sr = self.home_star.rgb;
+                // Central Home Star marker at (0, 0, 0):
+                out.extend_from_slice(&[0.0, 0.0, 0.0, sr[0], sr[1], sr[2], 11.5]);
+                let np = self.planets.len().max(1);
+                for (idx, p) in self.planets.iter().enumerate() {
+                    let r_norm = 0.18 + 0.70 * ((idx as f32) / ((np - 1).max(1) as f32));
+                    let x = r_norm * p.orbit_angle_rad.cos();
+                    let z = r_norm * p.orbit_angle_rad.sin();
+                    let sz = (4.2 + 2.2 * p.radius_earth.max(0.25).ln()).clamp(3.6, 10.0);
+                    out.extend_from_slice(&[x, 0.0, z, p.rgb[0], p.rgb[1], p.rgb[2], sz]);
+                }
+                out
+            }
             _ => {
                 let rad = 1.005f32;
                 let mut out = Vec::with_capacity(self.stars.len() * 7);
@@ -1721,6 +2269,51 @@ impl SunSandbox {
     ) -> Vec<f32> {
         let mut lines = Vec::new();
         let rad = 1.004f32;
+
+        if aspect == "solar_system" {
+            let np = self.planets.len().max(1);
+            let segs = 56;
+            for (idx, p) in self.planets.iter().enumerate() {
+                let r_norm = 0.18 + 0.70 * ((idx as f32) / ((np - 1).max(1) as f32));
+                for k in 0..segs {
+                    let a0 = (k as f32) * 2.0 * (PI as f32) / (segs as f32);
+                    let a1 = ((k + 1) as f32) * 2.0 * (PI as f32) / (segs as f32);
+                    lines.extend_from_slice(&[
+                        r_norm * a0.cos(),
+                        0.0,
+                        r_norm * a0.sin(),
+                        r_norm * a1.cos(),
+                        0.0,
+                        r_norm * a1.sin(),
+                    ]);
+                }
+                let px = r_norm * p.orbit_angle_rad.cos();
+                let pz = r_norm * p.orbit_angle_rad.sin();
+                if p.has_rings {
+                    let ring_r = 0.048f32;
+                    let rsegs = 24;
+                    for k in 0..rsegs {
+                        let a0 = (k as f32) * 2.0 * (PI as f32) / (rsegs as f32);
+                        let a1 = ((k + 1) as f32) * 2.0 * (PI as f32) / (rsegs as f32);
+                        lines.extend_from_slice(&[
+                            px + ring_r * a0.cos(),
+                            0.015 * a0.sin(),
+                            pz + ring_r * a0.sin(),
+                            px + ring_r * a1.cos(),
+                            0.015 * a1.sin(),
+                            pz + ring_r * a1.sin(),
+                        ]);
+                    }
+                }
+                if p.is_home_world {
+                    let d = 0.055f32;
+                    lines.extend_from_slice(&[px - d, 0.0, pz, px + d, 0.0, pz]);
+                    lines.extend_from_slice(&[px, -d, pz, px, d, pz]);
+                    lines.extend_from_slice(&[px, 0.0, pz - d, px, 0.0, pz + d]);
+                }
+            }
+            return lines;
+        }
 
         if aspect == "galaxy" {
             // Draw galactocentric crosshair & orbit circle through the Home Star's galactic position:
@@ -1828,6 +2421,13 @@ impl SunSandbox {
                     tile_star_rgb[tid] = s.rgb;
                 }
             }
+            // Also project naked-eye sibling planets onto the celestial sphere along the ecliptic:
+            for pl in &self.planets {
+                if pl.is_naked_eye_visible() {
+                    let tid = self.tree.nearest(pl.sky_dir);
+                    tile_star_rgb[tid] = pl.rgb;
+                }
+            }
         }
 
         let selected_star_tile = selected_tile.and_then(|sel| {
@@ -1861,6 +2461,67 @@ impl SunSandbox {
                 "galaxy" => {
                     // Subtle deep-space background for the 3D galaxy cloud:
                     [0.02, 0.025, 0.045]
+                }
+                "solar_system" => {
+                    // Render the planetary system on the sphere:
+                    // North pole cap (`z > 0.86`) = the Home Sun; concentric latitude bands from north to south
+                    // represent each planet's orbit, with a 3D planet disc (and rings if `has_rings`) at its orbital longitude:
+                    if p[2] > 0.87 {
+                        let sr = self.home_star.rgb;
+                        [sr[0] * 0.95, sr[1] * 0.95, sr[2] * 0.95]
+                    } else {
+                        let np = self.planets.len().max(1);
+                        let mut col = [0.02f32, 0.026, 0.048];
+                        for (idx, pl) in self.planets.iter().enumerate() {
+                            let band_z = 0.72 - 1.44 * ((idx as f64) / ((np - 1).max(1) as f64));
+                            let r_xy = (1.0 - band_z * band_z).max(0.02).sqrt();
+                            let p_center = normal([
+                                r_xy * (pl.orbit_angle_rad as f64).cos(),
+                                r_xy * (pl.orbit_angle_rad as f64).sin(),
+                                band_z,
+                            ]);
+                            let ang_dist = dot(p, p_center).clamp(-1.0, 1.0).acos() as f32;
+                            let disc_rad = (0.065 + 0.022 * pl.radius_earth.max(0.25).ln()).clamp(0.055, 0.135);
+                            if ang_dist <= disc_rad {
+                                // Inside the planet's disc — render bands for gas/ice giants or continents for home world:
+                                let stripe = ((p[2] * 48.0) as f32).sin() * 0.12;
+                                if pl.is_home_world {
+                                    col = [
+                                        (0.20 + 0.55 * self.optics.plant_foliage_rgb[0]).clamp(0.0, 1.0),
+                                        (0.32 + 0.55 * self.optics.plant_foliage_rgb[1]).clamp(0.0, 1.0),
+                                        (0.55 + 0.35 * self.optics.sky_zenith_rgb[2]).clamp(0.0, 1.0),
+                                    ];
+                                } else {
+                                    col = [
+                                        (pl.rgb[0] + stripe).clamp(0.05, 1.0),
+                                        (pl.rgb[1] + stripe * 0.8).clamp(0.05, 1.0),
+                                        (pl.rgb[2] + stripe * 0.5).clamp(0.05, 1.0),
+                                    ];
+                                }
+                                break;
+                            } else if pl.has_rings
+                                && ang_dist > disc_rad * 1.18
+                                && ang_dist <= disc_rad * 1.85
+                                && (p[2] - band_z).abs() < 0.038
+                            {
+                                // Prominent ring system around `RingedGasGiant` / `RingedIceGiant`:
+                                col = [
+                                    (pl.rgb[0] * 0.92 + 0.08).clamp(0.0, 1.0),
+                                    (pl.rgb[1] * 0.88 + 0.08).clamp(0.0, 1.0),
+                                    (pl.rgb[2] * 0.82 + 0.08).clamp(0.0, 1.0),
+                                ];
+                                break;
+                            } else if (p[2] - band_z).abs() < 0.012 {
+                                // Orbital track line:
+                                col = if pl.is_home_world {
+                                    [0.14, 0.48, 0.32]
+                                } else {
+                                    [0.08, 0.12, 0.22]
+                                };
+                            }
+                        }
+                        col
+                    }
                 }
                 "sky_plants" => {
                     // 3D Exoplanet view showing Daytime Sky & Ocean scattering, Photosynthetic Plant Foliage
@@ -2048,7 +2709,7 @@ impl SunSandbox {
             .map(|(i, _)| i)
     }
 
-    /// One-line summary of the generated galaxy, chosen Home Star, and Sky/Sunset/Plant optics.
+    /// One-line summary of the generated galaxy, chosen Home Star, Planetary System, and Sky/Sunset/Plant optics.
     pub fn summary_line(&self) -> String {
         let hs = &self.home_star;
         let op = &self.optics;
@@ -2057,11 +2718,13 @@ impl SunSandbox {
             + hs.gal_pos_kpc[2] * hs.gal_pos_kpc[2])
             .sqrt();
         format!(
-            "Sun: {} ({:.0} K, B-V {:+.2}, {:.2} R☉) | Sky: {} | Sunset: {} | Plants: {} | {} (R={:.1} kpc)",
+            "Sun: {} ({:.0} K, B-V {:+.2}, {:.2} R☉) | Planets: {} (Home #{}) | Sky: {} | Sunset: {} | Plants: {} | {} (R={:.1} kpc)",
             hs.spectral_type,
             hs.temp_k,
             hs.bv_color,
             hs.radius_solar,
+            self.planets.len(),
+            self.home_planet_index + 1,
             op.sky_color_name,
             op.sunset_color_name,
             op.plant_color_name,
@@ -2071,7 +2734,7 @@ impl SunSandbox {
     }
 
     /// Detailed multi-line inspection of the selected star on the celestial sphere, the Home Sun,
-    /// and the planet's Sky, Sunset, and Photosynthetic Plant Foliage colors.
+    /// the generated Planetary System, and the planet's Sky, Sunset, and Photosynthetic Plant Foliage colors.
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
         let hs = &self.home_star;
         let op = &self.optics;
@@ -2084,12 +2747,14 @@ impl SunSandbox {
         let st_lum = 10.0_f32.powf((4.83 - st.abs_mag) / 2.5);
         let gal_lat_deg = (90.0 - (st.galactic_offset_rad as f64 * 180.0 / PI)).abs();
         let cat_prefix = if self.is_real_hipparcos { "HIP" } else { "Star #" };
+        let sys_summary = self.planets_summary_text();
 
         format!(
             "Selected Night-Sky Star: {cat_prefix}{} — {letter}{sub}{lum_cls} ({lum_desc})\n\
              Apparent Magnitude: m_V = {:+.2} | Absolute Magnitude: M_V = {:+.2} ({:.1} L☉)\n\
              Distance: {:.1} light-years ({:.1} pc) | Color Index: B-V = {:+.2} (T_eff ≈ {:.0} K) | Offset from Galactic Plane: {:.1}°\n\
              Home Sun: {} ({}) — {:.0} K, {:.2} M☉, {:.2} R☉, {:.2} L☉ | Habitable Orbit: {:.2} AU ({:.0} Earth days/yr, Solar Tides {:.2}x)\n\
+             Solar System ({} Planets): {}\n\
              Atmosphere: {} — Daytime Sky: {} ({})\n\
              Sunset: {} ({})\n\
              Main Plant Foliage: {} — {}",
@@ -2111,6 +2776,8 @@ impl SunSandbox {
             hs.habitable_au,
             hs.orbital_period_days,
             hs.solar_tide_factor,
+            self.planets.len(),
+            sys_summary,
             self.atmosphere.name(),
             op.sky_color_name,
             op.sky_mechanism,
@@ -2195,8 +2862,12 @@ mod tests {
         assert!(op_mars.sky_zenith_rgb[0] > op_mars.sky_zenith_rgb[2]);
         assert!(op_mars.sunset_rgb[2] > op_mars.sunset_rgb[0]);
 
-        // Verify 3D "sky_plants" aspect renders all 7,292 tiles:
+        // Verify 3D "sky_plants" and "solar_system" aspects render all 7,292 tiles:
         let sky_plant_colors = sb.tile_colors_rgb("sky_plants", false, Some(0));
         assert_eq!(sky_plant_colors.len(), sb.tile_count() * 3);
+        let solar_sys_colors = sb.tile_colors_rgb("solar_system", false, Some(0));
+        assert_eq!(solar_sys_colors.len(), sb.tile_count() * 3);
+        assert!(sb.planet_count() >= 4);
+        assert!(sb.planets()[sb.home_planet_index()].is_home_world);
     }
 }

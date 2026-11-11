@@ -3208,6 +3208,7 @@ function buildWorldInfo(view) {
     sunsetColorName: s.sunset_color_name(),
     plantColorCss: rgbFloatToCss(s.plant_foliage_rgb(), 36, 138, 41),
     plantColorName: s.plant_color_name(),
+    planetsSummaryText: s.planets_summary_text(),
     isRunning: Boolean(view.isRunning),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
     selectedReport,
@@ -4103,9 +4104,9 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
     starGeometry.setAttribute("position", new THREE.Float32BufferAttribute(posArr, 3));
     starGeometry.setAttribute("customColor", new THREE.Float32BufferAttribute(colArr, 3));
     starGeometry.setAttribute("size", new THREE.Float32BufferAttribute(sizeArr, 1));
-    const isGalaxy = view.aspect === "galaxy";
-    starMaterial.uniforms.cullBackface.value = isGalaxy ? 0.0 : 1.0;
-    view.cullStarBackface = !isGalaxy;
+    const is3dInterior = view.aspect === "galaxy" || view.aspect === "solar_system";
+    starMaterial.uniforms.cullBackface.value = is3dInterior ? 0.0 : 1.0;
+    view.cullStarBackface = !is3dInterior;
     starPoints.visible = true;
 
     const lineSegs = session.overlay_line_segments(
@@ -4118,12 +4119,12 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
         "position",
         new THREE.Float32BufferAttribute(lineSegs, 3)
       );
-      arrowMaterial.color.setHex(isGalaxy ? 0x34d399 : 0x60a5fa);
-      arrowMaterial.opacity = isGalaxy ? 0.72 : 0.42;
-      view.arrowStrokeStyle = isGalaxy
+      arrowMaterial.color.setHex(is3dInterior ? 0x34d399 : 0x60a5fa);
+      arrowMaterial.opacity = is3dInterior ? 0.72 : 0.42;
+      view.arrowStrokeStyle = is3dInterior
         ? "rgba(52, 211, 153, 0.72)"
         : "rgba(96, 165, 250, 0.42)";
-      view.disableArrowBackfaceCull = isGalaxy;
+      view.disableArrowBackfaceCull = is3dInterior;
       arrowLines.visible = true;
     } else {
       arrowLines.visible = false;
@@ -4166,6 +4167,7 @@ function buildSunInfo(view) {
     plantHighlightCss: rgbFloatToCss(s.plant_highlight_rgb(), 82, 189, 71),
     plantColorName: s.plant_color_name(),
     plantPigmentDesc: s.plant_pigment_desc(),
+    planetsSummaryText: s.planets_summary_text(),
     summaryLine: s.summary_line(),
     selectedReport,
   };

@@ -171,6 +171,18 @@ impl WasmSunSession {
         self.sandbox.home_star().solar_tide_factor
     }
 
+    pub fn planet_count(&self) -> usize {
+        self.sandbox.planet_count()
+    }
+
+    pub fn home_planet_index(&self) -> usize {
+        self.sandbox.home_planet_index()
+    }
+
+    pub fn planets_summary_text(&self) -> String {
+        self.sandbox.planets_summary_text()
+    }
+
     pub fn summary_line(&self) -> String {
         self.sandbox.summary_line()
     }

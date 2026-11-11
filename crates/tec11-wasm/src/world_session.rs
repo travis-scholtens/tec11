@@ -223,6 +223,18 @@ impl WasmWorldSession {
         self.sim.optics().plant_color_name.clone()
     }
 
+    pub fn planet_count(&self) -> usize {
+        self.sim.solar_system().len()
+    }
+
+    pub fn home_planet_index(&self) -> usize {
+        self.sim.home_planet_index()
+    }
+
+    pub fn planets_summary_text(&self) -> String {
+        self.sim.planets_summary_text()
+    }
+
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
         self.sim.inspect_tile(tile_idx)
     }

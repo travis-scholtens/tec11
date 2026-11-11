@@ -14,6 +14,7 @@ use crate::population::{
 };
 use crate::prehistory::PrehistorySimulation;
 use crate::rivers::trace_coarse_rivers;
+use crate::sun_sky::{generate_solar_system_with_rng, HomeStar, SolarSystemPlanet};
 
 pub const HISTORY_YEARS_PER_TICK: u32 = 200;
 pub const HISTORY_MIN_RIVER_ELEV: f32 = 2.0;
@@ -173,6 +174,17 @@ impl LanguageRecord {
         moon_count: u32,
         rng: &mut Pcg64Mcg,
     ) -> Self {
+        Self::new_for_state_with_system(id, state_id, species_indices, moon_count, &[], rng)
+    }
+
+    pub fn new_for_state_with_system(
+        id: u32,
+        state_id: u32,
+        species_indices: &[usize],
+        moon_count: u32,
+        solar_system: &[SolarSystemPlanet],
+        rng: &mut Pcg64Mcg,
+    ) -> Self {
         let phonology = Language::generate(rng);
         let mut rec = Self {
             id,
@@ -198,7 +210,7 @@ impl LanguageRecord {
         for origin in rec.lexicon.values_mut() {
             origin.lang_name = lang_name.clone();
         }
-        // Celestial concepts: Sun, Moons (0..moon_count), and Planets (home world + classical naked-eye planets)
+        // Celestial concepts: Sun, Moons (0..moon_count), and Planets in the actual solar system
         rec.coin_concept(ConceptKey::Sun(0), rng);
         for m in 0..moon_count {
             if m == 0 || ((id + m) % 2 == 0) {
@@ -207,18 +219,35 @@ impl LanguageRecord {
                 rec.derive_concept(ConceptKey::Moon(0), ConceptKey::Moon(m), rng);
             }
         }
-        // Planet(0) = Home planet / world; Planet(1..=5) = classical naked-eye planets
-        rec.coin_concept(ConceptKey::Planet(0), rng);
-        rec.coin_concept(ConceptKey::Planet(1), rng);
-        rec.coin_concept(ConceptKey::Planet(2), rng);
-        if state_id % 2 == 0 {
-            rec.coin_concept(ConceptKey::Planet(3), rng);
-        }
-        if state_id % 3 == 0 {
-            rec.coin_concept(ConceptKey::Planet(4), rng);
-        }
-        if state_id % 4 == 0 {
-            rec.coin_concept(ConceptKey::Planet(5), rng);
+        if solar_system.is_empty() {
+            // Fallback when no solar system slice is supplied:
+            rec.coin_concept(ConceptKey::Planet(0), rng);
+            rec.coin_concept(ConceptKey::Planet(1), rng);
+            rec.coin_concept(ConceptKey::Planet(2), rng);
+            if state_id % 2 == 0 {
+                rec.coin_concept(ConceptKey::Planet(3), rng);
+            }
+            if state_id % 3 == 0 {
+                rec.coin_concept(ConceptKey::Planet(4), rng);
+            }
+            if state_id % 4 == 0 {
+                rec.coin_concept(ConceptKey::Planet(5), rng);
+            }
+        } else {
+            for p in solar_system {
+                if p.is_home_world || p.apparent_mag <= 1.8 {
+                    // The home planet itself and brilliant morning/evening stars or gas giants are named universally:
+                    rec.coin_concept(ConceptKey::Planet(p.index), rng);
+                } else if p.is_naked_eye_visible() {
+                    // Classical naked-eye wandering planets are named by astronomer traditions and shared across trade routes:
+                    if (state_id + p.index) % 2 == 0 {
+                        rec.coin_concept(ConceptKey::Planet(p.index), rng);
+                    }
+                } else if (state_id + p.index) % 3 == 0 {
+                    // Outer / dimmer planets in the system discovered by observant sky-watchers:
+                    rec.coin_concept(ConceptKey::Planet(p.index), rng);
+                }
+            }
         }
         for &sp_idx in species_indices {
             rec.coin_concept(ConceptKey::Species(sp_idx as u32), rng);
@@ -371,6 +400,7 @@ pub struct HistorySimulation {
     tree: PointTree,
     history_ticks: u32,
     moon_count: u32,
+    solar_system: Vec<SolarSystemPlanet>,
     settled_species: Vec<SettledSpecies>,
     tile_species: Vec<Vec<usize>>,
     rivers: Vec<Vec<usize>>,
@@ -400,8 +430,24 @@ impl HistorySimulation {
     }
 
     pub fn from_prehistory_with_moons(
+        prehistory: PrehistorySimulation,
+        moon_count: u32,
+        seed: u128,
+    ) -> Self {
+        let mut sys_rng = Pcg64Mcg::from_seed_u64(42);
+        let solar_system = generate_solar_system_with_rng(
+            &mut sys_rng,
+            &HomeStar::sol(),
+            [0.0, -0.398, 0.917],
+            true,
+        );
+        Self::from_prehistory_with_system(prehistory, moon_count, solar_system, seed)
+    }
+
+    pub fn from_prehistory_with_system(
         mut prehistory: PrehistorySimulation,
         moon_count: u32,
+        solar_system: Vec<SolarSystemPlanet>,
         seed: u128,
     ) -> Self {
         // Ensure prehistory has populated agricultural tiles if starting directly on Earth or an unpopulated planet.
@@ -434,6 +480,7 @@ impl HistorySimulation {
             tree,
             history_ticks: 0,
             moon_count,
+            solar_system,
             settled_species: Vec::new(),
             tile_species: vec![Vec::new(); num_fine],
             rivers: Vec::new(),
@@ -654,11 +701,12 @@ impl HistorySimulation {
             let lid = self.next_language_id;
             self.next_language_id += 1;
 
-            let lang = LanguageRecord::new_for_state_with_celestial(
+            let lang = LanguageRecord::new_for_state_with_system(
                 lid,
                 sid,
                 &self.tile_species[city_f],
                 self.moon_count,
+                &self.solar_system,
                 &mut self.rng,
             );
             self.languages.insert(lid, lang);
@@ -1234,11 +1282,11 @@ impl HistorySimulation {
                 for s in &related_states {
                     let s_lang = state_langs.get(s).copied().flatten();
                     concepts.insert(ConceptKey::State(*s), s_lang);
-                    // Share astronomical knowledge of outer wandering planets (`Planet(3..=5)`) with trading partners & neighbors
+                    // Share astronomical knowledge of all planets in `self.solar_system` across trading partners & neighbors:
                     if let Some(slid) = s_lang {
                         if let Some(slang) = self.languages.get(&slid) {
-                            for p_id in 3..=5 {
-                                let pk = ConceptKey::Planet(p_id);
+                            for p in &self.solar_system {
+                                let pk = ConceptKey::Planet(p.index);
                                 if slang.describes(pk) {
                                     concepts.entry(pk).or_insert(Some(slid));
                                 }
@@ -1257,14 +1305,18 @@ impl HistorySimulation {
                     }
                 }
 
-                // Native species and core celestial concepts (`Sun`, `Moons`, and `Planets`) in `state_id`
+                // Native species and core celestial concepts (`Sun`, `Moons`, and the actual `solar_system` planets) in `state_id`
                 let s_lang = state_langs.get(&state_id).copied().flatten();
                 concepts.entry(ConceptKey::Sun(0)).or_insert(s_lang);
                 for m in 0..self.moon_count {
                     concepts.entry(ConceptKey::Moon(m)).or_insert(s_lang);
                 }
-                for p in 0..=2 {
-                    concepts.entry(ConceptKey::Planet(p)).or_insert(s_lang);
+                for p in &self.solar_system {
+                    if p.is_home_world || p.is_naked_eye_visible() {
+                        concepts
+                            .entry(ConceptKey::Planet(p.index))
+                            .or_insert(s_lang);
+                    }
                 }
                 for &sp in &native {
                     concepts.insert(ConceptKey::Species(sp as u32), s_lang);
@@ -2067,6 +2119,14 @@ impl HistorySimulation {
         self.tile_states.get(&tile_idx).copied()
     }
 
+    pub fn solar_system(&self) -> &[SolarSystemPlanet] {
+        &self.solar_system
+    }
+
+    pub fn set_solar_system(&mut self, solar_system: Vec<SolarSystemPlanet>) {
+        self.solar_system = solar_system;
+    }
+
     /// Detailed multi-line inspection report for a clicked display face and its State (`historypresenter.py`).
     pub fn inspect_tile(&self, display_idx: usize) -> String {
         if display_idx >= self.terrain.display_faces.len() {
@@ -2213,11 +2273,11 @@ impl HistorySimulation {
             }
         ));
 
-        // Sample lexicon from primary language (including celestial Sun, Moons & Planets)
+        // Sample lexicon from primary language (including celestial Sun, Moons & actual Solar System Planets)
         if let Some(lid) = dom_lang {
             if let Some(lang) = self.languages.get(&lid) {
                 lines.push(format!("--- {} Lexicon ---", lang.name()));
-                for (&ck, orig) in lang.lexicon.iter().take(14) {
+                for (&ck, orig) in lang.lexicon.iter().take(20) {
                     let gloss = match ck {
                         ConceptKey::Sun(0) => "sun (host star)".to_string(),
                         ConceptKey::Sun(id) => format!("sun #{}", id + 1),
@@ -2234,15 +2294,11 @@ impl HistorySimulation {
                                 }
                             }
                         }
-                        ConceptKey::Planet(p) => match p {
-                            0 => "planet #1 (home world)".to_string(),
-                            1 => "planet #2 (inner swift)".to_string(),
-                            2 => "planet #3 (morning star)".to_string(),
-                            3 => "planet #4 (red outer)".to_string(),
-                            4 => "planet #5 (giant planet)".to_string(),
-                            5 => "planet #6 (ringed outer)".to_string(),
-                            _ => format!("planet #{}", p + 1),
-                        },
+                        ConceptKey::Planet(p) => self
+                            .solar_system
+                            .get(p as usize)
+                            .map(|pl| pl.lexicon_gloss())
+                            .unwrap_or_else(|| format!("planet #{}", p + 1)),
                         ConceptKey::Species(sp_id) => self
                             .settled_species
                             .get(sp_id as usize)
