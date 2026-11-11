@@ -1354,6 +1354,13 @@ mkApp = do
                           , onClick: capture_ (setScreen WorldScreen)
                           , children: [ R.text "Start (World Simulation)" ]
                           }
+                      , R.button
+                          { id: "grid-btn"
+                          , className: "menu-btn"
+                          , disabled: not wasmReady
+                          , onClick: capture_ (setScreen GridScreen)
+                          , children: [ R.text "Grid" ]
+                          }
                       , R.div
                           { className: "menu-accordion"
                           , children:
@@ -1361,7 +1368,7 @@ mkApp = do
                                     { className: "menu-accordion-header"
                                     , onClick: capture_ (setAccGeoOpen (not accGeoOpen))
                                     , children:
-                                        [ R.span { children: [ R.text "Geology & Terrain" ] }
+                                        [ R.span { children: [ R.text "Continents" ] }
                                         , R.span { children: [ R.text (if accGeoOpen then "▼" else "▶") ] }
                                         ]
                                     }
@@ -1372,13 +1379,6 @@ mkApp = do
                                           { className: "menu-accordion-body"
                                           , children:
                                               [ R.button
-                                                  { id: "grid-btn"
-                                                  , className: "menu-btn"
-                                                  , disabled: not wasmReady
-                                                  , onClick: capture_ (setScreen GridScreen)
-                                                  , children: [ R.text "Grid" ]
-                                                  }
-                                              , R.button
                                                   { id: "pangea-btn"
                                                   , className: "menu-btn"
                                                   , disabled: not wasmReady
@@ -1398,13 +1398,6 @@ mkApp = do
                                                   , disabled: not wasmReady
                                                   , onClick: capture_ (setScreen MoveScreen)
                                                   , children: [ R.text "Move" ]
-                                                  }
-                                              , R.button
-                                                  { id: "erosion-btn"
-                                                  , className: "menu-btn"
-                                                  , disabled: not wasmReady
-                                                  , onClick: capture_ (setScreen ErosionScreen)
-                                                  , children: [ R.text "Erosion" ]
                                                   }
                                               , R.button
                                                   { id: "tectonics-btn"
@@ -1434,7 +1427,7 @@ mkApp = do
                                     { className: "menu-accordion-header"
                                     , onClick: capture_ (setAccBioOpen (not accBioOpen))
                                     , children:
-                                        [ R.span { children: [ R.text "Climate, Rivers & Biosphere" ] }
+                                        [ R.span { children: [ R.text "Weather" ] }
                                         , R.span { children: [ R.text (if accBioOpen then "▼" else "▶") ] }
                                         ]
                                     }
@@ -1445,6 +1438,13 @@ mkApp = do
                                           { className: "menu-accordion-body"
                                           , children:
                                               [ R.button
+                                                  { id: "erosion-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen ErosionScreen)
+                                                  , children: [ R.text "Erosion" ]
+                                                  }
+                                              , R.button
                                                   { id: "climate-btn"
                                                   , className: "menu-btn"
                                                   , disabled: not wasmReady
@@ -1458,12 +1458,50 @@ mkApp = do
                                                   , onClick: capture_ (setScreen RiversScreen)
                                                   , children: [ R.text "Rivers" ]
                                                   }
-                                              , R.button
-                                                  { id: "lifeforms-btn"
+                                              ]
+                                          }
+                                      ]
+                                    else
+                                      []
+                              )
+                          }
+                      , R.div
+                          { className: "menu-accordion"
+                          , children:
+                              ( [ R.button
+                                    { className: "menu-accordion-header"
+                                    , onClick: capture_ (setAccAstroOpen (not accAstroOpen))
+                                    , children:
+                                        [ R.span { children: [ R.text "Space" ] }
+                                        , R.span { children: [ R.text (if accAstroOpen then "▼" else "▶") ] }
+                                        ]
+                                    }
+                                ]
+                                  <>
+                                    if accAstroOpen then
+                                      [ R.div
+                                          { className: "menu-accordion-body"
+                                          , children:
+                                              [ R.button
+                                                  { id: "sun-btn"
                                                   , className: "menu-btn"
                                                   , disabled: not wasmReady
-                                                  , onClick: capture_ (setScreen LifeformsScreen)
-                                                  , children: [ R.text "Lifeforms" ]
+                                                  , onClick: capture_ (setScreen SunScreen)
+                                                  , children: [ R.text "Sun" ]
+                                                  }
+                                              , R.button
+                                                  { id: "moon-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen MoonScreen)
+                                                  , children: [ R.text "Moons" ]
+                                                  }
+                                              , R.button
+                                                  { id: "meteor-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen MeteorScreen)
+                                                  , children: [ R.text "Meteors" ]
                                                   }
                                               ]
                                           }
@@ -1479,7 +1517,7 @@ mkApp = do
                                     { className: "menu-accordion-header"
                                     , onClick: capture_ (setAccHistOpen (not accHistOpen))
                                     , children:
-                                        [ R.span { children: [ R.text "People, Prehistory, Travel & History" ] }
+                                        [ R.span { children: [ R.text "Life" ] }
                                         , R.span { children: [ R.text (if accHistOpen then "▼" else "▶") ] }
                                         ]
                                     }
@@ -1490,6 +1528,13 @@ mkApp = do
                                           { className: "menu-accordion-body"
                                           , children:
                                               [ R.button
+                                                  { id: "lifeforms-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen LifeformsScreen)
+                                                  , children: [ R.text "Lifeforms" ]
+                                                  }
+                                              , R.button
                                                   { id: "population-btn"
                                                   , className: "menu-btn"
                                                   , disabled: not wasmReady
@@ -1530,51 +1575,6 @@ mkApp = do
                                                   , disabled: not wasmReady
                                                   , onClick: capture_ (setScreen HistoryScreen)
                                                   , children: [ R.text "History" ]
-                                                  }
-                                              ]
-                                          }
-                                      ]
-                                    else
-                                      []
-                              )
-                          }
-                      , R.div
-                          { className: "menu-accordion"
-                          , children:
-                              ( [ R.button
-                                    { className: "menu-accordion-header"
-                                    , onClick: capture_ (setAccAstroOpen (not accAstroOpen))
-                                    , children:
-                                        [ R.span { children: [ R.text "Astronomy, Moons & Impacts" ] }
-                                        , R.span { children: [ R.text (if accAstroOpen then "▼" else "▶") ] }
-                                        ]
-                                    }
-                                ]
-                                  <>
-                                    if accAstroOpen then
-                                      [ R.div
-                                          { className: "menu-accordion-body"
-                                          , children:
-                                              [ R.button
-                                                  { id: "moon-btn"
-                                                  , className: "menu-btn"
-                                                  , disabled: not wasmReady
-                                                  , onClick: capture_ (setScreen MoonScreen)
-                                                  , children: [ R.text "Moons" ]
-                                                  }
-                                              , R.button
-                                                  { id: "meteor-btn"
-                                                  , className: "menu-btn"
-                                                  , disabled: not wasmReady
-                                                  , onClick: capture_ (setScreen MeteorScreen)
-                                                  , children: [ R.text "Meteors" ]
-                                                  }
-                                              , R.button
-                                                  { id: "sun-btn"
-                                                  , className: "menu-btn"
-                                                  , disabled: not wasmReady
-                                                  , onClick: capture_ (setScreen SunScreen)
-                                                  , children: [ R.text "Sun" ]
                                                   }
                                               ]
                                           }
