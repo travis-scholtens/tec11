@@ -3,6 +3,7 @@ use tec11_math_grid::{normal, PointTree, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::population::{identify_continents_and_oceans, PlanetaryGeography};
+use crate::rivers::trace_coarse_rivers;
 use crate::tectonics::TectonicsSimulation;
 
 const ANIMALS_TSV: &str = include_str!("../data/animals.tsv");
@@ -101,16 +102,45 @@ fn extract_json_range(json_str: &str, key: &str) -> Option<ValueRange> {
     Some(ValueRange::new(min, max))
 }
 
+fn extract_json_bool(json_str: &str, key: &str) -> Option<bool> {
+    let needle = format!("\"{key}\":");
+    let pos = json_str.find(&needle)?;
+    let rest = json_str[pos + needle.len()..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn extract_json_str<'a>(json_str: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":");
+    let pos = json_str.find(&needle)?;
+    let rest = &json_str[pos + needle.len()..];
+    let first_quote = rest.find('"')?;
+    let after_first = &rest[first_quote + 1..];
+    let second_quote = after_first.find('"')?;
+    Some(after_first[..second_quote].trim())
+}
+
 fn normalize_temp(celsius_range: ValueRange) -> ValueRange {
     celsius_range.map(|c| (c + 25.0) / 75.0)
 }
 
-fn normalize_precip(cm_range: ValueRange, num_seasons: f32) -> ValueRange {
-    cm_range.map(|cm| cm / num_seasons / 30.0)
+fn normalize_precip(cm_range: ValueRange) -> ValueRange {
+    ValueRange::new(
+        (cm_range.min / 200.0).min(0.68),
+        (cm_range.max + 20.0) / 110.0,
+    )
 }
 
-fn normalize_sun(hours_range: ValueRange, num_seasons: f32) -> ValueRange {
-    hours_range.map(|h| h / num_seasons / 400.0)
+fn normalize_sun(hours_range: ValueRange) -> ValueRange {
+    ValueRange::new(
+        ((hours_range.min - 400.0).max(0.0) / 3400.0).min(0.65),
+        (hours_range.max + 600.0) / 2600.0,
+    )
 }
 
 /// Settle all flora and fauna from `animals.tsv` and `plants.tsv` onto the given planet's
@@ -121,14 +151,46 @@ pub fn settle_species_on_climate(
 ) -> SettledBiosphere {
     let n = elevations.len();
     let num_seasons = climate_model.season_count().clamp(1, 8);
-    let num_seasons_f = num_seasons as f32;
     let all_seasons_mask: u8 = if num_seasons >= 8 {
         0xFF
     } else {
         (1u8 << num_seasons) - 1
     };
 
+    let grid = climate_model.grid();
+    let adj = grid.adjacency();
+    let geography = identify_continents_and_oceans(grid, elevations);
+
     let land_tiles: Vec<usize> = (0..n).filter(|&t| elevations[t] > 0.0).collect();
+    let sea_tiles: Vec<usize> = (0..n).filter(|&t| elevations[t] <= 0.0).collect();
+
+    let koeppen_ids = climate_model.koeppen_ids();
+    let mean_precip: Vec<f32> = climate_model
+        .classifications()
+        .iter()
+        .map(|c| c.mean_precipitation as f32)
+        .collect();
+    let rivers = trace_coarse_rivers(elevations, &mean_precip, &koeppen_ids, &adj, 2.0, 0.25);
+    let mut is_river_or_wetland = vec![false; n];
+    for r in rivers {
+        for t in r {
+            if t < n {
+                is_river_or_wetland[t] = true;
+            }
+        }
+    }
+    for &t in &land_tiles {
+        if mean_precip.get(t).copied().unwrap_or(0.0) >= 0.45
+            || adj[t].iter().any(|&nb| nb < n && elevations[nb] <= 0.0)
+        {
+            is_river_or_wetland[t] = true;
+        }
+    }
+    let freshwater_tiles: Vec<usize> = land_tiles
+        .iter()
+        .copied()
+        .filter(|&t| is_river_or_wetland[t])
+        .collect();
 
     // Flatten seasonal climate arrays `[season * n + tile]` for cache-friendly inner loops
     let mut temp_s = vec![0.0f32; num_seasons * n];
@@ -148,7 +210,7 @@ pub fn settle_species_on_climate(
     let mut seasonal_plant_counts = vec![vec![0u16; n]; num_seasons];
     let mut tile_all_species = vec![Vec::new(); n];
 
-    // 1. Settle Animals (`findregions`, `findhibernationregions`, `findmigratorypatterns`)
+    // 1. Settle Animals (combining year-round core, hibernation peripheral range, and seasonal migration)
     for line in ANIMALS_TSV.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -163,103 +225,131 @@ pub fn settle_species_on_climate(
         let Some(p_range) = extract_json_range(json_part, "precipitationRange") else {
             continue;
         };
+        let sealife = extract_json_bool(json_part, "sealife").unwrap_or(false);
+        let animal_kind = extract_json_str(json_part, "kind").unwrap_or("small mammal");
+        let is_obligate_freshwater = !sealife
+            && matches!(
+                animal_kind,
+                "small fish" | "large fish" | "small amphibian" | "large amphibian"
+            );
+
         let tol = ClimateTolerance {
             temp_norm: normalize_temp(t_range),
-            precip_norm: normalize_precip(p_range, num_seasons_f),
-            sun_norm: ValueRange::new(0.0, 1.0),
+            precip_norm: if sealife {
+                ValueRange::new(0.0, 2.0)
+            } else {
+                normalize_precip(p_range)
+            },
+            sun_norm: ValueRange::new(0.0, 2.0),
         };
 
-        // Strategy 1: Year-round (`findregions`: all seasons in range)
-        let year_round_tiles: Vec<TileSeasonPresence> = land_tiles
-            .iter()
-            .copied()
-            .filter(|&t| {
-                (0..num_seasons).all(|s| {
-                    let idx = s * n + t;
-                    tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx])
-                })
-            })
-            .map(|tile| TileSeasonPresence {
-                tile,
-                season_mask: all_seasons_mask,
-            })
-            .collect();
-
-        let chosen_tiles = if !year_round_tiles.is_empty() {
-            Some(year_round_tiles)
+        let candidate_tiles: &[usize] = if sealife {
+            &sea_tiles
+        } else if is_obligate_freshwater {
+            &freshwater_tiles
         } else {
-            // Strategy 2: Hibernation (`findhibernationregions`)
-            let winter_range =
-                ValueRange::new((tol.temp_norm.min - 0.01).clamp(0.0, 0.3), tol.temp_norm.min);
-            let hib_tiles: Vec<TileSeasonPresence> = land_tiles
-                .iter()
-                .copied()
-                .filter_map(|t| {
-                    let (mask, winter_ok) =
-                        (0..num_seasons).fold((0u8, true), |(mask, winter_ok), s| {
-                            let idx = s * n + t;
-                            if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
-                                (mask | (1u8 << s), winter_ok)
-                            } else {
-                                (mask, winter_ok && winter_range.contains(temp_s[idx]))
-                            }
-                        });
-                    (winter_ok && mask != 0 && mask != all_seasons_mask).then_some(
-                        TileSeasonPresence {
-                            tile: t,
-                            season_mask: mask,
-                        },
-                    )
-                })
-                .collect();
-            if !hib_tiles.is_empty() {
-                Some(hib_tiles)
+            &land_tiles
+        };
+
+        let winter_range = ValueRange::new(
+            (tol.temp_norm.min - 0.25).clamp(0.0, 0.45),
+            tol.temp_norm.min,
+        );
+
+        let mut combined_tiles: Vec<TileSeasonPresence> = Vec::new();
+        let mut mig_candidates: Vec<TileSeasonPresence> = Vec::new();
+
+        for &t in candidate_tiles {
+            let (mask, winter_ok) =
+                (0..num_seasons).fold((0u8, true), |(mask, winter_ok), s| {
+                    let idx = s * n + t;
+                    let eff_precip = if sealife { 1.0 } else { precip_s[idx] };
+                    if tol.in_range(temp_s[idx], eff_precip, sun_s[idx]) {
+                        (mask | (1u8 << s), winter_ok)
+                    } else {
+                        (mask, winter_ok && winter_range.contains(temp_s[idx]))
+                    }
+                });
+
+            if mask == all_seasons_mask {
+                combined_tiles.push(TileSeasonPresence {
+                    tile: t,
+                    season_mask: all_seasons_mask,
+                });
+            } else if mask != 0 && winter_ok && !sealife {
+                combined_tiles.push(TileSeasonPresence {
+                    tile: t,
+                    season_mask: mask,
+                });
+            } else if mask != 0 {
+                mig_candidates.push(TileSeasonPresence {
+                    tile: t,
+                    season_mask: mask,
+                });
+            }
+        }
+
+        // Seasonal migration: check per continent (or per ocean/globally for birds and sealife)
+        // whether seasonal masks complement either a year-round core or another seasonal mask in that realm.
+        if !mig_candidates.is_empty() {
+            let can_fly_or_swim_globally =
+                sealife || matches!(animal_kind, "small bird" | "large bird");
+            let num_realms = if can_fly_or_swim_globally {
+                1
             } else {
-                // Strategy 3: Migration (`findmigratorypatterns`)
-                let mut present_masks = [false; 256];
-                let seasonal_tiles: Vec<TileSeasonPresence> = land_tiles
-                    .iter()
-                    .copied()
-                    .filter_map(|t| {
-                        let mask = (0..num_seasons).fold(0u8, |acc, s| {
-                            let idx = s * n + t;
-                            if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
-                                acc | (1u8 << s)
-                            } else {
-                                acc
-                            }
-                        });
-                        if mask != 0 && mask != all_seasons_mask {
-                            present_masks[mask as usize] = true;
-                            Some(TileSeasonPresence {
-                                tile: t,
-                                season_mask: mask,
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let mut valid_mig_mask = [false; 256];
-                for m1 in 1..(all_seasons_mask as usize) {
-                    if present_masks[m1]
-                        && (1..(all_seasons_mask as usize))
-                            .any(|m2| present_masks[m2] && ((m1 | m2) as u8) == all_seasons_mask)
-                    {
-                        valid_mig_mask[m1] = true;
+                geography.continents.len().max(1)
+            };
+            let mut realm_masks = vec![vec![false; 256]; num_realms];
+            for &p in &combined_tiles {
+                if p.season_mask == all_seasons_mask {
+                    let r = if can_fly_or_swim_globally {
+                        0
+                    } else {
+                        geography.tile_continent[p.tile].unwrap_or(0)
+                    };
+                    if r < num_realms {
+                        realm_masks[r][all_seasons_mask as usize] = true;
                     }
                 }
-                let mig_tiles: Vec<TileSeasonPresence> = seasonal_tiles
-                    .into_iter()
-                    .filter(|p| valid_mig_mask[p.season_mask as usize])
-                    .collect();
-                (!mig_tiles.is_empty()).then_some(mig_tiles)
             }
-        };
+            for &p in &mig_candidates {
+                let r = if can_fly_or_swim_globally {
+                    0
+                } else {
+                    geography.tile_continent[p.tile].unwrap_or(0)
+                };
+                if r < num_realms {
+                    realm_masks[r][p.season_mask as usize] = true;
+                }
+            }
+            let mut valid_realm_mask = vec![vec![false; 256]; num_realms];
+            for r in 0..num_realms {
+                for m1 in 1..(all_seasons_mask as usize) {
+                    if realm_masks[r][m1]
+                        && (1..=(all_seasons_mask as usize)).any(|m2| {
+                            realm_masks[r][m2] && ((m1 | m2) as u8) == all_seasons_mask
+                        })
+                    {
+                        valid_realm_mask[r][m1] = true;
+                    }
+                }
+            }
+            for p in mig_candidates {
+                let r = if can_fly_or_swim_globally {
+                    0
+                } else {
+                    geography.tile_continent[p.tile].unwrap_or(0)
+                };
+                if r < num_realms && valid_realm_mask[r][p.season_mask as usize] {
+                    combined_tiles.push(p);
+                }
+            }
+        }
 
-        if let Some(tile_seasons) = chosen_tiles {
+        if !combined_tiles.is_empty() {
+            combined_tiles.sort_by_key(|p| p.tile);
             let sp_id = settled.len();
-            for &presence in &tile_seasons {
+            for &presence in &combined_tiles {
                 tile_all_species[presence.tile].push(sp_id);
                 for s in 0..num_seasons {
                     if (presence.season_mask & (1u8 << s)) != 0 {
@@ -272,7 +362,7 @@ pub fn settle_species_on_climate(
                 id: sp_id,
                 kind: SpeciesKind::Animal,
                 name: name_part.trim().to_string(),
-                tile_seasons,
+                tile_seasons: combined_tiles,
             });
         }
     }
@@ -295,19 +385,26 @@ pub fn settle_species_on_climate(
         let Some(s_range) = extract_json_range(json_part, "sunlightRange") else {
             continue;
         };
+        let sealife = extract_json_bool(json_part, "sealife").unwrap_or(false);
         let tol = ClimateTolerance {
             temp_norm: normalize_temp(t_range),
-            precip_norm: normalize_precip(p_range, num_seasons_f),
-            sun_norm: normalize_sun(s_range, num_seasons_f),
+            precip_norm: if sealife {
+                ValueRange::new(0.0, 2.0)
+            } else {
+                normalize_precip(p_range)
+            },
+            sun_norm: normalize_sun(s_range),
         };
 
-        let plant_tiles: Vec<TileSeasonPresence> = land_tiles
+        let candidate_tiles: &[usize] = if sealife { &sea_tiles } else { &land_tiles };
+        let plant_tiles: Vec<TileSeasonPresence> = candidate_tiles
             .iter()
             .copied()
             .filter_map(|t| {
                 let mask = (0..num_seasons).fold(0u8, |acc, s| {
                     let idx = s * n + t;
-                    if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
+                    let eff_precip = if sealife { 1.0 } else { precip_s[idx] };
+                    if tol.in_range(temp_s[idx], eff_precip, sun_s[idx]) {
                         acc | (1u8 << s)
                     } else {
                         acc
@@ -339,8 +436,6 @@ pub fn settle_species_on_climate(
             });
         }
     }
-
-    let geography = identify_continents_and_oceans(climate_model.grid(), elevations);
 
     SettledBiosphere {
         geography,
