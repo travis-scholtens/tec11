@@ -1904,17 +1904,19 @@ impl SunSandbox {
                 }
             };
 
-            // 2. Sample distance within naked-eye visibility limit (`randomstars.py:37`):
-            let max_r_ly = (3.26 / 10.0_f64.powf(((m as f64) - 6.0) / 5.0 - 1.0)).max(1.2);
+            // 2. Sample distance within naked-eye visibility limit (`randomstars.py:37`),
+            //    using thin-disk/volume weighting (`u^(1/2.4)`) so apparent magnitudes match Hipparcos:
+            let max_r_ly = (3.26156 / 10.0_f64.powf(((m as f64) - 6.0) / 5.0 - 1.0)).max(1.2);
             let dist_scale = if self.galaxy_type == GalaxyType::GlobularCluster
                 || self.vantage == GalacticVantage::GalacticBulge
             {
                 // Dense bulge / globular cluster environments pack stars closer together, brightening the night sky:
-                0.68
+                0.76
             } else {
                 1.0
             };
-            let r_ly = (self.rng.uniform(1.0, max_r_ly) * dist_scale).max(1.0) as f32;
+            let u_vol = self.rng.uniform(0.0005, 1.0).powf(1.0 / 2.4);
+            let r_ly = ((1.0 + (max_r_ly - 1.0) * u_vol) * dist_scale).max(1.0) as f32;
 
             // 3. Sample 3D celestial coordinates `(theta, phi)` in the galactic frame, generalized across
             //    galaxy morphologies and vantages (`randomstars.py:38-42` + non-spiral/halo generalizations):
@@ -2021,7 +2023,8 @@ impl SunSandbox {
             let dir = normal(rotate(v_gal, u_axis, rot_angle));
 
             // Apparent magnitude and RGB scaling (`starmap.py:452-456`):
-            let app_mag = m - 5.0 * (((r_ly as f64) / 3.26).log10() as f32 + 1.0);
+            // Distance modulus: m_app = M_abs + 5 * (log10(d_pc) - 1.0), where d_pc = r_ly / 3.26156:
+            let app_mag = (m + 5.0 * (((r_ly as f64) / 3.26156).log10() as f32 - 1.0)).clamp(-1.6, 6.2);
             let base_rgb = bv_to_rgb(c);
             let scale = (1.0 - (app_mag + 40.0) / 45.0).clamp(0.08, 1.0);
             let mag_boost = ((6.5 - app_mag.clamp(-1.5, 6.2)) / 7.5).clamp(0.18, 1.0);
@@ -2092,6 +2095,15 @@ impl SunSandbox {
                     .push((bright_indices[i], bright_indices[j]));
             }
         }
+    }
+
+    /// Project a 3D galactocentric / ecliptic coordinate `(gx, gy, gz)` with a `38°` inclination tilt
+    /// so that the 3D galaxy structure and planetary orbits are clearly visible from the front (`+Z`) camera.
+    fn tilt_3d_plane(gx: f32, gy: f32, gz: f32) -> [f32; 3] {
+        // 38 deg inclination around X axis:
+        let sin_t = 0.6156615f32;
+        let cos_t = 0.7880108f32;
+        [gx, gz * cos_t + gy * sin_t, gy * cos_t - gz * sin_t]
     }
 
     /// Build a 3D galaxy point cloud (`1,800` stars) in `[-0.90, 0.90]^3` for the `3D Galaxy & Host Star` view.
@@ -2193,10 +2205,15 @@ impl SunSandbox {
 
             let rgb = bv_to_rgb(bv);
             let scale = (0.85 / max_kpc) as f32;
-            self.galaxy_particles.push([
+            let tilted = Self::tilt_3d_plane(
                 (pos_kpc[0] as f32 * scale).clamp(-0.92, 0.92),
-                (pos_kpc[2] as f32 * scale).clamp(-0.92, 0.92),
                 (pos_kpc[1] as f32 * scale).clamp(-0.92, 0.92),
+                (pos_kpc[2] as f32 * scale).clamp(-0.92, 0.92),
+            );
+            self.galaxy_particles.push([
+                tilted[0],
+                tilted[1],
+                tilted[2],
                 rgb[0],
                 rgb[1],
                 rgb[2],
@@ -2205,17 +2222,17 @@ impl SunSandbox {
     }
 
     /// Flat buffer `[x, y, z, r, g, b, size_px, ...]` for all 3D star points in the current aspect:
-    /// - `"night_sky"`: All ~6,000 naked-eye stars on the unit celestial sphere (`r = 1.006`), plus a bright marker for the Home Sun if `show_ecliptic` is enabled.
-    /// - `"home_sun"`: Background starfield on a slightly larger radius (`r = 1.04`).
-    /// - `"galaxy"`: 1,800 3D galaxy structure stars + bright reticle points at the Home Star's galactocentric position.
+    /// - `"night_sky"`: All ~6,000 naked-eye stars on the unit celestial sphere (`r = 1.005`).
+    /// - `"galaxy"`: 1,800 3D galaxy structure stars + bright marker at the Home Star's galactocentric position.
+    /// - `"solar_system"`: Central Home Star + each planet on its 3D tilted heliocentric orbit (plus ring particles for ringed giants).
     pub fn star_points_data(&self, aspect: &str) -> Vec<f32> {
         match aspect {
             "galaxy" => {
-                let mut out = Vec::with_capacity((self.galaxy_particles.len() + 1) * 7);
+                let mut out = Vec::with_capacity((self.galaxy_particles.len() + 2) * 7);
                 for p in &self.galaxy_particles {
-                    out.extend_from_slice(&[p[0], p[1], p[2], p[3], p[4], p[5], 2.4]);
+                    out.extend_from_slice(&[p[0], p[1], p[2], p[3], p[4], p[5], 2.7]);
                 }
-                // Home Star position marker in the galaxy:
+                // Home Star position marker in the galaxy (outer emerald halo + inner true star color):
                 let max_kpc = if self.galaxy_type == GalaxyType::GlobularCluster {
                     0.020
                 } else {
@@ -2223,24 +2240,56 @@ impl SunSandbox {
                 };
                 let scale = 0.85 / max_kpc;
                 let gp = self.home_star.gal_pos_kpc;
-                let hx = (gp[0] * scale).clamp(-0.90, 0.90);
-                let hy = (gp[2] * scale).clamp(-0.90, 0.90);
-                let hz = (gp[1] * scale).clamp(-0.90, 0.90);
-                out.extend_from_slice(&[hx, hy, hz, 0.15, 1.0, 0.45, 7.5]);
+                let h = Self::tilt_3d_plane(
+                    (gp[0] * scale).clamp(-0.90, 0.90),
+                    (gp[1] * scale).clamp(-0.90, 0.90),
+                    (gp[2] * scale).clamp(-0.90, 0.90),
+                );
+                let sr = self.home_star.rgb;
+                out.extend_from_slice(&[h[0], h[1], h[2], 0.15, 1.0, 0.55, 12.0]);
+                out.extend_from_slice(&[h[0], h[1], h[2], sr[0], sr[1], sr[2], 7.5]);
                 out
             }
             "solar_system" => {
-                let mut out = Vec::with_capacity((self.planets.len() + 1) * 7);
+                let mut out = Vec::with_capacity((self.planets.len() * 14 + 4) * 7);
                 let sr = self.home_star.rgb;
-                // Central Home Star marker at (0, 0, 0):
-                out.extend_from_slice(&[0.0, 0.0, 0.0, sr[0], sr[1], sr[2], 11.5]);
+                // Central Home Star corona + photosphere at (0, 0, 0):
+                out.extend_from_slice(&[0.0, 0.0, 0.0, sr[0] * 0.85, sr[1] * 0.75, sr[2] * 0.65, 22.0]);
+                out.extend_from_slice(&[0.0, 0.0, 0.0, sr[0], sr[1], sr[2], 14.5]);
                 let np = self.planets.len().max(1);
                 for (idx, p) in self.planets.iter().enumerate() {
-                    let r_norm = 0.18 + 0.70 * ((idx as f32) / ((np - 1).max(1) as f32));
-                    let x = r_norm * p.orbit_angle_rad.cos();
-                    let z = r_norm * p.orbit_angle_rad.sin();
-                    let sz = (4.2 + 2.2 * p.radius_earth.max(0.25).ln()).clamp(3.6, 10.0);
-                    out.extend_from_slice(&[x, 0.0, z, p.rgb[0], p.rgb[1], p.rgb[2], sz]);
+                    let r_norm = 0.18 + 0.72 * ((idx as f32) / ((np - 1).max(1) as f32));
+                    let pos = Self::tilt_3d_plane(
+                        r_norm * p.orbit_angle_rad.cos(),
+                        r_norm * p.orbit_angle_rad.sin(),
+                        0.0,
+                    );
+                    let sz = (5.8 + 2.8 * p.radius_earth.max(0.25).ln()).clamp(4.8, 13.5);
+                    if p.is_home_world {
+                        // Highlight Home World with a bright emerald halo behind the planet disc:
+                        out.extend_from_slice(&[pos[0], pos[1], pos[2], 0.20, 0.98, 0.58, sz + 5.5]);
+                    }
+                    out.extend_from_slice(&[pos[0], pos[1], pos[2], p.rgb[0], p.rgb[1], p.rgb[2], sz]);
+                    if p.has_rings {
+                        let ring_r = 0.046f32;
+                        for k in 0..16 {
+                            let a = (k as f32) * 2.0 * (PI as f32) / 16.0;
+                            let rp = Self::tilt_3d_plane(
+                                r_norm * p.orbit_angle_rad.cos() + ring_r * a.cos(),
+                                r_norm * p.orbit_angle_rad.sin() + ring_r * a.sin(),
+                                0.008 * a.sin(),
+                            );
+                            out.extend_from_slice(&[
+                                rp[0],
+                                rp[1],
+                                rp[2],
+                                (p.rgb[0] * 0.92 + 0.08).min(1.0),
+                                (p.rgb[1] * 0.88 + 0.08).min(1.0),
+                                (p.rgb[2] * 0.80 + 0.08).min(1.0),
+                                2.4,
+                            ]);
+                        }
+                    }
                 }
                 out
             }
@@ -2260,7 +2309,8 @@ impl SunSandbox {
         }
     }
 
-    /// 3D line segments `[x0, y0, z0, x1, y1, z1, ...]` for constellation asterisms and/or galactic plane & ecliptic circles.
+    /// 3D line segments `[x0, y0, z0, x1, y1, z1, ...]` for constellation asterisms, galactic plane,
+    /// 3D galactic orbit reticle, 3D planetary system orbits, or 1.0 R_sun size reference circle.
     pub fn overlay_line_segments(
         &self,
         aspect: &str,
@@ -2272,51 +2322,52 @@ impl SunSandbox {
 
         if aspect == "solar_system" {
             let np = self.planets.len().max(1);
-            let segs = 56;
+            let segs = 64;
             for (idx, p) in self.planets.iter().enumerate() {
-                let r_norm = 0.18 + 0.70 * ((idx as f32) / ((np - 1).max(1) as f32));
+                let r_norm = 0.18 + 0.72 * ((idx as f32) / ((np - 1).max(1) as f32));
                 for k in 0..segs {
                     let a0 = (k as f32) * 2.0 * (PI as f32) / (segs as f32);
                     let a1 = ((k + 1) as f32) * 2.0 * (PI as f32) / (segs as f32);
-                    lines.extend_from_slice(&[
-                        r_norm * a0.cos(),
-                        0.0,
-                        r_norm * a0.sin(),
-                        r_norm * a1.cos(),
-                        0.0,
-                        r_norm * a1.sin(),
-                    ]);
+                    let p0 = Self::tilt_3d_plane(r_norm * a0.cos(), r_norm * a0.sin(), 0.0);
+                    let p1 = Self::tilt_3d_plane(r_norm * a1.cos(), r_norm * a1.sin(), 0.0);
+                    lines.extend_from_slice(&[p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]]);
                 }
-                let px = r_norm * p.orbit_angle_rad.cos();
-                let pz = r_norm * p.orbit_angle_rad.sin();
+                let pos = Self::tilt_3d_plane(
+                    r_norm * p.orbit_angle_rad.cos(),
+                    r_norm * p.orbit_angle_rad.sin(),
+                    0.0,
+                );
                 if p.has_rings {
                     let ring_r = 0.048f32;
-                    let rsegs = 24;
+                    let rsegs = 28;
                     for k in 0..rsegs {
                         let a0 = (k as f32) * 2.0 * (PI as f32) / (rsegs as f32);
                         let a1 = ((k + 1) as f32) * 2.0 * (PI as f32) / (rsegs as f32);
-                        lines.extend_from_slice(&[
-                            px + ring_r * a0.cos(),
-                            0.015 * a0.sin(),
-                            pz + ring_r * a0.sin(),
-                            px + ring_r * a1.cos(),
-                            0.015 * a1.sin(),
-                            pz + ring_r * a1.sin(),
-                        ]);
+                        let rp0 = Self::tilt_3d_plane(
+                            r_norm * p.orbit_angle_rad.cos() + ring_r * a0.cos(),
+                            r_norm * p.orbit_angle_rad.sin() + ring_r * a0.sin(),
+                            0.008 * a0.sin(),
+                        );
+                        let rp1 = Self::tilt_3d_plane(
+                            r_norm * p.orbit_angle_rad.cos() + ring_r * a1.cos(),
+                            r_norm * p.orbit_angle_rad.sin() + ring_r * a1.sin(),
+                            0.008 * a1.sin(),
+                        );
+                        lines.extend_from_slice(&[rp0[0], rp0[1], rp0[2], rp1[0], rp1[1], rp1[2]]);
                     }
                 }
                 if p.is_home_world {
-                    let d = 0.055f32;
-                    lines.extend_from_slice(&[px - d, 0.0, pz, px + d, 0.0, pz]);
-                    lines.extend_from_slice(&[px, -d, pz, px, d, pz]);
-                    lines.extend_from_slice(&[px, 0.0, pz - d, px, 0.0, pz + d]);
+                    let d = 0.065f32;
+                    lines.extend_from_slice(&[pos[0] - d, pos[1], pos[2], pos[0] + d, pos[1], pos[2]]);
+                    lines.extend_from_slice(&[pos[0], pos[1] - d, pos[2], pos[0], pos[1] + d, pos[2]]);
+                    lines.extend_from_slice(&[pos[0], pos[1], pos[2] - d, pos[0], pos[1], pos[2] + d]);
                 }
             }
             return lines;
         }
 
         if aspect == "galaxy" {
-            // Draw galactocentric crosshair & orbit circle through the Home Star's galactic position:
+            // Draw galactocentric crosshair & tilted 3D orbit circle through the Home Star's galactic position:
             let max_kpc = if self.galaxy_type == GalaxyType::GlobularCluster {
                 0.020
             } else {
@@ -2324,35 +2375,48 @@ impl SunSandbox {
             };
             let scale = 0.85 / max_kpc;
             let gp = self.home_star.gal_pos_kpc;
-            let hx = (gp[0] * scale).clamp(-0.90, 0.90);
-            let hy = (gp[2] * scale).clamp(-0.90, 0.90);
-            let hz = (gp[1] * scale).clamp(-0.90, 0.90);
-            let d = 0.08f32;
-            lines.extend_from_slice(&[hx - d, hy, hz, hx + d, hy, hz]);
-            lines.extend_from_slice(&[hx, hy - d, hz, hx, hy + d, hz]);
-            lines.extend_from_slice(&[hx, hy, hz - d, hx, hy, hz + d]);
+            let gx = (gp[0] * scale).clamp(-0.90, 0.90);
+            let gy = (gp[1] * scale).clamp(-0.90, 0.90);
+            let gz = (gp[2] * scale).clamp(-0.90, 0.90);
+            let h = Self::tilt_3d_plane(gx, gy, gz);
+            let d = 0.09f32;
+            lines.extend_from_slice(&[h[0] - d, h[1], h[2], h[0] + d, h[1], h[2]]);
+            lines.extend_from_slice(&[h[0], h[1] - d, h[2], h[0], h[1] + d, h[2]]);
+            lines.extend_from_slice(&[h[0], h[1], h[2] - d, h[0], h[1], h[2] + d]);
 
-            let r_orb = (hx * hx + hz * hz).sqrt();
+            let r_orb = (gx * gx + gy * gy).sqrt();
             if r_orb > 0.04 {
-                let segs = 48;
+                let segs = 64;
                 for k in 0..segs {
                     let a0 = (k as f32) * 2.0 * (PI as f32) / (segs as f32);
                     let a1 = ((k + 1) as f32) * 2.0 * (PI as f32) / (segs as f32);
-                    lines.extend_from_slice(&[
-                        r_orb * a0.cos(),
-                        hy,
-                        r_orb * a0.sin(),
-                        r_orb * a1.cos(),
-                        hy,
-                        r_orb * a1.sin(),
-                    ]);
+                    let p0 = Self::tilt_3d_plane(r_orb * a0.cos(), r_orb * a0.sin(), gz);
+                    let p1 = Self::tilt_3d_plane(r_orb * a1.cos(), r_orb * a1.sin(), gz);
+                    lines.extend_from_slice(&[p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]]);
                 }
             }
             return lines;
         }
 
         if aspect == "home_sun" {
-            // Reference 1.0 R_sun ring around the sphere equator when comparing star size:
+            // Reference 1.0 R_sun comparison ring in the XY plane (`r = 0.68`) so the user can compare the star's size to Sol:
+            let sol_r = 0.68f32;
+            let segs = 64;
+            for k in 0..segs {
+                if k % 2 == 1 {
+                    continue; // Dashed reference circle for 1.0 R_sun
+                }
+                let a0 = (k as f32) * 2.0 * (PI as f32) / (segs as f32);
+                let a1 = ((k + 1) as f32) * 2.0 * (PI as f32) / (segs as f32);
+                lines.extend_from_slice(&[
+                    sol_r * a0.cos(),
+                    sol_r * a0.sin(),
+                    0.02,
+                    sol_r * a1.cos(),
+                    sol_r * a1.sin(),
+                    0.02,
+                ]);
+            }
             return lines;
         }
 
@@ -2396,10 +2460,11 @@ impl SunSandbox {
         lines
     }
 
-    /// Background sphere RGB colors (`7,292` tiles) for the 3 visualization aspects:
-    /// - `"night_sky"`: Deep-space celestial sphere with diffuse Milky Way / galactic core glow and bright star projection.
+    /// Background sphere RGB colors (`7,292` tiles) for each visualization aspect:
+    /// - `"night_sky"`: Deep-space celestial sphere with diffuse Milky Way / galactic core glow.
     /// - `"home_sun"`: The chosen Home Star rendered as a 3D photosphere with limb darkening, convective granulation, and its true `B-V` blackbody chromaticity.
-    /// - `"galaxy"`: Dark translucent celestial boundary enclosing the 3D galaxy particle cloud.
+    /// - `"sky_plants"`: 3-zone Horizon Landscape Globe showing the Daytime Sky dome (top), Sunset & Twilight horizon band (equator), and Photosynthetic Plant Foliage & Ocean (bottom).
+    /// - `"galaxy"` & `"solar_system"`: 3D interior point/orbit scenes (sphere mesh hidden in WebGL).
     pub fn tile_colors_rgb(
         &self,
         aspect: &str,
@@ -2409,48 +2474,34 @@ impl SunSandbox {
         let n = self.grid.faces.len();
         let mut out = Vec::with_capacity(n * 3);
 
-        // Pre-bin the brightest star on each coarse tile so even thesphere surface shows starlight:
-        let mut tile_star_rgb = vec![[0.0f32; 3]; n];
-        if aspect == "night_sky" {
-            for s in &self.stars {
-                let tid = self.tree.nearest(s.dir);
-                let cur = tile_star_rgb[tid];
-                let s_lum = s.rgb[0] + s.rgb[1] + s.rgb[2];
-                let c_lum = cur[0] + cur[1] + cur[2];
-                if s_lum > c_lum {
-                    tile_star_rgb[tid] = s.rgb;
-                }
-            }
-            // Also project naked-eye sibling planets onto the celestial sphere along the ecliptic:
-            for pl in &self.planets {
-                if pl.is_naked_eye_visible() {
-                    let tid = self.tree.nearest(pl.sky_dir);
-                    tile_star_rgb[tid] = pl.rgb;
-                }
-            }
-        }
-
-        let selected_star_tile = selected_tile.and_then(|sel| {
-            self.nearest_star_to_tile(sel)
-                .map(|idx| self.tree.nearest(self.stars[idx].dir))
-        });
+        let selected_star_tile = if aspect == "night_sky" {
+            selected_tile.and_then(|sel| {
+                self.nearest_star_to_tile(sel)
+                    .map(|idx| self.tree.nearest(self.stars[idx].dir))
+            })
+        } else {
+            None
+        };
 
         for v in 0..n {
             let p = self.grid.faces[v].0;
             let mut rgb = match aspect {
                 "home_sun" => {
-                    // Render the Home Star's 3D photosphere with convective cells, limb glow, and B-V color:
+                    // Render the Home Star's 3D photosphere with convective cells, limb darkening, and B-V color.
+                    // Note: in Three.js, `p[1]` (Y) is the vertical pole axis and `p[2]` (Z) faces the camera.
                     let base = self.home_star.rgb;
                     let gran1 = ((p[0] * 18.0).sin() * (p[1] * 18.0).cos() * (p[2] * 18.0).sin()) as f32;
                     let gran2 = ((p[0] * 37.0 + 1.3).cos() * (p[2] * 37.0 - 0.7).sin()) as f32;
-                    let lat = p[2].abs() as f32;
-                    // Active magnetic sunspot belt at mid-latitudes (`|z| in 0.15..0.45`):
-                    let spot_val = ((p[0] * 9.5 + 0.4).sin() * (p[1] * 11.0 - 0.8).cos()) as f32;
+                    let lat = p[1].abs() as f32;
+                    // Active magnetic sunspot belt at mid-latitudes (`|y| in 0.12..0.48`):
+                    let spot_val = ((p[0] * 9.5 + 0.4).sin() * (p[2] * 11.0 - 0.8).cos()) as f32;
                     let is_spot = (0.12..=0.48).contains(&lat) && spot_val > 0.88;
+                    let r_cyl = ((p[0] * p[0] + p[1] * p[1]).sqrt() as f32).clamp(0.0, 1.0);
+                    let mu_limb = (1.0 - 0.75 * r_cyl * r_cyl).clamp(0.45, 1.0);
                     let mod_f = if is_spot {
-                        0.42
+                        0.42 * mu_limb
                     } else {
-                        (0.92 + 0.08 * gran1 + 0.05 * gran2).clamp(0.78, 1.12)
+                        ((0.94 + 0.07 * gran1 + 0.04 * gran2) * mu_limb).clamp(0.45, 1.08)
                     };
                     [
                         (base[0] * mod_f).clamp(0.0, 1.0),
@@ -2458,182 +2509,106 @@ impl SunSandbox {
                         (base[2] * mod_f).clamp(0.0, 1.0),
                     ]
                 }
-                "galaxy" => {
-                    // Subtle deep-space background for the 3D galaxy cloud:
+                "galaxy" | "solar_system" => {
+                    // Subtle deep-space background for the 3D interior point/orbit scenes:
                     [0.02, 0.025, 0.045]
                 }
-                "solar_system" => {
-                    // Render the planetary system on the sphere:
-                    // North pole cap (`z > 0.86`) = the Home Sun; concentric latitude bands from north to south
-                    // represent each planet's orbit, with a 3D planet disc (and rings if `has_rings`) at its orbital longitude:
-                    if p[2] > 0.87 {
-                        let sr = self.home_star.rgb;
-                        [sr[0] * 0.95, sr[1] * 0.95, sr[2] * 0.95]
-                    } else {
-                        let np = self.planets.len().max(1);
-                        let mut col = [0.02f32, 0.026, 0.048];
-                        for (idx, pl) in self.planets.iter().enumerate() {
-                            let band_z = 0.72 - 1.44 * ((idx as f64) / ((np - 1).max(1) as f64));
-                            let r_xy = (1.0 - band_z * band_z).max(0.02).sqrt();
-                            let p_center = normal([
-                                r_xy * (pl.orbit_angle_rad as f64).cos(),
-                                r_xy * (pl.orbit_angle_rad as f64).sin(),
-                                band_z,
-                            ]);
-                            let ang_dist = dot(p, p_center).clamp(-1.0, 1.0).acos() as f32;
-                            let disc_rad = (0.065 + 0.022 * pl.radius_earth.max(0.25).ln()).clamp(0.055, 0.135);
-                            if ang_dist <= disc_rad {
-                                // Inside the planet's disc — render bands for gas/ice giants or continents for home world:
-                                let stripe = ((p[2] * 48.0) as f32).sin() * 0.12;
-                                if pl.is_home_world {
-                                    col = [
-                                        (0.20 + 0.55 * self.optics.plant_foliage_rgb[0]).clamp(0.0, 1.0),
-                                        (0.32 + 0.55 * self.optics.plant_foliage_rgb[1]).clamp(0.0, 1.0),
-                                        (0.55 + 0.35 * self.optics.sky_zenith_rgb[2]).clamp(0.0, 1.0),
-                                    ];
-                                } else {
-                                    col = [
-                                        (pl.rgb[0] + stripe).clamp(0.05, 1.0),
-                                        (pl.rgb[1] + stripe * 0.8).clamp(0.05, 1.0),
-                                        (pl.rgb[2] + stripe * 0.5).clamp(0.05, 1.0),
-                                    ];
-                                }
-                                break;
-                            } else if pl.has_rings
-                                && ang_dist > disc_rad * 1.18
-                                && ang_dist <= disc_rad * 1.85
-                                && (p[2] - band_z).abs() < 0.038
-                            {
-                                // Prominent ring system around `RingedGasGiant` / `RingedIceGiant`:
-                                col = [
-                                    (pl.rgb[0] * 0.92 + 0.08).clamp(0.0, 1.0),
-                                    (pl.rgb[1] * 0.88 + 0.08).clamp(0.0, 1.0),
-                                    (pl.rgb[2] * 0.82 + 0.08).clamp(0.0, 1.0),
-                                ];
-                                break;
-                            } else if (p[2] - band_z).abs() < 0.012 {
-                                // Orbital track line:
-                                col = if pl.is_home_world {
-                                    [0.14, 0.48, 0.32]
-                                } else {
-                                    [0.08, 0.12, 0.22]
-                                };
-                            }
-                        }
-                        col
-                    }
-                }
                 "sky_plants" => {
-                    // 3D Exoplanet view showing Daytime Sky & Ocean scattering, Photosynthetic Plant Foliage
-                    // across continents, the 360° Sunset/Twilight Terminator Band, and Night-Side Starlight:
-                    let mu = dot(p, self.sun_dir) as f32; // Cosine of solar zenith angle (-1 = midnight, 0 = sunset terminator, +1 = subsolar noon)
-                    let lat = p[2].abs() as f32;
-
-                    // Procedural continents vs oceans on the sphere:
-                    let c1 = ((p[0] * 3.1 + 0.4).sin() * (p[1] * 2.8 - 0.5).cos() + (p[2] * 2.6 + 0.2).sin()) as f32;
-                    let c2 = ((p[0] * 6.7 - 1.1).cos() * (p[1] * 6.3 + 0.8).sin() * (p[2] * 5.9 - 0.3).cos()) as f32;
-                    let c3 = ((p[0] * 13.5 + 0.7).sin() * (p[2] * 14.1 + 1.2).cos()) as f32;
-                    let elev = 0.52 * c1 + 0.30 * c2 + 0.18 * c3 - 0.06;
-                    let is_land = elev > 0.0;
-                    let is_polar_ice = lat > 0.84 + 0.05 * c2;
-
-                    // Cloud wisps across mid-latitudes and ITCZ:
-                    let cloud_n = ((p[0] * 9.2 + p[1] * 4.5).sin() * (p[2] * 11.4 - p[0] * 3.8).cos()) as f32;
-                    let cloud_w = ((cloud_n - 0.58) / 0.42).clamp(0.0, 1.0) * 0.55;
-
+                    // 3-Zone Atmospheric & Biosphere Panorama Globe (using `y = p[1]` as vertical screen axis):
+                    // - Upper Dome (`y > +0.16`): Daytime Sky from overhead Zenith (`y = +1.0`) to Daytime Horizon (`y = +0.16`),
+                    //   with the Home Sun disk in the upper sky (`(-0.28, 0.60, 0.75)`) in its true `B-V` color & angular scale.
+                    // - Equatorial Band (`-0.16 <= y <= +0.16`): Sunset & Twilight Horizon (`sunset_rgb` & `twilight_rgb`).
+                    // - Lower Hemisphere (`y < -0.16`): Surface Continent with Photosynthetic Plant Foliage (`plant_foliage_rgb` & `plant_highlight_rgb`)
+                    //   alongside Coastal Ocean reflecting the sky and sunset.
+                    let y = p[1] as f32;
                     let op = &self.optics;
-                    let surface_albedo = if is_polar_ice {
-                        [0.92, 0.95, 0.98]
-                    } else if is_land {
-                        // Moisture & foliage density highest in equatorial & temperate zones, drier in subtropical horse latitudes:
-                        let arid_belt = (-((lat - 0.40) / 0.14).powi(2)).exp();
-                        let veg = ((1.0 - 0.62 * arid_belt) * (1.0 - (elev * 0.85).clamp(0.0, 0.75)) * (1.0 - (lat / 0.86).powi(3))).clamp(0.08, 1.0);
-                        let canopy_var = (0.5 + 0.5 * c3).clamp(0.0, 1.0);
-                        let plant_rgb = [
-                            op.plant_foliage_rgb[0] * (1.0 - 0.35 * canopy_var) + op.plant_highlight_rgb[0] * (0.35 * canopy_var),
-                            op.plant_foliage_rgb[1] * (1.0 - 0.35 * canopy_var) + op.plant_highlight_rgb[1] * (0.35 * canopy_var),
-                            op.plant_foliage_rgb[2] * (1.0 - 0.35 * canopy_var) + op.plant_highlight_rgb[2] * (0.35 * canopy_var),
-                        ];
-                        let rock_rgb = [0.46, 0.36, 0.28];
-                        [
-                            rock_rgb[0] * (1.0 - veg) + plant_rgb[0] * veg,
-                            rock_rgb[1] * (1.0 - veg) + plant_rgb[1] * veg,
-                            rock_rgb[2] * (1.0 - veg) + plant_rgb[2] * veg,
-                        ]
-                    } else {
-                        // Ocean reflects the overhead sky color + deep water absorption:
-                        let depth_f = (1.0 + elev * 0.9).clamp(0.25, 1.0);
-                        [
-                            (0.04 + 0.52 * op.sky_zenith_rgb[0]) * depth_f,
-                            (0.08 + 0.58 * op.sky_zenith_rgb[1]) * depth_f,
-                            (0.14 + 0.65 * op.sky_zenith_rgb[2]) * depth_f,
-                        ]
-                    };
+                    let c1 = ((p[0] * 4.2 + 0.3).sin() * (p[2] * 4.0 - 0.4).cos()) as f32;
+                    let c2 = ((p[0] * 11.5 - 0.8).cos() * (p[1] * 9.0 + 0.5).sin() * (p[2] * 11.2 + 0.6).cos()) as f32;
+                    let c3 = ((p[0] * 21.0 + 1.1).sin() * (p[2] * 21.0 - 0.9).cos()) as f32;
 
-                    if mu >= 0.20 {
-                        // Sunlit daytime hemisphere:
-                        // Limb factor blends overhead sky (`sky_zenith_rgb`) near subsolar point with `sky_horizon_rgb` near the limb/terminator:
-                        let horizon_t = (1.0 - ((mu - 0.20) / 0.80).clamp(0.0, 1.0)).powi(2);
-                        let sky_atm = [
-                            op.sky_zenith_rgb[0] * (1.0 - horizon_t) + op.sky_horizon_rgb[0] * horizon_t,
-                            op.sky_zenith_rgb[1] * (1.0 - horizon_t) + op.sky_horizon_rgb[1] * horizon_t,
-                            op.sky_zenith_rgb[2] * (1.0 - horizon_t) + op.sky_horizon_rgb[2] * horizon_t,
+                    if y > 0.16 {
+                        // Upper Dome: Daytime Sky (Zenith at top `y = 1.0` -> Horizon at `y = 0.16`)
+                        let t_zen = ((y - 0.16) / 0.84).clamp(0.0, 1.0).powf(0.75);
+                        let mut sky = [
+                            op.sky_horizon_rgb[0] * (1.0 - t_zen) + op.sky_zenith_rgb[0] * t_zen,
+                            op.sky_horizon_rgb[1] * (1.0 - t_zen) + op.sky_zenith_rgb[1] * t_zen,
+                            op.sky_horizon_rgb[2] * (1.0 - t_zen) + op.sky_zenith_rgb[2] * t_zen,
                         ];
-                        let illum = (0.32 + 0.68 * mu).clamp(0.35, 1.0);
-                        // Mix surface albedo with atmospheric Rayleigh/Mie sky veil (stronger over ocean & toward horizon):
-                        let sky_veil = if is_land { 0.22 + 0.28 * horizon_t } else { 0.38 + 0.32 * horizon_t };
-                        let mut day_rgb = [
-                            surface_albedo[0] * illum * (1.0 - sky_veil) + sky_atm[0] * sky_veil,
-                            surface_albedo[1] * illum * (1.0 - sky_veil) + sky_atm[1] * sky_veil,
-                            surface_albedo[2] * illum * (1.0 - sky_veil) + sky_atm[2] * sky_veil,
-                        ];
-                        // Specular solar glint on ocean near subsolar point (`mu > 0.95`):
-                        if !is_land && mu > 0.95 {
-                            let glint = ((mu - 0.95) / 0.05).powi(2) * 0.65;
-                            day_rgb[0] = (day_rgb[0] * (1.0 - glint) + op.sun_rgb[0] * glint).min(1.0);
-                            day_rgb[1] = (day_rgb[1] * (1.0 - glint) + op.sun_rgb[1] * glint).min(1.0);
-                            day_rgb[2] = (day_rgb[2] * (1.0 - glint) + op.sun_rgb[2] * glint).min(1.0);
+                        // Home Sun disk in the daytime sky dome:
+                        let sun_pos = normal([-0.26, 0.62, 0.74]);
+                        let ang = dot(p, sun_pos).clamp(-1.0, 1.0).acos() as f32;
+                        let sun_rad = (0.095 * self.home_star.radius_solar.sqrt()).clamp(0.055, 0.16);
+                        if ang <= sun_rad {
+                            sky = op.sun_rgb;
+                        } else if ang <= sun_rad * 2.2 {
+                            let glow = (1.0 - (ang - sun_rad) / (sun_rad * 1.2)).clamp(0.0, 1.0).powi(2) * 0.65;
+                            sky[0] = (sky[0] * (1.0 - glow) + op.sun_rgb[0] * glow).clamp(0.0, 1.0);
+                            sky[1] = (sky[1] * (1.0 - glow) + op.sun_rgb[1] * glow).clamp(0.0, 1.0);
+                            sky[2] = (sky[2] * (1.0 - glow) + op.sun_rgb[2] * glow).clamp(0.0, 1.0);
+                        } else {
+                            // Subtle sunlit fair-weather clouds in lower daytime sky:
+                            let cloud = ((c2 - 0.42) / 0.58).clamp(0.0, 1.0) * (1.0 - t_zen) * 0.40;
+                            sky[0] = (sky[0] * (1.0 - cloud) + (0.65 * op.sun_rgb[0] + 0.35 * sky[0]) * cloud).clamp(0.0, 1.0);
+                            sky[1] = (sky[1] * (1.0 - cloud) + (0.65 * op.sun_rgb[1] + 0.35 * sky[1]) * cloud).clamp(0.0, 1.0);
+                            sky[2] = (sky[2] * (1.0 - cloud) + (0.65 * op.sun_rgb[2] + 0.35 * sky[2]) * cloud).clamp(0.0, 1.0);
                         }
-                        // Sunlit cloud layer:
-                        [
-                            (day_rgb[0] * (1.0 - cloud_w) + (0.65 * op.sun_rgb[0] + 0.35 * sky_atm[0]) * cloud_w).clamp(0.0, 1.0),
-                            (day_rgb[1] * (1.0 - cloud_w) + (0.65 * op.sun_rgb[1] + 0.35 * sky_atm[1]) * cloud_w).clamp(0.0, 1.0),
-                            (day_rgb[2] * (1.0 - cloud_w) + (0.65 * op.sun_rgb[2] + 0.35 * sky_atm[2]) * cloud_w).clamp(0.0, 1.0),
-                        ]
-                    } else if mu >= -0.22 {
-                        // Sunset & Twilight Terminator Ring (`mu` in `[-0.22, +0.20]`):
-                        let band_rgb = if mu >= 0.0 {
-                            let t = (mu / 0.20).clamp(0.0, 1.0);
+                        sky
+                    } else if y >= -0.16 {
+                        // Equatorial Band: Sunset & Twilight Horizon (`y` in `-0.16 .. +0.16`)
+                        // Smooth transition from Daytime Horizon (`y = +0.16`) -> Twilight -> Vivid Sunset Glow (`y = -0.04 .. +0.04`):
+                        let u = (y + 0.16) / 0.32; // 0.0 at bottom of sunset band, 1.0 at top
+                        let mut band = if u >= 0.55 {
+                            let t = ((u - 0.55) / 0.45).clamp(0.0, 1.0);
                             [
-                                op.sunset_rgb[0] * (1.0 - t) + op.sky_horizon_rgb[0] * t,
-                                op.sunset_rgb[1] * (1.0 - t) + op.sky_horizon_rgb[1] * t,
-                                op.sunset_rgb[2] * (1.0 - t) + op.sky_horizon_rgb[2] * t,
+                                op.twilight_rgb[0] * (1.0 - t) + op.sky_horizon_rgb[0] * t,
+                                op.twilight_rgb[1] * (1.0 - t) + op.sky_horizon_rgb[1] * t,
+                                op.twilight_rgb[2] * (1.0 - t) + op.sky_horizon_rgb[2] * t,
                             ]
                         } else {
-                            let t = ((-mu) / 0.22).clamp(0.0, 1.0);
+                            let t = (u / 0.55).clamp(0.0, 1.0);
                             [
-                                op.sunset_rgb[0] * (1.0 - t) + op.twilight_rgb[0] * t * 0.45,
-                                op.sunset_rgb[1] * (1.0 - t) + op.twilight_rgb[1] * t * 0.45,
-                                op.sunset_rgb[2] * (1.0 - t) + op.twilight_rgb[2] * t * 0.45,
+                                op.sunset_rgb[0] * (1.0 - 0.45 * t) + op.twilight_rgb[0] * (0.45 * t),
+                                op.sunset_rgb[1] * (1.0 - 0.45 * t) + op.twilight_rgb[1] * (0.45 * t),
+                                op.sunset_rgb[2] * (1.0 - 0.45 * t) + op.twilight_rgb[2] * (0.45 * t),
                             ]
                         };
-                        let surf_keep = ((mu + 0.22) / 0.42).clamp(0.08, 0.55);
-                        [
-                            (surface_albedo[0] * surf_keep * 0.45 + band_rgb[0] * 0.82).clamp(0.0, 1.0),
-                            (surface_albedo[1] * surf_keep * 0.45 + band_rgb[1] * 0.82).clamp(0.0, 1.0),
-                            (surface_albedo[2] * surf_keep * 0.45 + band_rgb[2] * 0.82).clamp(0.0, 1.0),
-                        ]
+                        // Setting sun aureole on the horizon (`(0.32, -0.02, 0.95)`):
+                        let set_pos = normal([0.32, -0.02, 0.95]);
+                        let ang = dot(p, set_pos).clamp(-1.0, 1.0).acos() as f32;
+                        if ang <= 0.22 {
+                            let aureole = (1.0 - ang / 0.22).powi(2) * 0.55;
+                            band[0] = (band[0] * (1.0 - aureole) + op.sunset_rgb[0].max(0.85 * op.sun_rgb[0]) * aureole).clamp(0.0, 1.0);
+                            band[1] = (band[1] * (1.0 - aureole) + op.sunset_rgb[1] * aureole).clamp(0.0, 1.0);
+                            band[2] = (band[2] * (1.0 - aureole) + op.sunset_rgb[2] * aureole).clamp(0.0, 1.0);
+                        }
+                        band
                     } else {
-                        // Night-side hemisphere (`mu < -0.22`): dark continents & oceans under faint starlight
-                        [
-                            (surface_albedo[0] * 0.09 + op.twilight_rgb[0] * 0.05).clamp(0.01, 0.25),
-                            (surface_albedo[1] * 0.09 + op.twilight_rgb[1] * 0.05).clamp(0.01, 0.25),
-                            (surface_albedo[2] * 0.11 + op.twilight_rgb[2] * 0.07).clamp(0.02, 0.28),
-                        ]
+                        // Lower Hemisphere (`y < -0.16`): Photosynthetic Plant Foliage Canopy (Left/Center) & Coastal Ocean (Right)
+                        let coast_line = 0.34 + 0.16 * c1;
+                        let is_ocean = (p[0] as f32) > coast_line;
+                        if is_ocean {
+                            // Ocean reflects the overhead daytime sky & warm sunset horizon:
+                            let wave = 0.90 + 0.10 * c3;
+                            let sunset_refl = ((y + 0.45) / 0.29).clamp(0.0, 1.0) * 0.38;
+                            [
+                                ((0.05 + 0.55 * op.sky_zenith_rgb[0]) * (1.0 - sunset_refl) + op.sunset_rgb[0] * sunset_refl) * wave,
+                                ((0.10 + 0.62 * op.sky_zenith_rgb[1]) * (1.0 - sunset_refl) + op.sunset_rgb[1] * sunset_refl) * wave,
+                                ((0.18 + 0.70 * op.sky_zenith_rgb[2]) * (1.0 - sunset_refl) + op.sunset_rgb[2] * sunset_refl) * wave,
+                            ]
+                        } else {
+                            // Lush photosynthetic plant canopy showing main foliage & highlight pigments:
+                            let canopy_t = (0.5 + 0.35 * c2 + 0.25 * c3).clamp(0.0, 1.0);
+                            [
+                                (op.plant_foliage_rgb[0] * (1.0 - canopy_t) + op.plant_highlight_rgb[0] * canopy_t).clamp(0.0, 1.0),
+                                (op.plant_foliage_rgb[1] * (1.0 - canopy_t) + op.plant_highlight_rgb[1] * canopy_t).clamp(0.0, 1.0),
+                                (op.plant_foliage_rgb[2] * (1.0 - canopy_t) + op.plant_highlight_rgb[2] * canopy_t).clamp(0.0, 1.0),
+                            ]
+                        }
                     }
                 }
                 _ => {
-                    // "night_sky": Celestial sphere with subtle diffuse galactic band / core glow:
+                    // "night_sky": Smooth deep-space celestial sphere with subtle diffuse galactic band / core glow
+                    // (crisp stars are rendered as `THREE.Points` via `star_points_data("night_sky")`):
                     let sin_b = dot(p, self.galactic_pole);
                     let cos_core = dot(p, self.galactic_center_dir);
                     let gal_glow = match (self.galaxy_type, self.vantage) {
@@ -2643,15 +2618,15 @@ impl SunSandbox {
                         ) => {
                             let band = (-((sin_b / 0.18).powi(2))).exp();
                             let bulge = (cos_core.max(0.0).powi(4)) * (-((sin_b / 0.32).powi(2))).exp();
-                            (0.09 * band + 0.11 * bulge) as f32
+                            (0.08 * band + 0.10 * bulge) as f32
                         }
                         (_, GalacticVantage::GalacticHalo) => {
                             let disk_hemisphere = ((-sin_b).max(0.0)).powf(1.5) * (0.4 + 0.6 * cos_core.max(0.0));
-                            (0.14 * disk_hemisphere) as f32
+                            (0.12 * disk_hemisphere) as f32
                         }
                         _ => {
                             let core_hemisphere = ((cos_core + 0.35).max(0.0) / 1.35).powi(2);
-                            (0.12 * core_hemisphere) as f32
+                            (0.10 * core_hemisphere) as f32
                         }
                     };
 
@@ -2665,29 +2640,30 @@ impl SunSandbox {
                     };
 
                     let mut bg = [
-                        0.012 + gal_glow * glow_tint[0],
-                        0.015 + gal_glow * glow_tint[1],
-                        0.028 + gal_glow * glow_tint[2],
+                        0.010 + gal_glow * glow_tint[0],
+                        0.013 + gal_glow * glow_tint[1],
+                        0.024 + gal_glow * glow_tint[2],
                     ];
 
-                    if show_galactic_plane && sin_b.abs() < 0.022 {
-                        bg[0] = (bg[0] + 0.08).min(1.0);
-                        bg[1] = (bg[1] + 0.14).min(1.0);
-                        bg[2] = (bg[2] + 0.25).min(1.0);
+                    if show_galactic_plane && sin_b.abs() < 0.020 {
+                        bg[0] = (bg[0] + 0.06).min(1.0);
+                        bg[1] = (bg[1] + 0.11).min(1.0);
+                        bg[2] = (bg[2] + 0.20).min(1.0);
                     }
-
-                    // Blend any star landing on this tile:
-                    let sr = tile_star_rgb[v];
-                    [
-                        bg[0].max(sr[0] * 0.55),
-                        bg[1].max(sr[1] * 0.55),
-                        bg[2].max(sr[2] * 0.55),
-                    ]
+                    bg
                 }
             };
 
-            if selected_star_tile == Some(v) || selected_tile == Some(v) {
-                rgb = [0.20, 0.95, 0.55];
+            if aspect == "night_sky" {
+                if selected_star_tile == Some(v) {
+                    rgb = [0.18, 0.75, 0.45];
+                }
+            } else if selected_tile == Some(v) {
+                rgb = [
+                    (rgb[0] * 0.65 + 0.15).min(1.0),
+                    (rgb[1] * 0.65 + 0.35).min(1.0),
+                    (rgb[2] * 0.65 + 0.25).min(1.0),
+                ];
             }
             out.extend_from_slice(&rgb);
         }
@@ -2733,6 +2709,168 @@ impl SunSandbox {
         )
     }
 
+    /// Context-aware inspection for the active view mode (`aspect`) when clicking `tile_idx`.
+    pub fn inspect_aspect_tile(&self, aspect: &str, tile_idx: usize) -> String {
+        let hs = &self.home_star;
+        let op = &self.optics;
+        let p = self
+            .grid
+            .faces
+            .get(tile_idx)
+            .map(|f| f.0)
+            .unwrap_or([0.0, 0.0, 1.0]);
+
+        match aspect {
+            "sky_plants" => {
+                let y = p[1] as f32;
+                let zone_report = if y > 0.16 {
+                    format!(
+                        "Clicked Region: Upper Dome — Daytime Sky ({})\n\
+                         Why it has this color: {} ({}) scattered by {} ({}).\n\
+                         Overhead Zenith RGB: ({:.0}%, {:.0}%, {:.0}%) → Horizon RGB: ({:.0}%, {:.0}%, {:.0}%)",
+                        op.sky_color_name,
+                        op.sky_mechanism,
+                        self.atmosphere.short_formula(),
+                        hs.spectral_type,
+                        hs.class_description,
+                        op.sky_zenith_rgb[0] * 100.0,
+                        op.sky_zenith_rgb[1] * 100.0,
+                        op.sky_zenith_rgb[2] * 100.0,
+                        op.sky_horizon_rgb[0] * 100.0,
+                        op.sky_horizon_rgb[1] * 100.0,
+                        op.sky_horizon_rgb[2] * 100.0
+                    )
+                } else if y >= -0.16 {
+                    format!(
+                        "Clicked Region: Equatorial Horizon Band — Sunset & Twilight ({})\n\
+                         Why it has this color: {} through {}.",
+                        op.sunset_color_name,
+                        op.sunset_mechanism,
+                        self.atmosphere.name()
+                    )
+                } else {
+                    format!(
+                        "Clicked Region: Lower Hemisphere — Photosynthetic Plant Canopy & Ocean ({})\n\
+                         Why plants have this color: {} under a {} ({:.0} K) sun and {} atmosphere.",
+                        op.plant_color_name,
+                        op.plant_pigment_desc,
+                        hs.spectral_type,
+                        hs.temp_k,
+                        self.atmosphere.short_formula()
+                    )
+                };
+                format!(
+                    "{zone_report}\n\
+                     Home Sun: {} ({}) — {:.0} K, {:.2} R☉, {:.2} L☉ | Habitable Orbit: {:.2} AU ({:.0}d/yr)",
+                    hs.spectral_type,
+                    hs.class_description,
+                    hs.temp_k,
+                    hs.radius_solar,
+                    hs.luminosity_solar,
+                    hs.habitable_au,
+                    hs.orbital_period_days
+                )
+            }
+            "home_sun" => {
+                let lat_deg = (p[1].clamp(-1.0, 1.0).asin() * 180.0 / PI).abs();
+                let region = if (7.0..=29.0).contains(&lat_deg) {
+                    "Active Mid-Latitude Magnetic Belt (Sunspot & Faculae Zone)"
+                } else if lat_deg > 60.0 {
+                    "Polar Photospheric Cap (Limb-Darkened Convection)"
+                } else {
+                    "Equatorial Photospheric Granulation Zone"
+                };
+                format!(
+                    "Clicked Home Sun Photosphere (Lat {:.1}°): {}\n\
+                     Spectral Type: {} ({}) | Effective Temp: {:.0} K (B-V = {:+.2})\n\
+                     Radius: {:.2} R☉ (dashed blue ring = 1.00 R☉ Sol reference) | Mass: {:.2} M☉ | Luminosity: {:.2} L☉\n\
+                     Habitable Zone Orbit: {:.2} AU ({:.0} Earth days/yr) | Angular Size in Sky: {:.2}° | Solar Tides: {:.2}x",
+                    lat_deg,
+                    region,
+                    hs.spectral_type,
+                    hs.class_description,
+                    hs.temp_k,
+                    hs.bv_color,
+                    hs.radius_solar,
+                    hs.mass_solar,
+                    hs.luminosity_solar,
+                    hs.habitable_au,
+                    hs.orbital_period_days,
+                    hs.angular_diameter_deg,
+                    hs.solar_tide_factor
+                )
+            }
+            "galaxy" => {
+                let gp = hs.gal_pos_kpc;
+                let r_kpc = (gp[0] * gp[0] + gp[1] * gp[1] + gp[2] * gp[2]).sqrt();
+                format!(
+                    "3D Host Galaxy View: {} — Vantage: {}\n\
+                     Home Star Galactocentric Position: (x={:+.2}, y={:+.2}, z={:+.2}) kpc | Distance from Galactic Center: R = {:.2} kpc\n\
+                     (Green 3D crosshair & orbit circle mark your Home Star's location and galactic orbit inside the galaxy)\n\
+                     Home Sun: {} ({}) — {:.0} K, {:.2} M☉, {:.2} R☉, Age {:.1}/{:.1} Gyr | Visible Night-Sky Stars: {}",
+                    self.galaxy_type.name(),
+                    self.vantage.name(),
+                    gp[0],
+                    gp[1],
+                    gp[2],
+                    r_kpc,
+                    hs.spectral_type,
+                    hs.class_description,
+                    hs.temp_k,
+                    hs.mass_solar,
+                    hs.radius_solar,
+                    hs.age_gyr,
+                    hs.lifespan_gyr,
+                    self.stars.len()
+                )
+            }
+            "solar_system" => {
+                let np = self.planets.len().max(1);
+                let mut best_idx = self.home_planet_index.min(np - 1);
+                let mut best_dist = f32::INFINITY;
+                for (idx, pl) in self.planets.iter().enumerate() {
+                    let r_norm = 0.18 + 0.72 * ((idx as f32) / ((np - 1).max(1) as f32));
+                    let pos = Self::tilt_3d_plane(
+                        r_norm * pl.orbit_angle_rad.cos(),
+                        r_norm * pl.orbit_angle_rad.sin(),
+                        0.0,
+                    );
+                    let dx = (p[0] as f32) - pos[0];
+                    let dy = (p[1] as f32) - pos[1];
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d < best_dist {
+                        best_dist = d;
+                        best_idx = idx;
+                    }
+                }
+                let pl = &self.planets[best_idx];
+                let vis_str = if pl.is_home_world {
+                    "Simulated Home World (marked with 3D target crosshair)".to_string()
+                } else if pl.is_naked_eye_visible() {
+                    format!("Naked-eye visible in night sky (m_V = {:+.1})", pl.apparent_mag)
+                } else {
+                    format!("Telescopic in night sky (m_V = {:+.1})", pl.apparent_mag)
+                };
+                format!(
+                    "Selected Solar System Planet: Planet #{} — {} ({})\n\
+                     Orbit: {:.2} AU (Period: {:.0} Earth days) | Radius: {:.2} R⊕ | Rings: {} | Moons: {}\n\
+                     Full System ({} Planets): {}",
+                    pl.index + 1,
+                    pl.kind.appearance_label(),
+                    vis_str,
+                    pl.orbit_au,
+                    pl.orbital_period_days,
+                    pl.radius_earth,
+                    if pl.has_rings { "Yes" } else { "No" },
+                    pl.moon_count,
+                    self.planets.len(),
+                    self.planets_summary_text()
+                )
+            }
+            _ => self.inspect_tile(tile_idx),
+        }
+    }
+
     /// Detailed multi-line inspection of the selected star on the celestial sphere, the Home Sun,
     /// the generated Planetary System, and the planet's Sky, Sunset, and Photosynthetic Plant Foliage colors.
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
@@ -2746,13 +2884,13 @@ impl SunSandbox {
         let st_temp = bv_to_temp_k(st.bv_color);
         let st_lum = 10.0_f32.powf((4.83 - st.abs_mag) / 2.5);
         let gal_lat_deg = (90.0 - (st.galactic_offset_rad as f64 * 180.0 / PI)).abs();
-        let cat_prefix = if self.is_real_hipparcos { "HIP" } else { "Star #" };
+        let cat_prefix = if self.is_real_hipparcos { "HIP " } else { "Star #" };
         let sys_summary = self.planets_summary_text();
 
         format!(
             "Selected Night-Sky Star: {cat_prefix}{} — {letter}{sub}{lum_cls} ({lum_desc})\n\
-             Apparent Magnitude: m_V = {:+.2} | Absolute Magnitude: M_V = {:+.2} ({:.1} L☉)\n\
-             Distance: {:.1} light-years ({:.1} pc) | Color Index: B-V = {:+.2} (T_eff ≈ {:.0} K) | Offset from Galactic Plane: {:.1}°\n\
+             Apparent Magnitude: m_V = {:+.2} (naked-eye limit ≤ +6.0) | Absolute Magnitude: M_V = {:+.2} ({:.1} L☉)\n\
+             Distance: {:.1} light-years ({:.1} pc) | Color Index: B-V = {:+.2} (T_eff ≈ {:.0} K) | Galactic Latitude: {:.1}°\n\
              Home Sun: {} ({}) — {:.0} K, {:.2} M☉, {:.2} R☉, {:.2} L☉ | Habitable Orbit: {:.2} AU ({:.0} Earth days/yr, Solar Tides {:.2}x)\n\
              Solar System ({} Planets): {}\n\
              Atmosphere: {} — Daytime Sky: {} ({})\n\

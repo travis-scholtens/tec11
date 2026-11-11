@@ -621,35 +621,37 @@ function paintCanvasFallback(view) {
   const rotMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
 
   const tris = [];
-  for (let i = 0; i < posAttr.count; i += 3) {
-    nVec.fromBufferAttribute(normAttr, i).applyMatrix3(rotMatrix).normalize();
-    if (nVec.z <= -0.05) {
-      continue;
+  if (!view.hideSurfaceMesh) {
+    for (let i = 0; i < posAttr.count; i += 3) {
+      nVec.fromBufferAttribute(normAttr, i).applyMatrix3(rotMatrix).normalize();
+      if (nVec.z <= -0.05) {
+        continue;
+      }
+
+      vA.fromBufferAttribute(posAttr, i).applyMatrix4(mesh.matrixWorld);
+      vB.fromBufferAttribute(posAttr, i + 1).applyMatrix4(mesh.matrixWorld);
+      vC.fromBufferAttribute(posAttr, i + 2).applyMatrix4(mesh.matrixWorld);
+
+      pA.copy(vA).project(camera);
+      pB.copy(vB).project(camera);
+      pC.copy(vC).project(camera);
+
+      const shade = view.unlit ? 1.0 : 0.55 + 0.45 * Math.max(0, nVec.dot(lightDir));
+      const r = Math.min(255, Math.round(colAttr.getX(i) * 255 * shade));
+      const g = Math.min(255, Math.round(colAttr.getY(i) * 255 * shade));
+      const b = Math.min(255, Math.round(colAttr.getZ(i) * 255 * shade));
+
+      tris.push({
+        ax: (pA.x * 0.5 + 0.5) * width,
+        ay: (-pA.y * 0.5 + 0.5) * height,
+        bx: (pB.x * 0.5 + 0.5) * width,
+        by: (-pB.y * 0.5 + 0.5) * height,
+        cx: (pC.x * 0.5 + 0.5) * width,
+        cy: (-pC.y * 0.5 + 0.5) * height,
+        depth: (pA.z + pB.z + pC.z) / 3,
+        fill: `rgb(${r}, ${g}, ${b})`,
+      });
     }
-
-    vA.fromBufferAttribute(posAttr, i).applyMatrix4(mesh.matrixWorld);
-    vB.fromBufferAttribute(posAttr, i + 1).applyMatrix4(mesh.matrixWorld);
-    vC.fromBufferAttribute(posAttr, i + 2).applyMatrix4(mesh.matrixWorld);
-
-    pA.copy(vA).project(camera);
-    pB.copy(vB).project(camera);
-    pC.copy(vC).project(camera);
-
-    const shade = 0.55 + 0.45 * Math.max(0, nVec.dot(lightDir));
-    const r = Math.min(255, Math.round(colAttr.getX(i) * 255 * shade));
-    const g = Math.min(255, Math.round(colAttr.getY(i) * 255 * shade));
-    const b = Math.min(255, Math.round(colAttr.getZ(i) * 255 * shade));
-
-    tris.push({
-      ax: (pA.x * 0.5 + 0.5) * width,
-      ay: (-pA.y * 0.5 + 0.5) * height,
-      bx: (pB.x * 0.5 + 0.5) * width,
-      by: (-pB.y * 0.5 + 0.5) * height,
-      cx: (pC.x * 0.5 + 0.5) * width,
-      cy: (-pC.y * 0.5 + 0.5) * height,
-      depth: (pA.z + pB.z + pC.z) / 3,
-      fill: `rgb(${r}, ${g}, ${b})`,
-    });
   }
 
   tris.sort((a, b) => b.depth - a.depth);
@@ -4072,17 +4074,38 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
   const colors = computeSunVertexColors(view);
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
 
+  const is3dInterior = view.aspect === "galaxy" || view.aspect === "solar_system";
+  view.hideSurfaceMesh = is3dInterior;
+  if (view.material) {
+    view.material.colorWrite = !is3dInterior;
+    view.material.depthWrite = !is3dInterior;
+  }
+
   if (view.aspect === "home_sun" || view.aspect === "sky_plants") {
     if (view.aspect === "home_sun") {
       const rSolar = session.sun_radius_solar();
       const sunScale = Math.max(0.24, Math.min(1.04, rSolar * 0.68));
       mesh.scale.set(sunScale, sunScale, sunScale);
+      const lineSegs = session.overlay_line_segments("home_sun", false, false);
+      if (lineSegs && lineSegs.length >= 6) {
+        arrowGeometry.setAttribute(
+          "position",
+          new THREE.Float32BufferAttribute(lineSegs, 3)
+        );
+        arrowMaterial.color.setHex(0x60a5fa);
+        arrowMaterial.opacity = 0.65;
+        view.arrowStrokeStyle = "rgba(96, 165, 250, 0.65)";
+        view.disableArrowBackfaceCull = true;
+        arrowLines.visible = true;
+      } else {
+        arrowLines.visible = false;
+      }
     } else {
       mesh.scale.set(1.0, 1.0, 1.0);
+      arrowLines.visible = false;
     }
     starPoints.visible = false;
     view.starPointsRaw = null;
-    arrowLines.visible = false;
   } else {
     mesh.scale.set(1.0, 1.0, 1.0);
     const raw = session.star_points_data(view.aspect);
@@ -4104,7 +4127,6 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
     starGeometry.setAttribute("position", new THREE.Float32BufferAttribute(posArr, 3));
     starGeometry.setAttribute("customColor", new THREE.Float32BufferAttribute(colArr, 3));
     starGeometry.setAttribute("size", new THREE.Float32BufferAttribute(sizeArr, 1));
-    const is3dInterior = view.aspect === "galaxy" || view.aspect === "solar_system";
     starMaterial.uniforms.cullBackface.value = is3dInterior ? 0.0 : 1.0;
     view.cullStarBackface = !is3dInterior;
     starPoints.visible = true;
@@ -4120,10 +4142,10 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
         new THREE.Float32BufferAttribute(lineSegs, 3)
       );
       arrowMaterial.color.setHex(is3dInterior ? 0x34d399 : 0x60a5fa);
-      arrowMaterial.opacity = is3dInterior ? 0.72 : 0.42;
+      arrowMaterial.opacity = is3dInterior ? 0.78 : 0.44;
       view.arrowStrokeStyle = is3dInterior
-        ? "rgba(52, 211, 153, 0.72)"
-        : "rgba(96, 165, 250, 0.42)";
+        ? "rgba(52, 211, 153, 0.78)"
+        : "rgba(96, 165, 250, 0.44)";
       view.disableArrowBackfaceCull = is3dInterior;
       arrowLines.visible = true;
     } else {
@@ -4136,10 +4158,20 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
 
 function buildSunInfo(view) {
   const s = view.session;
+  const defaultPrompt =
+    view.aspect === "sky_plants"
+      ? "3-Zone Panorama Globe: Top Dome = Daytime Sky (Zenith → Horizon + Home Sun), Middle Band = Sunset & Twilight Horizon, Bottom Hemisphere = Photosynthetic Plant Foliage & Ocean. Click any zone to inspect its optical physics."
+      : view.aspect === "galaxy"
+      ? "3D Host Galaxy View: Shows the 3D galaxy star cloud (tilted 38°), with a bright green 3D crosshair & orbit circle marking your Home Star's galactocentric location. Click or rotate to inspect."
+      : view.aspect === "solar_system"
+      ? "3D Planetary System View: Central Home Star with concentric 3D planet orbits (green target crosshair marks the simulated Home World; ringed planets show 3D ring halos). Click near any planet to inspect it."
+      : view.aspect === "home_sun"
+      ? "3D Home Sun Photosphere: Scaled to true solar radius (dashed blue circle = 1.00 R☉ Sol reference) in its true B-V blackbody color. Click the photosphere to inspect."
+      : "Click any star on the celestial sphere to inspect its catalog ID, spectral class, apparent & absolute magnitude, and distance in light-years.";
   const selectedReport =
     view.selectedTileIdx >= 0
-      ? s.inspect_tile(view.selectedTileIdx)
-      : "Click any star or planetary tile on the sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, atmospheric scattering, sunset optical depth, and photosynthetic plant pigments.";
+      ? s.inspect_aspect_tile(view.aspect || "night_sky", view.selectedTileIdx)
+      : defaultPrompt;
   return {
     galaxyTypeName: s.galaxy_type_name(),
     vantageName: s.vantage_name(),
@@ -4188,6 +4220,16 @@ export const mountSunView =
     }
 
     const view = createBaseSphereView(canvas, false);
+    // Use unlit vertex colors in SunScreen so directional Phong lighting does not half-shade
+    // the celestial sphere or distort true stellar B-V and atmospheric colors:
+    view.material.dispose();
+    view.material = new THREE.MeshBasicMaterial({
+      side: THREE.FrontSide,
+      vertexColors: true,
+    });
+    view.mesh.material = view.material;
+    view.unlit = true;
+
     view.session = new WasmSunSession();
     view.session.generate_galaxy_and_sun(galaxyTypeId, vantageId, starFilter);
     view.aspect = aspect;
@@ -4283,6 +4325,9 @@ export const setSunDisplayOptions =
     activeView.showGalacticPlane = showGalacticPlane;
     activeView.showConstellations = showConstellations;
     updateSunDataBuffers(activeView, false);
+    if (activeView.setSunInfo) {
+      activeView.setSunInfo(buildSunInfo(activeView))();
+    }
   };
 
 export const rotateGrid = (deg) => () => {

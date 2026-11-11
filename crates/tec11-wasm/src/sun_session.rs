@@ -191,6 +191,10 @@ impl WasmSunSession {
         self.sandbox.inspect_tile(tile_idx)
     }
 
+    pub fn inspect_aspect_tile(&self, aspect: &str, tile_idx: usize) -> String {
+        self.sandbox.inspect_aspect_tile(aspect, tile_idx)
+    }
+
     pub fn star_points_data(&self, aspect: &str) -> Vec<f32> {
         self.sandbox.star_points_data(aspect)
     }
