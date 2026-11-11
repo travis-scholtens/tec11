@@ -1,9 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
-use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
+use tec11_math_grid::{dot, Pcg64Mcg, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
+use crate::language::Language;
 use crate::rivers::trace_coarse_rivers;
 use crate::rock::{Rock, RockKind, RockLayer};
 use crate::tectonics::TectonicsSimulation;
@@ -78,6 +80,370 @@ pub fn main_ocean(elevations: &[f32], adjacency: &[Vec<usize>]) -> BTreeSet<usiz
         .into_values()
         .max_by_key(|b| b.len())
         .unwrap_or_default()
+}
+
+/// Metadata for a contiguous continental realm or isolated oceanic archipelago.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContinentInfo {
+    pub id: usize,
+    pub name: String,
+    pub adjectival_prefix: String,
+    pub tile_count: usize,
+    pub centroid: Vec3,
+    pub is_island_group: bool,
+}
+
+/// Metadata for a major ocean basin or enclosed sea.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OceanBasinInfo {
+    pub id: usize,
+    pub name: String,
+    pub tile_count: usize,
+    pub centroid: Vec3,
+}
+
+/// Partition of a planet's surface into named continents/island realms and ocean basins.
+#[derive(Clone, Debug, Default)]
+pub struct PlanetaryGeography {
+    pub continents: Vec<ContinentInfo>,
+    pub oceans: Vec<OceanBasinInfo>,
+    /// Per-tile continent index (`Some(id)` for land tiles `elevation > 0.0`, `None` for sea tiles).
+    pub tile_continent: Vec<Option<usize>>,
+    /// Per-tile ocean basin index (`Some(id)` for sea tiles `elevation <= 0.0`, `None` for land tiles).
+    pub tile_ocean: Vec<Option<usize>>,
+}
+
+impl PlanetaryGeography {
+    pub fn continent_name(&self, tile: usize) -> Option<&str> {
+        self.tile_continent
+            .get(tile)
+            .copied()
+            .flatten()
+            .and_then(|cid| self.continents.get(cid))
+            .map(|c| c.name.as_str())
+    }
+
+    pub fn ocean_name(&self, tile: usize) -> Option<&str> {
+        self.tile_ocean
+            .get(tile)
+            .copied()
+            .flatten()
+            .and_then(|oid| self.oceans.get(oid))
+            .map(|o| o.name.as_str())
+    }
+}
+
+fn format_adjectival_prefix(name: &str) -> String {
+    let lower = name.trim().to_lowercase();
+    if lower.is_empty() {
+        return "continental".to_string();
+    }
+    if lower.ends_with('n') || lower.ends_with("ic") || lower.ends_with("sh") {
+        lower
+    } else if lower.ends_with('a') || lower.ends_with('e') || lower.ends_with('o') || lower.ends_with('u') {
+        format!("{lower}n")
+    } else if lower.ends_with('i') {
+        format!("{lower}an")
+    } else {
+        format!("{lower}an")
+    }
+}
+
+fn compute_tile_set_centroid(tiles: &[usize], grid: &SphericalGrid) -> Vec3 {
+    if tiles.is_empty() {
+        return [1.0, 0.0, 0.0];
+    }
+    let sum = tiles.iter().fold([0.0f64; 3], |acc, &t| {
+        let p = grid.faces[t].0;
+        [acc[0] + p[0], acc[1] + p[1], acc[2] + p[2]]
+    });
+    let len = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
+    if len > 1e-9 {
+        [sum[0] / len, sum[1] / len, sum[2] / len]
+    } else {
+        grid.faces[tiles[0]].0
+    }
+}
+
+fn generate_geographic_name(
+    seed_tag: u64,
+    rank: usize,
+    centroid: Vec3,
+    used_names: &mut BTreeSet<String>,
+) -> String {
+    let qx = ((centroid[0] + 1.0) * 500.0).round() as u64;
+    let qy = ((centroid[1] + 1.0) * 500.0).round() as u64;
+    let qz = ((centroid[2] + 1.0) * 500.0).round() as u64;
+    let seed = seed_tag
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((rank as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add(qx << 20)
+        .wrapping_add(qy << 10)
+        .wrapping_add(qz);
+    let mut rng = Pcg64Mcg::new(seed as u128 | 1);
+    let lang = Language::generate(&mut rng);
+    let mut seen_keys = BTreeSet::new();
+    let mut seen_words = BTreeSet::new();
+    for _ in 0..32 {
+        let mut word = lang.generate_word_unique(&mut seen_keys, &seen_words, &mut rng);
+        if word.syllables.len() < 2 {
+            let extra = lang.generate_syllable(&mut rng);
+            word.syllables.push(extra);
+        }
+        seen_words.insert(word.clone());
+        let written = word.write(true);
+        if written.chars().count() >= 3 && !used_names.contains(&written) {
+            used_names.insert(written.clone());
+            return written;
+        }
+    }
+    let fallback = format!("Terra{}", rank + 1);
+    used_names.insert(fallback.clone());
+    fallback
+}
+
+/// Identify all continents (connected landmasses + associated coastal islands) and ocean basins
+/// on `grid` given `elevations` (`> 0.0` is land, `<= 0.0` is ocean/sea).
+pub fn identify_continents_and_oceans(
+    grid: &SphericalGrid,
+    elevations: &[f32],
+) -> PlanetaryGeography {
+    let n = elevations.len().min(grid.faces.len());
+    if n == 0 {
+        return PlanetaryGeography::default();
+    }
+
+    let adj = grid.adjacency();
+    let mut used_names = BTreeSet::new();
+
+    // --- 1. Continents & Island Realms ---
+    let mut land_dsu = DisjointSet::new(n);
+    for t in 0..n {
+        if elevations[t] > 0.0 {
+            for &nb in &adj[t] {
+                if nb < n && elevations[nb] > 0.0 {
+                    land_dsu.union(t, nb);
+                }
+            }
+        }
+    }
+
+    let mut land_bodies: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for t in 0..n {
+        if elevations[t] > 0.0 {
+            land_bodies.entry(land_dsu.find(t)).or_default().push(t);
+        }
+    }
+
+    let mut sorted_land: Vec<Vec<usize>> = land_bodies.into_values().collect();
+    sorted_land.sort_by_key(|tiles| (Reverse(tiles.len()), tiles.iter().copied().min().unwrap_or(0)));
+
+    let min_continent_tiles = (n / 240).max(8);
+    let mut major_realms: Vec<(Vec<usize>, bool)> = Vec::new();
+    let mut minor_islands: Vec<Vec<usize>> = Vec::new();
+
+    for (idx, tiles) in sorted_land.into_iter().enumerate() {
+        if tiles.len() >= min_continent_tiles || (idx == 0 && major_realms.is_empty()) {
+            major_realms.push((tiles, false));
+        } else {
+            minor_islands.push(tiles);
+        }
+    }
+
+    // Associate coastal islands (within ~25 deg / cos >= 0.90 of a major continent tile) with that continent;
+    // group isolated oceanic islands into archipelago realms.
+    let mut oceanic_groups: Vec<(Vec<usize>, Vec3)> = Vec::new();
+    for island_tiles in minor_islands {
+        let island_center = compute_tile_set_centroid(&island_tiles, grid);
+        let nearest_major = major_realms
+            .iter()
+            .enumerate()
+            .filter_map(|(m_idx, (m_tiles, _))| {
+                let best_dot = m_tiles
+                    .iter()
+                    .map(|&mt| dot(island_center, grid.faces[mt].0))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (best_dot >= 0.90).then_some((m_idx, best_dot))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some((m_idx, _)) = nearest_major {
+            major_realms[m_idx].0.extend(island_tiles);
+        } else {
+            let nearest_arch = oceanic_groups
+                .iter()
+                .enumerate()
+                .filter_map(|(a_idx, (_, a_center))| {
+                    let d = dot(island_center, *a_center);
+                    (d >= 0.88).then_some((a_idx, d))
+                })
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some((a_idx, _)) = nearest_arch {
+                oceanic_groups[a_idx].0.extend(island_tiles);
+                oceanic_groups[a_idx].1 = compute_tile_set_centroid(&oceanic_groups[a_idx].0, grid);
+            } else {
+                oceanic_groups.push((island_tiles, island_center));
+            }
+        }
+    }
+
+    for (arch_tiles, _) in oceanic_groups {
+        major_realms.push((arch_tiles, true));
+    }
+
+    major_realms.sort_by_key(|(tiles, is_island)| {
+        (
+            *is_island,
+            Reverse(tiles.len()),
+            tiles.iter().copied().min().unwrap_or(0),
+        )
+    });
+
+    let mut tile_continent = vec![None; n];
+    let continents: Vec<ContinentInfo> = major_realms
+        .into_iter()
+        .enumerate()
+        .map(|(cid, (tiles, is_island_group))| {
+            for &t in &tiles {
+                tile_continent[t] = Some(cid);
+            }
+            let centroid = compute_tile_set_centroid(&tiles, grid);
+            let name = generate_geographic_name(0x434F_4E54, cid, centroid, &mut used_names);
+            let adjectival_prefix = format_adjectival_prefix(&name);
+            ContinentInfo {
+                id: cid,
+                name,
+                adjectival_prefix,
+                tile_count: tiles.len(),
+                centroid,
+                is_island_group,
+            }
+        })
+        .collect();
+
+    // --- 2. Ocean Basins & Enclosed Seas ---
+    let mut sea_dsu = DisjointSet::new(n);
+    for t in 0..n {
+        if elevations[t] <= 0.0 {
+            for &nb in &adj[t] {
+                if nb < n && elevations[nb] <= 0.0 {
+                    sea_dsu.union(t, nb);
+                }
+            }
+        }
+    }
+
+    let mut sea_bodies: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for t in 0..n {
+        if elevations[t] <= 0.0 {
+            sea_bodies.entry(sea_dsu.find(t)).or_default().push(t);
+        }
+    }
+
+    let mut sorted_seas: Vec<Vec<usize>> = sea_bodies.into_values().collect();
+    sorted_seas.sort_by_key(|tiles| (Reverse(tiles.len()), tiles.iter().copied().min().unwrap_or(0)));
+
+    // Compute BFS distance from coast for all sea tiles so large interconnected oceans
+    // can be partitioned into 3-4 major ocean basins around oceanic poles of inaccessibility.
+    let mut coast_dist = vec![u16::MAX; n];
+    let mut bfs_q = VecDeque::new();
+    for t in 0..n {
+        if elevations[t] <= 0.0 && adj[t].iter().any(|&nb| nb < n && elevations[nb] > 0.0)
+        {
+            coast_dist[t] = 1;
+            bfs_q.push_back(t);
+        }
+    }
+    while let Some(curr) = bfs_q.pop_front() {
+        let next_d = coast_dist[curr].saturating_add(1);
+        for &nb in &adj[curr] {
+            if nb < n && elevations[nb] <= 0.0 && coast_dist[nb] == u16::MAX {
+                coast_dist[nb] = next_d;
+                bfs_q.push_back(nb);
+            }
+        }
+    }
+
+    let mut basin_tiles_list: Vec<Vec<usize>> = Vec::new();
+    for sea_comp in sorted_seas {
+        if sea_comp.len() >= (n / 3).max(60) {
+            let target_basins = ((sea_comp.len() * 4) / n.max(1)).clamp(2, 4);
+            let mut ranked_poles = sea_comp.clone();
+            ranked_poles.sort_by_key(|&t| (Reverse(coast_dist[t]), t));
+            let mut seeds: Vec<usize> = Vec::new();
+            for &cand in &ranked_poles {
+                if seeds
+                    .iter()
+                    .all(|&s| dot(grid.faces[cand].0, grid.faces[s].0) < 0.35)
+                {
+                    seeds.push(cand);
+                    if seeds.len() >= target_basins {
+                        break;
+                    }
+                }
+            }
+            if seeds.len() <= 1 {
+                basin_tiles_list.push(sea_comp);
+            } else {
+                let mut local_owner = BTreeMap::new();
+                let mut q = VecDeque::new();
+                for (b_idx, &s_tile) in seeds.iter().enumerate() {
+                    local_owner.insert(s_tile, b_idx);
+                    q.push_back(s_tile);
+                }
+                while let Some(curr) = q.pop_front() {
+                    let owner = local_owner[&curr];
+                    for &nb in &adj[curr] {
+                        if nb < n && elevations[nb] <= 0.0 && !local_owner.contains_key(&nb) {
+                            local_owner.insert(nb, owner);
+                            q.push_back(nb);
+                        }
+                    }
+                }
+                let mut split_basins = vec![Vec::new(); seeds.len()];
+                for t in sea_comp {
+                    let b_idx = local_owner.get(&t).copied().unwrap_or(0);
+                    split_basins[b_idx].push(t);
+                }
+                for b in split_basins {
+                    if !b.is_empty() {
+                        basin_tiles_list.push(b);
+                    }
+                }
+            }
+        } else {
+            basin_tiles_list.push(sea_comp);
+        }
+    }
+
+    basin_tiles_list
+        .sort_by_key(|tiles| (Reverse(tiles.len()), tiles.iter().copied().min().unwrap_or(0)));
+
+    let mut tile_ocean = vec![None; n];
+    let oceans: Vec<OceanBasinInfo> = basin_tiles_list
+        .into_iter()
+        .enumerate()
+        .map(|(oid, tiles)| {
+            for &t in &tiles {
+                tile_ocean[t] = Some(oid);
+            }
+            let centroid = compute_tile_set_centroid(&tiles, grid);
+            let name = generate_geographic_name(0x4F43_4541, oid, centroid, &mut used_names);
+            OceanBasinInfo {
+                id: oid,
+                name,
+                tile_count: tiles.len(),
+                centroid,
+            }
+        })
+        .collect();
+
+    PlanetaryGeography {
+        continents,
+        oceans,
+        tile_continent,
+        tile_ocean,
+    }
 }
 
 /// Select a random Eden tile (`koeppen == Aw == 3` bordering `main_ocean`),
@@ -596,5 +962,31 @@ mod tests {
         let expanded = sim.step();
         assert!(expanded);
         assert!(sim.populated_count() > 1);
+    }
+
+    #[test]
+    fn test_identify_continents_and_oceans_earth() {
+        let sim = PopulationSandbox::new_earth(2, 6, 42);
+        let elevs = sim.tile_elevations();
+        let geo = identify_continents_and_oceans(sim.grid(), &elevs);
+        assert!(
+            geo.continents.len() >= 3,
+            "Expected multiple continents on Earth, got {}",
+            geo.continents.len()
+        );
+        assert!(
+            geo.oceans.len() >= 2,
+            "Expected multiple ocean basins on Earth, got {}",
+            geo.oceans.len()
+        );
+        for (t, &e) in elevs.iter().enumerate() {
+            if e > 0.0 {
+                assert!(geo.continent_name(t).is_some());
+                assert!(geo.ocean_name(t).is_none());
+            } else {
+                assert!(geo.ocean_name(t).is_some());
+                assert!(geo.continent_name(t).is_none());
+            }
+        }
     }
 }

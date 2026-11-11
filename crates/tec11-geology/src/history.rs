@@ -10,7 +10,8 @@ use tec11_proto::PlanetSnapshotExt;
 use crate::language::{Language, SoundChangeKind, Word, WordOrigin};
 use crate::lifeforms::{settle_species_on_climate, SettledSpecies, SpeciesKind};
 use crate::population::{
-    is_farmable, is_habitable, is_passable, main_ocean, tile_population_thousands,
+    identify_continents_and_oceans, is_farmable, is_habitable, is_passable, main_ocean,
+    tile_population_thousands, PlanetaryGeography,
 };
 use crate::prehistory::PrehistorySimulation;
 use crate::rivers::trace_coarse_rivers;
@@ -40,6 +41,8 @@ pub enum ConceptKey {
     Moon(u32),
     Planet(u32),
     Constellation(u32),
+    Continent(u32),
+    Ocean(u32),
     Species(u32),
     Nation(u32),
     State(u32),
@@ -63,6 +66,14 @@ impl ConceptKey {
             },
             Self::Constellation(id) => tec11_proto::Concept {
                 kind: tec11_proto::ConceptKind::Constellation as i32,
+                id,
+            },
+            Self::Continent(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Continent as i32,
+                id,
+            },
+            Self::Ocean(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Ocean as i32,
                 id,
             },
             Self::Species(id) => tec11_proto::Concept {
@@ -92,6 +103,8 @@ impl ConceptKey {
             tec11_proto::ConceptKind::Moon => Self::Moon(c.id),
             tec11_proto::ConceptKind::Planet => Self::Planet(c.id),
             tec11_proto::ConceptKind::Constellation => Self::Constellation(c.id),
+            tec11_proto::ConceptKind::Continent => Self::Continent(c.id),
+            tec11_proto::ConceptKind::Ocean => Self::Ocean(c.id),
             tec11_proto::ConceptKind::Species => Self::Species(c.id),
             tec11_proto::ConceptKind::Nation => Self::Nation(c.id),
             tec11_proto::ConceptKind::State => Self::State(c.id),
@@ -596,6 +609,7 @@ pub struct HistorySimulation {
     moon_count: u32,
     solar_system: Vec<SolarSystemPlanet>,
     constellations: Vec<Constellation>,
+    geography: PlanetaryGeography,
     settled_species: Vec<SettledSpecies>,
     tile_species: Vec<Vec<usize>>,
     rivers: Vec<Vec<usize>>,
@@ -694,6 +708,7 @@ impl HistorySimulation {
             moon_count,
             solar_system,
             constellations,
+            geography: PlanetaryGeography::default(),
             settled_species: Vec::new(),
             tile_species: vec![Vec::new(); num_fine],
             rivers: Vec::new(),
@@ -738,8 +753,9 @@ impl HistorySimulation {
         let fine_adj = self.terrain.terrain_adj.clone();
         let fine_elevs = self.terrain.fine_elevations.clone();
 
-        // 1. Settle domesticable plants & animals on the planet's coarse climate,
+        // 1. Identify continents and ocean basins, settle plants & animals on the planet's coarse climate,
         //    then map onto subdivided fine faces (`historysimulation.py:facespecies`).
+        self.geography = identify_continents_and_oceans(&grid, &coarse_elevs);
         let biosphere = settle_species_on_climate(&coarse_elevs, self.prehistory.climate_model());
         let coarse_species = biosphere.tile_all_species;
         self.settled_species = biosphere.species;
@@ -952,15 +968,22 @@ impl HistorySimulation {
             }
         }
 
-        // Coin all constellations visible at some point in the year from each state's territory:
+        // Coin all constellations visible at some point in the year and home continents/oceans from each state's territory:
         let mut init_extents: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (&f_idx, &sid) in &self.tile_states {
             init_extents.entry(sid).or_default().push(f_idx);
         }
         for (sid, tiles) in &init_extents {
             let vis = self.visible_constellations_for_tiles(tiles);
+            let (conts, oceans) = self.continents_and_oceans_for_tiles(tiles, &coarse_elevs);
             let mut temp_rng = self.rng.clone();
             if let Some(lang) = self.languages.get_mut(sid) {
+                for cid in conts {
+                    lang.coin_concept(ConceptKey::Continent(cid), &mut temp_rng);
+                }
+                for oid in oceans {
+                    lang.coin_concept(ConceptKey::Ocean(oid), &mut temp_rng);
+                }
                 for c_idx in vis {
                     lang.coin_concept(ConceptKey::Constellation(c_idx), &mut temp_rng);
                 }
@@ -1887,6 +1910,41 @@ impl HistorySimulation {
             .collect()
     }
 
+    /// Set of continent IDs and adjacent ocean basin IDs for `tiles` (fine face indices).
+    pub fn continents_and_oceans_for_tiles(
+        &self,
+        tiles: &[usize],
+        coarse_elevs: &[f32],
+    ) -> (BTreeSet<u32>, BTreeSet<u32>) {
+        let coarse_adj = self.prehistory.adjacency();
+        let mut conts = BTreeSet::new();
+        let mut oceans = BTreeSet::new();
+        for &f_idx in tiles {
+            if f_idx >= self.terrain.parentage.len() {
+                continue;
+            }
+            let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+            if let Some(cid) = self.geography.tile_continent.get(c).copied().flatten() {
+                conts.insert(cid as u32);
+            }
+            if let Some(oid) = self.geography.tile_ocean.get(c).copied().flatten() {
+                oceans.insert(oid as u32);
+            }
+            if let Some(nbs) = coarse_adj.get(c) {
+                for &nb in nbs {
+                    if let Some(oid) = self.geography.tile_ocean.get(nb).copied().flatten() {
+                        oceans.insert(oid as u32);
+                    }
+                }
+            }
+        }
+        (conts, oceans)
+    }
+
+    pub fn geography(&self) -> &PlanetaryGeography {
+        &self.geography
+    }
+
     /// Accumulate concepts across co-resident communities, trade partners, rivals, and recursive trade imports,
     /// borrowing missing words from source state majority languages (`historysimulation.py:664-705`).
     fn accumulate_and_borrow_concepts(
@@ -1894,11 +1952,17 @@ impl HistorySimulation {
         extents: &BTreeMap<u32, Vec<usize>>,
         state_species: &BTreeMap<u32, BTreeSet<usize>>,
     ) {
+        let coarse_elevs = self.prehistory.tile_elevations();
         let mut state_langs: BTreeMap<u32, Option<u32>> = BTreeMap::new();
         let mut state_visible_constellations: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_continents: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_oceans: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         for (&sid, tiles) in extents {
             state_langs.insert(sid, self.primary_language_for_state(sid));
             state_visible_constellations.insert(sid, self.visible_constellations_for_tiles(tiles));
+            let (conts, oceans) = self.continents_and_oceans_for_tiles(tiles, &coarse_elevs);
+            state_continents.insert(sid, conts);
+            state_oceans.insert(sid, oceans);
         }
 
         let mut lang_concepts: BTreeMap<u32, BTreeMap<ConceptKey, Option<u32>>> = BTreeMap::new();
@@ -1999,7 +2063,9 @@ impl HistorySimulation {
                     }
                 }
 
-                // Imported species from recursive trade network (`imports`)
+                // Imported species and foreign continents/oceans from recursive trade network (`imports`)
+                let home_conts = state_continents.get(&state_id).cloned().unwrap_or_default();
+                let home_oceans = state_oceans.get(&state_id).cloned().unwrap_or_default();
                 for partner in rec_partners {
                     let p_lang = state_langs.get(&partner).copied().flatten();
                     if let Some(psp) = state_species.get(&partner) {
@@ -2007,10 +2073,26 @@ impl HistorySimulation {
                             concepts.insert(ConceptKey::Species(sp as u32), p_lang);
                         }
                     }
+                    if let Some(pconts) = state_continents.get(&partner) {
+                        for &cid in pconts.difference(&home_conts) {
+                            concepts.entry(ConceptKey::Continent(cid)).or_insert(p_lang);
+                        }
+                    }
+                    if let Some(poceans) = state_oceans.get(&partner) {
+                        for &oid in poceans.difference(&home_oceans) {
+                            concepts.entry(ConceptKey::Ocean(oid)).or_insert(p_lang);
+                        }
+                    }
                 }
 
-                // Native species, visible constellations (`vis_here`), and core celestial concepts (`Sun`, `Moons`, `Planets`) in `state_id`
+                // Native species, continents, oceans, visible constellations (`vis_here`), and core celestial concepts (`Sun`, `Moons`, `Planets`) in `state_id`
                 let s_lang = state_langs.get(&state_id).copied().flatten();
+                for &cid in &home_conts {
+                    concepts.insert(ConceptKey::Continent(cid), s_lang);
+                }
+                for &oid in &home_oceans {
+                    concepts.insert(ConceptKey::Ocean(oid), s_lang);
+                }
                 for &c_idx in &vis_here {
                     concepts.insert(ConceptKey::Constellation(c_idx), s_lang);
                 }
@@ -3392,15 +3474,26 @@ impl HistorySimulation {
         };
         let fine_idx = match face.source {
             DisplayFaceSource::OceanCoarse(c_idx) => {
-                return format!("Ocean Tile #{c_idx}");
+                let ocean_label = self.geography.ocean_name(c_idx).unwrap_or("World Ocean");
+                return format!("Ocean Tile #{c_idx} ({ocean_label})");
             }
             DisplayFaceSource::Fine(f) => f,
         };
         let fine_elev = self.terrain.fine_elevations[fine_idx];
+        let coarse_elevs = self.prehistory.tile_elevations();
+        let primary_c = self.terrain.primary_coarse_tile(fine_idx, &coarse_elevs);
         if fine_elev <= 0.0 {
-            return format!("Coastal Bay / Sea Face #{fine_idx} ({fine_elev:.2} km)");
+            let ocean_label = self
+                .geography
+                .ocean_name(primary_c)
+                .unwrap_or("Coastal Sea");
+            return format!("Coastal Bay / Sea Face #{fine_idx} ({ocean_label}, {fine_elev:.2} km)");
         }
 
+        let cont_name = self
+            .geography
+            .continent_name(primary_c)
+            .unwrap_or("Mainland");
         let mut lines = Vec::new();
         let tile_pop: f32 = self
             .tile_communities
@@ -3415,7 +3508,7 @@ impl HistorySimulation {
 
         let Some(&sid) = self.tile_states.get(&fine_idx) else {
             lines.push(format!(
-                "Fine Face #{fine_idx} (Unclaimed Land, {fine_elev:.2} km) | Pop: {:.1}K / Cap: {:.1}K",
+                "Continent: {cont_name} | Fine Face #{fine_idx} (Unclaimed Land, {fine_elev:.2} km) | Pop: {:.1}K / Cap: {:.1}K",
                 tile_pop, cap
             ));
             if !sp_names.is_empty() {
@@ -3436,7 +3529,7 @@ impl HistorySimulation {
         };
         let dom_lang = self.primary_language_for_state(sid);
         lines.push(format!(
-            "State: {st_name} | Pop: {:.0}K | Asabiya: {:.0}% ({frontier_label}) | Fine Face #{fine_idx} ({fine_elev:.2} km, {:.1}K / {:.1}K)",
+            "State: {st_name} | Continent: {cont_name} | Pop: {:.0}K | Asabiya: {:.0}% ({frontier_label}) | Fine Face #{fine_idx} ({fine_elev:.2} km, {:.1}K / {:.1}K)",
             st_pop,
             st_asabiya * 100.0,
             tile_pop,
@@ -3583,6 +3676,18 @@ impl HistorySimulation {
                             .get(c as usize)
                             .map(|con| con.lexicon_gloss())
                             .unwrap_or_else(|| format!("constellation #{}", c + 1)),
+                        ConceptKey::Continent(cid) => self
+                            .geography
+                            .continents
+                            .get(cid as usize)
+                            .map(|c| format!("continent ({})", c.name))
+                            .unwrap_or_else(|| format!("continent #{}", cid + 1)),
+                        ConceptKey::Ocean(oid) => self
+                            .geography
+                            .oceans
+                            .get(oid as usize)
+                            .map(|o| format!("ocean ({})", o.name))
+                            .unwrap_or_else(|| format!("ocean #{}", oid + 1)),
                         ConceptKey::Species(sp_id) => self
                             .settled_species
                             .get(sp_id as usize)

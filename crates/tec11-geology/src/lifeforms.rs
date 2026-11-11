@@ -2,6 +2,7 @@ use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{normal, PointTree, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
+use crate::population::{identify_continents_and_oceans, PlanetaryGeography};
 use crate::tectonics::TectonicsSimulation;
 
 const ANIMALS_TSV: &str = include_str!("../data/animals.tsv");
@@ -72,6 +73,7 @@ pub struct SettledSpecies {
 
 #[derive(Clone, Debug)]
 pub struct SettledBiosphere {
+    pub geography: PlanetaryGeography,
     pub species: Vec<SettledSpecies>,
     /// Per-season (`0..8`), per-tile animal count.
     pub seasonal_animal_counts: Vec<Vec<u16>>,
@@ -338,7 +340,10 @@ pub fn settle_species_on_climate(
         }
     }
 
+    let geography = identify_continents_and_oceans(climate_model.grid(), elevations);
+
     SettledBiosphere {
+        geography,
         species: settled,
         seasonal_animal_counts,
         seasonal_plant_counts,
@@ -514,6 +519,20 @@ impl LifeformsSandbox {
 
     pub fn nearest_tile(&self, x: f64, y: f64, z: f64) -> usize {
         self.tree.nearest(normal([x, y, z]))
+    }
+
+    pub fn geography(&self) -> &PlanetaryGeography {
+        &self.biosphere.geography
+    }
+
+    pub fn tile_region_name(&self, tile_idx: usize) -> String {
+        if let Some(cname) = self.biosphere.geography.continent_name(tile_idx) {
+            format!("Continent: {cname}")
+        } else if let Some(oname) = self.biosphere.geography.ocean_name(tile_idx) {
+            format!("Ocean: {oname}")
+        } else {
+            String::new()
+        }
     }
 
     /// Return a newline-separated list of `"<species_id>\t<kind>\t<name>"` for all settled species

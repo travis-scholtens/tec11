@@ -143,6 +143,8 @@ message Concept {
     KIND_MOON = 5;
     KIND_PLANET = 6;
     KIND_CONSTELLATION = 7;
+    KIND_CONTINENT = 8;
+    KIND_OCEAN = 9;
   }
   Kind kind = 1;
   uint32 id = 2;
