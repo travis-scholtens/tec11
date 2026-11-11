@@ -11,7 +11,9 @@ pub use grid::SphericalGrid;
 pub use noise::{simplex3, snoise3};
 pub use point_tree::PointTree;
 pub use rng::Pcg64Mcg;
-pub use terrain::{DisplayFaceSource, FineParentage, SubdividedTerrainGrid};
+pub use terrain::{
+    DisplayFace, DisplayFaceSource, DisplayMesh, FineParentage, SubdividedTerrainGrid,
+};
 pub use vec3::{
     cross, dist2, dot, great_circle_distance, length, normal, rotate, squared_length, Vec3, Vec3Key,
 };

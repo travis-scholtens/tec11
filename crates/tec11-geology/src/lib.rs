@@ -20,7 +20,10 @@ pub mod tile;
 pub mod world;
 
 pub use erosion_sandbox::ErosionSandbox;
-pub use history::{Community, ConceptKey, HistorySimulation, LanguageRecord, StateRecord, TravelRoute};
+pub use history::{
+    Community, ConceptKey, HistorySimulation, LanguageRecord, StatePair, StateRecord,
+    StateTopology, TravelRoute, TravelRouteKind, TravelRouteStatus,
+};
 pub use language::{
     a_mutate, apheresize, apocopate, break_vowels, i_mutate, open_consonants, sonorize_consonants,
     syncopate, vocalize_consonants, ConsonantDef, Language, LanguageSandbox, PhonotacticConstraint,

@@ -70,50 +70,47 @@ pub fn format_with_commas(n: u64) -> String {
 
 /// Triangular-weighted random integer in `[min_val..=max_val]` stepping by `step` and favoring `mode_val`
 /// (`randomspinvalue` in `worldpresenter.py:29-41`).
-pub fn random_spin_value(min_val: i32, max_val: i32, step: i32, mode_val: i32, rng: &mut Pcg64Mcg) -> i32 {
-    let mut vals = Vec::new();
-    let mut v = min_val;
-    while v <= max_val {
-        vals.push(v);
-        v += step.max(1);
-    }
+pub fn random_spin_value(
+    min_val: i32,
+    max_val: i32,
+    step: i32,
+    mode_val: i32,
+    rng: &mut Pcg64Mcg,
+) -> i32 {
+    let step_usize = step.max(1) as usize;
+    let vals: Vec<i32> = (min_val..=max_val).step_by(step_usize).collect();
     if vals.is_empty() {
         return mode_val;
     }
     let first = vals[0] as f64;
     let last = *vals.last().unwrap() as f64;
     let m = mode_val as f64;
-    let mut pw = 0.0;
-    let mut ws = Vec::with_capacity(vals.len());
-    for &val in &vals {
-        let vf = val as f64;
-        let dw = if vf < m {
-            (vf - first) / (m - first).max(1.0)
-        } else {
-            (last - vf) / (last - m).max(1.0)
-        };
-        let w = pw + (1.0 + dw);
-        ws.push(w);
-        pw = w;
-    }
-    let f = rng.uniform(0.0, pw);
-    for (i, &w) in ws.iter().enumerate() {
-        if f < w {
-            return vals[i];
-        }
-    }
-    *vals.last().unwrap()
+    let mut cumulative = 0.0;
+    let ws: Vec<f64> = vals
+        .iter()
+        .map(|&val| {
+            let vf = val as f64;
+            let dw = if vf < m {
+                (vf - first) / (m - first).max(1.0)
+            } else {
+                (last - vf) / (last - m).max(1.0)
+            };
+            cumulative += 1.0 + dw;
+            cumulative
+        })
+        .collect();
+    let f = rng.uniform(0.0, cumulative);
+    ws.iter()
+        .zip(&vals)
+        .find_map(|(&w, &val)| (f < w).then_some(val))
+        .unwrap_or_else(|| *vals.last().unwrap())
 }
 
 /// Geometric distribution `5 * (1 + geom(0.05))` in Myr (`randomtime` in `worldpresenter.py:43-51`).
 pub fn random_time_myr(rng: &mut Pcg64Mcg) -> u32 {
-    let mut n = 0u32;
-    while n < 199 {
-        if rng.uniform(0.0, 1.0) < 0.05 {
-            break;
-        }
-        n += 1;
-    }
+    let n = (0u32..199)
+        .take_while(|_| rng.uniform(0.0, 1.0) >= 0.05)
+        .count() as u32;
     5 * (1 + n)
 }
 
@@ -391,38 +388,47 @@ impl WorldSimulation {
 
     /// Advance the world simulation by 1 tick (`worldsimulation.py:77-87`).
     pub fn step(&mut self) {
-        let mut transition_to_prehistory = false;
-        let mut transition_to_history = false;
+        enum StageTransition {
+            None,
+            ToPrehistory,
+            ToHistory,
+        }
 
-        match &mut self.stage {
+        let transition = match &mut self.stage {
             WorldStageState::Tectonics(tec) => {
                 tec.step();
                 self.tectonics_ticks = tec.geoticks();
                 if tec.has_life() {
                     if self.people_ticks_remaining == 0 {
-                        transition_to_prehistory = true;
+                        StageTransition::ToPrehistory
                     } else {
                         self.people_ticks_remaining -= 1;
+                        StageTransition::None
                     }
+                } else {
+                    StageTransition::None
                 }
             }
             WorldStageState::Prehistory(pre) => {
                 pre.step();
                 self.prehistory_ticks = pre.prehistory_ticks();
                 if self.prehistory_ticks >= 32 && pre.active_agricultural_race_count() > 0 {
-                    transition_to_history = true;
+                    StageTransition::ToHistory
+                } else {
+                    StageTransition::None
                 }
             }
             WorldStageState::History(hist) => {
                 hist.step();
                 self.history_ticks = hist.history_ticks();
+                StageTransition::None
             }
-        }
+        };
 
-        if transition_to_prehistory {
-            self.enter_prehistory_stage();
-        } else if transition_to_history {
-            self.enter_history_stage();
+        match transition {
+            StageTransition::ToPrehistory => self.enter_prehistory_stage(),
+            StageTransition::ToHistory => self.enter_history_stage(),
+            StageTransition::None => {}
         }
     }
 
@@ -745,47 +751,46 @@ impl WorldSimulation {
                 let life = tec.tile_life();
                 let scars = tec.tile_impact_scars();
                 let has_atm = tec.has_atmosphere();
-                let mut buf = Vec::with_capacity(n * 3);
-                for t in 0..n {
-                    let h = tiles[t].elevation();
-                    let rgb = match aspect {
-                        "climate" => {
-                            if !has_atm {
-                                if h > 0.0 {
-                                    [0.5, 0.5, 0.5]
+                (0..n)
+                    .flat_map(|t| {
+                        let h = tiles[t].elevation();
+                        match aspect {
+                            "climate" => {
+                                if !has_atm {
+                                    if h > 0.0 {
+                                        [0.5, 0.5, 0.5]
+                                    } else {
+                                        [0.0, 0.0, 0.0]
+                                    }
+                                } else if h > 0.0 {
+                                    koeppen_rgb(koeppen[t])
                                 } else {
                                     [0.0, 0.0, 0.0]
                                 }
-                            } else if h > 0.0 {
-                                koeppen_rgb(koeppen[t])
-                            } else {
-                                [0.0, 0.0, 0.0]
                             }
-                        }
-                        "meteors" => {
-                            let base = Self::natural_color_with_optics(
+                            "meteors" => {
+                                let base = Self::natural_color_with_optics(
+                                    h,
+                                    tiles[t].top_felsity(),
+                                    koeppen[t],
+                                    life[t],
+                                    has_atm,
+                                    &self.optics,
+                                );
+                                let scar = scars[t].max(tiles[t].impact_signature());
+                                Self::blend_impact_scar_color(base, scar)
+                            }
+                            _ => Self::natural_color_with_optics(
                                 h,
                                 tiles[t].top_felsity(),
                                 koeppen[t],
                                 life[t],
                                 has_atm,
                                 &self.optics,
-                            );
-                            let scar = scars[t].max(tiles[t].impact_signature());
-                            Self::blend_impact_scar_color(base, scar)
+                            ),
                         }
-                        _ => Self::natural_color_with_optics(
-                            h,
-                            tiles[t].top_felsity(),
-                            koeppen[t],
-                            life[t],
-                            has_atm,
-                            &self.optics,
-                        ),
-                    };
-                    buf.extend_from_slice(&rgb);
-                }
-                buf
+                    })
+                    .collect()
             }
             WorldStageState::Prehistory(pre) => {
                 let n = pre.tile_count();
@@ -793,54 +798,53 @@ impl WorldSimulation {
                 let koeppen = pre.tile_koeppen_ids();
                 let life = pre.tile_life();
                 let overlay = pre.population_overlay_colors();
-                let mut buf = Vec::with_capacity(n * 3);
-                for t in 0..n {
-                    let h = tiles[t].elevation();
-                    let rgb = match aspect {
-                        "climate" => {
-                            if h > 0.0 {
-                                koeppen_rgb(koeppen[t])
-                            } else {
-                                [0.0, 0.0, 0.0]
+                (0..n)
+                    .flat_map(|t| {
+                        let h = tiles[t].elevation();
+                        match aspect {
+                            "climate" => {
+                                if h > 0.0 {
+                                    koeppen_rgb(koeppen[t])
+                                } else {
+                                    [0.0, 0.0, 0.0]
+                                }
                             }
-                        }
-                        "population" | "nations" => {
-                            if overlay[t * 3] >= 0.0 {
-                                [overlay[t * 3], overlay[t * 3 + 1], overlay[t * 3 + 2]]
-                            } else {
-                                Self::natural_color_with_optics(
+                            "population" | "nations" => {
+                                if overlay[t * 3] >= 0.0 {
+                                    [overlay[t * 3], overlay[t * 3 + 1], overlay[t * 3 + 2]]
+                                } else {
+                                    Self::natural_color_with_optics(
+                                        h,
+                                        tiles[t].top_felsity(),
+                                        koeppen[t],
+                                        life[t],
+                                        true,
+                                        &self.optics,
+                                    )
+                                }
+                            }
+                            "meteors" => {
+                                let base = Self::natural_color_with_optics(
                                     h,
                                     tiles[t].top_felsity(),
                                     koeppen[t],
                                     life[t],
                                     true,
                                     &self.optics,
-                                )
+                                );
+                                Self::blend_impact_scar_color(base, tiles[t].impact_signature())
                             }
-                        }
-                        "meteors" => {
-                            let base = Self::natural_color_with_optics(
+                            _ => Self::natural_color_with_optics(
                                 h,
                                 tiles[t].top_felsity(),
                                 koeppen[t],
                                 life[t],
                                 true,
                                 &self.optics,
-                            );
-                            Self::blend_impact_scar_color(base, tiles[t].impact_signature())
+                            ),
                         }
-                        _ => Self::natural_color_with_optics(
-                            h,
-                            tiles[t].top_felsity(),
-                            koeppen[t],
-                            life[t],
-                            true,
-                            &self.optics,
-                        ),
-                    };
-                    buf.extend_from_slice(&rgb);
-                }
-                buf
+                    })
+                    .collect()
             }
             WorldStageState::History(hist) => match aspect {
                 "climate" => {
@@ -849,23 +853,23 @@ impl WorldSimulation {
                         let coarse_elevs = pre.tile_elevations();
                         let koeppen = pre.tile_koeppen_ids();
                         let terrain = hist.terrain();
-                        let mut buf = Vec::with_capacity(terrain.display_faces.len() * 3);
-                        for (_, _, src) in &terrain.display_faces {
-                            match *src {
+                        terrain
+                            .display_faces
+                            .iter()
+                            .flat_map(|face| match face.source {
                                 tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
                                     if terrain.fine_elevations[f_idx] > 0.0 {
                                         let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
-                                        buf.extend_from_slice(&koeppen_rgb(koeppen[c]));
+                                        koeppen_rgb(koeppen[c])
                                     } else {
-                                        buf.extend_from_slice(&[0.0, 0.0, 0.0]);
+                                        [0.0, 0.0, 0.0]
                                     }
                                 }
                                 tec11_math_grid::DisplayFaceSource::OceanCoarse(_) => {
-                                    buf.extend_from_slice(&[0.0, 0.0, 0.0]);
+                                    [0.0, 0.0, 0.0]
                                 }
-                            }
-                        }
-                        buf
+                            })
+                            .collect()
                     } else {
                         hist.tile_colors_rgb("nations", true, selected_tile)
                     }
@@ -878,9 +882,10 @@ impl WorldSimulation {
                         let koeppen = pre.tile_koeppen_ids();
                         let life = pre.tile_life();
                         let terrain = hist.terrain();
-                        let mut buf = Vec::with_capacity(terrain.display_faces.len() * 3);
-                        for (_, _, src) in &terrain.display_faces {
-                            match *src {
+                        terrain
+                            .display_faces
+                            .iter()
+                            .flat_map(|face| match face.source {
                                 tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
                                     let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
                                     let h = terrain.fine_elevations[f_idx];
@@ -892,11 +897,10 @@ impl WorldSimulation {
                                         true,
                                         &self.optics,
                                     );
-                                    let rgb = Self::blend_impact_scar_color(
+                                    Self::blend_impact_scar_color(
                                         base,
                                         tiles[c].impact_signature(),
-                                    );
-                                    buf.extend_from_slice(&rgb);
+                                    )
                                 }
                                 tec11_math_grid::DisplayFaceSource::OceanCoarse(c_idx) => {
                                     let h = tiles[c_idx].elevation();
@@ -908,15 +912,13 @@ impl WorldSimulation {
                                         true,
                                         &self.optics,
                                     );
-                                    let rgb = Self::blend_impact_scar_color(
+                                    Self::blend_impact_scar_color(
                                         base,
                                         tiles[c_idx].impact_signature(),
-                                    );
-                                    buf.extend_from_slice(&rgb);
+                                    )
                                 }
-                            }
-                        }
-                        buf
+                            })
+                            .collect()
                     } else {
                         hist.tile_colors_rgb_with_optics(
                             "nations",

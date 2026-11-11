@@ -52,25 +52,25 @@ pub struct TileClimateClassification {
     pub life: bool,
 }
 
+use crate::model::TemperatureRange;
+
 /// Classify a single tile given its seasonal raw temperature `rts` and raw precipitation `rps`
 /// arrays, temperature range `templimits`, and whether `life` is enabled.
 pub fn classify_tile(
     elevation: f32,
     rts: &[f64],
     rps: &[f64],
-    templimits: (f64, f64),
+    templimits: TemperatureRange,
     life_enabled: bool,
 ) -> TileClimateClassification {
     let n = rts.len();
     let n_f64 = n as f64;
+    let span = templimits.span();
 
-    let ts: Vec<f64> = rts
-        .iter()
-        .map(|&c| c * (templimits.1 - templimits.0) + templimits.0)
-        .collect();
+    let ts: Vec<f64> = rts.iter().map(|&c| c * span + templimits.min_c).collect();
     let ps: Vec<f64> = rps.iter().map(|&c| c * 1800.0 / n_f64).collect();
 
-    let mut thr = (ts.iter().sum::<f64>() / n_f64) * 20.0;
+    let base_thr = (ts.iter().sum::<f64>() / n_f64) * 20.0;
 
     let mut byt: Vec<usize> = (0..n).collect();
     byt.sort_by(|&i, &j| {
@@ -86,11 +86,14 @@ pub fn classify_tile(
     let cold_half = &byt[..half];
 
     let inh: f64 = warm_half.iter().map(|&i| ps[i]).sum();
-    if inh >= 0.7 * tot {
-        thr += 280.0;
-    } else if inh >= 0.3 * tot {
-        thr += 140.0;
-    }
+    let thr = base_thr
+        + if inh >= 0.7 * tot {
+            280.0
+        } else if inh >= 0.3 * tot {
+            140.0
+        } else {
+            0.0
+        };
 
     let koeppen = if elevation <= 0.0 {
         KoeppenCode::Ocean

@@ -13,23 +13,52 @@ pub enum SpeciesKind {
     Plant,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ValueRange {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl ValueRange {
+    #[inline]
+    pub const fn new(min: f32, max: f32) -> Self {
+        Self { min, max }
+    }
+
+    #[inline]
+    pub fn contains(self, v: f32) -> bool {
+        v >= self.min && v <= self.max
+    }
+
+    #[inline]
+    pub fn map(self, f: impl Fn(f32) -> f32) -> Self {
+        Self {
+            min: f(self.min),
+            max: f(self.max),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct ClimateTolerance {
-    pub temp_norm: (f32, f32),
-    pub precip_norm: (f32, f32),
-    pub sun_norm: (f32, f32),
+    pub temp_norm: ValueRange,
+    pub precip_norm: ValueRange,
+    pub sun_norm: ValueRange,
 }
 
 impl ClimateTolerance {
     #[inline]
     pub fn in_range(&self, temp: f32, precip: f32, sun: f32) -> bool {
-        temp >= self.temp_norm.0
-            && temp <= self.temp_norm.1
-            && precip >= self.precip_norm.0
-            && precip <= self.precip_norm.1
-            && sun >= self.sun_norm.0
-            && sun <= self.sun_norm.1
+        self.temp_norm.contains(temp)
+            && self.precip_norm.contains(precip)
+            && self.sun_norm.contains(sun)
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TileSeasonPresence {
+    pub tile: usize,
+    pub season_mask: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -37,8 +66,8 @@ pub struct SettledSpecies {
     pub id: usize,
     pub kind: SpeciesKind,
     pub name: String,
-    /// Pairs of `(tile_idx, active_seasons_bitmask)` where `active_seasons_bitmask != 0`.
-    pub tile_seasons: Vec<(usize, u8)>,
+    /// Tile presence entries where `season_mask != 0`.
+    pub tile_seasons: Vec<TileSeasonPresence>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,7 +83,7 @@ pub struct SettledBiosphere {
 }
 
 /// Extract a `"<key>": "<low>-<high>"` range from a JSON line in `animals.tsv` / `plants.tsv`.
-fn extract_json_range(json_str: &str, key: &str) -> Option<(f32, f32)> {
+fn extract_json_range(json_str: &str, key: &str) -> Option<ValueRange> {
     let needle = format!("\"{key}\":");
     let pos = json_str.find(&needle)?;
     let rest = &json_str[pos + needle.len()..];
@@ -64,36 +93,22 @@ fn extract_json_range(json_str: &str, key: &str) -> Option<(f32, f32)> {
     let range_str = after_first[..second_quote].trim();
 
     // Match `(-?[0-9]+)-(-?[0-9]+)`: find the hyphen separating low and high (skipping leading '-')
-    let bytes = range_str.as_bytes();
-    let mut sep_idx = None;
-    for i in 1..bytes.len() {
-        if bytes[i] == b'-' {
-            sep_idx = Some(i);
-            break;
-        }
-    }
-    let sep = sep_idx?;
-    let low: f32 = range_str[..sep].parse().ok()?;
-    let high: f32 = range_str[sep + 1..].parse().ok()?;
-    Some((low, high))
+    let sep = (1..range_str.len()).find(|&i| range_str.as_bytes()[i] == b'-')?;
+    let min: f32 = range_str[..sep].parse().ok()?;
+    let max: f32 = range_str[sep + 1..].parse().ok()?;
+    Some(ValueRange::new(min, max))
 }
 
-fn normalize_temp(celsius_range: (f32, f32)) -> (f32, f32) {
-    ((celsius_range.0 + 25.0) / 75.0, (celsius_range.1 + 25.0) / 75.0)
+fn normalize_temp(celsius_range: ValueRange) -> ValueRange {
+    celsius_range.map(|c| (c + 25.0) / 75.0)
 }
 
-fn normalize_precip(cm_range: (f32, f32), num_seasons: f32) -> (f32, f32) {
-    (
-        cm_range.0 / num_seasons / 30.0,
-        cm_range.1 / num_seasons / 30.0,
-    )
+fn normalize_precip(cm_range: ValueRange, num_seasons: f32) -> ValueRange {
+    cm_range.map(|cm| cm / num_seasons / 30.0)
 }
 
-fn normalize_sun(hours_range: (f32, f32), num_seasons: f32) -> (f32, f32) {
-    (
-        hours_range.0 / num_seasons / 400.0,
-        hours_range.1 / num_seasons / 400.0,
-    )
+fn normalize_sun(hours_range: ValueRange, num_seasons: f32) -> ValueRange {
+    hours_range.map(|h| h / num_seasons / 400.0)
 }
 
 /// Settle all flora and fauna from `animals.tsv` and `plants.tsv` onto the given planet's
@@ -149,101 +164,105 @@ pub fn settle_species_on_climate(
         let tol = ClimateTolerance {
             temp_norm: normalize_temp(t_range),
             precip_norm: normalize_precip(p_range, num_seasons_f),
-            sun_norm: (0.0, 1.0),
+            sun_norm: ValueRange::new(0.0, 1.0),
         };
 
         // Strategy 1: Year-round (`findregions`: all seasons in range)
-        let mut year_round_tiles = Vec::new();
-        for &t in &land_tiles {
-            let mut all_ok = true;
-            for s in 0..num_seasons {
-                let idx = s * n + t;
-                if !tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
-                    all_ok = false;
-                    break;
-                }
-            }
-            if all_ok {
-                year_round_tiles.push((t, all_seasons_mask));
-            }
-        }
+        let year_round_tiles: Vec<TileSeasonPresence> = land_tiles
+            .iter()
+            .copied()
+            .filter(|&t| {
+                (0..num_seasons).all(|s| {
+                    let idx = s * n + t;
+                    tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx])
+                })
+            })
+            .map(|tile| TileSeasonPresence {
+                tile,
+                season_mask: all_seasons_mask,
+            })
+            .collect();
 
         let chosen_tiles = if !year_round_tiles.is_empty() {
             Some(year_round_tiles)
         } else {
             // Strategy 2: Hibernation (`findhibernationregions`)
-            let too_cold = (tol.temp_norm.0 - 0.01).min(0.3).max(0.0);
-            let winter_max = tol.temp_norm.0;
-            let mut hib_tiles = Vec::new();
-            for &t in &land_tiles {
-                let mut mask = 0u8;
-                let mut winter_ok = true;
-                for s in 0..num_seasons {
-                    let idx = s * n + t;
-                    if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
-                        mask |= 1u8 << s;
-                    } else {
-                        let temp = temp_s[idx];
-                        if temp < too_cold || temp > winter_max {
-                            winter_ok = false;
-                        }
-                    }
-                }
-                if winter_ok && mask != 0 && mask != all_seasons_mask {
-                    hib_tiles.push((t, mask));
-                }
-            }
+            let winter_range =
+                ValueRange::new((tol.temp_norm.min - 0.01).clamp(0.0, 0.3), tol.temp_norm.min);
+            let hib_tiles: Vec<TileSeasonPresence> = land_tiles
+                .iter()
+                .copied()
+                .filter_map(|t| {
+                    let (mask, winter_ok) =
+                        (0..num_seasons).fold((0u8, true), |(mask, winter_ok), s| {
+                            let idx = s * n + t;
+                            if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
+                                (mask | (1u8 << s), winter_ok)
+                            } else {
+                                (mask, winter_ok && winter_range.contains(temp_s[idx]))
+                            }
+                        });
+                    (winter_ok && mask != 0 && mask != all_seasons_mask).then_some(
+                        TileSeasonPresence {
+                            tile: t,
+                            season_mask: mask,
+                        },
+                    )
+                })
+                .collect();
             if !hib_tiles.is_empty() {
                 Some(hib_tiles)
             } else {
                 // Strategy 3: Migration (`findmigratorypatterns`)
-                let mut seasonal_tiles = Vec::new();
                 let mut present_masks = [false; 256];
-                for &t in &land_tiles {
-                    let mut mask = 0u8;
-                    for s in 0..num_seasons {
-                        let idx = s * n + t;
-                        if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
-                            mask |= 1u8 << s;
+                let seasonal_tiles: Vec<TileSeasonPresence> = land_tiles
+                    .iter()
+                    .copied()
+                    .filter_map(|t| {
+                        let mask = (0..num_seasons).fold(0u8, |acc, s| {
+                            let idx = s * n + t;
+                            if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
+                                acc | (1u8 << s)
+                            } else {
+                                acc
+                            }
+                        });
+                        if mask != 0 && mask != all_seasons_mask {
+                            present_masks[mask as usize] = true;
+                            Some(TileSeasonPresence {
+                                tile: t,
+                                season_mask: mask,
+                            })
+                        } else {
+                            None
                         }
-                    }
-                    if mask != 0 && mask != all_seasons_mask {
-                        seasonal_tiles.push((t, mask));
-                        present_masks[mask as usize] = true;
-                    }
-                }
+                    })
+                    .collect();
                 let mut valid_mig_mask = [false; 256];
                 for m1 in 1..(all_seasons_mask as usize) {
-                    if !present_masks[m1] {
-                        continue;
-                    }
-                    for m2 in 1..(all_seasons_mask as usize) {
-                        if present_masks[m2] && ((m1 | m2) as u8) == all_seasons_mask {
-                            valid_mig_mask[m1] = true;
-                            break;
-                        }
+                    if present_masks[m1]
+                        && (1..(all_seasons_mask as usize))
+                            .any(|m2| present_masks[m2] && ((m1 | m2) as u8) == all_seasons_mask)
+                    {
+                        valid_mig_mask[m1] = true;
                     }
                 }
-                let mig_tiles: Vec<(usize, u8)> = seasonal_tiles
+                let mig_tiles: Vec<TileSeasonPresence> = seasonal_tiles
                     .into_iter()
-                    .filter(|&(_, m)| valid_mig_mask[m as usize])
+                    .filter(|p| valid_mig_mask[p.season_mask as usize])
                     .collect();
-                if !mig_tiles.is_empty() {
-                    Some(mig_tiles)
-                } else {
-                    None
-                }
+                (!mig_tiles.is_empty()).then_some(mig_tiles)
             }
         };
 
         if let Some(tile_seasons) = chosen_tiles {
             let sp_id = settled.len();
-            for &(t, mask) in &tile_seasons {
-                tile_all_species[t].push(sp_id);
+            for &presence in &tile_seasons {
+                tile_all_species[presence.tile].push(sp_id);
                 for s in 0..num_seasons {
-                    if (mask & (1u8 << s)) != 0 {
-                        seasonal_animal_counts[s][t] =
-                            seasonal_animal_counts[s][t].saturating_add(1);
+                    if (presence.season_mask & (1u8 << s)) != 0 {
+                        seasonal_animal_counts[s][presence.tile] =
+                            seasonal_animal_counts[s][presence.tile].saturating_add(1);
                     }
                 }
             }
@@ -280,28 +299,33 @@ pub fn settle_species_on_climate(
             sun_norm: normalize_sun(s_range, num_seasons_f),
         };
 
-        let mut plant_tiles = Vec::new();
-        for &t in &land_tiles {
-            let mut mask = 0u8;
-            for s in 0..num_seasons {
-                let idx = s * n + t;
-                if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
-                    mask |= 1u8 << s;
-                }
-            }
-            if mask != 0 {
-                plant_tiles.push((t, mask));
-            }
-        }
+        let plant_tiles: Vec<TileSeasonPresence> = land_tiles
+            .iter()
+            .copied()
+            .filter_map(|t| {
+                let mask = (0..num_seasons).fold(0u8, |acc, s| {
+                    let idx = s * n + t;
+                    if tol.in_range(temp_s[idx], precip_s[idx], sun_s[idx]) {
+                        acc | (1u8 << s)
+                    } else {
+                        acc
+                    }
+                });
+                (mask != 0).then_some(TileSeasonPresence {
+                    tile: t,
+                    season_mask: mask,
+                })
+            })
+            .collect();
 
         if !plant_tiles.is_empty() {
             let sp_id = settled.len();
-            for &(t, mask) in &plant_tiles {
-                tile_all_species[t].push(sp_id);
+            for &presence in &plant_tiles {
+                tile_all_species[presence.tile].push(sp_id);
                 for s in 0..num_seasons {
-                    if (mask & (1u8 << s)) != 0 {
-                        seasonal_plant_counts[s][t] =
-                            seasonal_plant_counts[s][t].saturating_add(1);
+                    if (presence.season_mask & (1u8 << s)) != 0 {
+                        seasonal_plant_counts[s][presence.tile] =
+                            seasonal_plant_counts[s][presence.tile].saturating_add(1);
                     }
                 }
             }
@@ -515,28 +539,23 @@ impl LifeformsSandbox {
                 }
                 let active_in_season = sp
                     .tile_seasons
-                    .binary_search_by_key(&tile_idx, |&(t, _)| t)
+                    .binary_search_by_key(&tile_idx, |p| p.tile)
                     .ok()
-                    .map(|idx| (sp.tile_seasons[idx].1 & s_bit) != 0)
-                    .unwrap_or(false);
-                if active_in_season {
-                    Some(sp)
-                } else {
-                    None
-                }
+                    .is_some_and(|idx| (sp.tile_seasons[idx].season_mask & s_bit) != 0);
+                active_in_season.then_some(sp)
             })
             .collect();
 
         list.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut out = String::new();
-        for sp in list {
-            let kind_code = match sp.kind {
-                SpeciesKind::Animal => "A",
-                SpeciesKind::Plant => "P",
-            };
-            out.push_str(&format!("{}\t{}\t{}\n", sp.id, kind_code, sp.name));
-        }
-        out
+        list.into_iter()
+            .map(|sp| {
+                let kind_code = match sp.kind {
+                    SpeciesKind::Animal => "A",
+                    SpeciesKind::Plant => "P",
+                };
+                format!("{}\t{}\t{}\n", sp.id, kind_code, sp.name)
+            })
+            .collect()
     }
 
     /// Return a per-tile `u8` presence mask (`1` if `species_id` is present on tile `t` in `season_idx`, else `0`).
@@ -546,9 +565,9 @@ impl LifeformsSandbox {
             return mask;
         };
         let s_bit = 1u8 << (season_idx.min(7) as u8);
-        for &(t, m) in &sp.tile_seasons {
-            if (m & s_bit) != 0 {
-                mask[t] = 1;
+        for &presence in &sp.tile_seasons {
+            if (presence.season_mask & s_bit) != 0 {
+                mask[presence.tile] = 1;
             }
         }
         mask

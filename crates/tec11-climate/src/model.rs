@@ -8,10 +8,49 @@ use crate::ocean::{solve_seasonal_ocean_circulation, OceanCirculation};
 /// Standard 8 seasonal steps used in `Tec-Nine` (`climatesimulation.py:41`).
 pub const DEFAULT_SEASONS: [f64; 8] = [-1.0, -0.5, 0.0, 0.5, 1.0, 0.5, 0.0, -0.5];
 
+/// Global temperature interval `[min_c, max_c]` in degrees Celsius.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TemperatureRange {
+    pub min_c: f64,
+    pub max_c: f64,
+}
+
+impl TemperatureRange {
+    pub const fn new(min_c: f64, max_c: f64) -> Self {
+        Self { min_c, max_c }
+    }
+
+    #[inline]
+    pub fn span(self) -> f64 {
+        self.max_c - self.min_c
+    }
+}
+
+/// Weighted downwind edge in the atmospheric advection graph (`climatemethod.py`).
+#[derive(Clone, Copy, Debug)]
+pub struct DownwindLink {
+    pub target_tile: usize,
+    pub weight: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindDestCacheKey {
+    cells: u32,
+    spin_bits: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OceanCacheKey {
+    cells: u32,
+    spin_bits: u64,
+    tilt_bits: u64,
+    glaciation_bits: u64,
+}
+
 /// Default spin rate and axial tilt (`climatesimulation.py:11-12`).
 pub const DEFAULT_SPIN: f64 = 1.0;
 pub const DEFAULT_TILT_DEG: f64 = 23.0;
-pub const MEAN_TEMPRANGE_C: (f64, f64) = (-25.0, 50.0);
+pub const MEAN_TEMPRANGE_C: TemperatureRange = TemperatureRange::new(-25.0, 50.0);
 pub const BREEZE_DISTANCE: u32 = 10;
 
 /// Compute initial compass bearing (in degrees `[0, 360)`) from `(lat1_deg, lon1_deg)`
@@ -43,11 +82,9 @@ pub fn wind_direction_deg(lat_deg: f64, cells: u32, spin: f64) -> f64 {
     let c = cells.max(1) as f64;
     let band = (lat_deg.abs() / (90.0 / c)) as i32 & 1;
     let n = if lat_deg > 0.0 { band } else { 1 - band };
-    let mut d = 180.0 - 180.0 * (n as f64);
-
+    let base_deg = 180.0 - 180.0 * (n as f64);
     let ce = 2.0 * spin * (PI * (180.0 - lat_deg) / 180.0).sin();
-    d += ce.atan2(1.0) * 180.0 / PI;
-    d.rem_euclid(360.0)
+    (base_deg + ce.atan2(1.0) * 180.0 / PI).rem_euclid(360.0)
 }
 
 /// Discrete odd circulation cell count per hemisphere (`1, 3, 5, 7`) for a continuous
@@ -69,9 +106,12 @@ pub fn nominal_cells_for_spin(spin: f64) -> u32 {
 
 /// Compute global temperature limits `(min_c, max_c)` shifted by `glaciation` in `[0.0, 1.0]`,
 /// matching `temprange()` in `climatemethod.py`.
-pub fn temp_range_for_glaciation(mean_range: (f64, f64), glaciation: f64) -> (f64, f64) {
+pub fn temp_range_for_glaciation(
+    mean_range: TemperatureRange,
+    glaciation: f64,
+) -> TemperatureRange {
     let dtemp = 5.0 * (glaciation / 0.5);
-    (mean_range.0 + dtemp, mean_range.1 + dtemp)
+    TemperatureRange::new(mean_range.min_c + dtemp, mean_range.max_c + dtemp)
 }
 
 /// Per-season scalar and vector fields across all grid tiles.
@@ -97,11 +137,11 @@ pub struct ClimateModel {
     glaciation: f64,
     spin: f64,
     tilt_deg: f64,
-    /// Cached wind/seabreeze parameters `(cells, spin_bits)`.
-    cached_dest_params: Option<(u32, u64)>,
-    /// Cached ocean circulation parameters `(cells, spin_bits, tilt_bits, glaciation_bits)`.
-    cached_ocean_params: Option<(u32, u64, u64, u64)>,
-    dest_map: Vec<Vec<(usize, f64)>>,
+    /// Cached wind/seabreeze parameters.
+    cached_dest_params: Option<WindDestCacheKey>,
+    /// Cached ocean circulation parameters.
+    cached_ocean_params: Option<OceanCacheKey>,
+    dest_map: Vec<Vec<DownwindLink>>,
     /// Per-tile sea-breeze moisture factor `((d - breeze) / d)^2`.
     seabased: Vec<f64>,
     /// Coupled seasonal wind-driven Stommel–Ekman ocean circulation and SST anomaly.
@@ -149,16 +189,17 @@ impl ClimateModel {
         assert_eq!(n, elevations.len());
         let adjacency = grid.adjacency();
 
-        let mut lats_deg = Vec::with_capacity(n);
-        let mut lons_deg = Vec::with_capacity(n);
-        for &([x, y, z], _) in &grid.faces {
-            let lat = 180.0 / PI * z.atan2((x * x + y * y).sqrt());
-            // In our right-handed globe frame (where +Z = x is Prime Meridian and +Y = z is North),
-            // East (+X) is -y, so geographic longitude is atan2(-y, x).
-            let lon = 180.0 / PI * (-y).atan2(x);
-            lats_deg.push(lat);
-            lons_deg.push(lon);
-        }
+        let (lats_deg, lons_deg): (Vec<f64>, Vec<f64>) = grid
+            .faces
+            .iter()
+            .map(|&([x, y, z], _)| {
+                let lat = 180.0 / PI * z.atan2((x * x + y * y).sqrt());
+                // In our right-handed globe frame (where +Z = x is Prime Meridian and +Y = z is North),
+                // East (+X) is -y, so geographic longitude is atan2(-y, x).
+                let lon = 180.0 / PI * (-y).atan2(x);
+                (lat, lon)
+            })
+            .unzip();
 
         let mut model = Self {
             grid,
@@ -233,8 +274,8 @@ impl ClimateModel {
         self.ocean_seasons.get(season_idx)
     }
 
-    /// Downwind destination graph `dest_map[v]` = `[(neighbor_idx, normalized_weight)]`.
-    pub fn dest_map(&self) -> &[Vec<(usize, f64)>] {
+    /// Downwind destination graph `dest_map[v]` = `[DownwindLink { target_tile, weight }]`.
+    pub fn dest_map(&self) -> &[Vec<DownwindLink>] {
         &self.dest_map
     }
 
@@ -253,7 +294,8 @@ impl ClimateModel {
         } else {
             ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0])
         };
-        let dir_rad = wind_direction_deg(self.lats_deg[tile_idx], self.cells, self.spin) * PI / 180.0;
+        let dir_rad =
+            wind_direction_deg(self.lats_deg[tile_idx], self.cells, self.spin) * PI / 180.0;
         let we = dir_rad.sin();
         let wn = dir_rad.cos();
         [
@@ -304,10 +346,13 @@ impl ClimateModel {
         self.spin = spin;
         self.tilt_deg = tilt_deg.clamp(0.0, 90.0);
         self.cells = cells;
-        let q_bits = quant_spin.to_bits();
-        if self.cached_dest_params != Some((cells, q_bits)) {
+        let dest_key = WindDestCacheKey {
+            cells,
+            spin_bits: quant_spin.to_bits(),
+        };
+        if self.cached_dest_params != Some(dest_key) {
             self.compute_wind_dest_map();
-            self.cached_dest_params = Some((cells, q_bits));
+            self.cached_dest_params = Some(dest_key);
         }
     }
 
@@ -322,14 +367,15 @@ impl ClimateModel {
         let n = grid.faces.len();
         let adjacency = grid.adjacency();
 
-        let mut lats_deg = Vec::with_capacity(n);
-        let mut lons_deg = Vec::with_capacity(n);
-        for &([x, y, z], _) in &grid.faces {
-            let lat = 180.0 / PI * z.atan2((x * x + y * y).sqrt());
-            let lon = 180.0 / PI * (-y).atan2(x);
-            lats_deg.push(lat);
-            lons_deg.push(lon);
-        }
+        let (lats_deg, lons_deg): (Vec<f64>, Vec<f64>) = grid
+            .faces
+            .iter()
+            .map(|&([x, y, z], _)| {
+                let lat = 180.0 / PI * z.atan2((x * x + y * y).sqrt());
+                let lon = 180.0 / PI * (-y).atan2(x);
+                (lat, lon)
+            })
+            .unzip();
 
         let mut model = Self {
             grid,
@@ -351,7 +397,10 @@ impl ClimateModel {
         };
         model.compute_wind_dest_map();
         let quant_spin = (spin * 20.0).round() / 20.0;
-        model.cached_dest_params = Some((model.cells, quant_spin.to_bits()));
+        model.cached_dest_params = Some(WindDestCacheKey {
+            cells: model.cells,
+            spin_bits: quant_spin.to_bits(),
+        });
         model
     }
 
@@ -374,12 +423,12 @@ impl ClimateModel {
             self.glaciation,
             &DEFAULT_SEASONS,
         );
-        self.cached_ocean_params = Some((
-            self.cells,
-            self.spin.to_bits(),
-            self.tilt_deg.to_bits(),
-            self.glaciation.to_bits(),
-        ));
+        self.cached_ocean_params = Some(OceanCacheKey {
+            cells: self.cells,
+            spin_bits: self.spin.to_bits(),
+            tilt_bits: self.tilt_deg.to_bits(),
+            glaciation_bits: self.glaciation.to_bits(),
+        });
 
         self.refresh_seasons_and_classifications(has_life);
     }
@@ -405,81 +454,86 @@ impl ClimateModel {
         let glacial_dp = 0.2 * (0.5 - self.glaciation) / 0.5;
         let c_f64 = self.cells as f64;
         let templimits = temp_range_for_glaciation(MEAN_TEMPRANGE_C, self.glaciation);
-        let num_seasons = DEFAULT_SEASONS.len();
 
-        let mut snapshots = Vec::with_capacity(num_seasons);
-        for (s_idx, &season_val) in DEFAULT_SEASONS.iter().enumerate() {
-            let ocean = &self.ocean_seasons[s_idx];
-            let mut sun_vec = Vec::with_capacity(n);
-            let mut temp_vec = Vec::with_capacity(n);
-            let mut precip_vec = Vec::with_capacity(n);
+        let snapshots: Vec<SeasonalSnapshot> = DEFAULT_SEASONS
+            .iter()
+            .enumerate()
+            .map(|(s_idx, &season_val)| {
+                let ocean = &self.ocean_seasons[s_idx];
+                let mut sun_vec = Vec::with_capacity(n);
+                let mut temp_vec = Vec::with_capacity(n);
+                let mut precip_vec = Vec::with_capacity(n);
 
-            for v in 0..n {
-                let lat = self.lats_deg[v];
-                let h = self.elevations[v] as f64;
-                let sst_inf = ocean.coastal_sst_influence[v] as f64;
+                for v in 0..n {
+                    let lat = self.lats_deg[v];
+                    let h = self.elevations[v] as f64;
+                    let sst_inf = ocean.coastal_sst_influence[v] as f64;
 
-                let ins = insolation(lat, season_val, self.tilt_deg);
-                let base_t = if h > 0.0 {
-                    ins * (1.0 - (h / 10.0).min(1.0))
-                } else {
-                    ins
-                };
-                let temp = base_t + glacial_dt + 0.06 * sst_inf;
-                let conv = (((lat * 2.0 * c_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
-                    + 1.0)
-                    / 2.0;
-                let precip =
-                    (self.seabased[v] + conv + glacial_dp + 0.12 * sst_inf).clamp(0.0, 1.0);
+                    let ins = insolation(lat, season_val, self.tilt_deg);
+                    let base_t = if h > 0.0 {
+                        ins * (1.0 - (h / 10.0).min(1.0))
+                    } else {
+                        ins
+                    };
+                    let temp = base_t + glacial_dt + 0.06 * sst_inf;
+                    let conv =
+                        (((lat * 2.0 * c_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
+                            + 1.0)
+                            / 2.0;
+                    let precip =
+                        (self.seabased[v] + conv + glacial_dp + 0.12 * sst_inf).clamp(0.0, 1.0);
 
-                sun_vec.push(ins as f32);
-                temp_vec.push(temp as f32);
-                precip_vec.push(precip as f32);
-            }
+                    sun_vec.push(ins as f32);
+                    temp_vec.push(temp as f32);
+                    precip_vec.push(precip as f32);
+                }
 
-            snapshots.push(SeasonalSnapshot {
-                season_value: season_val,
-                insolation: sun_vec,
-                temperature: temp_vec,
-                precipitation: precip_vec,
-                ocean: ocean.clone(),
-            });
-        }
+                SeasonalSnapshot {
+                    season_value: season_val,
+                    insolation: sun_vec,
+                    temperature: temp_vec,
+                    precipitation: precip_vec,
+                    ocean: ocean.clone(),
+                }
+            })
+            .collect();
 
-        let mut classifications = Vec::with_capacity(n);
-        let mut rts = vec![0.0f64; num_seasons];
-        let mut rps = vec![0.0f64; num_seasons];
-
-        for v in 0..n {
-            for (s_idx, snap) in snapshots.iter().enumerate() {
-                rts[s_idx] = snap.temperature[v] as f64;
-                rps[s_idx] = snap.precipitation[v] as f64;
-            }
-            classifications.push(classify_tile(
-                self.elevations[v],
-                &rts,
-                &rps,
-                templimits,
-                has_life,
-            ));
-        }
+        let classifications: Vec<TileClimateClassification> = (0..n)
+            .map(|v| {
+                let rts: Vec<f64> = snapshots
+                    .iter()
+                    .map(|snap| snap.temperature[v] as f64)
+                    .collect();
+                let rps: Vec<f64> = snapshots
+                    .iter()
+                    .map(|snap| snap.precipitation[v] as f64)
+                    .collect();
+                classify_tile(self.elevations[v], &rts, &rps, templimits, has_life)
+            })
+            .collect();
 
         self.seasons = snapshots;
         self.classifications = classifications;
     }
 
     fn recompute(&mut self) {
-        let spin_bits = self.spin.to_bits();
-        let tilt_bits = self.tilt_deg.to_bits();
-        let glac_bits = self.glaciation.to_bits();
-
-        if self.cached_dest_params != Some((self.cells, spin_bits)) {
+        let dest_key = WindDestCacheKey {
+            cells: self.cells,
+            spin_bits: self.spin.to_bits(),
+        };
+        if self.cached_dest_params != Some(dest_key) {
             self.compute_wind_dest_map();
             self.compute_seabreeze();
-            self.cached_dest_params = Some((self.cells, spin_bits));
+            self.cached_dest_params = Some(dest_key);
         }
 
-        if self.cached_ocean_params != Some((self.cells, spin_bits, tilt_bits, glac_bits)) {
+        let ocean_key = OceanCacheKey {
+            cells: self.cells,
+            spin_bits: self.spin.to_bits(),
+            tilt_bits: self.tilt_deg.to_bits(),
+            glaciation_bits: self.glaciation.to_bits(),
+        };
+        if self.cached_ocean_params != Some(ocean_key) {
             self.ocean_seasons = solve_seasonal_ocean_circulation(
                 &self.grid,
                 &self.adjacency,
@@ -491,78 +545,10 @@ impl ClimateModel {
                 self.glaciation,
                 &DEFAULT_SEASONS,
             );
-            self.cached_ocean_params = Some((self.cells, spin_bits, tilt_bits, glac_bits));
+            self.cached_ocean_params = Some(ocean_key);
         }
 
-        let n = self.tile_count();
-        let glacial_dt = 0.15 * (self.glaciation - 0.5) / 0.5;
-        let glacial_dp = 0.2 * (0.5 - self.glaciation) / 0.5;
-        let c_f64 = self.cells as f64;
-
-        let mut snapshots = Vec::with_capacity(DEFAULT_SEASONS.len());
-        for (s_idx, &season_val) in DEFAULT_SEASONS.iter().enumerate() {
-            let ocean = &self.ocean_seasons[s_idx];
-            let mut sun_vec = Vec::with_capacity(n);
-            let mut temp_vec = Vec::with_capacity(n);
-            let mut precip_vec = Vec::with_capacity(n);
-
-            for v in 0..n {
-                let lat = self.lats_deg[v];
-                let h = self.elevations[v] as f64;
-                let sst_inf = ocean.coastal_sst_influence[v] as f64;
-
-                let ins = insolation(lat, season_val, self.tilt_deg);
-                let base_t = if h > 0.0 {
-                    ins * (1.0 - (h / 10.0).min(1.0))
-                } else {
-                    ins
-                };
-                // Couple seasonal marine SST anomaly (warm boundary currents vs cold upwelling)
-                // into coastal/maritime air temperatures.
-                let temp = base_t + glacial_dt + 0.06 * sst_inf;
-
-                let conv = (((lat * 2.0 * c_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
-                    + 1.0)
-                    / 2.0;
-                // Warm currents boost coastal evaporation/moisture; cold upwelling suppresses it.
-                let precip = (self.seabased[v] + conv + glacial_dp + 0.12 * sst_inf).clamp(0.0, 1.0);
-
-                sun_vec.push(ins as f32);
-                temp_vec.push(temp as f32);
-                precip_vec.push(precip as f32);
-            }
-
-            snapshots.push(SeasonalSnapshot {
-                season_value: season_val,
-                insolation: sun_vec,
-                temperature: temp_vec,
-                precipitation: precip_vec,
-                ocean: ocean.clone(),
-            });
-        }
-
-        let templimits = temp_range_for_glaciation(MEAN_TEMPRANGE_C, self.glaciation);
-        let num_seasons = snapshots.len();
-        let mut classifications = Vec::with_capacity(n);
-        let mut rts = vec![0.0f64; num_seasons];
-        let mut rps = vec![0.0f64; num_seasons];
-
-        for v in 0..n {
-            for (s_idx, snap) in snapshots.iter().enumerate() {
-                rts[s_idx] = snap.temperature[v] as f64;
-                rps[s_idx] = snap.precipitation[v] as f64;
-            }
-            classifications.push(classify_tile(
-                self.elevations[v],
-                &rts,
-                &rps,
-                templimits,
-                true,
-            ));
-        }
-
-        self.seasons = snapshots;
-        self.classifications = classifications;
+        self.refresh_seasons_and_classifications(true);
     }
 
     fn compute_wind_dest_map(&mut self) {
@@ -573,7 +559,7 @@ impl ClimateModel {
             .map(|&lat| wind_direction_deg(lat, self.cells, self.spin))
             .collect();
 
-        let mut dests: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        let mut dests: Vec<Vec<DownwindLink>> = vec![Vec::new(); n];
         let mut seen = vec![false; n];
 
         for v in 0..n {
@@ -585,7 +571,10 @@ impl ClimateModel {
                 let b = bearing_deg(lat_v, lon_v, self.lats_deg[a], self.lons_deg[a]);
                 let w = ((b - dir_v) * PI / 180.0).cos();
                 if w > 0.0 {
-                    dests[v].push((a, w));
+                    dests[v].push(DownwindLink {
+                        target_tile: a,
+                        weight: w,
+                    });
                     seen[a] = true;
                 }
             }
@@ -599,17 +588,20 @@ impl ClimateModel {
                     let b = bearing_deg(lat_v, lon_v, self.lats_deg[a], lon_v);
                     let w = -((b - directions[a]) * PI / 180.0).cos();
                     if w > 0.0 {
-                        dests[a].push((v, w));
+                        dests[a].push(DownwindLink {
+                            target_tile: v,
+                            weight: w,
+                        });
                     }
                 }
             }
         }
 
         for dws in &mut dests {
-            let total: f64 = dws.iter().map(|&(_, w)| w).sum();
+            let total: f64 = dws.iter().map(|link| link.weight).sum();
             if total > 0.0 {
-                for item in dws.iter_mut() {
-                    item.1 /= total;
+                for link in dws.iter_mut() {
+                    link.weight /= total;
                 }
             }
         }
@@ -619,20 +611,24 @@ impl ClimateModel {
     fn compute_seabreeze(&mut self) {
         let n = self.tile_count();
         let mut seabreeze: Vec<Option<u32>> = vec![None; n];
-        let mut frontier: Vec<usize> = Vec::new();
-        for v in 0..n {
-            if self.elevations[v] <= 0.0 {
-                seabreeze[v] = Some(0);
-                frontier.push(v);
-            }
-        }
+        let mut frontier: Vec<usize> = (0..n)
+            .filter(|&v| {
+                if self.elevations[v] <= 0.0 {
+                    seabreeze[v] = Some(0);
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect();
 
         let mut d = 0;
         while d < BREEZE_DISTANCE && !frontier.is_empty() {
             d += 1;
             let mut next_frontier = Vec::new();
             for &s in &frontier {
-                for &(a, _) in &self.dest_map[s] {
+                for &link in &self.dest_map[s] {
+                    let a = link.target_tile;
                     if seabreeze[a].is_none() {
                         seabreeze[a] = Some(d);
                         next_frontier.push(a);
@@ -643,12 +639,10 @@ impl ClimateModel {
         }
 
         let d_f64 = BREEZE_DISTANCE as f64;
-        for v in 0..n {
-            self.seabased[v] = match seabreeze[v] {
-                None => 0.0,
-                Some(b) => ((d_f64 - b as f64) / d_f64).powi(2),
-            };
-        }
+        self.seabased = seabreeze
+            .into_iter()
+            .map(|opt| opt.map_or(0.0, |b| ((d_f64 - b as f64) / d_f64).powi(2)))
+            .collect();
     }
 }
 

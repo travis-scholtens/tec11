@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use tec11_math_grid::{DisplayFaceSource, FineParentage, SphericalGrid, SubdividedTerrainGrid};
+use tec11_math_grid::{
+    DisplayFaceSource, DisplayMesh, FineParentage, SphericalGrid, SubdividedTerrainGrid,
+};
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::prehistory::PrehistorySimulation;
@@ -63,12 +65,8 @@ impl TerrainSandbox {
             TERRAIN_MIN_RIVER_PRECIP,
         );
         let river_routes = terrain.route_rivers(grid, &coarse_rivers);
-        let mut river_fine_faces = BTreeSet::new();
-        for route in &river_routes {
-            for &f_idx in route {
-                river_fine_faces.insert(f_idx);
-            }
-        }
+        let river_fine_faces: BTreeSet<usize> =
+            river_routes.iter().flatten().copied().collect();
 
         Self {
             prehistory,
@@ -130,45 +128,40 @@ impl TerrainSandbox {
         self.prehistory.land_percent()
     }
 
-    pub fn build_display_mesh(&self) -> (Vec<f32>, Vec<f32>, Vec<u32>) {
+    pub fn build_display_mesh(&self) -> DisplayMesh {
         self.terrain.build_display_mesh()
     }
 
     pub fn tile_colors_rgb(&self, show_rivers: bool, selected_face: i32) -> Vec<f32> {
-        let num_display = self.terrain.display_faces.len();
-        let mut out = vec![0.0f32; num_display * 3];
-
-        for (d_idx, (_, _, source)) in self.terrain.display_faces.iter().enumerate() {
-            if selected_face >= 0 && d_idx == selected_face as usize {
-                out[d_idx * 3] = 1.0;
-                out[d_idx * 3 + 1] = 0.0;
-                out[d_idx * 3 + 2] = 0.0;
-                continue;
-            }
-            let rgb = match *source {
-                DisplayFaceSource::Fine(fine_idx) => {
-                    if show_rivers && self.river_fine_faces.contains(&fine_idx) {
-                        [0.0, 0.0, 1.0]
-                    } else {
-                        elevation_color_rgb(self.terrain.fine_elevations[fine_idx])
-                    }
+        let sel_idx = (selected_face >= 0).then_some(selected_face as usize);
+        self.terrain
+            .display_faces
+            .iter()
+            .enumerate()
+            .flat_map(|(d_idx, face)| {
+                if sel_idx == Some(d_idx) {
+                    return [1.0, 0.0, 0.0];
                 }
-                DisplayFaceSource::OceanCoarse(_) => [0.0, 0.0, 1.0],
-            };
-            out[d_idx * 3] = rgb[0];
-            out[d_idx * 3 + 1] = rgb[1];
-            out[d_idx * 3 + 2] = rgb[2];
-        }
-
-        out
+                match face.source {
+                    DisplayFaceSource::Fine(fine_idx) => {
+                        if show_rivers && self.river_fine_faces.contains(&fine_idx) {
+                            [0.0, 0.0, 1.0]
+                        } else {
+                            elevation_color_rgb(self.terrain.fine_elevations[fine_idx])
+                        }
+                    }
+                    DisplayFaceSource::OceanCoarse(_) => [0.0, 0.0, 1.0],
+                }
+            })
+            .collect()
     }
 
     pub fn inspect_face(&self, display_idx: usize) -> String {
-        if display_idx >= self.terrain.display_faces.len() {
+        let Some(face) = self.terrain.display_faces.get(display_idx) else {
             return String::new();
-        }
+        };
         let tiles = self.prehistory.tiles();
-        match self.terrain.display_faces[display_idx].2 {
+        match face.source {
             DisplayFaceSource::OceanCoarse(c_idx) => {
                 let elev = tiles[c_idx].elevation();
                 format!(

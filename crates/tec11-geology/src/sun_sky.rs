@@ -184,10 +184,18 @@ pub fn bv_to_temp_k(bv: f32) -> f32 {
     4600.0 * (1.0 / (0.92 * b + 1.7) + 1.0 / (0.92 * b + 0.62))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StarClassification {
+    pub spectral_letter: &'static str,
+    pub subclass: u32,
+    pub luminosity_class: &'static str,
+    pub description: &'static str,
+}
+
 /// Format spectral classification (`O/B/A/F/G/K/M` + subclass `0..9` + luminosity class `I/III/V`)
 /// from `(B-V, M_V)`.
-pub fn classify_star(bv: f32, abs_mag: f32) -> (&'static str, u32, &'static str, &'static str) {
-    let (letter, sub, base_desc) = if bv < -0.22 {
+pub fn classify_star(bv: f32, abs_mag: f32) -> StarClassification {
+    let (spectral_letter, subclass, base_desc) = if bv < -0.22 {
         ("O", ((bv + 0.35) / 0.13 * 9.0).clamp(3.0, 9.0) as u32, "Blue Star")
     } else if bv < 0.0 {
         ("B", ((bv + 0.22) / 0.22 * 9.0).clamp(0.0, 9.0) as u32, "Blue-White Star")
@@ -205,7 +213,7 @@ pub fn classify_star(bv: f32, abs_mag: f32) -> (&'static str, u32, &'static str,
 
     // Distinguish Supergiants (I), Giants (III), Subgiants (IV), and Main Sequence Dwarfs (V):
     let ms_expected_mv = -1.5 + 6.2 * bv;
-    let (lum_class, lum_desc) = if abs_mag < -3.8 {
+    let (luminosity_class, lum_desc) = if abs_mag < -3.8 {
         ("I", "Supergiant")
     } else if bv > 0.55 && abs_mag < ms_expected_mv - 2.2 {
         ("III", "Giant")
@@ -215,25 +223,39 @@ pub fn classify_star(bv: f32, abs_mag: f32) -> (&'static str, u32, &'static str,
         ("V", "Main-Sequence Dwarf")
     };
 
-    (letter, sub, lum_class, if lum_class == "V" { base_desc } else { lum_desc })
+    StarClassification {
+        spectral_letter,
+        subclass,
+        luminosity_class,
+        description: if luminosity_class == "V" {
+            base_desc
+        } else {
+            lum_desc
+        },
+    }
+}
+
+struct HistPgm {
+    width: usize,
+    height: usize,
+    pixels: &'static [u8],
 }
 
 /// Parse the 100x100 `hist.pgm` smoothed 2D `(B-V, M_V)` histogram from `tps12/Celestiality`.
-fn parse_hist_pgm() -> (usize, usize, &'static [u8]) {
+fn parse_hist_pgm() -> HistPgm {
     // Skip 4 newline-terminated header lines (`P5`, `# CREATOR...`, `100 100`, `255`):
-    let mut newlines = 0;
-    let mut start = 0;
-    for (i, &b) in HIST_PGM_BYTES.iter().enumerate() {
-        if b == b'\n' {
-            newlines += 1;
-            if newlines == 4 {
-                start = i + 1;
-                break;
-            }
-        }
+    let start = HIST_PGM_BYTES
+        .iter()
+        .enumerate()
+        .filter(|&(_, &b)| b == b'\n')
+        .nth(3)
+        .map(|(i, _)| i + 1)
+        .unwrap_or(0);
+    HistPgm {
+        width: 100,
+        height: 100,
+        pixels: &HIST_PGM_BYTES[start..start + 10_000],
     }
-    let pixels = &HIST_PGM_BYTES[start..start + 10_000];
-    (100, 100, pixels)
 }
 
 /// Atmospheric gas & aerosol composition governing Rayleigh/Mie scattering, molecular absorption bands,
@@ -758,12 +780,14 @@ pub fn sample_home_star_with_rng(
     let age_gyr = (lifespan_gyr * (rng.uniform(0.25, 0.75) as f32)).clamp(0.4, 12.5);
 
     let abs_mag_est = 4.83 - 2.5 * luminosity_solar.max(1e-4).log10();
-    let (letter, sub, mut lum_cls, _) = classify_star(bv, abs_mag_est);
-    if is_subgiant {
-        lum_cls = "IV";
-    }
-    let spectral_type = format!("{letter}{sub}{lum_cls}");
-    let class_description = match (letter, is_subgiant) {
+    let cls = classify_star(bv, abs_mag_est);
+    let lum_cls = if is_subgiant {
+        "IV"
+    } else {
+        cls.luminosity_class
+    };
+    let spectral_type = format!("{}{}{lum_cls}", cls.spectral_letter, cls.subclass);
+    let class_description = match (cls.spectral_letter, is_subgiant) {
         (_, true) => "Orange-Gold Evolved Subgiant",
         ("A", _) => "Blue-White Main-Sequence Star",
         ("F", _) => "Yellow-White Main-Sequence Dwarf",
@@ -1464,9 +1488,18 @@ pub fn build_constellations_from_stars(
         }
     }
 
+    struct RawConstellationGroup {
+        star_indices: Vec<usize>,
+        edges: Vec<(usize, usize)>,
+        center_dir: Vec3,
+        declination_deg: f32,
+        right_ascension_deg: f32,
+        brightest_mag: f32,
+    }
+
     // Extract connected components from `adj`:
     let mut visited = vec![false; bright_indices.len()];
-    let mut raw_groups: Vec<(Vec<usize>, Vec<(usize, usize)>, Vec3, f32, f32, f32)> = Vec::new();
+    let mut raw_groups: Vec<RawConstellationGroup> = Vec::new();
     for start in 0..bright_indices.len() {
         if visited[start] || adj[start].is_empty() {
             continue;
@@ -1487,42 +1520,50 @@ pub fn build_constellations_from_stars(
         if comp_local.len() < 2 {
             continue;
         }
-        let mut comp_stars = Vec::with_capacity(comp_local.len());
-        let mut sum = [0.0f64; 3];
-        let mut min_mag = f32::INFINITY;
-        for &loc in &comp_local {
-            let s_idx = bright_indices[loc];
-            comp_stars.push(s_idx);
+        let comp_stars: Vec<usize> = comp_local.iter().map(|&loc| bright_indices[loc]).collect();
+        let sum = comp_stars.iter().fold([0.0f64; 3], |acc, &s_idx| {
             let d = stars[s_idx].dir;
-            sum[0] += d[0];
-            sum[1] += d[1];
-            sum[2] += d[2];
-            if stars[s_idx].app_mag < min_mag {
-                min_mag = stars[s_idx].app_mag;
-            }
-        }
-        let mut comp_edges = Vec::new();
-        for &u in &comp_local {
-            for &v in &adj[u] {
-                if u < v {
-                    comp_edges.push((bright_indices[u], bright_indices[v]));
-                }
-            }
-        }
+            [acc[0] + d[0], acc[1] + d[1], acc[2] + d[2]]
+        });
+        let min_mag = comp_stars
+            .iter()
+            .map(|&s_idx| stars[s_idx].app_mag)
+            .fold(f32::INFINITY, f32::min);
+        let bright_slice = &bright_indices[..];
+        let comp_edges: Vec<(usize, usize)> = comp_local
+            .iter()
+            .flat_map(|&u| {
+                adj[u]
+                    .iter()
+                    .filter(move |&&v| u < v)
+                    .map(move |&v| (bright_slice[u], bright_slice[v]))
+            })
+            .collect();
         let center_dir = normal(sum);
         let dec_deg = (center_dir[2].clamp(-1.0, 1.0).asin() * 180.0 / PI) as f32;
         let ra_deg = ((center_dir[1].atan2(center_dir[0]) * 180.0 / PI).rem_euclid(360.0)) as f32;
-        raw_groups.push((comp_stars, comp_edges, center_dir, dec_deg, ra_deg, min_mag));
+        raw_groups.push(RawConstellationGroup {
+            star_indices: comp_stars,
+            edges: comp_edges,
+            center_dir,
+            declination_deg: dec_deg,
+            right_ascension_deg: ra_deg,
+            brightest_mag: min_mag,
+        });
     }
 
     // Sort from northernmost declination to southernmost declination and cap at 16:
-    raw_groups.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    raw_groups.sort_by(|a, b| {
+        b.declination_deg
+            .partial_cmp(&a.declination_deg)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     raw_groups.truncate(14);
 
     // Ensure both deep northern (`dec >= +58°`) and deep southern (`dec <= -58°`) circumpolar bands
     // have at least one constellation even if the galaxy vantage concentrated bright stars in one hemisphere:
-    let has_deep_north = raw_groups.iter().any(|g| g.3 >= 58.0);
-    let has_deep_south = raw_groups.iter().any(|g| g.3 <= -58.0);
+    let has_deep_north = raw_groups.iter().any(|g| g.declination_deg >= 58.0);
+    let has_deep_south = raw_groups.iter().any(|g| g.declination_deg <= -58.0);
     let defaults = generate_default_constellations(stars.len() as u64);
     let mut constellations = Vec::new();
     if !has_deep_north {
@@ -1530,17 +1571,17 @@ pub fn build_constellations_from_stars(
             constellations.push(dn.clone());
         }
     }
-    for (comp_stars, comp_edges, center_dir, dec_deg, ra_deg, min_mag) in raw_groups {
+    for group in raw_groups {
         let idx = constellations.len();
         constellations.push(Constellation {
             index: idx as u32,
-            star_count: comp_stars.len() as u32,
-            star_indices: comp_stars,
-            edges: comp_edges,
-            center_dir,
-            declination_deg: dec_deg,
-            right_ascension_deg: ra_deg,
-            brightest_mag: min_mag,
+            star_count: group.star_indices.len() as u32,
+            star_indices: group.star_indices,
+            edges: group.edges,
+            center_dir: group.center_dir,
+            declination_deg: group.declination_deg,
+            right_ascension_deg: group.right_ascension_deg,
+            brightest_mag: group.brightest_mag,
             shape_label: CONSTELLATION_SHAPE_LABELS[idx % CONSTELLATION_SHAPE_LABELS.len()],
         });
     }
@@ -1950,153 +1991,18 @@ impl SunSandbox {
     }
 
     fn sample_home_star_properties(&mut self, gal_pos_kpc: [f32; 3], star_filter: u32) -> HomeStar {
-        // Choose spectral class:
-        // 0 = Auto (Habitable Main Sequence F/G/K/M weighted by galactic population)
-        // 1 = F-Class Yellow-White (B-V 0.32..0.56)
-        // 2 = G-Class Yellow Sol-like (B-V 0.58..0.80)
-        // 3 = K-Class Orange Dwarf (B-V 0.82..1.35)
-        // 4 = M-Class Red Dwarf (B-V 1.38..1.72)
-        // 5 = A-Class Blue-White Dwarf (B-V 0.02..0.28)
-        // 6 = Evolved Subgiant / Giant (B-V 0.75..1.25, M_V +0.5..+2.8)
-        let chosen_class = if (1..=6).contains(&star_filter) {
-            star_filter
-        } else {
-            // Older stellar populations (Elliptical, Lenticular, Bulge, GlobularCluster)
-            // favor K/G/M stars over shorter-lived F/A stars:
-            let is_old_pop = matches!(
-                self.galaxy_type,
-                GalaxyType::Elliptical | GalaxyType::Lenticular | GalaxyType::GlobularCluster
-            ) || self.vantage == GalacticVantage::GalacticBulge;
-            let p = self.rng.next_f64();
-            if is_old_pop {
-                if p < 0.06 {
-                    1 // F
-                } else if p < 0.38 {
-                    2 // G
-                } else if p < 0.78 {
-                    3 // K
-                } else if p < 0.94 {
-                    4 // M
-                } else {
-                    6 // Subgiant
-                }
-            } else if p < 0.04 {
-                5 // A
-            } else if p < 0.20 {
-                1 // F
-            } else if p < 0.56 {
-                2 // G
-            } else if p < 0.86 {
-                3 // K
-            } else {
-                4 // M
-            }
-        };
-
-        let (bv, mass_solar, radius_solar, is_subgiant) = match chosen_class {
-            1 => {
-                // F-Class Yellow-White Main-Sequence Star
-                let t = self.rng.uniform(0.0, 1.0) as f32;
-                let bv = 0.32 + 0.24 * t;
-                let mass = 1.50 - 0.42 * t;
-                let radius = 1.45 - 0.35 * t;
-                (bv, mass, radius, false)
-            }
-            2 => {
-                // G-Class Yellow Sol-like Main-Sequence Star
-                let t = self.rng.uniform(0.0, 1.0) as f32;
-                let bv = 0.58 + 0.22 * t;
-                let mass = 1.08 - 0.22 * t;
-                let radius = 1.10 - 0.22 * t;
-                (bv, mass, radius, false)
-            }
-            3 => {
-                // K-Class Orange Main-Sequence Dwarf
-                let t = self.rng.uniform(0.0, 1.0) as f32;
-                let bv = 0.82 + 0.52 * t;
-                let mass = 0.84 - 0.28 * t;
-                let radius = 0.86 - 0.24 * t;
-                (bv, mass, radius, false)
-            }
-            4 => {
-                // M-Class Red Main-Sequence Dwarf
-                let t = self.rng.uniform(0.0, 1.0) as f32;
-                let bv = 1.38 + 0.32 * t;
-                let mass = 0.52 - 0.30 * t;
-                let radius = 0.56 - 0.30 * t;
-                (bv, mass, radius, false)
-            }
-            5 => {
-                // A-Class White Main-Sequence Star
-                let t = self.rng.uniform(0.0, 1.0) as f32;
-                let bv = 0.02 + 0.26 * t;
-                let mass = 2.10 - 0.55 * t;
-                let radius = 1.85 - 0.38 * t;
-                (bv, mass, radius, false)
-            }
-            _ => {
-                // Evolved Subgiant / Early Giant (IV)
-                let t = self.rng.uniform(0.0, 1.0) as f32;
-                let bv = 0.72 + 0.45 * t;
-                let mass = 1.15 + 0.35 * (1.0 - t);
-                let radius = 2.10 + 1.10 * t;
-                (bv, mass, radius, true)
-            }
-        };
-
-        let temp_k = bv_to_temp_k(bv);
-        let rgb = bv_to_rgb(bv);
-        let temp_ratio = temp_k / 5778.0;
-        let luminosity_solar = (radius_solar * radius_solar) * temp_ratio.powi(4);
-        let habitable_au = luminosity_solar.sqrt().max(0.04);
-        let orbital_period_days =
-            365.25 * (habitable_au.powi(3) / mass_solar.max(0.08)).sqrt();
-        let angular_diameter_deg = 0.533 * (radius_solar / habitable_au);
-        let solar_tide_factor = (mass_solar / habitable_au.powi(3)).clamp(0.05, 50.0);
-
-        let lifespan_gyr = (10.0 * (mass_solar as f64).powf(-2.5)).clamp(0.6, 80.0) as f32;
-        let age_gyr = (lifespan_gyr * (self.rng.uniform(0.25, 0.75) as f32)).clamp(0.4, 12.5);
-
-        let abs_mag_est = 4.83 - 2.5 * luminosity_solar.max(1e-4).log10();
-        let (letter, sub, mut lum_cls, _) = classify_star(bv, abs_mag_est);
-        if is_subgiant {
-            lum_cls = "IV";
-        }
-        let spectral_type = format!("{letter}{sub}{lum_cls}");
-        let class_description = match (letter, is_subgiant) {
-            (_, true) => "Orange-Gold Evolved Subgiant",
-            ("A", _) => "Blue-White Main-Sequence Star",
-            ("F", _) => "Yellow-White Main-Sequence Dwarf",
-            ("G", _) => "Yellow Main-Sequence Dwarf",
-            ("K", _) => "Orange Main-Sequence Dwarf",
-            ("M", _) => "Red Main-Sequence Dwarf",
-            _ => "Main-Sequence Star",
-        }
-        .to_string();
-
-        HomeStar {
-            spectral_type,
-            class_description,
-            bv_color: bv,
-            rgb,
-            temp_k,
-            mass_solar,
-            radius_solar,
-            luminosity_solar,
-            habitable_au,
-            orbital_period_days,
-            angular_diameter_deg,
-            solar_tide_factor,
-            age_gyr,
-            lifespan_gyr,
-            gal_pos_kpc,
-        }
+        let is_old_pop = matches!(
+            self.galaxy_type,
+            GalaxyType::Elliptical | GalaxyType::Lenticular | GalaxyType::GlobularCluster
+        ) || self.vantage == GalacticVantage::GalacticBulge;
+        sample_home_star_with_rng(&mut self.rng, gal_pos_kpc, star_filter, is_old_pop)
     }
 
     /// Generate `count` naked-eye visible stars (`m_app <= 6.0`) around `self.home_star`,
     /// generalizing `RandomStars` (`randomstars.py`) to arbitrary galaxy morphologies and vantages.
     fn generate_surrounding_starmap(&mut self, count: usize) {
-        let (w, h, hist) = parse_hist_pgm();
+        let hist_pgm = parse_hist_pgm();
+        let (w, h, hist) = (hist_pgm.width, hist_pgm.height, hist_pgm.pixels);
         self.stars.clear();
         self.stars.reserve(count);
 
@@ -3069,23 +2975,28 @@ impl SunSandbox {
             }
             "solar_system" => {
                 let np = self.planets.len().max(1);
-                let mut best_idx = self.home_planet_index.min(np - 1);
-                let mut best_dist = f32::INFINITY;
-                for (idx, pl) in self.planets.iter().enumerate() {
-                    let r_norm = 0.18 + 0.72 * ((idx as f32) / ((np - 1).max(1) as f32));
-                    let pos = Self::tilt_3d_plane(
-                        r_norm * pl.orbit_angle_rad.cos(),
-                        r_norm * pl.orbit_angle_rad.sin(),
-                        0.0,
-                    );
-                    let dx = (p[0] as f32) - pos[0];
-                    let dy = (p[1] as f32) - pos[1];
-                    let d = (dx * dx + dy * dy).sqrt();
-                    if d < best_dist {
-                        best_dist = d;
-                        best_idx = idx;
-                    }
-                }
+                let best_idx = self
+                    .planets
+                    .iter()
+                    .enumerate()
+                    .min_by(|&(idx_a, pl_a), &(idx_b, pl_b)| {
+                        let dist_sq = |idx: usize, pl: &SolarSystemPlanet| {
+                            let r_norm = 0.18 + 0.72 * ((idx as f32) / ((np - 1).max(1) as f32));
+                            let pos = Self::tilt_3d_plane(
+                                r_norm * pl.orbit_angle_rad.cos(),
+                                r_norm * pl.orbit_angle_rad.sin(),
+                                0.0,
+                            );
+                            let dx = (p[0] as f32) - pos[0];
+                            let dy = (p[1] as f32) - pos[1];
+                            dx * dx + dy * dy
+                        };
+                        dist_sq(idx_a, pl_a)
+                            .partial_cmp(&dist_sq(idx_b, pl_b))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(idx, _)| idx)
+                    .unwrap_or_else(|| self.home_planet_index.min(np - 1));
                 let pl = &self.planets[best_idx];
                 let vis_str = if pl.is_home_world {
                     "Simulated Home World (marked with 3D target crosshair)".to_string()
@@ -3123,7 +3034,7 @@ impl SunSandbox {
             return String::new();
         };
         let st = &self.stars[star_idx];
-        let (letter, sub, lum_cls, lum_desc) = classify_star(st.bv_color, st.abs_mag);
+        let cls = classify_star(st.bv_color, st.abs_mag);
         let st_temp = bv_to_temp_k(st.bv_color);
         let st_lum = 10.0_f32.powf((4.83 - st.abs_mag) / 2.5);
         let gal_lat_deg = (90.0 - (st.galactic_offset_rad as f64 * 180.0 / PI)).abs();
@@ -3131,7 +3042,7 @@ impl SunSandbox {
         let sys_summary = self.planets_summary_text();
 
         format!(
-            "Selected Night-Sky Star: {cat_prefix}{} — {letter}{sub}{lum_cls} ({lum_desc})\n\
+            "Selected Night-Sky Star: {cat_prefix}{} — {}{}{} ({})\n\
              Apparent Magnitude: m_V = {:+.2} (naked-eye limit ≤ +6.0) | Absolute Magnitude: M_V = {:+.2} ({:.1} L☉)\n\
              Distance: {:.1} light-years ({:.1} pc) | Color Index: B-V = {:+.2} (T_eff ≈ {:.0} K) | Galactic Latitude: {:.1}°\n\
              Home Sun: {} ({}) — {:.0} K, {:.2} M☉, {:.2} R☉, {:.2} L☉ | Habitable Orbit: {:.2} AU ({:.0} Earth days/yr, Solar Tides {:.2}x)\n\
@@ -3140,6 +3051,10 @@ impl SunSandbox {
              Sunset: {} ({})\n\
              Main Plant Foliage: {} — {}",
             st.id,
+            cls.spectral_letter,
+            cls.subclass,
+            cls.luminosity_class,
+            cls.description,
             st.app_mag,
             st.abs_mag,
             st_lum,

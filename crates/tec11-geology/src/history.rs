@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use tec11_math_grid::{
-    normal, DisplayFaceSource, FineParentage, Pcg64Mcg, PointTree, SphericalGrid,
+    normal, DisplayFaceSource, DisplayMesh, FineParentage, Pcg64Mcg, PointTree, SphericalGrid,
     SubdividedTerrainGrid, Vec3,
 };
 use tec11_proto::PlanetSnapshotExt;
@@ -402,6 +402,127 @@ pub struct StateRecord {
     pub asabiya: f32,
 }
 
+/// Canonical ordered pair of state IDs (`a <= b`), representing an undirected bilateral relationship
+/// such as a trade partnership or military conflict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StatePair {
+    pub a: u32,
+    pub b: u32,
+}
+
+impl StatePair {
+    #[inline]
+    pub fn new(u: u32, v: u32) -> Self {
+        if u <= v {
+            Self { a: u, b: v }
+        } else {
+            Self { a: v, b: u }
+        }
+    }
+
+    #[inline]
+    pub fn contains(self, state_id: u32) -> bool {
+        self.a == state_id || self.b == state_id
+    }
+
+    #[inline]
+    pub fn other(self, state_id: u32) -> Option<u32> {
+        if self.a == state_id {
+            Some(self.b)
+        } else if self.b == state_id {
+            Some(self.a)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn to_proto(self) -> tec11_proto::StatePair {
+        tec11_proto::StatePair {
+            state_a: self.a,
+            state_b: self.b,
+        }
+    }
+
+    #[inline]
+    pub fn from_proto(sp: &tec11_proto::StatePair) -> Self {
+        Self::new(sp.state_a, sp.state_b)
+    }
+}
+
+/// Physical mechanism of a water travel corridor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TravelRouteKind {
+    /// Long-distance pelagic streamline driven by open-ocean winds and gyre currents.
+    OceanGyre,
+    /// Bounded coastal, island-hopping, or monsoonal sea lane.
+    CoastalSeaLane,
+    /// Navigable inland river corridor (downstream or upstream).
+    RiverCorridor,
+}
+
+impl TravelRouteKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OceanGyre => "Ocean Current & Wind Gyre",
+            Self::CoastalSeaLane => "Coastal / Monsoon Sea Lane",
+            Self::RiverCorridor => "Riverine Corridor",
+        }
+    }
+}
+
+/// Diplomatic and historical usage status of a [`TravelRoute`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TravelRouteStatus {
+    /// Unsettled wind/current corridor with no active port polity at its origin.
+    PotentialCorridor,
+    /// Active expansion or domestic sea/river lane established by a water-access polity.
+    ActiveSeaLane,
+    /// Active naval or amphibious war route between conflicting states.
+    NavalConflict,
+    /// Active maritime or riverine trade route between trading partner states.
+    MaritimeTrade,
+}
+
+impl TravelRouteStatus {
+    pub fn rgb(self, kind: TravelRouteKind) -> [f32; 3] {
+        match self {
+            Self::MaritimeTrade => [1.00, 0.88, 0.18],
+            Self::NavalConflict => [1.00, 0.22, 0.22],
+            Self::ActiveSeaLane => match kind {
+                TravelRouteKind::RiverCorridor => [0.25, 0.96, 0.68],
+                TravelRouteKind::OceanGyre | TravelRouteKind::CoastalSeaLane => [0.18, 0.90, 0.98],
+            },
+            Self::PotentialCorridor => [0.36, 0.50, 0.84],
+        }
+    }
+
+    pub fn radius_lift(self) -> f32 {
+        match self {
+            Self::MaritimeTrade | Self::NavalConflict => 1.010,
+            Self::ActiveSeaLane => 1.008,
+            Self::PotentialCorridor => 1.005,
+        }
+    }
+
+    pub fn ocean_sector_label(self) -> &'static str {
+        match self {
+            Self::MaritimeTrade => "TRADE ROUTE (gold)",
+            Self::NavalConflict => "NAVAL CONFLICT (red)",
+            Self::ActiveSeaLane => "ACTIVE SEA LANE (cyan)",
+            Self::PotentialCorridor => "Potential Wind/Current Corridor",
+        }
+    }
+
+    pub fn land_label(self) -> &'static str {
+        match self {
+            Self::MaritimeTrade => "MARITIME TRADE",
+            Self::NavalConflict => "NAVAL CONFLICT",
+            Self::ActiveSeaLane | Self::PotentialCorridor => "EXPANSION / SEA LANE",
+        }
+    }
+}
+
 /// A maritime or riverine travel route connecting a water-access origin tile to a destination
 /// landing tile along prevailing winds, surface ocean currents, or navigable rivers.
 #[derive(Clone, Debug, PartialEq)]
@@ -420,18 +541,50 @@ pub struct TravelRoute {
     pub effective_cost: f32,
     /// Mean wind + ocean current alignment factor in `[0.0, 1.0]`.
     pub wind_current_alignment: f32,
-    /// Route kind: `0` = Ocean Current & Wind Gyre, `1` = Coastal / Monsoon Sea Lane, `2` = Riverine Corridor.
-    pub route_kind: u8,
+    /// Physical mechanism of this travel route.
+    pub route_kind: TravelRouteKind,
 }
 
 impl TravelRoute {
     pub fn kind_name(&self) -> &'static str {
-        match self.route_kind {
-            0 => "Ocean Current & Wind Gyre",
-            1 => "Coastal / Monsoon Sea Lane",
-            _ => "Riverine Corridor",
-        }
+        self.route_kind.name()
     }
+}
+
+/// Computed territorial, ecological, and diplomatic adjacency topology of all active states.
+#[derive(Clone, Debug)]
+pub struct StateTopology {
+    pub extents: BTreeMap<u32, Vec<usize>>,
+    pub species: BTreeMap<u32, BTreeSet<usize>>,
+    pub neighbors: BTreeMap<u32, BTreeSet<u32>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NavEdge {
+    target: usize,
+    cost: f32,
+    alignment: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OceanSearchNode {
+    cost_int: u32,
+    prev_tile: usize,
+    sum_alignment: f32,
+    hops: usize,
+}
+
+#[derive(Clone, Debug)]
+struct MigrationSpillover {
+    target_face: usize,
+    state_id: u32,
+    community: Community,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WarOutcome {
+    winner: u32,
+    loser: u32,
 }
 
 /// Complete History simulation (`historysimulation.py`, `historydisplay.py`, `historypresenter.py`).
@@ -460,8 +613,8 @@ pub struct HistorySimulation {
     states: BTreeMap<u32, StateRecord>,
     languages: BTreeMap<u32, LanguageRecord>,
     nationalities: BTreeSet<u32>,
-    trade_partners: Vec<(u32, u32)>,
-    conflicts: Vec<(u32, u32)>,
+    trade_partners: Vec<StatePair>,
+    conflicts: Vec<StatePair>,
     next_state_id: u32,
     next_language_id: u32,
     rng: Pcg64Mcg,
@@ -529,7 +682,7 @@ impl HistorySimulation {
             .display_faces
             .iter()
             .enumerate()
-            .map(|(i, (c, _, _))| (*c, i))
+            .map(|(i, face)| (face.center, i))
             .collect();
         let tree = PointTree::new(&indexed_pts);
 
@@ -588,15 +741,8 @@ impl HistorySimulation {
         // 1. Settle domesticable plants & animals on the planet's coarse climate,
         //    then map onto subdivided fine faces (`historysimulation.py:facespecies`).
         let biosphere = settle_species_on_climate(&coarse_elevs, self.prehistory.climate_model());
+        let coarse_species = biosphere.tile_all_species;
         self.settled_species = biosphere.species;
-        let mut coarse_species: Vec<Vec<usize>> = vec![Vec::new(); num_coarse];
-        for (sp_idx, sp) in self.settled_species.iter().enumerate() {
-            for &(t, _) in &sp.tile_seasons {
-                if t < num_coarse {
-                    coarse_species[t].push(sp_idx);
-                }
-            }
-        }
         self.tile_species = Vec::with_capacity(num_fine);
         for f_idx in 0..num_fine {
             let sp_vec = match self.terrain.parentage[f_idx] {
@@ -930,66 +1076,72 @@ impl HistorySimulation {
 
         // 2. Build directed wind + ocean-current transition table for coarse ocean tiles.
         let num_seasons = climate.season_count().max(1);
-        let mut wind_vecs: Vec<[f32; 3]> = Vec::with_capacity(num_coarse);
-        for c in 0..num_coarse {
-            wind_vecs.push(climate.wind_vector_xyz(c));
-        }
+        let wind_vecs: Vec<[f32; 3]> = (0..num_coarse)
+            .map(|c| climate.wind_vector_xyz(c))
+            .collect();
 
-        // For each coarse ocean tile `u`, store navigable transitions `(v, step_cost, alignment)`
-        let mut nav_edges: Vec<Vec<(usize, f32, f32)>> = vec![Vec::new(); num_coarse];
-        for u in 0..num_coarse {
-            if coarse_elevs[u] > 0.0 {
-                continue;
-            }
-            let pu = grid.faces[u].0;
-            let wu = wind_vecs[u];
-            for &v in &coarse_adj[u] {
-                let pv = grid.faces[v].0;
-                let dx = (pv[0] - pu[0]) as f32;
-                let dy = (pv[1] - pu[1]) as f32;
-                let dz = (pv[2] - pu[2]) as f32;
-                let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-                let dir = [dx / len, dy / len, dz / len];
+        // For each coarse ocean tile `u`, store navigable transitions `NavEdge { target, cost, alignment }`
+        let nav_edges: Vec<Vec<NavEdge>> = (0..num_coarse)
+            .map(|u| {
+                if coarse_elevs[u] > 0.0 {
+                    return Vec::new();
+                }
+                let pu = grid.faces[u].0;
+                let wu = wind_vecs[u];
+                let mut edges: Vec<NavEdge> = coarse_adj[u]
+                    .iter()
+                    .filter_map(|&v| {
+                        let pv = grid.faces[v].0;
+                        let dx = (pv[0] - pu[0]) as f32;
+                        let dy = (pv[1] - pu[1]) as f32;
+                        let dz = (pv[2] - pu[2]) as f32;
+                        let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+                        let dir = [dx / len, dy / len, dz / len];
 
-                let wind_dot = wu[0] * dir[0] + wu[1] * dir[1] + wu[2] * dir[2];
-                let mut best_align = 0.45 * wind_dot;
-                for s_idx in 0..num_seasons {
-                    if let Some(oc) = climate.ocean_for_season(s_idx) {
-                        if let Some(vel) = oc.velocity_xyz.get(u) {
-                            let cur_dot = vel[0] * dir[0] + vel[1] * dir[1] + vel[2] * dir[2];
-                            let align = 0.45 * wind_dot + 0.85 * cur_dot;
-                            if align > best_align {
-                                best_align = align;
+                        let wind_dot = wu[0] * dir[0] + wu[1] * dir[1] + wu[2] * dir[2];
+                        let best_align = (0..num_seasons)
+                            .filter_map(|s_idx| {
+                                let oc = climate.ocean_for_season(s_idx)?;
+                                let vel = oc.velocity_xyz.get(u)?;
+                                let cur_dot = vel[0] * dir[0] + vel[1] * dir[1] + vel[2] * dir[2];
+                                Some(0.45 * wind_dot + 0.85 * cur_dot)
+                            })
+                            .fold(0.45 * wind_dot, f32::max);
+
+                        let v_touches_land = coarse_elevs[v] > 0.0
+                            || coarse_adj[v].iter().any(|&nb| coarse_elevs[nb] > 0.0);
+                        (best_align >= 0.06 || (v_touches_land && best_align >= -0.20)).then(|| {
+                            let cost = if best_align >= 0.06 {
+                                (1.0 - 0.55 * best_align).clamp(0.35, 0.95)
+                            } else {
+                                1.05
+                            };
+                            let alignment = ((best_align + 0.25) / 1.25).clamp(0.10, 1.0);
+                            NavEdge {
+                                target: v,
+                                cost,
+                                alignment,
                             }
-                        }
-                    }
-                }
-
-                let v_touches_land = coarse_elevs[v] > 0.0
-                    || coarse_adj[v].iter().any(|&nb| coarse_elevs[nb] > 0.0);
-                if best_align >= 0.06 || (v_touches_land && best_align >= -0.20) {
-                    let cost = if best_align >= 0.06 {
-                        (1.0 - 0.55 * best_align).clamp(0.35, 0.95)
-                    } else {
-                        1.05
-                    };
-                    let align_norm = ((best_align + 0.25) / 1.25).clamp(0.10, 1.0);
-                    nav_edges[u].push((v, cost, align_norm));
-                }
-            }
-            nav_edges[u].sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        }
+                        })
+                    })
+                    .collect();
+                edges.sort_by(|a, b| {
+                    a.cost
+                        .partial_cmp(&b.cost)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                edges
+            })
+            .collect();
 
         let mut routes_by_pair: BTreeMap<(usize, usize), TravelRoute> = BTreeMap::new();
 
         // 3. Trace wind & ocean-current gyre streamlines and bounded coastal/monsoon sea lanes from each coastal port.
         let coastal_ports: Vec<(usize, usize)> = (0..num_coarse)
             .filter_map(|c| {
-                if is_coastal_coarse[c] {
-                    self.coarse_port_fine_face[c].map(|f| (c, f))
-                } else {
-                    None
-                }
+                is_coastal_coarse[c]
+                    .then(|| self.coarse_port_fine_face[c].map(|f| (c, f)))
+                    .flatten()
             })
             .collect();
 
@@ -1010,9 +1162,7 @@ impl HistorySimulation {
                 }
                 let mut curr = o_start;
                 let mut path = vec![c_start, o_start];
-                let mut visited = BTreeSet::new();
-                visited.insert(c_start);
-                visited.insert(o_start);
+                let mut visited = BTreeSet::from([c_start, o_start]);
                 let mut total_cost = 0.6f32;
                 let mut total_align = 0.65f32;
                 let mut steps = 1usize;
@@ -1020,20 +1170,24 @@ impl HistorySimulation {
                 for _ in 0..16 {
                     // Check if `curr` is adjacent to a distant coastal port with favorable onshore wind/current
                     if steps >= 2 {
-                        if let Some(&(land_v, edge_cost, edge_align)) = nav_edges[curr]
-                            .iter()
-                            .find(|&&(v, _, _)| {
-                                v != c_start
-                                    && !direct_land_nbs.contains(&v)
-                                    && self.coarse_port_fine_face.get(v).and_then(|x| *x).is_some()
-                            })
-                        {
+                        if let Some(&edge) = nav_edges[curr].iter().find(|edge| {
+                            edge.target != c_start
+                                && !direct_land_nbs.contains(&edge.target)
+                                && self
+                                    .coarse_port_fine_face
+                                    .get(edge.target)
+                                    .copied()
+                                    .flatten()
+                                    .is_some()
+                        }) {
+                            let land_v = edge.target;
                             let f_end = self.coarse_port_fine_face[land_v].unwrap();
                             let mut full_path = path.clone();
                             full_path.push(land_v);
-                            let eff_cost = total_cost + edge_cost;
-                            let mean_align =
-                                ((total_align + edge_align) / (steps as f32 + 1.0)).clamp(0.1, 1.0);
+                            let eff_cost = total_cost + edge.cost;
+                            let mean_align = ((total_align + edge.alignment)
+                                / (steps as f32 + 1.0))
+                                .clamp(0.1, 1.0);
                             let route = TravelRoute {
                                 from_fine_face: f_start,
                                 to_fine_face: f_end,
@@ -1042,7 +1196,7 @@ impl HistorySimulation {
                                 coarse_path: full_path,
                                 effective_cost: eff_cost,
                                 wind_current_alignment: mean_align,
-                                route_kind: 0,
+                                route_kind: TravelRouteKind::OceanGyre,
                             };
                             let key = (c_start, land_v);
                             if routes_by_pair
@@ -1056,43 +1210,52 @@ impl HistorySimulation {
                     }
 
                     // Advance to the strongest downwind / down-current ocean tile
-                    let next_opt = nav_edges[curr]
+                    let Some(next_edge) = nav_edges[curr]
                         .iter()
                         .copied()
-                        .find(|&(v, _, _)| coarse_elevs[v] <= 0.0 && !visited.contains(&v));
-                    let Some((next_o, edge_cost, edge_align)) = next_opt else {
+                        .find(|edge| coarse_elevs[edge.target] <= 0.0 && !visited.contains(&edge.target))
+                    else {
                         break;
                     };
-                    visited.insert(next_o);
-                    path.push(next_o);
-                    total_cost += edge_cost;
-                    total_align += edge_align;
+                    visited.insert(next_edge.target);
+                    path.push(next_edge.target);
+                    total_cost += next_edge.cost;
+                    total_align += next_edge.alignment;
                     steps += 1;
-                    curr = next_o;
+                    curr = next_edge.target;
                 }
             }
 
             // (b) Bounded Dijkstra search for nearby coastal/island/monsoon sea lanes (up to 7 ocean steps)
-            let mut best_ocean_cost: BTreeMap<usize, (u32, usize, f32, usize)> = BTreeMap::new();
+            let mut best_ocean_cost: BTreeMap<usize, OceanSearchNode> = BTreeMap::new();
             let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
             for &o_nb in &coarse_adj[c_start] {
                 if coarse_elevs[o_nb] <= 0.0 {
-                    best_ocean_cost.insert(o_nb, (60, c_start, 0.70, 1));
+                    best_ocean_cost.insert(
+                        o_nb,
+                        OceanSearchNode {
+                            cost_int: 60,
+                            prev_tile: c_start,
+                            sum_alignment: 0.70,
+                            hops: 1,
+                        },
+                    );
                     heap.push(Reverse((60, o_nb)));
                 }
             }
             let mut found_destinations = 0usize;
             while let Some(Reverse((cost_int, u))) = heap.pop() {
-                let Some(&(bc, _, sum_align, hops)) = best_ocean_cost.get(&u) else {
+                let Some(&node) = best_ocean_cost.get(&u) else {
                     continue;
                 };
-                if cost_int > bc || cost_int > 550 || hops > 7 {
+                if cost_int > node.cost_int || cost_int > 550 || node.hops > 7 {
                     continue;
                 }
-                for &(v, step_cost, step_align) in &nav_edges[u] {
-                    let next_cost = cost_int + (step_cost * 100.0) as u32;
+                for &edge in &nav_edges[u] {
+                    let v = edge.target;
+                    let next_cost = cost_int + (edge.cost * 100.0) as u32;
                     if coarse_elevs[v] > 0.0 {
-                        if hops >= 2
+                        if node.hops >= 2
                             && v != c_start
                             && !direct_land_nbs.contains(&v)
                             && found_destinations < 2
@@ -1103,17 +1266,17 @@ impl HistorySimulation {
                                     // Reconstruct coarse path
                                     let mut rev_path = vec![v, u];
                                     let mut trace = u;
-                                    while let Some(&(_, prev, _, _)) = best_ocean_cost.get(&trace) {
-                                        rev_path.push(prev);
-                                        if prev == c_start || rev_path.len() > 12 {
+                                    while let Some(&prev_node) = best_ocean_cost.get(&trace) {
+                                        rev_path.push(prev_node.prev_tile);
+                                        if prev_node.prev_tile == c_start || rev_path.len() > 12 {
                                             break;
                                         }
-                                        trace = prev;
+                                        trace = prev_node.prev_tile;
                                     }
                                     rev_path.reverse();
                                     let eff_cost = (next_cost as f32) / 100.0;
-                                    let mean_align = ((sum_align + step_align)
-                                        / (hops as f32 + 1.0))
+                                    let mean_align = ((node.sum_alignment + edge.alignment)
+                                        / (node.hops as f32 + 1.0))
                                         .clamp(0.1, 1.0);
                                     routes_by_pair.insert(
                                         key,
@@ -1125,21 +1288,26 @@ impl HistorySimulation {
                                             coarse_path: rev_path,
                                             effective_cost: eff_cost,
                                             wind_current_alignment: mean_align,
-                                            route_kind: 1,
+                                            route_kind: TravelRouteKind::CoastalSeaLane,
                                         },
                                     );
                                     found_destinations += 1;
                                 }
                             }
                         }
-                    } else if hops < 7 && next_cost <= 520 {
+                    } else if node.hops < 7 && next_cost <= 520 {
                         let is_better = best_ocean_cost
                             .get(&v)
-                            .is_none_or(|&(old_c, _, _, _)| next_cost < old_c);
+                            .is_none_or(|old| next_cost < old.cost_int);
                         if is_better {
                             best_ocean_cost.insert(
                                 v,
-                                (next_cost, u, sum_align + step_align, hops + 1),
+                                OceanSearchNode {
+                                    cost_int: next_cost,
+                                    prev_tile: u,
+                                    sum_alignment: node.sum_alignment + edge.alignment,
+                                    hops: node.hops + 1,
+                                },
                             );
                             heap.push(Reverse((next_cost, v)));
                         }
@@ -1148,7 +1316,7 @@ impl HistorySimulation {
             }
         }
 
-        // 4. Add navigable riverine corridors (`route_kind = 2`) along major coarse rivers.
+        // 4. Add navigable riverine corridors (`TravelRouteKind::RiverCorridor`) along major coarse rivers.
         for r in &self.rivers {
             let valid_land: Vec<usize> = r
                 .iter()
@@ -1176,7 +1344,7 @@ impl HistorySimulation {
                             coarse_path: valid_land.clone(),
                             effective_cost: downstream_cost,
                             wind_current_alignment: 0.90,
-                            route_kind: 2,
+                            route_kind: TravelRouteKind::RiverCorridor,
                         },
                     );
                     let mut upstream_path = valid_land;
@@ -1191,7 +1359,7 @@ impl HistorySimulation {
                             coarse_path: upstream_path,
                             effective_cost: downstream_cost * 1.35,
                             wind_current_alignment: 0.65,
-                            route_kind: 2,
+                            route_kind: TravelRouteKind::RiverCorridor,
                         },
                     );
                 }
@@ -1234,26 +1402,26 @@ impl HistorySimulation {
             }
         }
 
-        let mut active = Vec::new();
-        for route in &self.potential_travel_routes {
-            if let Some(active_origin_fine) = coarse_active_fine
-                .get(route.from_coarse_tile)
-                .copied()
-                .flatten()
-            {
-                let mut r = route.clone();
-                r.from_fine_face = active_origin_fine;
-                if let Some(active_dest_fine) = coarse_active_fine
+        self.travel_routes = self
+            .potential_travel_routes
+            .iter()
+            .filter_map(|route| {
+                let active_origin_fine = coarse_active_fine
+                    .get(route.from_coarse_tile)
+                    .copied()
+                    .flatten()?;
+                let to_fine_face = coarse_active_fine
                     .get(route.to_coarse_tile)
                     .copied()
                     .flatten()
-                {
-                    r.to_fine_face = active_dest_fine;
-                }
-                active.push(r);
-            }
-        }
-        self.travel_routes = active;
+                    .unwrap_or(route.to_fine_face);
+                Some(TravelRoute {
+                    from_fine_face: active_origin_fine,
+                    to_fine_face,
+                    ..route.clone()
+                })
+            })
+            .collect();
     }
 
     /// Greedy 6-coloring of adjacent states (`terrainmethod.py:colornations`).
@@ -1273,16 +1441,13 @@ impl HistorySimulation {
 
         let state_ids: Vec<u32> = self.states.keys().copied().collect();
         for sid in state_ids {
-            let mut used_colors = BTreeSet::new();
-            if let Some(nbs) = state_adj.get(&sid) {
-                for &nb_sid in nbs {
-                    if nb_sid < sid {
-                        if let Some(st) = self.states.get(&nb_sid) {
-                            used_colors.insert(st.color_idx);
-                        }
-                    }
-                }
-            }
+            let used_colors: BTreeSet<usize> = state_adj
+                .get(&sid)
+                .into_iter()
+                .flatten()
+                .filter(|&&nb_sid| nb_sid < sid)
+                .filter_map(|nb_sid| self.states.get(nb_sid).map(|st| st.color_idx))
+                .collect();
             let chosen = (0..NATION_PALETTE.len())
                 .find(|c| !used_colors.contains(c))
                 .unwrap_or((sid as usize) % NATION_PALETTE.len());
@@ -1294,27 +1459,20 @@ impl HistorySimulation {
 
     /// Direct trade partners of state `n` (`historysimulation.py:lookuptradepartners`).
     fn lookup_trade_partners(&self, n: u32) -> BTreeSet<u32> {
-        let mut out = BTreeSet::new();
-        for &(a, b) in &self.trade_partners {
-            if a == n {
-                out.insert(b);
-            } else if b == n {
-                out.insert(a);
-            }
-        }
-        out
+        self.trade_partners
+            .iter()
+            .filter_map(|pair| pair.other(n))
+            .collect()
     }
 
     /// Transitive trade network of state `n` with shortest hop counts `h >= 1` (`recursivetradepartners`).
     fn recursive_trade_partner_distances(&self, n: u32) -> BTreeMap<u32, usize> {
-        let mut dists = BTreeMap::new();
-        let mut q = VecDeque::new();
-        dists.insert(n, 0usize);
-        q.push_back((n, 0usize));
+        let mut dists = BTreeMap::from([(n, 0usize)]);
+        let mut q = VecDeque::from([(n, 0usize)]);
         while let Some((curr, d)) = q.pop_front() {
             for nb in self.lookup_trade_partners(curr) {
-                if !dists.contains_key(&nb) {
-                    dists.insert(nb, d + 1);
+                if let std::collections::btree_map::Entry::Vacant(e) = dists.entry(nb) {
+                    e.insert(d + 1);
                     q.push_back((nb, d + 1));
                 }
             }
@@ -1337,13 +1495,13 @@ impl HistorySimulation {
             .states
             .get(&s1)
             .and_then(|s| self.terrain.terrain_grid.faces.get(s.capital_tile))
-            .map(|(c, _)| *c)
+            .map(|&(c, _)| c)
             .unwrap_or([1.0, 0.0, 0.0]);
         let c2 = self
             .states
             .get(&s2)
             .and_then(|s| self.terrain.terrain_grid.faces.get(s.capital_tile))
-            .map(|(c, _)| *c)
+            .map(|&(c, _)| c)
             .unwrap_or([1.0, 0.0, 0.0]);
         let dot = (c1[0] * c2[0] + c1[1] * c2[1] + c1[2] * c2[2]).clamp(-1.0, 1.0);
         dot.acos() as f32
@@ -1352,20 +1510,16 @@ impl HistorySimulation {
     /// Effective distance between states `s1` and `s2`, taking into account lower friction along
     /// established maritime/riverine wind & current travel routes (`self.travel_routes`).
     fn effective_state_distance(&self, s1: u32, s2: u32) -> f32 {
-        let mut best = self.capital_angular_distance(s1, s2);
-        for r in &self.travel_routes {
-            let st_from = self.tile_states.get(&r.from_fine_face).copied();
-            let st_to = self.tile_states.get(&r.to_fine_face).copied();
-            if (st_from == Some(s1) && st_to == Some(s2))
-                || (st_from == Some(s2) && st_to == Some(s1))
-            {
-                let water_dist = (r.effective_cost * 0.14).clamp(0.08, 1.15);
-                if water_dist < best {
-                    best = water_dist;
-                }
-            }
-        }
-        best
+        let pair = StatePair::new(s1, s2);
+        self.travel_routes
+            .iter()
+            .filter_map(|r| {
+                let st_from = *self.tile_states.get(&r.from_fine_face)?;
+                let st_to = *self.tile_states.get(&r.to_fine_face)?;
+                (st_from != st_to && StatePair::new(st_from, st_to) == pair)
+                    .then(|| (r.effective_cost * 0.14).clamp(0.08, 1.15))
+            })
+            .fold(self.capital_angular_distance(s1, s2), f32::min)
     }
 
     /// Total carrying capacity $K_n$ of state `state_id` across its fine faces.
@@ -1397,41 +1551,33 @@ impl HistorySimulation {
         let f_nat = self.majority_nationality(f_idx);
         let f_lang = self.majority_language(f_idx);
 
-        let mut max_intensity = 0.0f32;
-        for &nb in &fine_adj[f_idx] {
-            if self.tile_states.get(&nb) == Some(&sid) {
-                continue;
-            }
-            let nb_pop: f32 = self
-                .tile_communities
-                .get(&nb)
-                .map(|cs| cs.iter().map(|c| c.thousands).sum())
-                .unwrap_or(0.0);
-            if nb_pop <= 0.0 {
-                continue;
-            }
-            let nb_ag = self
-                .tile_communities
-                .get(&nb)
-                .is_some_and(|cs| cs.iter().any(|c| c.agriculture));
-            let nb_nat = self.majority_nationality(nb);
-            let nb_lang = self.majority_language(nb);
-
-            let mut intensity = 0.0f32;
-            if f_ag != nb_ag {
-                intensity += 0.50;
-            }
-            if f_nat != nb_nat {
-                intensity += 0.30;
-            }
-            if f_lang != nb_lang {
-                intensity += 0.20;
-            }
-            if intensity > max_intensity {
-                max_intensity = intensity;
-            }
-        }
-        max_intensity.clamp(0.0, 1.0)
+        fine_adj[f_idx]
+            .iter()
+            .filter_map(|&nb| {
+                if self.tile_states.get(&nb) == Some(&sid) {
+                    return None;
+                }
+                let nb_comms = self.tile_communities.get(&nb)?;
+                let nb_pop: f32 = nb_comms.iter().map(|c| c.thousands).sum();
+                if nb_pop <= 0.0 {
+                    return None;
+                }
+                let nb_ag = nb_comms.iter().any(|c| c.agriculture);
+                let ag_diff = if f_ag != nb_ag { 0.50 } else { 0.0 };
+                let nat_diff = if f_nat != self.majority_nationality(nb) {
+                    0.30
+                } else {
+                    0.0
+                };
+                let lang_diff = if f_lang != self.majority_language(nb) {
+                    0.20
+                } else {
+                    0.0
+                };
+                Some(ag_diff + nat_diff + lang_diff)
+            })
+            .fold(0.0f32, f32::max)
+            .clamp(0.0, 1.0)
     }
 
     /// Update each active state's collective solidarity (*asabiya*) $S_n$ using Turchin's logistic
@@ -1444,21 +1590,21 @@ impl HistorySimulation {
     ) {
         const R_FRONTIER: f32 = 0.45;
         const DELTA_CORE: f32 = 0.12;
-        let mut new_asabiya: BTreeMap<u32, f32> = BTreeMap::new();
-        for (&sid, tiles) in extents {
-            if tiles.is_empty() {
-                continue;
-            }
-            let sum_i: f32 = tiles
-                .iter()
-                .map(|&f| self.tile_metaethnic_intensity(f, fine_adj))
-                .sum();
-            // Scale frontier exposure so compact frontier marcher states reach high I_bar while sprawling empires dilute I_bar
-            let mean_i = (sum_i / (tiles.len() as f32) * 2.5).clamp(0.0, 1.0);
-            let s = self.state_asabiya(sid);
-            let ds = R_FRONTIER * mean_i * (1.0 - s) - DELTA_CORE * (1.0 - mean_i) * s;
-            new_asabiya.insert(sid, (s + ds).clamp(0.10, 1.00));
-        }
+        let new_asabiya: Vec<(u32, f32)> = extents
+            .iter()
+            .filter(|(_, tiles)| !tiles.is_empty())
+            .map(|(&sid, tiles)| {
+                let sum_i: f32 = tiles
+                    .iter()
+                    .map(|&f| self.tile_metaethnic_intensity(f, fine_adj))
+                    .sum();
+                // Scale frontier exposure so compact frontier marcher states reach high I_bar while sprawling empires dilute I_bar
+                let mean_i = (sum_i / (tiles.len() as f32) * 2.5).clamp(0.0, 1.0);
+                let s = self.state_asabiya(sid);
+                let ds = R_FRONTIER * mean_i * (1.0 - s) - DELTA_CORE * (1.0 - mean_i) * s;
+                (sid, (s + ds).clamp(0.10, 1.00))
+            })
+            .collect();
         for (sid, s) in new_asabiya {
             if let Some(st) = self.states.get_mut(&sid) {
                 st.asabiya = s;
@@ -1468,37 +1614,25 @@ impl HistorySimulation {
 
     /// Active military opponents of state `n` (`historysimulation.py:lookupopponents`).
     fn lookup_opponents(&self, n: u32) -> BTreeSet<u32> {
-        let mut out = BTreeSet::new();
-        for &(a, b) in &self.conflicts {
-            if a == n {
-                out.insert(b);
-            } else if b == n {
-                out.insert(a);
-            }
-        }
-        out
+        self.conflicts
+            .iter()
+            .filter_map(|pair| pair.other(n))
+            .collect()
     }
 
     /// Compute per-state tile extents, native species sets, and neighboring states (including across rivers
     /// and along established maritime/riverine wind & current travel routes).
-    fn state_topology(
-        &self,
-        adjacency: &[Vec<usize>],
-    ) -> (
-        BTreeMap<u32, Vec<usize>>,
-        BTreeMap<u32, BTreeSet<usize>>,
-        BTreeMap<u32, BTreeSet<u32>>,
-    ) {
+    fn state_topology(&self, adjacency: &[Vec<usize>]) -> StateTopology {
         let mut extents: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
-        let mut state_species: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
+        let mut species: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
         let mut neighbors: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
 
         for (&t, &s1) in &self.tile_states {
             extents.entry(s1).or_default().push(t);
-            let sp_set = state_species.entry(s1).or_default();
-            for &sp in &self.tile_species[t] {
-                sp_set.insert(sp);
-            }
+            species
+                .entry(s1)
+                .or_default()
+                .extend(self.tile_species[t].iter().copied());
             let nb_set = neighbors.entry(s1).or_default();
             let mut checked_river = false;
             for &nb in &adjacency[t] {
@@ -1533,7 +1667,11 @@ impl HistorySimulation {
             }
         }
 
-        (extents, state_species, neighbors)
+        StateTopology {
+            extents,
+            species,
+            neighbors,
+        }
     }
 
     /// Hop-decayed Heckscher-Ohlin & Tinbergen trade pressure $\text{Pressure}_{n \leftarrow o}$:
@@ -1581,27 +1719,27 @@ impl HistorySimulation {
     /// 3. Collins resource + territorial carrying-capacity + demographic tension with Boulding distance decay (`e^{-0.5 d}`).
     fn update_diplomacy_and_trade(&mut self, adjacency: &[Vec<usize>]) {
         self.update_travel_routes();
-        let (extents, state_species, neighbors) = self.state_topology(adjacency);
+        let StateTopology {
+            extents,
+            species: state_species,
+            neighbors,
+        } = self.state_topology(adjacency);
         let active_states: BTreeSet<u32> = extents.keys().copied().collect();
         for st in self.states.values_mut() {
             st.active = active_states.contains(&st.id);
         }
 
         // Prune any stale trade partnerships or conflicts involving extinct or non-neighboring states
-        self.trade_partners.retain(|&(a, b)| {
-            active_states.contains(&a)
-                && active_states.contains(&b)
-                && a != b
-                && neighbors.get(&a).is_some_and(|nbs| nbs.contains(&b))
-        });
-        self.conflicts.retain(|&(a, b)| {
-            active_states.contains(&a)
-                && active_states.contains(&b)
-                && a != b
-                && neighbors.get(&a).is_some_and(|nbs| nbs.contains(&b))
-        });
+        let is_valid_pair = |pair: &StatePair| {
+            active_states.contains(&pair.a)
+                && active_states.contains(&pair.b)
+                && pair.a != pair.b
+                && neighbors.get(&pair.a).is_some_and(|nbs| nbs.contains(&pair.b))
+        };
+        self.trade_partners.retain(is_valid_pair);
+        self.conflicts.retain(is_valid_pair);
 
-        let active_conflict_set: BTreeSet<(u32, u32)> = self.conflicts.iter().copied().collect();
+        let active_conflict_set: BTreeSet<StatePair> = self.conflicts.iter().copied().collect();
 
         // 1. Heckscher-Ohlin + Tinbergen trade pressure & mutual eligibility
         let mut pressure_map: BTreeMap<(u32, u32), f32> = BTreeMap::new();
@@ -1612,7 +1750,7 @@ impl HistorySimulation {
             let mut n_elig = BTreeSet::new();
             if let Some(nbs) = neighbors.get(&n) {
                 for &o in nbs {
-                    let pair = if n < o { (n, o) } else { (o, n) };
+                    let pair = StatePair::new(n, o);
                     // Polachek: states actively at war cannot simultaneously form a trade partnership
                     if active_conflict_set.contains(&pair) {
                         continue;
@@ -1628,15 +1766,17 @@ impl HistorySimulation {
         }
 
         // Re-evaluate existing trade partners (dissolve if mutual gains drop below half the threshold)
-        let mut partner_set: BTreeSet<(u32, u32)> = self
+        let mut partner_set: BTreeSet<StatePair> = self
             .trade_partners
             .iter()
             .copied()
-            .filter(|&(a, b)| {
-                let p_ab = pressure_map.get(&(a, b)).copied().unwrap_or(0.0);
-                let p_ba = pressure_map.get(&(b, a)).copied().unwrap_or(0.0);
-                let min_a = (state_species.get(&a).map(|s| s.len()).unwrap_or(0) as f32) * 0.025;
-                let min_b = (state_species.get(&b).map(|s| s.len()).unwrap_or(0) as f32) * 0.025;
+            .filter(|&pair| {
+                let p_ab = pressure_map.get(&(pair.a, pair.b)).copied().unwrap_or(0.0);
+                let p_ba = pressure_map.get(&(pair.b, pair.a)).copied().unwrap_or(0.0);
+                let min_a =
+                    (state_species.get(&pair.a).map(|s| s.len()).unwrap_or(0) as f32) * 0.025;
+                let min_b =
+                    (state_species.get(&pair.b).map(|s| s.len()).unwrap_or(0) as f32) * 0.025;
                 p_ab >= min_a && p_ba >= min_b
             })
             .collect();
@@ -1644,8 +1784,7 @@ impl HistorySimulation {
         for (&n, n_elig) in &eligible {
             for &o in n_elig {
                 if eligible.get(&o).is_some_and(|o_elig| o_elig.contains(&n)) {
-                    let pair = if n < o { (n, o) } else { (o, n) };
-                    partner_set.insert(pair);
+                    partner_set.insert(StatePair::new(n, o));
                 }
             }
         }
@@ -1664,61 +1803,52 @@ impl HistorySimulation {
             .map(|(&sid, tiles)| (sid, self.state_carrying_capacity(tiles)))
             .collect();
 
-        let mut conflict_set: BTreeSet<(u32, u32)> = active_conflict_set;
+        let mut conflict_set: BTreeSet<StatePair> = active_conflict_set;
 
         for &n in &active_states {
             let native = state_species.get(&n).cloned().unwrap_or_default();
             let eff_n = state_eff_pops.get(&n).copied().unwrap_or(0.0);
             let cap_n = state_caps.get(&n).copied().unwrap_or(1.0);
-            let mut best_rival: Option<(u32, f32)> = None;
+            let best_rival = neighbors.get(&n).and_then(|nbs| {
+                nbs.iter()
+                    .filter_map(|&o| {
+                        let eff_o = state_eff_pops.get(&o).copied().unwrap_or(0.0);
+                        if eff_o <= 1e-4 || eff_n <= eff_o {
+                            return None;
+                        }
+                        let cap_o = state_caps.get(&o).copied().unwrap_or(1.0);
+                        let osp = state_species.get(&o).cloned().unwrap_or_default();
 
-            if let Some(nbs) = neighbors.get(&n) {
-                for &o in nbs {
-                    let eff_o = state_eff_pops.get(&o).copied().unwrap_or(0.0);
-                    if eff_o <= 1e-4 || eff_n <= eff_o {
-                        continue;
-                    }
-                    let cap_o = state_caps.get(&o).copied().unwrap_or(1.0);
-                    let osp = state_species.get(&o).cloned().unwrap_or_default();
+                        // Heckscher-Ohlin resource motive + Collins territorial carrying-capacity motive
+                        let dr = if native.is_empty() {
+                            0.0
+                        } else {
+                            (osp.difference(&native).count() as f32) / (native.len() as f32)
+                        };
+                        let dk = cap_o / (cap_n + cap_o);
+                        let dp = (eff_n - eff_o) / eff_o;
+                        let dist = self.effective_state_distance(n, o);
+                        let boulding_lsg = (-0.5 * dist).exp();
+                        let tension = (dr + 0.15 * dk + dp) * boulding_lsg;
 
-                    // Heckscher-Ohlin resource motive + Collins territorial carrying-capacity motive
-                    let dr = if native.is_empty() {
-                        0.0
-                    } else {
-                        (osp.difference(&native).count() as f32) / (native.len() as f32)
-                    };
-                    let dk = cap_o / (cap_n + cap_o);
-                    let dp = (eff_n - eff_o) / eff_o;
-                    let dist = self.effective_state_distance(n, o);
-                    let boulding_lsg = (-0.5 * dist).exp();
-                    let tension = (dr + 0.15 * dk + dp) * boulding_lsg;
+                        let pair = StatePair::new(n, o);
+                        // Polachek commercial peace dividend raises the threshold required to break peace with a trade partner
+                        let war_threshold = if partner_set.contains(&pair) {
+                            let p_no = pressure_map.get(&(n, o)).copied().unwrap_or(0.0);
+                            let p_on = pressure_map.get(&(o, n)).copied().unwrap_or(0.0);
+                            let denom = (native.len() + osp.len()).max(1) as f32;
+                            let peace_dividend = (1.5 * (p_no + p_on) / denom).max(1.0);
+                            1.0 + peace_dividend
+                        } else {
+                            1.0
+                        };
 
-                    let pair = if n < o { (n, o) } else { (o, n) };
-                    // Polachek commercial peace dividend raises the threshold required to break peace with a trade partner
-                    let war_threshold = if partner_set.contains(&pair) {
-                        let p_no = pressure_map.get(&(n, o)).copied().unwrap_or(0.0);
-                        let p_on = pressure_map.get(&(o, n)).copied().unwrap_or(0.0);
-                        let denom =
-                            (native.len() + osp.len()).max(1) as f32;
-                        let peace_dividend = (1.5 * (p_no + p_on) / denom).max(1.0);
-                        1.0 + peace_dividend
-                    } else {
-                        1.0
-                    };
-
-                    if tension >= war_threshold
-                        && best_rival.is_none_or(|(_, best_t)| tension > best_t)
-                    {
-                        best_rival = Some((o, tension));
-                    }
-                }
-            }
+                        (tension >= war_threshold).then_some((o, tension))
+                    })
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            });
             if let Some((priority, _)) = best_rival {
-                let pair = if n < priority {
-                    (n, priority)
-                } else {
-                    (priority, n)
-                };
+                let pair = StatePair::new(n, priority);
                 // If tension overcame Polachek commercial peace, abrogate the trade pact
                 partner_set.remove(&pair);
                 conflict_set.insert(pair);
@@ -1746,16 +1876,15 @@ impl HistorySimulation {
 
     /// Set of constellation indices `c.index` visible at some point in the year from any of `tiles`.
     pub fn visible_constellations_for_tiles(&self, tiles: &[usize]) -> BTreeSet<u32> {
-        let mut visible = BTreeSet::new();
-        for c in &self.constellations {
-            if tiles
-                .iter()
-                .any(|&f_idx| c.is_visible_at_latitude_deg(self.fine_face_latitude_deg(f_idx)))
-            {
-                visible.insert(c.index);
-            }
-        }
-        visible
+        self.constellations
+            .iter()
+            .filter(|c| {
+                tiles
+                    .iter()
+                    .any(|&f_idx| c.is_visible_at_latitude_deg(self.fine_face_latitude_deg(f_idx)))
+            })
+            .map(|c| c.index)
+            .collect()
     }
 
     /// Accumulate concepts across co-resident communities, trade partners, rivals, and recursive trade imports,
@@ -2228,7 +2357,7 @@ impl HistorySimulation {
             .iter()
             .map(|(&t, cs)| (t, cs.iter().map(|c| c.thousands).sum()))
             .collect();
-        let mut spillover: Vec<(usize, u32, Community)> = Vec::new();
+        let mut spillover: Vec<MigrationSpillover> = Vec::new();
         for (&t, comms) in self.tile_communities.iter_mut() {
             let cap = self.capacities[t].max(0.2);
             let total: f32 = comms.iter().map(|c| c.thousands).sum();
@@ -2244,69 +2373,84 @@ impl HistorySimulation {
             }
             let new_total: f32 = comms.iter().map(|c| c.thousands).sum();
             if new_total > cap * 0.85 && !comms.is_empty() {
-                let sid = self.tile_states.get(&t).copied().unwrap_or(0);
-                for &nb in &fine_adj[t] {
+                let state_id = self.tile_states.get(&t).copied().unwrap_or(0);
+                if let Some(&nb) = fine_adj[t].iter().find(|&&nb| {
                     let c = self.terrain.primary_coarse_tile(nb, &coarse_elevs);
-                    if fine_elevs[nb] > 0.0
+                    let nb_pop = tile_pops.get(&nb).copied().unwrap_or(0.0);
+                    fine_elevs[nb] > 0.0
                         && is_passable(fine_elevs[nb], koeppen[c], true)
                         && self.capacities[nb] > 0.1
-                    {
-                        let nb_pop: f32 = tile_pops.get(&nb).copied().unwrap_or(0.0);
-                        if nb_pop < self.capacities[nb] * 0.9 {
-                            let mut migrant = comms[0].clone();
-                            migrant.thousands = (comms[0].thousands * 0.08).max(0.02);
-                            comms[0].thousands = (comms[0].thousands - migrant.thousands).max(0.02);
-                            spillover.push((nb, sid, migrant));
-                            break;
-                        }
-                    }
+                        && nb_pop < self.capacities[nb] * 0.9
+                }) {
+                    let mut migrant = comms[0].clone();
+                    migrant.thousands = (comms[0].thousands * 0.08).max(0.02);
+                    comms[0].thousands = (comms[0].thousands - migrant.thousands).max(0.02);
+                    spillover.push(MigrationSpillover {
+                        target_face: nb,
+                        state_id,
+                        community: migrant,
+                    });
                 }
             }
         }
 
-        for (nb, sid, migrant) in spillover {
-            self.tile_states.entry(nb).or_insert(sid);
-            self.tile_communities.entry(nb).or_default().push(migrant);
+        for item in spillover {
+            self.tile_states
+                .entry(item.target_face)
+                .or_insert(item.state_id);
+            self.tile_communities
+                .entry(item.target_face)
+                .or_default()
+                .push(item.community);
         }
 
         // 2b. Maritime & riverine expansion along established wind/current travel routes (`self.travel_routes`)
-        let mut maritime_spillover: Vec<(usize, u32, Community)> = Vec::new();
-        for route in &self.travel_routes {
-            let src = route.from_fine_face;
-            let dst = route.to_fine_face;
-            let Some(&sid) = self.tile_states.get(&src) else {
-                continue;
-            };
-            let Some(src_comms) = self.tile_communities.get(&src) else {
-                continue;
-            };
-            let src_pop: f32 = src_comms.iter().map(|c| c.thousands).sum();
-            let src_cap = self.capacities[src].max(0.2);
-            if src_pop <= src_cap * 0.55 || src_comms.is_empty() {
-                continue;
-            }
-            let c_dst = self.terrain.primary_coarse_tile(dst, &coarse_elevs);
-            if fine_elevs[dst] <= 0.0
-                || !is_passable(fine_elevs[dst], koeppen[c_dst], true)
-                || self.capacities[dst] <= 0.1
-            {
-                continue;
-            }
-            let dst_pop: f32 = self
-                .tile_communities
-                .get(&dst)
-                .map(|cs| cs.iter().map(|c| c.thousands).sum())
-                .unwrap_or(0.0);
-            if dst_pop < self.capacities[dst] * 0.85 {
+        let maritime_spillover: Vec<MigrationSpillover> = self
+            .travel_routes
+            .iter()
+            .filter_map(|route| {
+                let src = route.from_fine_face;
+                let dst = route.to_fine_face;
+                let &state_id = self.tile_states.get(&src)?;
+                let src_comms = self.tile_communities.get(&src)?;
+                let src_pop: f32 = src_comms.iter().map(|c| c.thousands).sum();
+                let src_cap = self.capacities[src].max(0.2);
+                if src_pop <= src_cap * 0.55 || src_comms.is_empty() {
+                    return None;
+                }
+                let c_dst = self.terrain.primary_coarse_tile(dst, &coarse_elevs);
+                if fine_elevs[dst] <= 0.0
+                    || !is_passable(fine_elevs[dst], koeppen[c_dst], true)
+                    || self.capacities[dst] <= 0.1
+                {
+                    return None;
+                }
+                let dst_pop: f32 = self
+                    .tile_communities
+                    .get(&dst)
+                    .map(|cs| cs.iter().map(|c| c.thousands).sum())
+                    .unwrap_or(0.0);
+                if dst_pop >= self.capacities[dst] * 0.85 {
+                    return None;
+                }
                 let mut migrant = src_comms[0].clone();
                 let frac = (0.06 * route.wind_current_alignment.max(0.35)).clamp(0.02, 0.08);
                 migrant.thousands = (src_comms[0].thousands * frac).max(0.02);
-                maritime_spillover.push((dst, sid, migrant));
-            }
-        }
-        for (dst, sid, migrant) in maritime_spillover {
-            self.tile_states.entry(dst).or_insert(sid);
-            self.tile_communities.entry(dst).or_default().push(migrant);
+                Some(MigrationSpillover {
+                    target_face: dst,
+                    state_id,
+                    community: migrant,
+                })
+            })
+            .collect();
+        for item in maritime_spillover {
+            self.tile_states
+                .entry(item.target_face)
+                .or_insert(item.state_id);
+            self.tile_communities
+                .entry(item.target_face)
+                .or_default()
+                .push(item.community);
         }
         self.update_travel_routes();
 
@@ -2367,7 +2511,7 @@ impl HistorySimulation {
         self.branch_disconnected_dialects(&fine_adj);
 
         // 5. Update Turchin metaethnic frontier asabiya & resolve conflicts via Collins-Turchin multi-front force allocation & Boulding distance decay
-        let (extents, _, _) = self.state_topology(&fine_adj);
+        let StateTopology { extents, .. } = self.state_topology(&fine_adj);
         self.update_state_asabiya(&extents, &fine_adj);
         let state_eff_pops: BTreeMap<u32, f32> = extents
             .keys()
@@ -2389,9 +2533,9 @@ impl HistorySimulation {
             })
             .collect();
 
-        let mut results: Vec<(u32, u32)> = Vec::new();
-        let mut border_transfers: Vec<(u32, u32)> = Vec::new();
-        for &(n, o) in &self.conflicts {
+        let mut results: Vec<WarOutcome> = Vec::new();
+        let mut border_transfers: Vec<WarOutcome> = Vec::new();
+        for &StatePair { a: n, b: o } in &self.conflicts {
             let pn = state_eff_pops.get(&n).copied().unwrap_or(0.0);
             let po = state_eff_pops.get(&o).copied().unwrap_or(0.0);
             let opp_total_n = opp_pop_totals.get(&n).copied().unwrap_or(1.0).max(0.1);
@@ -2404,22 +2548,34 @@ impl HistorySimulation {
             let fo_val = po * weight_o_to_n * lsg;
 
             if fo_val > 0.0 && fn_val / fo_val > 1.5 {
-                results.push((n, o));
+                results.push(WarOutcome {
+                    winner: n,
+                    loser: o,
+                });
             } else if fn_val > 0.0 && fo_val / fn_val > 1.5 {
-                results.push((o, n));
+                results.push(WarOutcome {
+                    winner: o,
+                    loser: n,
+                });
             } else if fo_val > 0.0 && fn_val / fo_val > 1.15 {
-                border_transfers.push((n, o));
+                border_transfers.push(WarOutcome {
+                    winner: n,
+                    loser: o,
+                });
             } else if fn_val > 0.0 && fo_val / fn_val > 1.15 {
-                border_transfers.push((o, n));
+                border_transfers.push(WarOutcome {
+                    winner: o,
+                    loser: n,
+                });
             }
         }
         // All active conflicts resolve this tick (decisive annexation, marginal border transfer, or stalemate truce)
         self.conflicts.clear();
 
-        let losers: BTreeSet<u32> = results.iter().map(|&(_, l)| l).collect();
-        let winners: BTreeSet<u32> = results.iter().map(|&(w, _)| w).collect();
+        let losers: BTreeSet<u32> = results.iter().map(|out| out.loser).collect();
+        let winners: BTreeSet<u32> = results.iter().map(|out| out.winner).collect();
         let mut conquests: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
-        for &(winner, loser) in &results {
+        for &WarOutcome { winner, loser } in &results {
             if !losers.contains(&winner) {
                 conquests.entry(winner).or_default().insert(loser);
                 if let Some(loser_tiles) = extents.get(&loser) {
@@ -2429,7 +2585,7 @@ impl HistorySimulation {
                 }
             }
         }
-        for &(winner, loser) in &border_transfers {
+        for &WarOutcome { winner, loser } in &border_transfers {
             if losers.contains(&winner) || losers.contains(&loser) {
                 continue;
             }
@@ -2446,25 +2602,24 @@ impl HistorySimulation {
                         .collect();
                     // If the conflict was across a maritime/riverine travel route, capture the landing port & adjacent coastal faces
                     if border_faces.is_empty() {
-                        for r in &self.travel_routes {
+                        if let Some(port_f) = self.travel_routes.iter().find_map(|r| {
                             let from_st = self.tile_states.get(&r.from_fine_face).copied();
                             let to_st = self.tile_states.get(&r.to_fine_face).copied();
-                            let landing = if from_st == Some(winner) && to_st == Some(loser) {
+                            if from_st == Some(winner) && to_st == Some(loser) {
                                 Some(r.to_fine_face)
                             } else if to_st == Some(winner) && from_st == Some(loser) {
                                 Some(r.from_fine_face)
                             } else {
                                 None
-                            };
-                            if let Some(port_f) = landing {
-                                border_faces.push(port_f);
-                                for &nb in &fine_adj[port_f] {
-                                    if self.tile_states.get(&nb) == Some(&loser) {
-                                        border_faces.push(nb);
-                                    }
-                                }
-                                break;
                             }
+                        }) {
+                            border_faces.push(port_f);
+                            border_faces.extend(
+                                fine_adj[port_f]
+                                    .iter()
+                                    .copied()
+                                    .filter(|&nb| self.tile_states.get(&nb) == Some(&loser)),
+                            );
                         }
                     }
                     border_faces.truncate(6.min(loser_tiles.len().saturating_sub(1)));
@@ -2692,8 +2847,7 @@ impl HistorySimulation {
                     }
                 }
             }
-            self.trade_partners
-                .retain(|&(a, b)| a != n && b != n);
+            self.trade_partners.retain(|pair| !pair.contains(n));
         }
 
         // 8. Update trade, conflicts, concept accumulation, and recolor nations
@@ -2710,7 +2864,7 @@ impl HistorySimulation {
         &self.terrain
     }
 
-    pub fn build_display_mesh(&self) -> (Vec<f32>, Vec<f32>, Vec<u32>) {
+    pub fn build_display_mesh(&self) -> DisplayMesh {
         self.terrain.build_display_mesh()
     }
 
@@ -2822,7 +2976,11 @@ impl HistorySimulation {
     pub fn set_constellations(&mut self, constellations: Vec<Constellation>) {
         self.constellations = constellations;
         let fine_adj = self.terrain.terrain_adj.clone();
-        let (extents, state_species, _) = self.state_topology(&fine_adj);
+        let StateTopology {
+            extents,
+            species: state_species,
+            ..
+        } = self.state_topology(&fine_adj);
         self.accumulate_and_borrow_concepts(&extents, &state_species);
     }
 
@@ -2843,51 +3001,47 @@ impl HistorySimulation {
     }
 
     pub fn water_access_port_count(&self) -> usize {
-        let mut ports = BTreeSet::new();
-        for r in &self.travel_routes {
-            ports.insert(r.from_fine_face);
-            ports.insert(r.to_fine_face);
-        }
+        let ports: BTreeSet<usize> = self
+            .travel_routes
+            .iter()
+            .flat_map(|r| [r.from_fine_face, r.to_fine_face])
+            .collect();
         ports.len()
     }
 
-    /// Classify the diplomatic/historical usage of a `TravelRoute`:
-    /// `3` = Active Trade Route (Gold),
-    /// `2` = Active Military Conflict Route (Red),
-    /// `1` = Active Expansion / Sea Lane (Cyan for ocean, Emerald-Turquoise for river),
-    /// `0` = Potential Unsettled Wind/Current Corridor (Indigo).
-    pub fn route_status(&self, route: &TravelRoute, is_active: bool) -> u8 {
+    /// Classify the diplomatic/historical usage of a `TravelRoute`.
+    pub fn route_status(&self, route: &TravelRoute, is_active: bool) -> TravelRouteStatus {
         if !is_active {
-            return 0;
+            return TravelRouteStatus::PotentialCorridor;
         }
         if let (Some(&s1), Some(&s2)) = (
             self.tile_states.get(&route.from_fine_face),
             self.tile_states.get(&route.to_fine_face),
         ) {
             if s1 != s2 {
-                let pair = (s1.min(s2), s1.max(s2));
+                let pair = StatePair::new(s1, s2);
                 if self.conflicts.contains(&pair) {
-                    return 2;
+                    return TravelRouteStatus::NavalConflict;
                 }
                 if self.trade_partners.contains(&pair) {
-                    return 3;
+                    return TravelRouteStatus::MaritimeTrade;
                 }
             }
         }
-        1
+        TravelRouteStatus::ActiveSeaLane
     }
 
     pub fn maritime_trade_route_count(&self) -> usize {
         self.travel_routes
             .iter()
-            .filter(|r| self.route_status(r, true) == 3)
+            .filter(|r| self.route_status(r, true) == TravelRouteStatus::MaritimeTrade)
             .count()
     }
 
     pub fn maritime_conflict_route_count(&self) -> usize {
         self.travel_routes
             .iter()
-            .filter(|r| self.route_status(r, true) == 2)
+            .filter(|r| self.route_status(r, true) == TravelRouteStatus::NavalConflict)
             .count()
     }
 
@@ -2905,55 +3059,45 @@ impl HistorySimulation {
         let mut out = Vec::new();
         let mut append_route = |route: &TravelRoute, is_active: bool| {
             let status = self.route_status(route, is_active);
-            let rgb: [f32; 3] = match status {
-                3 => [1.00, 0.88, 0.18], // Gold: Maritime Trade Route
-                2 => [1.00, 0.22, 0.22], // Crimson: Maritime Conflict / Naval War Route
-                1 => {
-                    if route.route_kind == 2 {
-                        [0.25, 0.96, 0.68] // Emerald-Turquoise: Active Riverine Corridor
-                    } else {
-                        [0.18, 0.90, 0.98] // Cyan: Active Wind/Current Expansion Sea Lane
-                    }
-                }
-                _ => [0.36, 0.50, 0.84], // Muted Indigo: Potential Wind/Current Corridor
-            };
-            let radius_lift: f32 = match status {
-                3 | 2 => 1.010,
-                1 => 1.008,
-                _ => 1.005,
+            let rgb = status.rgb(route.route_kind);
+            let radius_lift = status.radius_lift();
+
+            let lift_pt = |c: Vec3| -> [f32; 3] {
+                [
+                    c[0] as f32 * radius_lift,
+                    c[1] as f32 * radius_lift,
+                    c[2] as f32 * radius_lift,
+                ]
             };
 
-            let mut pts: Vec<[f32; 3]> = Vec::with_capacity(route.coarse_path.len() + 2);
-            if let Some(&(c, _)) = self.terrain.terrain_grid.faces.get(route.from_fine_face) {
-                pts.push([
-                    c[0] as f32 * radius_lift,
-                    c[1] as f32 * radius_lift,
-                    c[2] as f32 * radius_lift,
-                ]);
-            }
-            for &c_idx in &route.coarse_path {
-                if let Some(&(c, _)) = grid.faces.get(c_idx) {
-                    pts.push([
-                        c[0] as f32 * radius_lift,
-                        c[1] as f32 * radius_lift,
-                        c[2] as f32 * radius_lift,
-                    ]);
-                }
-            }
-            if let Some(&(c, _)) = self.terrain.terrain_grid.faces.get(route.to_fine_face) {
-                pts.push([
-                    c[0] as f32 * radius_lift,
-                    c[1] as f32 * radius_lift,
-                    c[2] as f32 * radius_lift,
-                ]);
-            }
+            let pts: Vec<[f32; 3]> = self
+                .terrain
+                .terrain_grid
+                .faces
+                .get(route.from_fine_face)
+                .map(|&(c, _)| lift_pt(c))
+                .into_iter()
+                .chain(
+                    route
+                        .coarse_path
+                        .iter()
+                        .filter_map(|&c_idx| grid.faces.get(c_idx).map(|&(c, _)| lift_pt(c))),
+                )
+                .chain(
+                    self.terrain
+                        .terrain_grid
+                        .faces
+                        .get(route.to_fine_face)
+                        .map(|&(c, _)| lift_pt(c)),
+                )
+                .collect();
 
             if pts.len() < 2 {
                 return;
             }
-            for i in 0..(pts.len() - 1) {
-                let p0 = pts[i];
-                let p1 = pts[i + 1];
+            for pair in pts.windows(2) {
+                let p0 = pair[0];
+                let p1 = pair[1];
                 out.extend_from_slice(&[
                     p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], rgb[0], rgb[1], rgb[2],
                 ]);
@@ -3070,18 +3214,19 @@ impl HistorySimulation {
 
     /// Detailed multi-line inspection report for the Travel mode (or `"travel"` / `"winds_currents"` aspects).
     pub fn inspect_travel_tile(&self, display_idx: usize) -> String {
-        if display_idx >= self.terrain.display_faces.len() {
+        let Some(face) = self.terrain.display_faces.get(display_idx) else {
             return String::new();
-        }
+        };
         let climate = self.prehistory.climate_model();
         let ocean = climate.ocean();
         let coarse_elevs = self.prehistory.tile_elevations();
 
-        match self.terrain.display_faces[display_idx].2 {
+        match face.source {
             DisplayFaceSource::OceanCoarse(c_idx) => {
                 let lat = climate.lats_deg().get(c_idx).copied().unwrap_or(0.0);
                 let lon = climate.lons_deg().get(c_idx).copied().unwrap_or(0.0);
-                let wind_deg = tec11_climate::wind_direction_deg(lat, climate.cells(), climate.spin());
+                let wind_deg =
+                    tec11_climate::wind_direction_deg(lat, climate.cells(), climate.spin());
                 let spd = ocean.speed.get(c_idx).copied().unwrap_or(0.0);
                 let sst = ocean.sst_anomaly.get(c_idx).copied().unwrap_or(0.0);
                 let sst_desc = if sst >= 0.08 {
@@ -3099,32 +3244,36 @@ impl HistorySimulation {
 
                 // Find any travel routes passing through or within 1 hop of `c_idx`
                 let adj = self.prehistory.adjacency();
-                let mut nearby_coarse = BTreeSet::new();
-                nearby_coarse.insert(c_idx);
-                if let Some(nbs) = adj.get(c_idx) {
-                    for &nb in nbs {
-                        nearby_coarse.insert(nb);
-                    }
-                }
+                let nearby_coarse: BTreeSet<usize> = std::iter::once(c_idx)
+                    .chain(adj.get(c_idx).into_iter().flatten().copied())
+                    .collect();
 
-                let mut matching_routes = Vec::new();
-                for r in &self.travel_routes {
-                    if r.coarse_path.iter().any(|c| nearby_coarse.contains(c)) {
-                        matching_routes.push((r, true));
-                    }
-                }
-                if matching_routes.is_empty() {
-                    for r in &self.potential_travel_routes {
-                        if r.coarse_path.iter().any(|c| nearby_coarse.contains(c)) {
-                            matching_routes.push((r, false));
-                        }
-                    }
-                }
-
-                if matching_routes.is_empty() {
-                    lines.push("No established travel routes pass directly through this ocean sector.".to_string());
+                let active_matches: Vec<(&TravelRoute, bool)> = self
+                    .travel_routes
+                    .iter()
+                    .filter(|r| r.coarse_path.iter().any(|c| nearby_coarse.contains(c)))
+                    .map(|r| (r, true))
+                    .collect();
+                let matching_routes: Vec<(&TravelRoute, bool)> = if !active_matches.is_empty() {
+                    active_matches
                 } else {
-                    lines.push(format!("--- Travel Routes in Sector ({}) ---", matching_routes.len()));
+                    self.potential_travel_routes
+                        .iter()
+                        .filter(|r| r.coarse_path.iter().any(|c| nearby_coarse.contains(c)))
+                        .map(|r| (r, false))
+                        .collect()
+                };
+
+                if matching_routes.is_empty() {
+                    lines.push(
+                        "No established travel routes pass directly through this ocean sector."
+                            .to_string(),
+                    );
+                } else {
+                    lines.push(format!(
+                        "--- Travel Routes in Sector ({}) ---",
+                        matching_routes.len()
+                    ));
                     for (r, is_active) in matching_routes.into_iter().take(8) {
                         let from_label = self
                             .tile_states
@@ -3136,12 +3285,7 @@ impl HistorySimulation {
                             .get(&r.to_fine_face)
                             .map(|&s| self.state_name(s))
                             .unwrap_or_else(|| format!("Coast #{}", r.to_coarse_tile));
-                        let status_str = match self.route_status(r, is_active) {
-                            3 => "TRADE ROUTE (gold)",
-                            2 => "NAVAL CONFLICT (red)",
-                            1 => "ACTIVE SEA LANE (cyan)",
-                            _ => "Potential Wind/Current Corridor",
-                        };
+                        let status_str = self.route_status(r, is_active).ocean_sector_label();
                         lines.push(format!(
                             "• {from_label} → {to_label} [{status_str}] | {} | Wind/Current Align: {:.0}% | Cost: {:.2}",
                             r.kind_name(),
@@ -3155,7 +3299,8 @@ impl HistorySimulation {
             DisplayFaceSource::Fine(fine_idx) => {
                 let c_idx = self.terrain.primary_coarse_tile(fine_idx, &coarse_elevs);
                 let lat = climate.lats_deg().get(c_idx).copied().unwrap_or(0.0);
-                let wind_deg = tec11_climate::wind_direction_deg(lat, climate.cells(), climate.spin());
+                let wind_deg =
+                    tec11_climate::wind_direction_deg(lat, climate.cells(), climate.spin());
                 let mut lines = Vec::new();
 
                 if let Some(&sid) = self.tile_states.get(&fine_idx) {
@@ -3165,16 +3310,19 @@ impl HistorySimulation {
                         "State: {st_name} | Pop: {:.0}K | Fine Face #{fine_idx} (Coarse #{c_idx}, {lat:+.1}°, Prevailing Wind {wind_deg:.0}°)",
                         st_pop
                     ));
-                    let mut state_routes = Vec::new();
-                    for r in &self.travel_routes {
-                        let s_from = self.tile_states.get(&r.from_fine_face).copied();
-                        let s_to = self.tile_states.get(&r.to_fine_face).copied();
-                        if s_from == Some(sid) || s_to == Some(sid) {
-                            state_routes.push(r);
-                        }
-                    }
+                    let state_routes: Vec<&TravelRoute> = self
+                        .travel_routes
+                        .iter()
+                        .filter(|r| {
+                            self.tile_states.get(&r.from_fine_face) == Some(&sid)
+                                || self.tile_states.get(&r.to_fine_face) == Some(&sid)
+                        })
+                        .collect();
                     if state_routes.is_empty() {
-                        lines.push("Water Travel Routes: None (inland or no active coastal ports)".to_string());
+                        lines.push(
+                            "Water Travel Routes: None (inland or no active coastal ports)"
+                                .to_string(),
+                        );
                     } else {
                         lines.push(format!(
                             "--- Active Water Travel Routes for {st_name} ({}) ---",
@@ -3185,17 +3333,17 @@ impl HistorySimulation {
                                 .tile_states
                                 .get(&r.from_fine_face)
                                 .map(|&s| self.state_name(s))
-                                .unwrap_or_else(|| format!("Unclaimed Coast #{}", r.from_coarse_tile));
+                                .unwrap_or_else(|| {
+                                    format!("Unclaimed Coast #{}", r.from_coarse_tile)
+                                });
                             let to_label = self
                                 .tile_states
                                 .get(&r.to_fine_face)
                                 .map(|&s| self.state_name(s))
-                                .unwrap_or_else(|| format!("Unclaimed Coast #{}", r.to_coarse_tile));
-                            let status_str = match self.route_status(r, true) {
-                                3 => "MARITIME TRADE",
-                                2 => "NAVAL CONFLICT",
-                                _ => "EXPANSION / SEA LANE",
-                            };
+                                .unwrap_or_else(|| {
+                                    format!("Unclaimed Coast #{}", r.to_coarse_tile)
+                                });
+                            let status_str = self.route_status(r, true).land_label();
                             lines.push(format!(
                                 "• {from_label} → {to_label} [{status_str}] ({}, Align {:.0}%, Cost {:.2})",
                                 r.kind_name(),
@@ -3216,7 +3364,10 @@ impl HistorySimulation {
                     if pot.is_empty() {
                         lines.push("No potential wind/current travel corridors originate or land on this tile.".to_string());
                     } else {
-                        lines.push(format!("--- Potential Wind/Current Corridors ({}) ---", pot.len()));
+                        lines.push(format!(
+                            "--- Potential Wind/Current Corridors ({}) ---",
+                            pot.len()
+                        ));
                         for r in pot.into_iter().take(8) {
                             lines.push(format!(
                                 "• Coast #{} → Coast #{} ({}, Wind/Current Align {:.0}%, Cost {:.2})",
@@ -3236,10 +3387,10 @@ impl HistorySimulation {
 
     /// Detailed multi-line inspection report for a clicked display face and its State (`historypresenter.py`).
     pub fn inspect_tile(&self, display_idx: usize) -> String {
-        if display_idx >= self.terrain.display_faces.len() {
+        let Some(face) = self.terrain.display_faces.get(display_idx) else {
             return String::new();
-        }
-        let fine_idx = match self.terrain.display_faces[display_idx].2 {
+        };
+        let fine_idx = match face.source {
             DisplayFaceSource::OceanCoarse(c_idx) => {
                 return format!("Ocean Tile #{c_idx}");
             }
@@ -3337,17 +3488,9 @@ impl HistorySimulation {
 
         // Trade partners & Conflicts
         let partners: Vec<String> = self
-            .trade_partners
-            .iter()
-            .filter_map(|&(a, b)| {
-                if a == sid {
-                    Some(self.state_name(b))
-                } else if b == sid {
-                    Some(self.state_name(a))
-                } else {
-                    None
-                }
-            })
+            .lookup_trade_partners(sid)
+            .into_iter()
+            .map(|p| self.state_name(p))
             .collect();
         lines.push(format!(
             "Trade Partners (yellow): {}",
@@ -3359,17 +3502,9 @@ impl HistorySimulation {
         ));
 
         let rivals: Vec<String> = self
-            .conflicts
-            .iter()
-            .filter_map(|&(a, b)| {
-                if a == sid {
-                    Some(self.state_name(b))
-                } else if b == sid {
-                    Some(self.state_name(a))
-                } else {
-                    None
-                }
-            })
+            .lookup_opponents(sid)
+            .into_iter()
+            .map(|r| self.state_name(r))
             .collect();
         lines.push(format!(
             "Conflicts (red): {}",
@@ -3381,22 +3516,27 @@ impl HistorySimulation {
         ));
 
         // Active maritime/riverine travel routes for this state
-        let mut route_summaries = Vec::new();
-        for r in &self.travel_routes {
-            let s_from = self.tile_states.get(&r.from_fine_face).copied();
-            let s_to = self.tile_states.get(&r.to_fine_face).copied();
-            if s_from == Some(sid) {
-                let dst_label = s_to
-                    .map(|s| self.state_name(s))
-                    .unwrap_or_else(|| format!("Coast #{}", r.to_coarse_tile));
-                route_summaries.push(format!("→ {dst_label} ({})", r.kind_name()));
-            } else if s_to == Some(sid) {
-                let src_label = s_from
-                    .map(|s| self.state_name(s))
-                    .unwrap_or_else(|| format!("Coast #{}", r.from_coarse_tile));
-                route_summaries.push(format!("← {src_label} ({})", r.kind_name()));
-            }
-        }
+        let mut route_summaries: Vec<String> = self
+            .travel_routes
+            .iter()
+            .filter_map(|r| {
+                let s_from = self.tile_states.get(&r.from_fine_face).copied();
+                let s_to = self.tile_states.get(&r.to_fine_face).copied();
+                if s_from == Some(sid) {
+                    let dst_label = s_to
+                        .map(|s| self.state_name(s))
+                        .unwrap_or_else(|| format!("Coast #{}", r.to_coarse_tile));
+                    Some(format!("→ {dst_label} ({})", r.kind_name()))
+                } else if s_to == Some(sid) {
+                    let src_label = s_from
+                        .map(|s| self.state_name(s))
+                        .unwrap_or_else(|| format!("Coast #{}", r.from_coarse_tile));
+                    Some(format!("← {src_label} ({})", r.kind_name()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         route_summaries.dedup();
         lines.push(format!(
             "Water Travel Routes ({}): {}",
@@ -3404,7 +3544,11 @@ impl HistorySimulation {
             if route_summaries.is_empty() {
                 "None".to_string()
             } else {
-                route_summaries.into_iter().take(6).collect::<Vec<_>>().join(", ")
+                route_summaries
+                    .into_iter()
+                    .take(6)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             }
         ));
 
@@ -3504,29 +3648,19 @@ impl HistorySimulation {
         };
 
         let selected_state = selected_tile.and_then(|d_idx| {
-            match self.terrain.display_faces.get(d_idx)?.2 {
+            match self.terrain.display_faces.get(d_idx)?.source {
                 DisplayFaceSource::Fine(f) => self.tile_states.get(&f).copied(),
                 DisplayFaceSource::OceanCoarse(_) => None,
             }
         });
-        let mut partner_states = BTreeSet::new();
-        let mut rival_states = BTreeSet::new();
-        if let Some(sel_sid) = selected_state {
-            for &(a, b) in &self.trade_partners {
-                if a == sel_sid {
-                    partner_states.insert(b);
-                } else if b == sel_sid {
-                    partner_states.insert(a);
-                }
-            }
-            for &(a, b) in &self.conflicts {
-                if a == sel_sid {
-                    rival_states.insert(b);
-                } else if b == sel_sid {
-                    rival_states.insert(a);
-                }
-            }
-        }
+        let (partner_states, rival_states) = if let Some(sel_sid) = selected_state {
+            (
+                self.lookup_trade_partners(sel_sid),
+                self.lookup_opponents(sel_sid),
+            )
+        } else {
+            (BTreeSet::new(), BTreeSet::new())
+        };
 
         let max_cap = self.capacities.iter().copied().fold(1.0f32, f32::max);
         let max_sp = self
@@ -3537,18 +3671,19 @@ impl HistorySimulation {
             .unwrap_or(1)
             .max(1) as f32;
 
-        let mut active_ports = BTreeSet::new();
-        if aspect == "travel" || aspect == "winds_currents" {
-            for r in &self.travel_routes {
-                active_ports.insert(r.from_fine_face);
-                active_ports.insert(r.to_fine_face);
-            }
-        }
+        let active_ports: BTreeSet<usize> = if aspect == "travel" || aspect == "winds_currents" {
+            self.travel_routes
+                .iter()
+                .flat_map(|r| [r.from_fine_face, r.to_fine_face])
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         let ocean = self.prehistory.climate_model().ocean();
 
         let mut out = Vec::with_capacity(num_display * 3);
-        for (_, _, source) in &self.terrain.display_faces {
-            let f_idx = match *source {
+        for face in &self.terrain.display_faces {
+            let f_idx = match face.source {
                 DisplayFaceSource::OceanCoarse(c_idx) => {
                     if aspect == "winds_currents" || aspect == "travel" {
                         let spd = ocean.speed.get(c_idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
@@ -3729,18 +3864,14 @@ impl HistorySimulation {
         let trade_partners = self
             .trade_partners
             .iter()
-            .map(|&(a, b)| tec11_proto::StatePair {
-                state_a: a,
-                state_b: b,
-            })
+            .copied()
+            .map(StatePair::to_proto)
             .collect();
         let conflicts = self
             .conflicts
             .iter()
-            .map(|&(a, b)| tec11_proto::StatePair {
-                state_a: a,
-                state_b: b,
-            })
+            .copied()
+            .map(StatePair::to_proto)
             .collect();
 
         tec11_proto::PlanetSnapshot {
@@ -3805,13 +3936,9 @@ impl HistorySimulation {
                 sim.trade_partners = hist
                     .trade_partners
                     .iter()
-                    .map(|sp| (sp.state_a, sp.state_b))
+                    .map(StatePair::from_proto)
                     .collect();
-                sim.conflicts = hist
-                    .conflicts
-                    .iter()
-                    .map(|sp| (sp.state_a, sp.state_b))
-                    .collect();
+                sim.conflicts = hist.conflicts.iter().map(StatePair::from_proto).collect();
                 sim.update_travel_routes();
             }
         }
@@ -3887,7 +4014,11 @@ mod tests {
         );
 
         let fine_adj = sim.terrain.terrain_adj.clone();
-        let (extents, state_species, _) = sim.state_topology(&fine_adj);
+        let StateTopology {
+            extents,
+            species: state_species,
+            ..
+        } = sim.state_topology(&fine_adj);
 
         // Verify that every state's language natively describes all constellations visible
         // from its tiles at some point in the year.
@@ -3914,9 +4045,7 @@ mod tests {
         // Find two states in different hemispheres (one northern, one southern) so each sees
         // constellations that the other cannot see, then link them as trade partners and verify
         // that accumulate_and_borrow_concepts borrows the unseen constellations from the trade partner.
-        let mut north_sid = None;
-        let mut south_sid = None;
-        for (&sid, tiles) in &extents {
+        let north_sid = extents.iter().find_map(|(&sid, tiles)| {
             let vis = sim.visible_constellations_for_tiles(tiles);
             let sees_north_pole = sim
                 .constellations
@@ -3926,6 +4055,10 @@ mod tests {
                 .constellations
                 .iter()
                 .any(|c| c.declination_deg < -60.0 && !vis.contains(&c.index));
+            (sees_north_pole && misses_south_pole).then_some(sid)
+        });
+        let south_sid = extents.iter().find_map(|(&sid, tiles)| {
+            let vis = sim.visible_constellations_for_tiles(tiles);
             let sees_south_pole = sim
                 .constellations
                 .iter()
@@ -3934,14 +4067,8 @@ mod tests {
                 .constellations
                 .iter()
                 .any(|c| c.declination_deg > 60.0 && !vis.contains(&c.index));
-
-            if sees_north_pole && misses_south_pole && north_sid.is_none() {
-                north_sid = Some(sid);
-            }
-            if sees_south_pole && misses_north_pole && south_sid.is_none() {
-                south_sid = Some(sid);
-            }
-        }
+            (sees_south_pole && misses_north_pole).then_some(sid)
+        });
 
         if let (Some(n_id), Some(s_id)) = (north_sid, south_sid) {
             let n_vis = sim.visible_constellations_for_tiles(&extents[&n_id]);
@@ -3953,7 +4080,7 @@ mod tests {
             );
 
             // Connect them as trade partners and run accumulate_and_borrow_concepts
-            sim.trade_partners.push((n_id.min(s_id), n_id.max(s_id)));
+            sim.trade_partners.push(StatePair::new(n_id, s_id));
             sim.accumulate_and_borrow_concepts(&extents, &state_species);
 
             let n_lang_id = sim

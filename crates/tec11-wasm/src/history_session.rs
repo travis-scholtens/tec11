@@ -1,10 +1,11 @@
 use tec11_geology::HistorySimulation;
+use tec11_math_grid::DisplayMesh;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct WasmHistorySession {
     sim: HistorySimulation,
-    cached_mesh: Option<(Vec<f32>, Vec<f32>, Vec<u32>)>,
+    cached_mesh: Option<DisplayMesh>,
 }
 
 #[wasm_bindgen]
@@ -113,30 +114,27 @@ impl WasmHistorySession {
         show_rivers: bool,
         selected_tile: i32,
     ) -> Vec<f32> {
-        let sel = if selected_tile >= 0 {
-            Some(selected_tile as usize)
-        } else {
-            None
-        };
-        self.sim.tile_colors_rgb(aspect, show_rivers, sel)
+        self.sim.tile_colors_rgb(
+            aspect,
+            show_rivers,
+            (selected_tile >= 0).then_some(selected_tile as usize),
+        )
     }
 
-    fn ensure_mesh(&mut self) -> &(Vec<f32>, Vec<f32>, Vec<u32>) {
-        if self.cached_mesh.is_none() {
-            self.cached_mesh = Some(self.sim.build_display_mesh());
-        }
-        self.cached_mesh.as_ref().unwrap()
+    fn ensure_mesh(&mut self) -> &DisplayMesh {
+        self.cached_mesh
+            .get_or_insert_with(|| self.sim.build_display_mesh())
     }
 
     pub fn mesh_positions(&mut self) -> Vec<f32> {
-        self.ensure_mesh().0.clone()
+        self.ensure_mesh().positions.clone()
     }
 
     pub fn mesh_normals(&mut self) -> Vec<f32> {
-        self.ensure_mesh().1.clone()
+        self.ensure_mesh().normals.clone()
     }
 
     pub fn vertex_tile_ids(&mut self) -> Vec<u32> {
-        self.ensure_mesh().2.clone()
+        self.ensure_mesh().vertex_face_ids.clone()
     }
 }

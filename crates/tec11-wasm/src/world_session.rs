@@ -240,31 +240,29 @@ impl WasmWorldSession {
     }
 
     pub fn tile_colors_rgb(&self, aspect: &str, selected_tile: i32) -> Vec<f32> {
-        let sel = if selected_tile >= 0 {
-            Some(selected_tile as usize)
-        } else {
-            None
-        };
-        self.sim.tile_colors_rgb(aspect, sel)
+        self.sim.tile_colors_rgb(
+            aspect,
+            (selected_tile >= 0).then_some(selected_tile as usize),
+        )
     }
 
     pub fn mesh_positions(&self) -> Vec<f32> {
         match self.sim.stage() {
-            WorldStageState::History(hist) => hist.build_display_mesh().0,
+            WorldStageState::History(hist) => hist.build_display_mesh().positions,
             _ => build_mesh_positions(self.sim.grid()),
         }
     }
 
     pub fn mesh_normals(&self) -> Vec<f32> {
         match self.sim.stage() {
-            WorldStageState::History(hist) => hist.build_display_mesh().1,
+            WorldStageState::History(hist) => hist.build_display_mesh().normals,
             _ => build_mesh_normals(self.sim.grid()),
         }
     }
 
     pub fn vertex_tile_ids(&self) -> Vec<u32> {
         match self.sim.stage() {
-            WorldStageState::History(hist) => hist.build_display_mesh().2,
+            WorldStageState::History(hist) => hist.build_display_mesh().vertex_face_ids,
             _ => build_vertex_tile_ids(self.sim.grid()),
         }
     }
