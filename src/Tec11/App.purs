@@ -219,6 +219,8 @@ type WorldInfo =
   , moonDistRadii :: Int
   , meteorFreqTenths :: Int
   , orbitalSummaryText :: String
+  , sunFilter :: Int
+  , atmosphereId :: Int
   , sunSpectralType :: String
   , sunColorCss :: String
   , atmosphereName :: String
@@ -701,6 +703,8 @@ mkApp = do
       , moonDistRadii: 60
       , meteorFreqTenths: 10
       , orbitalSummaryText: "Day: 11.1h (→24h) | Tilt: 23.0° | Moons: 1 (1.0x @ 23.4→60 Rp, Tides 14.5x) | Meteors: 1.0x (0 hits)"
+      , sunFilter: 2
+      , atmosphereId: 0
       , sunSpectralType: "G2V"
       , sunColorCss: "rgb(255, 255, 119)"
       , atmosphereName: "N2-O2 + O3 Ozone (Earth-like)"
@@ -1191,6 +1195,8 @@ mkApp = do
           setWorldMoonMassTenths info.moonMassTenths
           setWorldMoonDistRadii info.moonDistRadii
           setWorldMeteorFreqTenths info.meteorFreqTenths
+          setWorldSunFilter info.sunFilter
+          setWorldAtmosphereId info.atmosphereId
 
       handleMoonCountChange :: Maybe String -> Effect Unit
       handleMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
@@ -4332,7 +4338,7 @@ mkApp = do
                           , children:
                               [ R.label
                                   { className: "slider-inline-label"
-                                  , children: [ R.text ("Day: " <> show worldDayHours <> "h") ]
+                                  , children: [ R.text "Day:" ]
                                   }
                               , R.input
                                   { id: "world-spin-select"
@@ -4345,9 +4351,18 @@ mkApp = do
                                   , value: show worldDayHours
                                   , onChange: handler targetValue handleWorldDayHoursChange
                                   }
-                              , R.label
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show worldDayHours <> "h") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
                                   { className: "slider-inline-label"
-                                  , children: [ R.text ("Tilt: " <> show worldTiltDeg <> "°") ]
+                                  , children: [ R.text "Tilt:" ]
                                   }
                               , R.input
                                   { id: "world-tilt-slider"
@@ -4359,6 +4374,10 @@ mkApp = do
                                   , disabled: worldRandomize || worldInfo.isRunning
                                   , value: show worldTiltDeg
                                   , onChange: handler targetValue handleWorldTiltChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show worldTiltDeg <> "°") ]
                                   }
                               ]
                           }
@@ -4479,9 +4498,14 @@ mkApp = do
                                       , R.option { value: "4", children: [ R.text "4 (8:4:2:1 Chain)" ] }
                                       ]
                                   }
-                              , R.label
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
                                   { className: "slider-inline-label"
-                                  , children: [ R.text ("Dist: " <> show worldMoonDistRadii <> " Rp") ]
+                                  , children: [ R.text "Moon Dist:" ]
                                   }
                               , R.input
                                   { id: "world-moon-dist-slider"
@@ -4493,6 +4517,10 @@ mkApp = do
                                   , disabled: worldRandomize || worldInfo.isRunning || worldMoonCount == 0
                                   , value: show worldMoonDistRadii
                                   , onChange: handler targetValue handleWorldMoonDistChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show worldMoonDistRadii <> " Rp") ]
                                   }
                               ]
                           }
@@ -4568,26 +4596,30 @@ mkApp = do
                               , R.select
                                   { id: "world-sun-select"
                                   , className: "control-select"
-                                  , disabled: worldInfo.isRunning
+                                  , disabled: worldRandomize || worldInfo.isRunning
                                   , value: show worldSunFilter
                                   , onChange: handler targetValue handleWorldSunFilterChange
                                   , children:
-                                      [ R.option { value: "0", children: [ R.text "Auto (Habitable)" ] }
-                                      , R.option { value: "2", children: [ R.text "G-Class Yellow (Sol)" ] }
+                                      [ R.option { value: "2", children: [ R.text "G-Class Yellow (Sol)" ] }
                                       , R.option { value: "3", children: [ R.text "K-Class Orange" ] }
                                       , R.option { value: "1", children: [ R.text "F-Class White-Yellow" ] }
                                       , R.option { value: "4", children: [ R.text "M-Class Red Dwarf" ] }
                                       , R.option { value: "5", children: [ R.text "A-Class Blue-White" ] }
                                       ]
                                   }
-                              , R.label
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
                                   { className: "slider-inline-label"
                                   , children: [ R.text "Gas:" ]
                                   }
                               , R.select
                                   { id: "world-atmosphere-select"
                                   , className: "control-select"
-                                  , disabled: worldInfo.isRunning
+                                  , disabled: worldRandomize || worldInfo.isRunning
                                   , value: show worldAtmosphereId
                                   , onChange: handler targetValue handleWorldAtmosphereChange
                                   , children:
@@ -4597,7 +4629,6 @@ mkApp = do
                                       , R.option { value: "3", children: [ R.text "Tholin Haze (Titan)" ] }
                                       , R.option { value: "4", children: [ R.text "Dusty CO2 (Mars)" ] }
                                       , R.option { value: "5", children: [ R.text "H2-He-N2 (Hycean)" ] }
-                                      , R.option { value: "99", children: [ R.text "Random Gas Mix" ] }
                                       ]
                                   }
                               ]

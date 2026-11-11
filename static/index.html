@@ -142,6 +142,7 @@
     }
     .rotate-slider {
       flex: 1;
+      min-width: 0;
       accent-color: #3b82f6;
       cursor: pointer;
     }
@@ -251,6 +252,15 @@
       border-radius: 8px;
       font-size: 0.9rem;
       cursor: pointer;
+      max-width: 100%;
+    }
+    .slider-row .control-select {
+      flex: 1;
+      min-width: 0;
+    }
+    .control-select:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     .grid-stats {
       background: #0b1021;

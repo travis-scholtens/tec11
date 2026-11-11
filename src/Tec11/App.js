@@ -3552,6 +3552,8 @@ function buildWorldInfo(view) {
     moonDistRadii: moonDistTarget,
     meteorFreqTenths: Math.round(meteorFreq * 10.0),
     orbitalSummaryText,
+    sunFilter: s.star_filter(),
+    atmosphereId: s.atmosphere_id(),
     sunSpectralType: s.sun_spectral_type(),
     sunColorCss: rgbFloatToCss(s.sun_rgb(), 255, 255, 119),
     atmosphereName: s.atmosphere_name(),

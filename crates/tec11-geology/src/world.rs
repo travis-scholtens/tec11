@@ -229,8 +229,6 @@ impl WorldSimulation {
     /// Configure the world's Host Star (`star_filter`: `0` = Random Habitable, `1` = F, `2` = G Sol-like, `3` = K, `4` = M, `5` = A, `6` = Subgiant)
     /// and Atmospheric Gas Composition (`atmosphere_id`: `0..=5` explicit, `99` = Random).
     pub fn set_sun_and_atmosphere(&mut self, star_filter: u32, atmosphere_id: u32) {
-        self.star_filter = star_filter;
-        self.atmosphere_id = atmosphere_id;
         let mut sky_rng = self.rng.clone();
         let is_sol = star_filter == 2 && atmosphere_id == 0;
         self.home_star = if is_sol {
@@ -239,6 +237,8 @@ impl WorldSimulation {
             sample_home_star_with_rng(&mut sky_rng, [8.1, 0.0, 0.02], star_filter, false)
         };
         self.atmosphere = sample_atmosphere_with_rng(&mut sky_rng, atmosphere_id);
+        self.star_filter = self.home_star.star_filter_id();
+        self.atmosphere_id = self.atmosphere.id();
         self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
         let ecliptic_pole = [0.0, -0.398, 0.917];
         self.solar_system = generate_solar_system_with_rng(
@@ -330,16 +330,8 @@ impl WorldSimulation {
         }
         let seed = self.rng.next_u64();
         let mut sky_rng = Pcg64Mcg::from_seed_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
-        let eff_star_filter = if randomize && self.star_filter == 2 {
-            0 // Random habitable star in random mode unless explicitly locked
-        } else {
-            self.star_filter
-        };
-        let eff_atm_id = if randomize && self.atmosphere_id == 0 {
-            99 // Random habitable atmosphere in random mode unless explicitly locked
-        } else {
-            self.atmosphere_id
-        };
+        let eff_star_filter = if randomize { 0 } else { self.star_filter };
+        let eff_atm_id = if randomize { 99 } else { self.atmosphere_id };
         let is_sol = eff_star_filter == 2 && eff_atm_id == 0 && !randomize;
         self.home_star = if is_sol {
             HomeStar::sol()
@@ -347,6 +339,8 @@ impl WorldSimulation {
             sample_home_star_with_rng(&mut sky_rng, [8.1, 0.0, 0.02], eff_star_filter, false)
         };
         self.atmosphere = sample_atmosphere_with_rng(&mut sky_rng, eff_atm_id);
+        self.star_filter = self.home_star.star_filter_id();
+        self.atmosphere_id = self.atmosphere.id();
         self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
         let ecliptic_pole = [0.0, -0.398, 0.917];
         self.solar_system = generate_solar_system_with_rng(
@@ -1156,6 +1150,15 @@ mod tests {
         if let WorldStageState::History(hist) = world.stage() {
             assert_eq!(hist.solar_system().len(), world.solar_system().len());
             assert!(hist.solar_system()[home_idx].is_home_world);
+        }
+
+        // Verify that randomized creation updates star_filter and atmosphere_id to concrete dropdown values:
+        for _ in 0..8 {
+            world.create(params, true);
+            assert!((1..=5).contains(&world.star_filter()));
+            assert_eq!(world.star_filter(), world.home_star().star_filter_id());
+            assert!(world.atmosphere_id() <= 5);
+            assert_eq!(world.atmosphere_id(), world.atmosphere().id());
         }
     }
 }

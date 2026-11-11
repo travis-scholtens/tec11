@@ -179,6 +179,10 @@ impl WasmWorldSession {
         self.sim.set_sun_and_atmosphere(star_filter, atmosphere_id);
     }
 
+    pub fn star_filter(&self) -> u32 {
+        self.sim.star_filter()
+    }
+
     pub fn sun_spectral_type(&self) -> String {
         self.sim.home_star().spectral_type.clone()
     }

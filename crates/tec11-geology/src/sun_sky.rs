@@ -139,6 +139,22 @@ impl HomeStar {
             gal_pos_kpc: [8.1, 0.0, 0.02],
         }
     }
+
+    /// Map this star's spectral type back to the discrete star filter ID (`1` = F, `2` = G, `3` = K, `4` = M, `5` = A, `6` = Subgiant).
+    pub fn star_filter_id(&self) -> u32 {
+        if self.spectral_type.ends_with("IV") {
+            6
+        } else {
+            match self.spectral_type.as_bytes().first().copied() {
+                Some(b'F') => 1,
+                Some(b'G') => 2,
+                Some(b'K') => 3,
+                Some(b'M') => 4,
+                Some(b'A') => 5,
+                _ => 2,
+            }
+        }
+    }
 }
 
 /// A single naked-eye visible star on the celestial sphere (`star.py` in `Celestiality`).
