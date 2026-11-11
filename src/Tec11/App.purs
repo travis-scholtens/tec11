@@ -4936,7 +4936,7 @@ mkApp = do
                                           }
                                       , R.option
                                           { value: "sky_plants"
-                                          , children: [ R.text "Sky, Sunset & Plant Foliage (3D Planet)" ]
+                                          , children: [ R.text "Sky, Sunset & Plant Foliage (2D Landscape)" ]
                                           }
                                       , R.option
                                           { value: "home_sun"

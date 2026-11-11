@@ -605,6 +605,11 @@ function paintCanvasFallback(view) {
   ctx.fillStyle = "#050505";
   ctx.fillRect(0, 0, width, height);
 
+  if (view.quad2dMesh && view.quad2dMesh.visible && view.pic2dCanvas) {
+    ctx.drawImage(view.pic2dCanvas, 0, 0, width, height);
+    return;
+  }
+
   const posAttr = geometry.attributes.position;
   const normAttr = geometry.attributes.normal;
   const colAttr = geometry.attributes.color;
@@ -732,7 +737,7 @@ function createBaseSphereView(canvas, showBorders) {
   const width = 460;
   const height = 460;
 
-  const camera = new THREE.OrthographicCamera(-1.1, 1.1, 1.1, -1.1, 0, 11);
+  const camera = new THREE.OrthographicCamera(-1.1, 1.1, 1.1, -1.1, 0.1, 25);
   camera.position.z = 11;
 
   const scene = new THREE.Scene();
@@ -806,6 +811,7 @@ function createBaseSphereView(canvas, showBorders) {
     },
     transparent: true,
     depthTest: true,
+    depthWrite: false,
   });
   const starPoints = new THREE.Points(starGeometry, starMaterial);
   starPoints.visible = false;
@@ -4044,6 +4050,252 @@ function computeSunVertexColors(view) {
   return colors;
 }
 
+function drawSkyPlants2dPicture(view) {
+  const { session, pic2dCanvas } = view;
+  if (!pic2dCanvas || !session) return;
+  const ctx = pic2dCanvas.getContext("2d");
+  if (!ctx) return;
+
+  const W = pic2dCanvas.width;
+  const H = pic2dCanvas.height;
+
+  const sunRgb = session.sun_rgb();
+  const skyZen = session.sky_zenith_rgb();
+  const skyHor = session.sky_horizon_rgb();
+  const sunsetRgb = session.sunset_rgb();
+  const twiRgb = session.twilight_rgb();
+  const plantFol = session.plant_foliage_rgb();
+  const plantHi = session.plant_highlight_rgb();
+
+  const toRgb = (arr, alpha = 1.0) => {
+    const r = Math.max(0, Math.min(255, Math.round((arr[0] || 0) * 255)));
+    const g = Math.max(0, Math.min(255, Math.round((arr[1] || 0) * 255)));
+    const b = Math.max(0, Math.min(255, Math.round((arr[2] || 0) * 255)));
+    return alpha < 1.0 ? `rgba(${r}, ${g}, ${b}, ${alpha})` : `rgb(${r}, ${g}, ${b})`;
+  };
+  const mixRgb = (a, b, t, alpha = 1.0) => {
+    const r = Math.max(0, Math.min(255, Math.round(((a[0] || 0) * (1 - t) + (b[0] || 0) * t) * 255)));
+    const g = Math.max(0, Math.min(255, Math.round(((a[1] || 0) * (1 - t) + (b[1] || 0) * t) * 255)));
+    const bl = Math.max(0, Math.min(255, Math.round(((a[2] || 0) * (1 - t) + (b[2] || 0) * t) * 255)));
+    return alpha < 1.0 ? `rgba(${r}, ${g}, ${bl}, ${alpha})` : `rgb(${r}, ${g}, ${bl})`;
+  };
+
+  const horizonY = 278;
+
+  // 1. Daytime Sky Backdrop (full width, zenith -> daytime horizon):
+  const dayGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
+  dayGrad.addColorStop(0.0, toRgb(skyZen));
+  dayGrad.addColorStop(0.58, mixRgb(skyZen, skyHor, 0.55));
+  dayGrad.addColorStop(1.0, toRgb(skyHor));
+  ctx.fillStyle = dayGrad;
+  ctx.fillRect(0, 0, W, horizonY + 12);
+
+  // 2. Smooth Sunset & Twilight Zone on the Right Half (`x = 170..460`):
+  //    Draw vertical strips that blend from 0% sunset at x=170 to 100% sunset/twilight at x=330..460:
+  for (let x = 165; x < W; x += 3) {
+    const w = Math.min(1.0, Math.pow(Math.max(0, (x - 165) / 185), 1.25));
+    const colGrad = ctx.createLinearGradient(0, 0, 0, horizonY + 8);
+    colGrad.addColorStop(0.0, toRgb(twiRgb, w * 0.92));
+    colGrad.addColorStop(0.50, mixRgb(twiRgb, sunsetRgb, 0.52, w * 0.96));
+    colGrad.addColorStop(1.0, toRgb(sunsetRgb, w));
+    ctx.fillStyle = colGrad;
+    ctx.fillRect(x, 0, 4, horizonY + 8);
+  }
+
+  // 3. Daytime Home Sun (upper-left sky) scaled by true solar radius:
+  const rSolar = session.sun_radius_solar();
+  const sunRadPx = Math.max(11, Math.min(34, 20 * Math.sqrt(rSolar)));
+  const sunX = 112;
+  const sunY = 82;
+  const corona = ctx.createRadialGradient(sunX, sunY, sunRadPx * 0.3, sunX, sunY, sunRadPx * 3.4);
+  corona.addColorStop(0.0, toRgb(sunRgb, 0.95));
+  corona.addColorStop(0.32, toRgb(sunRgb, 0.45));
+  corona.addColorStop(1.0, toRgb(sunRgb, 0.0));
+  ctx.fillStyle = corona;
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, sunRadPx * 3.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = toRgb(sunRgb);
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, sunRadPx, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 4. Setting Sun on the Right Horizon (`x = 366, y = horizonY - 4`):
+  const setX = 366;
+  const setY = horizonY - 2;
+  const setGlow = ctx.createRadialGradient(setX, setY, sunRadPx * 0.2, setX, setY, sunRadPx * 4.2);
+  setGlow.addColorStop(0.0, mixRgb(sunRgb, sunsetRgb, 0.45, 0.95));
+  setGlow.addColorStop(0.38, toRgb(sunsetRgb, 0.55));
+  setGlow.addColorStop(1.0, toRgb(sunsetRgb, 0.0));
+  ctx.fillStyle = setGlow;
+  ctx.beginPath();
+  ctx.arc(setX, setY, sunRadPx * 4.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = mixRgb(sunRgb, sunsetRgb, 0.58);
+  ctx.beginPath();
+  ctx.arc(setX, setY, sunRadPx * 0.95, Math.PI, 0, false);
+  ctx.fill();
+
+  // 5. Atmospheric Clouds (Daytime cumulus on left + Sunset-lit stratus on right):
+  const drawCloud = (cx, cy, rx, ry, col) => {
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx - rx * 0.55, cy + ry * 0.18, rx * 0.65, ry * 0.75, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx + rx * 0.58, cy + ry * 0.15, rx * 0.70, ry * 0.78, 0, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  drawCloud(72, 165, 38, 10, mixRgb(sunRgb, skyHor, 0.35, 0.55));
+  drawCloud(195, 138, 44, 11, mixRgb(sunRgb, skyHor, 0.40, 0.50));
+  drawCloud(310, 162, 48, 8, mixRgb(sunsetRgb, twiRgb, 0.30, 0.62));
+  drawCloud(405, 195, 42, 7, mixRgb(sunsetRgb, sunRgb, 0.35, 0.68));
+
+  // 6. Distant Mountain Range along the Horizon (with atmospheric perspective haze):
+  ctx.fillStyle = mixRgb(plantFol, skyHor, 0.55);
+  ctx.beginPath();
+  ctx.moveTo(0, horizonY);
+  const mtnPts = [
+    [0, 246], [38, 224], [76, 252], [118, 214], [162, 248],
+    [204, 232], [248, 258], [292, 238], [335, 266], [460, 276],
+  ];
+  for (const [mx, my] of mtnPts) {
+    ctx.lineTo(mx, my);
+  }
+  ctx.lineTo(W, horizonY);
+  ctx.closePath();
+  ctx.fill();
+
+  // 7. Coastal Ocean / Bay (`y = horizonY .. 365`) reflecting Sky & Sunset:
+  const oceanGrad = ctx.createLinearGradient(0, horizonY, W, 365);
+  oceanGrad.addColorStop(0.0, mixRgb(skyZen, [0.04, 0.12, 0.24], 0.38));
+  oceanGrad.addColorStop(0.52, mixRgb(skyHor, [0.05, 0.15, 0.28], 0.35));
+  oceanGrad.addColorStop(1.0, mixRgb(sunsetRgb, twiRgb, 0.38));
+  ctx.fillStyle = oceanGrad;
+  ctx.fillRect(0, horizonY, W, 92);
+
+  // Shimmering sunset water reflection path below the setting sun (`x ≈ 366`):
+  for (let ry = horizonY + 4; ry < 358; ry += 5) {
+    const t = (ry - horizonY) / 80.0;
+    const rw = 16 + t * 42;
+    const rx = setX - rw * 0.5 + Math.sin(ry * 0.7) * 4.0;
+    ctx.fillStyle = mixRgb(sunsetRgb, sunRgb, 0.45, 0.72 * (1.0 - t * 0.5));
+    ctx.fillRect(rx, ry, rw, 2.5);
+  }
+
+  // 8. Foreground Rolling Hills & Photosynthetic Plant Foliage (`y = 292 .. 460`):
+  // Farther hill slope (left-to-center):
+  const hillBackGrad = ctx.createLinearGradient(0, 285, 0, 390);
+  hillBackGrad.addColorStop(0.0, mixRgb(plantHi, skyHor, 0.18));
+  hillBackGrad.addColorStop(1.0, toRgb(plantFol));
+  ctx.fillStyle = hillBackGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, 294);
+  ctx.bezierCurveTo(95, 278, 195, 312, 315, 348);
+  ctx.lineTo(315, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fill();
+
+  // Midground hill slope (right-to-left):
+  const hillMidGrad = ctx.createLinearGradient(0, 325, 0, H);
+  hillMidGrad.addColorStop(0.0, mixRgb(plantHi, sunsetRgb, 0.16));
+  hillMidGrad.addColorStop(1.0, mixRgb(plantFol, [0.04, 0.04, 0.06], 0.22));
+  ctx.fillStyle = hillMidGrad;
+  ctx.beginPath();
+  ctx.moveTo(W, 336);
+  ctx.bezierCurveTo(350, 322, 235, 344, 95, 378);
+  ctx.lineTo(95, H);
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  ctx.fill();
+
+  // Foreground lush botanical meadow & canopy ridge (full bottom):
+  const hillFrontGrad = ctx.createLinearGradient(0, 355, 0, H);
+  hillFrontGrad.addColorStop(0.0, toRgb(plantHi));
+  hillFrontGrad.addColorStop(0.55, toRgb(plantFol));
+  hillFrontGrad.addColorStop(1.0, mixRgb(plantFol, [0.02, 0.02, 0.04], 0.35));
+  ctx.fillStyle = hillFrontGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, 356);
+  ctx.bezierCurveTo(130, 340, 280, 368, W, 354);
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fill();
+
+  // 9. Botanical Tree / Flora Canopy Clusters showing Foliage + Sunlit Highlight Pigments:
+  const drawFloraCluster = (tx, ty, scale) => {
+    // Trunk / stem:
+    ctx.fillStyle = "rgba(48, 34, 28, 0.85)";
+    ctx.fillRect(tx - 2.2 * scale, ty - 6 * scale, 4.4 * scale, 22 * scale);
+
+    // Shaded lower canopy (`plantFol`):
+    ctx.fillStyle = mixRgb(plantFol, [0.02, 0.02, 0.04], 0.20);
+    ctx.beginPath();
+    ctx.arc(tx, ty - 10 * scale, 14 * scale, 0, Math.PI * 2);
+    ctx.arc(tx - 10 * scale, ty - 6 * scale, 10 * scale, 0, Math.PI * 2);
+    ctx.arc(tx + 10 * scale, ty - 6 * scale, 10 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Mid-tone main foliage (`plantFol`):
+    ctx.fillStyle = toRgb(plantFol);
+    ctx.beginPath();
+    ctx.arc(tx - 2 * scale, ty - 13 * scale, 12 * scale, 0, Math.PI * 2);
+    ctx.arc(tx - 10 * scale, ty - 9 * scale, 8.5 * scale, 0, Math.PI * 2);
+    ctx.arc(tx + 8 * scale, ty - 9 * scale, 8.5 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Sunlit upper-left crown highlights (`plantHi`):
+    ctx.fillStyle = toRgb(plantHi);
+    ctx.beginPath();
+    ctx.arc(tx - 4 * scale, ty - 16 * scale, 8.5 * scale, 0, Math.PI * 2);
+    ctx.arc(tx - 11 * scale, ty - 11 * scale, 6.0 * scale, 0, Math.PI * 2);
+    ctx.arc(tx + 5 * scale, ty - 12 * scale, 5.5 * scale, 0, Math.PI * 2);
+    ctx.fill();
+  };
+
+  drawFloraCluster(44, 355, 1.35);
+  drawFloraCluster(98, 366, 1.05);
+  drawFloraCluster(158, 358, 1.22);
+  drawFloraCluster(228, 376, 0.95);
+  drawFloraCluster(308, 372, 1.15);
+  drawFloraCluster(392, 362, 1.28);
+  drawFloraCluster(438, 378, 0.92);
+
+  // 10. Clean Caption Badges on the 2D Picture so each region is immediately clear:
+  const drawBadge = (bx, by, swatchRgb, label) => {
+    ctx.font = "600 11px Inter, system-ui, sans-serif";
+    const textW = ctx.measureText(label).width;
+    const padW = textW + 28;
+    ctx.fillStyle = "rgba(10, 14, 23, 0.72)";
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(bx, by, padW, 22, 6);
+    } else {
+      ctx.rect(bx, by, padW, 22);
+    }
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = toRgb(swatchRgb);
+    ctx.beginPath();
+    ctx.arc(bx + 11, by + 11, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillText(label, bx + 21, by + 15);
+  };
+
+  drawBadge(10, 10, skyZen, `Sky: ${session.sky_color_name()}`);
+  drawBadge(10, 38, sunRgb, `Sun: ${session.sun_spectral_type()} (${Math.round(session.sun_temp_k())} K)`);
+  drawBadge(W - 215, 10, sunsetRgb, `Sunset: ${session.sunset_color_name()}`);
+  drawBadge(10, H - 32, plantFol, `Plants: ${session.plant_color_name()}`);
+}
+
 function updateSunDataBuffers(view, rebuildGeometry = false) {
   const {
     session,
@@ -4066,6 +4318,30 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
     geometry.computeBoundingSphere();
   }
 
+  if (view.aspect === "sky_plants") {
+    view.hideSurfaceMesh = true;
+    if (view.material) {
+      view.material.colorWrite = false;
+      view.material.depthWrite = false;
+    }
+    starPoints.visible = false;
+    view.starPointsRaw = null;
+    arrowLines.visible = false;
+    drawSkyPlants2dPicture(view);
+    if (view.pic2dTexture) {
+      view.pic2dTexture.needsUpdate = true;
+    }
+    if (view.quad2dMesh) {
+      view.quad2dMesh.visible = true;
+    }
+    view.paint();
+    return;
+  }
+
+  if (view.quad2dMesh) {
+    view.quad2dMesh.visible = false;
+  }
+
   view.tileColors = session.tile_colors_rgb(
     view.aspect,
     Boolean(view.showGalacticPlane),
@@ -4081,27 +4357,22 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
     view.material.depthWrite = !is3dInterior;
   }
 
-  if (view.aspect === "home_sun" || view.aspect === "sky_plants") {
-    if (view.aspect === "home_sun") {
-      const rSolar = session.sun_radius_solar();
-      const sunScale = Math.max(0.24, Math.min(1.04, rSolar * 0.68));
-      mesh.scale.set(sunScale, sunScale, sunScale);
-      const lineSegs = session.overlay_line_segments("home_sun", false, false);
-      if (lineSegs && lineSegs.length >= 6) {
-        arrowGeometry.setAttribute(
-          "position",
-          new THREE.Float32BufferAttribute(lineSegs, 3)
-        );
-        arrowMaterial.color.setHex(0x60a5fa);
-        arrowMaterial.opacity = 0.65;
-        view.arrowStrokeStyle = "rgba(96, 165, 250, 0.65)";
-        view.disableArrowBackfaceCull = true;
-        arrowLines.visible = true;
-      } else {
-        arrowLines.visible = false;
-      }
+  if (view.aspect === "home_sun") {
+    const rSolar = session.sun_radius_solar();
+    const sunScale = Math.max(0.24, Math.min(1.04, rSolar * 0.68));
+    mesh.scale.set(sunScale, sunScale, sunScale);
+    const lineSegs = session.overlay_line_segments("home_sun", false, false);
+    if (lineSegs && lineSegs.length >= 6) {
+      arrowGeometry.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(lineSegs, 3)
+      );
+      arrowMaterial.color.setHex(0x60a5fa);
+      arrowMaterial.opacity = 0.65;
+      view.arrowStrokeStyle = "rgba(96, 165, 250, 0.65)";
+      view.disableArrowBackfaceCull = true;
+      arrowLines.visible = true;
     } else {
-      mesh.scale.set(1.0, 1.0, 1.0);
       arrowLines.visible = false;
     }
     starPoints.visible = false;
@@ -4160,9 +4431,9 @@ function buildSunInfo(view) {
   const s = view.session;
   const defaultPrompt =
     view.aspect === "sky_plants"
-      ? "3-Zone Panorama Globe: Top Dome = Daytime Sky (Zenith → Horizon + Home Sun), Middle Band = Sunset & Twilight Horizon, Bottom Hemisphere = Photosynthetic Plant Foliage & Ocean. Click any zone to inspect its optical physics."
+      ? "2D Exoplanet Landscape: Left/Top = Daytime Sky & Home Sun, Right Horizon = Sunset & Twilight Glow over the Ocean, Foreground = Rolling Hills & Photosynthetic Plant Foliage. Click the sky, sunset, or plants to inspect their optical physics."
       : view.aspect === "galaxy"
-      ? "3D Host Galaxy View: Shows the 3D galaxy star cloud (tilted 38°), with a bright green 3D crosshair & orbit circle marking your Home Star's galactocentric location. Click or rotate to inspect."
+      ? "3D Host Galaxy View: Shows the full 3D galaxy star cloud (tilted 38°), with a bright green 3D crosshair & orbit circle marking your Home Star's galactocentric location. Click or rotate to inspect."
       : view.aspect === "solar_system"
       ? "3D Planetary System View: Central Home Star with concentric 3D planet orbits (green target crosshair marks the simulated Home World; ringed planets show 3D ring halos). Click near any planet to inspect it."
       : view.aspect === "home_sun"
@@ -4230,6 +4501,25 @@ export const mountSunView =
     view.mesh.material = view.material;
     view.unlit = true;
 
+    // Offscreen 2D canvas & full-viewport 2D quad for the `"sky_plants"` 2D Landscape Picture:
+    const pic2dCanvas = document.createElement("canvas");
+    pic2dCanvas.width = 460;
+    pic2dCanvas.height = 460;
+    const pic2dTexture = new THREE.CanvasTexture(pic2dCanvas);
+    const quad2dGeom = new THREE.PlaneGeometry(2.2, 2.2);
+    const quad2dMat = new THREE.MeshBasicMaterial({
+      map: pic2dTexture,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const quad2dMesh = new THREE.Mesh(quad2dGeom, quad2dMat);
+    quad2dMesh.position.set(0, 0, 1.5);
+    quad2dMesh.visible = false;
+    view.scene.add(quad2dMesh);
+    view.pic2dCanvas = pic2dCanvas;
+    view.pic2dTexture = pic2dTexture;
+    view.quad2dMesh = quad2dMesh;
+
     view.session = new WasmSunSession();
     view.session.generate_galaxy_and_sun(galaxyTypeId, vantageId, starFilter);
     view.aspect = aspect;
@@ -4270,6 +4560,9 @@ export const mountSunView =
       if (activeView === view) {
         activeView = null;
       }
+      quad2dGeom.dispose();
+      quad2dMat.dispose();
+      pic2dTexture.dispose();
       view.dispose();
       view.session.free();
     };
