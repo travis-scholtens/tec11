@@ -302,7 +302,7 @@ pub fn solve_seasonal_ocean_circulation(
     // 4. Solve the annual-mean Stommel streamfunction first (equinox baseline).
     let (_, _, _, _, annual_curl, annual_ice) = compute_wind_forcing(0.0);
     let zero_psi = vec![0.0f64; n];
-    let annual_psi = solve_stommel_sor(&annual_curl, &annual_ice, &zero_psi, 60);
+    let annual_psi = solve_stommel_sor(&annual_curl, &annual_ice, &zero_psi, 36);
 
     // 5. For each season, compute wind forcing, blended Stommel streamfunction,
     //    surface velocity (geostrophic + seasonal Ekman + monsoonal coastal current),
@@ -318,9 +318,30 @@ pub fn solve_seasonal_ocean_circulation(
 
     for s_idx in 0..num_seasons {
         let season_val = seasons.get(s_idx).copied().unwrap_or(0.0);
+        // If an earlier half-season had the exact same solar declination parameter `season_val`
+        // (e.g. `DEFAULT_SEASONS = [-1.0, -0.5, 0.0, 0.5, 1.0, 0.5, 0.0, -0.5]`), reuse its
+        // wind forcing and barotropic streamfunction velocity while letting the 8-half-season
+        // periodic SST solver in step 7 integrate thermal inertia across all 8 half-seasons.
+        if let Some(prev_idx) = (0..s_idx).find(|&p| {
+            (seasons.get(p).copied().unwrap_or(0.0) - season_val).abs() < 1e-9
+        }) {
+            seasonal_psi.push(seasonal_psi[prev_idx].clone());
+            seasonal_tau_e.push(seasonal_tau_e[prev_idx].clone());
+            seasonal_tau_n.push(seasonal_tau_n[prev_idx].clone());
+            seasonal_u_east.push(seasonal_u_east[prev_idx].clone());
+            seasonal_u_north.push(seasonal_u_north[prev_idx].clone());
+            seasonal_raw_speed.push(seasonal_raw_speed[prev_idx].clone());
+            seasonal_upwelling.push(seasonal_upwelling[prev_idx].clone());
+            seasonal_ice_cover.push(seasonal_ice_cover[prev_idx].clone());
+            continue;
+        }
         let (tau_e, tau_n, ekman_e, ekman_n, wind_curl, ice_cover) =
             compute_wind_forcing(season_val);
-        let eq_psi = solve_stommel_sor(&wind_curl, &ice_cover, &annual_psi, 30);
+        let eq_psi = if season_val.abs() < 1e-9 {
+            annual_psi.clone()
+        } else {
+            solve_stommel_sor(&wind_curl, &ice_cover, &annual_psi, 18)
+        };
 
         let mut psi = vec![0.0f64; n];
         for v in 0..n {
@@ -437,7 +458,7 @@ pub fn solve_seasonal_ocean_circulation(
         .collect();
 
     let s0 = if num_seasons > 2 { 2 } else { 0 };
-    for _iter in 0..25 {
+    for _iter in 0..14 {
         let prev = t_sst.clone();
         for v in 0..n {
             if elevations[v] > 0.0 {
@@ -483,7 +504,13 @@ pub fn solve_seasonal_ocean_circulation(
 
     let mut seasonal_raw_diff: Vec<Vec<f64>> = vec![vec![0.0; n]; num_seasons];
     let cycles = if num_seasons > 1 { 2 } else { 1 };
-    let sweeps_per_season = if num_seasons > 1 { 12 } else { 20 };
+    let sweeps_per_season = if num_seasons >= 8 {
+        6
+    } else if num_seasons > 1 {
+        12
+    } else {
+        20
+    };
 
     for _cycle in 0..cycles {
         for s_idx in 0..num_seasons {

@@ -4,6 +4,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct WasmTerrainSession {
     sim: TerrainSandbox,
+    cached_mesh: Option<(Vec<f32>, Vec<f32>, Vec<u32>)>,
 }
 
 #[wasm_bindgen]
@@ -12,15 +13,21 @@ impl WasmTerrainSession {
     pub fn new() -> Self {
         Self {
             sim: TerrainSandbox::new_earth(),
+            cached_mesh: None,
         }
     }
 
     pub fn load_earth(&mut self) {
         self.sim.load_earth();
+        self.cached_mesh = None;
     }
 
     pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
-        self.sim.load_snapshot_bytes(bytes)
+        let ok = self.sim.load_snapshot_bytes(bytes);
+        if ok {
+            self.cached_mesh = None;
+        }
+        ok
     }
 
     pub fn encode_snapshot(&self) -> Vec<u8> {
@@ -59,15 +66,22 @@ impl WasmTerrainSession {
         self.sim.tile_colors_rgb(show_rivers, selected_face)
     }
 
-    pub fn mesh_positions(&self) -> Vec<f32> {
-        self.sim.build_display_mesh().0
+    fn ensure_mesh(&mut self) -> &(Vec<f32>, Vec<f32>, Vec<u32>) {
+        if self.cached_mesh.is_none() {
+            self.cached_mesh = Some(self.sim.build_display_mesh());
+        }
+        self.cached_mesh.as_ref().unwrap()
     }
 
-    pub fn mesh_normals(&self) -> Vec<f32> {
-        self.sim.build_display_mesh().1
+    pub fn mesh_positions(&mut self) -> Vec<f32> {
+        self.ensure_mesh().0.clone()
     }
 
-    pub fn vertex_tile_ids(&self) -> Vec<u32> {
-        self.sim.build_display_mesh().2
+    pub fn mesh_normals(&mut self) -> Vec<f32> {
+        self.ensure_mesh().1.clone()
+    }
+
+    pub fn vertex_tile_ids(&mut self) -> Vec<u32> {
+        self.ensure_mesh().2.clone()
     }
 }

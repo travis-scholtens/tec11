@@ -20,7 +20,7 @@ pub mod tile;
 pub mod world;
 
 pub use erosion_sandbox::ErosionSandbox;
-pub use history::{Community, ConceptKey, HistorySimulation, LanguageRecord, StateRecord};
+pub use history::{Community, ConceptKey, HistorySimulation, LanguageRecord, StateRecord, TravelRoute};
 pub use language::{
     a_mutate, apheresize, apocopate, break_vowels, i_mutate, open_consonants, sonorize_consonants,
     syncopate, vocalize_consonants, ConsonantDef, Language, LanguageSandbox, PhonotacticConstraint,
@@ -44,11 +44,11 @@ pub use rivers::{trace_coarse_rivers, RiversSandbox};
 pub use rock::{Rock, RockKind, RockLayer};
 pub use split_sandbox::SplitSandbox;
 pub use sun_sky::{
-    bv_to_rgb, bv_to_temp_k, classify_star, format_solar_system_summary,
-    generate_solar_system_with_rng, recompute_planet_visibility_from_home,
-    sample_atmosphere_with_rng, sample_home_star_with_rng, substitute_simulated_planet,
-    AtmosphereType, CelestialStar, GalacticVantage, GalaxyType, HomeStar, PlanetKind,
-    PlanetaryOptics, SolarSystemPlanet, SunSandbox,
+    build_constellations_from_stars, bv_to_rgb, bv_to_temp_k, classify_star,
+    format_solar_system_summary, generate_default_constellations, generate_solar_system_with_rng,
+    recompute_planet_visibility_from_home, sample_atmosphere_with_rng, sample_home_star_with_rng,
+    substitute_simulated_planet, AtmosphereType, CelestialStar, Constellation, GalacticVantage,
+    GalaxyType, HomeStar, PlanetKind, PlanetaryOptics, SolarSystemPlanet, SunSandbox,
 };
 pub use tectonics::{LithosphericGroup, TectonicsSimulation};
 pub use terrain::TerrainSandbox;

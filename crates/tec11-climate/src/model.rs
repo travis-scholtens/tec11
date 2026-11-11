@@ -3,7 +3,7 @@ use tec11_math_grid::SphericalGrid;
 
 use crate::earth_data::EARTH_SIZE6_ELEVATIONS_M;
 use crate::koeppen::{classify_tile, TileClimateClassification};
-use crate::ocean::{solve_ocean_circulation, solve_seasonal_ocean_circulation, OceanCirculation};
+use crate::ocean::{solve_seasonal_ocean_circulation, OceanCirculation};
 
 /// Standard 8 seasonal steps used in `Tec-Nine` (`climatesimulation.py:41`).
 pub const DEFAULT_SEASONS: [f64; 8] = [-1.0, -0.5, 0.0, 0.5, 1.0, 0.5, 0.0, -0.5];
@@ -202,6 +202,14 @@ impl ClimateModel {
         self.glaciation
     }
 
+    pub fn spin(&self) -> f64 {
+        self.spin
+    }
+
+    pub fn tilt_deg(&self) -> f64 {
+        self.tilt_deg
+    }
+
     pub fn elevations(&self) -> &[f32] {
         &self.elevations
     }
@@ -223,6 +231,36 @@ impl ClimateModel {
     /// Return the ocean circulation for a specific `season_idx` (`0..season_count()`).
     pub fn ocean_for_season(&self, season_idx: usize) -> Option<&OceanCirculation> {
         self.ocean_seasons.get(season_idx)
+    }
+
+    /// Downwind destination graph `dest_map[v]` = `[(neighbor_idx, normalized_weight)]`.
+    pub fn dest_map(&self) -> &[Vec<(usize, f64)>] {
+        &self.dest_map
+    }
+
+    /// Prevailing 3D unit tangent wind vector `[wx, wy, wz]` in grid coordinates at `tile_idx`.
+    pub fn wind_vector_xyz(&self, tile_idx: usize) -> [f32; 3] {
+        if tile_idx >= self.grid.faces.len() {
+            return [0.0, 0.0, 0.0];
+        }
+        let ([x, y, z], _) = self.grid.faces[tile_idx];
+        let xy = (x * x + y * y).sqrt();
+        let (east, north) = if xy > 1e-9 {
+            (
+                [y / xy, -x / xy, 0.0],
+                [-x * z / xy, -y * z / xy, xy],
+            )
+        } else {
+            ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0])
+        };
+        let dir_rad = wind_direction_deg(self.lats_deg[tile_idx], self.cells, self.spin) * PI / 180.0;
+        let we = dir_rad.sin();
+        let wn = dir_rad.cos();
+        [
+            (we * east[0] + wn * north[0]) as f32,
+            (we * east[1] + wn * north[1]) as f32,
+            (we * east[2] + wn * north[2]) as f32,
+        ]
     }
 
     pub fn classifications(&self) -> &[TileClimateClassification] {
@@ -317,22 +355,51 @@ impl ClimateModel {
         model
     }
 
-    /// Fast per-tick update for `TectonicsSimulation` (`planetsimulation.py:278-286`),
+    /// Per-tick climate & ocean circulation update across all 8 (half-)seasons (`DEFAULT_SEASONS`:
+    /// `[-1.0, -0.5, 0.0, 0.5, 1.0, 0.5, 0.0, -0.5]`, matching `planetsimulation.py:278-286`),
     /// reusing the precomputed wind `dest_map` (`_climatemappings`).
     pub fn update_for_tectonics(&mut self, elevations: &[f32], has_life: bool) {
         assert_eq!(self.elevations.len(), elevations.len());
         self.elevations.copy_from_slice(elevations);
         self.compute_seabreeze();
 
-        let annual_ocean = solve_ocean_circulation(
+        self.ocean_seasons = solve_seasonal_ocean_circulation(
             &self.grid,
             &self.adjacency,
             &self.lats_deg,
             &self.elevations,
             self.cells,
             self.spin,
+            self.tilt_deg,
+            self.glaciation,
+            &DEFAULT_SEASONS,
         );
+        self.cached_ocean_params = Some((
+            self.cells,
+            self.spin.to_bits(),
+            self.tilt_deg.to_bits(),
+            self.glaciation.to_bits(),
+        ));
 
+        self.refresh_seasons_and_classifications(has_life);
+    }
+
+    /// Fast per-tick climate update for Pleistocene glaciation & glacio-isostasy steps in
+    /// `PrehistorySimulation` where continent positions do not drift (`4,000` yr/tick),
+    /// reusing the solved 8-season ocean circulation while updating all 8 half-seasons'
+    /// temperature, precipitation, and Köppen classifications for the new `glaciation` and `elevations`.
+    pub fn update_for_glaciation_step(&mut self, elevations: &[f32], has_life: bool) {
+        if self.ocean_seasons.len() != DEFAULT_SEASONS.len() {
+            self.update_for_tectonics(elevations, has_life);
+            return;
+        }
+        assert_eq!(self.elevations.len(), elevations.len());
+        self.elevations.copy_from_slice(elevations);
+        self.compute_seabreeze();
+        self.refresh_seasons_and_classifications(has_life);
+    }
+
+    fn refresh_seasons_and_classifications(&mut self, has_life: bool) {
         let n = self.tile_count();
         let glacial_dt = 0.15 * (self.glaciation - 0.5) / 0.5;
         let glacial_dp = 0.2 * (0.5 - self.glaciation) / 0.5;
@@ -340,16 +407,18 @@ impl ClimateModel {
         let templimits = temp_range_for_glaciation(MEAN_TEMPRANGE_C, self.glaciation);
         let num_seasons = DEFAULT_SEASONS.len();
 
-        let mut classifications = Vec::with_capacity(n);
-        let mut rts = vec![0.0f64; num_seasons];
-        let mut rps = vec![0.0f64; num_seasons];
+        let mut snapshots = Vec::with_capacity(num_seasons);
+        for (s_idx, &season_val) in DEFAULT_SEASONS.iter().enumerate() {
+            let ocean = &self.ocean_seasons[s_idx];
+            let mut sun_vec = Vec::with_capacity(n);
+            let mut temp_vec = Vec::with_capacity(n);
+            let mut precip_vec = Vec::with_capacity(n);
 
-        for v in 0..n {
-            let lat = self.lats_deg[v];
-            let h = self.elevations[v] as f64;
-            let sst_inf = annual_ocean.coastal_sst_influence[v] as f64;
+            for v in 0..n {
+                let lat = self.lats_deg[v];
+                let h = self.elevations[v] as f64;
+                let sst_inf = ocean.coastal_sst_influence[v] as f64;
 
-            for (s_idx, &season_val) in DEFAULT_SEASONS.iter().enumerate() {
                 let ins = insolation(lat, season_val, self.tilt_deg);
                 let base_t = if h > 0.0 {
                     ins * (1.0 - (h / 10.0).min(1.0))
@@ -363,10 +432,29 @@ impl ClimateModel {
                 let precip =
                     (self.seabased[v] + conv + glacial_dp + 0.12 * sst_inf).clamp(0.0, 1.0);
 
-                rts[s_idx] = temp;
-                rps[s_idx] = precip;
+                sun_vec.push(ins as f32);
+                temp_vec.push(temp as f32);
+                precip_vec.push(precip as f32);
             }
 
+            snapshots.push(SeasonalSnapshot {
+                season_value: season_val,
+                insolation: sun_vec,
+                temperature: temp_vec,
+                precipitation: precip_vec,
+                ocean: ocean.clone(),
+            });
+        }
+
+        let mut classifications = Vec::with_capacity(n);
+        let mut rts = vec![0.0f64; num_seasons];
+        let mut rps = vec![0.0f64; num_seasons];
+
+        for v in 0..n {
+            for (s_idx, snap) in snapshots.iter().enumerate() {
+                rts[s_idx] = snap.temperature[v] as f64;
+                rps[s_idx] = snap.precipitation[v] as f64;
+            }
             classifications.push(classify_tile(
                 self.elevations[v],
                 &rts,
@@ -376,7 +464,7 @@ impl ClimateModel {
             ));
         }
 
-        self.ocean_seasons = vec![annual_ocean];
+        self.seasons = snapshots;
         self.classifications = classifications;
     }
 
@@ -722,6 +810,7 @@ mod tests {
         let elevs = vec![0.2f32; grid.faces.len()];
         let mut model = ClimateModel::new_for_tectonics(grid, 3, 1.0, 23.0);
         model.update_for_tectonics(&elevs, true);
+        assert_eq!(model.season_count(), 8);
         let precip_24h: Vec<f64> = model
             .classifications()
             .iter()

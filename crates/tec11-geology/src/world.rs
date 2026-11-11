@@ -932,6 +932,12 @@ impl WorldSimulation {
                     selected_tile,
                     Some(&self.optics),
                 ),
+                "travel" => hist.tile_colors_rgb_with_optics(
+                    "travel",
+                    true,
+                    selected_tile,
+                    Some(&self.optics),
+                ),
                 _ => hist.tile_colors_rgb_with_optics(
                     "nations",
                     true,

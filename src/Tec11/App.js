@@ -683,29 +683,58 @@ function paintCanvasFallback(view) {
     }
   }
 
-  // Draw 3D ocean current arrows / constellation & orbit lines if visible
+  // Draw 3D ocean current arrows / travel route lines / constellation & orbit lines if visible
   if (arrowLines && arrowLines.visible && arrowGeometry) {
     const arrowPos = arrowGeometry.attributes.position;
+    const arrowCol =
+      view.arrowMaterial && view.arrowMaterial.vertexColors
+        ? arrowGeometry.attributes.color
+        : null;
     if (arrowPos) {
-      ctx.strokeStyle = view.arrowStrokeStyle || "rgba(248, 250, 252, 0.78)";
-      ctx.lineWidth = 1.1;
-      ctx.beginPath();
-      for (let i = 0; i < arrowPos.count; i += 2) {
-        vA.fromBufferAttribute(arrowPos, i).applyMatrix4(mesh.matrixWorld);
-        vB.fromBufferAttribute(arrowPos, i + 1).applyMatrix4(mesh.matrixWorld);
-        if (!view.disableArrowBackfaceCull && vA.z <= 0.02 && vB.z <= 0.02) {
-          continue;
+      if (arrowCol) {
+        ctx.lineWidth = view.arrowLineWidth || 1.5;
+        for (let i = 0; i < arrowPos.count; i += 2) {
+          vA.fromBufferAttribute(arrowPos, i).applyMatrix4(mesh.matrixWorld);
+          vB.fromBufferAttribute(arrowPos, i + 1).applyMatrix4(mesh.matrixWorld);
+          if (!view.disableArrowBackfaceCull && vA.z <= 0.02 && vB.z <= 0.02) {
+            continue;
+          }
+          pA.copy(vA).project(camera);
+          pB.copy(vB).project(camera);
+          const x0 = (pA.x * 0.5 + 0.5) * width;
+          const y0 = (-pA.y * 0.5 + 0.5) * height;
+          const x1 = (pB.x * 0.5 + 0.5) * width;
+          const y1 = (-pB.y * 0.5 + 0.5) * height;
+          const cr = Math.min(255, Math.round(arrowCol.getX(i) * 255));
+          const cg = Math.min(255, Math.round(arrowCol.getY(i) * 255));
+          const cb = Math.min(255, Math.round(arrowCol.getZ(i) * 255));
+          ctx.strokeStyle = `rgba(${cr}, ${cg}, ${cb}, 0.92)`;
+          ctx.beginPath();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+          ctx.stroke();
         }
-        pA.copy(vA).project(camera);
-        pB.copy(vB).project(camera);
-        const x0 = (pA.x * 0.5 + 0.5) * width;
-        const y0 = (-pA.y * 0.5 + 0.5) * height;
-        const x1 = (pB.x * 0.5 + 0.5) * width;
-        const y1 = (-pB.y * 0.5 + 0.5) * height;
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
+      } else {
+        ctx.strokeStyle = view.arrowStrokeStyle || "rgba(248, 250, 252, 0.78)";
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        for (let i = 0; i < arrowPos.count; i += 2) {
+          vA.fromBufferAttribute(arrowPos, i).applyMatrix4(mesh.matrixWorld);
+          vB.fromBufferAttribute(arrowPos, i + 1).applyMatrix4(mesh.matrixWorld);
+          if (!view.disableArrowBackfaceCull && vA.z <= 0.02 && vB.z <= 0.02) {
+            continue;
+          }
+          pA.copy(vA).project(camera);
+          pB.copy(vB).project(camera);
+          const x0 = (pA.x * 0.5 + 0.5) * width;
+          const y0 = (-pA.y * 0.5 + 0.5) * height;
+          const x1 = (pB.x * 0.5 + 0.5) * width;
+          const y1 = (-pB.y * 0.5 + 0.5) * height;
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
     }
   }
 
@@ -2332,6 +2361,32 @@ export const loadFilePlanetIntoLifeforms = (setLifeformsInfo) => () => {
 // Mode 9: Population Simulation (`populationmethod.py`, `populationdisplay.py`, `populationpresenter.py`)
 // ============================================================================
 
+function naturalTileColorRgb(h, f, hasAtmosphere, kId, life) {
+  if (h <= 0.0) {
+    return [0.0, 0.0, 128.0 / 255.0];
+  }
+  const fVal = f !== undefined && f !== null ? f : 0.7;
+  const rockR = 128.0;
+  const rockG = 64.0 + 64.0 * fVal;
+  const rockB = 128.0 * fVal;
+  if (!hasAtmosphere || !kId) {
+    return [rockR / 255.0, rockG / 255.0, rockB / 255.0];
+  }
+  if (kId === 12 || kId === 13) {
+    return [1.0, 1.0, 1.0];
+  }
+  const lifeGreen = 255.0 * (life || 0.0);
+  return [
+    (0.5 * rockR) / 255.0,
+    (0.5 * (rockG + lifeGreen)) / 255.0,
+    (0.5 * rockB) / 255.0,
+  ];
+}
+
+function computeNaturalTileColor(h, f, kId, life) {
+  return naturalTileColorRgb(h, f, true, kId, life);
+}
+
 function computePopulationVertexColors(view) {
   const { vertexTileIds, elevations, felsities, koeppenIds, lifeValues, populatedMask } = view;
   const vertexCount = vertexTileIds.length;
@@ -2913,6 +2968,52 @@ function computeHistoryVertexColors(view) {
   return colors;
 }
 
+function setColoredArrowSegments(view, raw9Buffers) {
+  let totalSegs = 0;
+  for (const buf of raw9Buffers) {
+    if (buf && buf.length >= 9) {
+      totalSegs += Math.floor(buf.length / 9);
+    }
+  }
+  if (totalSegs === 0) {
+    view.arrowLines.visible = false;
+    return;
+  }
+  const positions = new Float32Array(totalSegs * 6);
+  const colors = new Float32Array(totalSegs * 6);
+  let outIdx = 0;
+  for (const buf of raw9Buffers) {
+    if (!buf || buf.length < 9) continue;
+    const n = Math.floor(buf.length / 9) * 9;
+    for (let i = 0; i < n; i += 9) {
+      positions[outIdx] = buf[i];
+      positions[outIdx + 1] = buf[i + 1];
+      positions[outIdx + 2] = buf[i + 2];
+      positions[outIdx + 3] = buf[i + 3];
+      positions[outIdx + 4] = buf[i + 4];
+      positions[outIdx + 5] = buf[i + 5];
+      const r = buf[i + 6];
+      const g = buf[i + 7];
+      const b = buf[i + 8];
+      colors[outIdx] = r;
+      colors[outIdx + 1] = g;
+      colors[outIdx + 2] = b;
+      colors[outIdx + 3] = r;
+      colors[outIdx + 4] = g;
+      colors[outIdx + 5] = b;
+      outIdx += 6;
+    }
+  }
+  view.arrowGeometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  view.arrowGeometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  view.arrowMaterial.vertexColors = true;
+  view.arrowMaterial.color.setHex(0xffffff);
+  view.arrowMaterial.opacity = 0.94;
+  view.arrowMaterial.needsUpdate = true;
+  view.arrowLineWidth = 1.65;
+  view.arrowLines.visible = true;
+}
+
 function updateHistoryDataBuffers(view, rebuildGeometry = false) {
   const { session, geometry } = view;
   if (rebuildGeometry) {
@@ -2930,6 +3031,18 @@ function updateHistoryDataBuffers(view, rebuildGeometry = false) {
   );
   const colors = computeHistoryVertexColors(view);
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+
+  if (view.aspect === "travel") {
+    const routeSegs = session.travel_route_segments_colored(false);
+    setColoredArrowSegments(view, [routeSegs]);
+  } else if (view.aspect === "winds_currents") {
+    const vecSegs = session.wind_current_vector_segments();
+    const routeSegs = session.travel_route_segments_colored(false);
+    setColoredArrowSegments(view, [vecSegs, routeSegs]);
+  } else {
+    view.arrowLines.visible = false;
+  }
+
   view.paint();
 }
 
@@ -3126,6 +3239,232 @@ export const loadFilePlanetIntoHistory = (setHistoryInfo) => () => {
 };
 
 // ============================================================================
+// Mode 13b: Travel Routes & Maritime Navigation (`TravelScreen`)
+// ============================================================================
+
+function updateTravelDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+  view.tileColors = session.tile_colors_rgb(
+    view.aspect,
+    Boolean(view.showRivers),
+    view.selectedTileIdx
+  );
+  const colors = computeHistoryVertexColors(view);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+
+  const buffers = [];
+  if (view.showWindsCurrents || view.aspect === "winds_currents") {
+    buffers.push(session.wind_current_vector_segments());
+  }
+  buffers.push(session.travel_route_segments_colored(Boolean(view.showPotential)));
+  setColoredArrowSegments(view, buffers);
+
+  view.paint();
+}
+
+function buildTravelInfo(view) {
+  const s = view.session;
+  const planetName = s.is_custom_planet()
+    ? `Saved Planet (${s.land_percent()}% land)`
+    : "Earth (ETOPO2)";
+  const selectedReport =
+    view.selectedTileIdx >= 0
+      ? s.inspect_travel_tile(view.selectedTileIdx)
+      : "Click any coastal port, ocean tile, or river corridor on the globe to inspect prevailing wind & current vectors, active maritime sea lanes (gold = trade, red = conflict, green = expansion), and riverine routes (cyan).";
+  return {
+    planetName,
+    tileCount: s.tile_count(),
+    ticks: s.history_ticks(),
+    years: s.years(),
+    activeStates: s.active_state_count(),
+    populationText: formatPopulationThousands(s.total_population_thousands()),
+    activeRoutes: s.active_travel_route_count(),
+    potentialRoutes: s.potential_travel_route_count(),
+    portCount: s.water_access_port_count(),
+    tradeRoutes: s.maritime_trade_route_count(),
+    conflictRoutes: s.maritime_conflict_route_count(),
+    isRunning: Boolean(view.isRunning),
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    selectedReport,
+  };
+}
+
+function scheduleTravelTick(view) {
+  if (!view.isRunning || activeView !== view) return;
+  view.timerId = setTimeout(() => {
+    if (!view.isRunning || activeView !== view) return;
+    view.session.step();
+    updateTravelDataBuffers(view, false);
+    if (view.setTravelInfo) {
+      view.setTravelInfo(buildTravelInfo(view))();
+    }
+    if (view.isRunning) {
+      scheduleTravelTick(view);
+    }
+  }, 150);
+}
+
+export const mountTravelView =
+  (aspect) =>
+  (showPotential) =>
+  (showWindsCurrents) =>
+  (showRivers) =>
+  (setTravelInfo) =>
+  () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.session = new WasmHistorySession();
+    view.aspect = aspect;
+    view.showPotential = showPotential;
+    view.showWindsCurrents = showWindsCurrents;
+    view.showRivers = showRivers;
+    view.selectedTileIdx = -1;
+    view.isRunning = false;
+    view.timerId = null;
+    view.setTravelInfo = setTravelInfo;
+
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateTravelDataBuffers(view, false);
+        view.setTravelInfo(buildTravelInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateTravelDataBuffers(view, true);
+    setTravelInfo(buildTravelInfo(view))();
+
+    return () => {
+      canvas.removeEventListener("click", handleCanvasClick);
+      stopHistoryLoop(view);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const stepTravel = (setTravelInfo) => () => {
+  if (!activeView || !activeView.session || activeView.isRunning) return;
+  activeView.session.step();
+  updateTravelDataBuffers(activeView, false);
+  setTravelInfo(buildTravelInfo(activeView))();
+};
+
+export const toggleTravelRunning = (setTravelInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  if (activeView.isRunning) {
+    stopHistoryLoop(activeView);
+    setTravelInfo(buildTravelInfo(activeView))();
+  } else {
+    activeView.isRunning = true;
+    setTravelInfo(buildTravelInfo(activeView))();
+    scheduleTravelTick(activeView);
+  }
+};
+
+export const resetTravel = (setTravelInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopHistoryLoop(activeView);
+  activeView.session.reset();
+  activeView.selectedTileIdx = -1;
+  updateTravelDataBuffers(activeView, false);
+  setTravelInfo(buildTravelInfo(activeView))();
+};
+
+export const setTravelDisplayOptions =
+  (aspect) => (showPotential) => (showWindsCurrents) => (showRivers) => () => {
+    if (!activeView || !activeView.session) return;
+    activeView.aspect = aspect;
+    activeView.showPotential = showPotential;
+    activeView.showWindsCurrents = showWindsCurrents;
+    activeView.showRivers = showRivers;
+    updateTravelDataBuffers(activeView, false);
+  };
+
+export const saveTravelPlanet = (setTravelInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const bytes = activeView.session.encode_snapshot();
+  if (!bytes || bytes.length === 0) return;
+  storeSavedSnapshotBytes(bytes);
+  activeClimateSnapshotBytes = bytes;
+  const yrs = activeView.session.years();
+  triggerBinaryDownload(`tec11-travel-history-${yrs}yr.tec11`, bytes);
+  setTravelInfo(buildTravelInfo(activeView))();
+};
+
+export const loadEarthIntoTravel = (setTravelInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopHistoryLoop(activeView);
+  activeClimateSnapshotBytes = null;
+  activeView.session.load_earth();
+  activeView.selectedTileIdx = -1;
+  updateTravelDataBuffers(activeView, true);
+  setTravelInfo(buildTravelInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoTravel = (setTravelInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  stopHistoryLoop(activeView);
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.selectedTileIdx = -1;
+    updateTravelDataBuffers(activeView, true);
+    setTravelInfo(buildTravelInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoTravel = (setTravelInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes) => {
+    if (!activeView || !activeView.session) return;
+    stopHistoryLoop(activeView);
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.selectedTileIdx = -1;
+      updateTravelDataBuffers(activeView, true);
+      setTravelInfo(buildTravelInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
 // Mode 14: Complete World Simulation (`worldsimulation.py`, `worlddisplay.py`, `worldpresenter.py`)
 // ============================================================================
 
@@ -3157,6 +3496,12 @@ function updateWorldDataBuffers(view, rebuildGeometry = false) {
   view.tileColors = session.tile_colors_rgb(view.aspect, view.selectedTileIdx);
   const colors = computeWorldVertexColors(view);
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  if (view.aspect === "travel" && session.stage_index() === 2) {
+    const routeSegs = session.travel_route_segments_colored();
+    setColoredArrowSegments(view, [routeSegs]);
+  } else {
+    view.arrowLines.visible = false;
+  }
   view.paint();
 }
 

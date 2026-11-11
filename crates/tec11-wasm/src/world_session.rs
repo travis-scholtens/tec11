@@ -268,4 +268,11 @@ impl WasmWorldSession {
             _ => build_vertex_tile_ids(self.sim.grid()),
         }
     }
+
+    pub fn travel_route_segments_colored(&self) -> Vec<f32> {
+        match self.sim.stage() {
+            WorldStageState::History(hist) => hist.travel_route_segments_colored(false),
+            _ => Vec::new(),
+        }
+    }
 }

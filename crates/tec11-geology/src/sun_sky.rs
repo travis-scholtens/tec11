@@ -1298,6 +1298,283 @@ pub fn format_solar_system_summary(planets: &[SolarSystemPlanet]) -> String {
         .join(" | ")
 }
 
+const CONSTELLATION_SHAPE_LABELS: [&str; 16] = [
+    "Northern Crown",
+    "Polar Serpent",
+    "Great Wain",
+    "Chained Chariot",
+    "Hunter's Bow",
+    "Twin Pillars",
+    "River Herd",
+    "Winged Steed",
+    "Golden Scales",
+    "Sea Leviathan",
+    "Scorpion's Tail",
+    "Archer's Arrow",
+    "Southern Ship",
+    "Altar Flame",
+    "Southern Cross",
+    "South Pole Octant",
+];
+
+/// A constellation (connected asterism of bright stars on the celestial sphere).
+#[derive(Clone, Debug)]
+pub struct Constellation {
+    /// 0-based constellation index (`0..N-1`).
+    pub index: u32,
+    /// Indices into `stars` belonging to this constellation.
+    pub star_indices: Vec<usize>,
+    /// Pairs of star indices `(ia, ib)` forming the constellation's line segments.
+    pub edges: Vec<(usize, usize)>,
+    /// Unit vector on the celestial sphere pointing to the centroid of the constellation.
+    pub center_dir: Vec3,
+    /// Celestial declination `δ ∈ [-90°, +90°]` (`asin(center_dir[2]) * 180 / π`).
+    pub declination_deg: f32,
+    /// Celestial right ascension `α ∈ [0°, 360°)` (`atan2(center_dir[1], center_dir[0])`).
+    pub right_ascension_deg: f32,
+    /// Number of stars in the constellation.
+    pub star_count: u32,
+    /// Apparent magnitude `m_V` of the brightest (alpha) star in the constellation.
+    pub brightest_mag: f32,
+    /// Descriptive asterism figure label.
+    pub shape_label: &'static str,
+}
+
+impl Constellation {
+    pub fn hemisphere_band_label(&self) -> &'static str {
+        if self.declination_deg >= 50.0 {
+            "north circumpolar"
+        } else if self.declination_deg >= 18.0 {
+            "northern sky"
+        } else if self.declination_deg > -18.0 {
+            "equatorial zodiac"
+        } else if self.declination_deg > -50.0 {
+            "southern sky"
+        } else {
+            "south circumpolar"
+        }
+    }
+
+    /// Returns true if this constellation rises at least `5°` above the horizon at some point
+    /// during the year for an observer at geographic latitude `lat_deg ∈ [-90°, +90°]`.
+    /// Because the Sun completes a full `360°` circuit of right ascension over the course of the year,
+    /// any right ascension is visible in the night sky during part of the year provided its
+    /// culmination altitude `h_max = 90° - |lat_deg - declination_deg| >= 5°` (`|lat_deg - δ| <= 85°`).
+    pub fn is_visible_at_latitude_deg(&self, lat_deg: f64) -> bool {
+        (lat_deg - (self.declination_deg as f64)).abs() <= 85.0
+    }
+
+    /// Gloss used for `ConceptKey::Constellation(self.index)` in `history.rs`.
+    pub fn lexicon_gloss(&self) -> String {
+        format!(
+            "constellation #{} ({}, {} stars, dec {:+.0}° {})",
+            self.index + 1,
+            self.shape_label,
+            self.star_count,
+            self.declination_deg,
+            self.hemisphere_band_label()
+        )
+    }
+}
+
+/// Generate a deterministic 16-constellation sky catalog spanning all declination bands
+/// from north circumpolar (`+78°`) through the equatorial zodiac (`0°`) to south circumpolar (`-78°`).
+pub fn generate_default_constellations(seed: u64) -> Vec<Constellation> {
+    let mut rng = Pcg64Mcg::from_seed_u64(seed ^ 0xC0A5_7E11_A710_42u64);
+    let base_declinations: [f32; 16] = [
+        78.0, 64.0, 52.0, 38.0, 26.0, 14.0, 5.0, -4.0, -13.0, -24.0, -36.0, -48.0, -58.0, -67.0,
+        -75.0, -82.0,
+    ];
+    let mut out = Vec::with_capacity(16);
+    for (idx, &base_dec) in base_declinations.iter().enumerate() {
+        let dec_deg = (base_dec + (rng.uniform(-3.0, 3.0) as f32)).clamp(-87.0, 87.0);
+        let ra_deg =
+            ((idx as f32) * 22.5 + 15.0 + (rng.uniform(-6.0, 6.0) as f32)).rem_euclid(360.0);
+        let dec_rad = (dec_deg as f64) * PI / 180.0;
+        let ra_rad = (ra_deg as f64) * PI / 180.0;
+        let center_dir = normal([
+            dec_rad.cos() * ra_rad.cos(),
+            dec_rad.cos() * ra_rad.sin(),
+            dec_rad.sin(),
+        ]);
+        let star_count = 3 + ((rng.next_u64() % 5) as u32);
+        let brightest_mag = rng.uniform(0.2, 2.2) as f32;
+        out.push(Constellation {
+            index: idx as u32,
+            star_indices: Vec::new(),
+            edges: Vec::new(),
+            center_dir,
+            declination_deg: dec_deg,
+            right_ascension_deg: ra_deg,
+            star_count,
+            brightest_mag,
+            shape_label: CONSTELLATION_SHAPE_LABELS[idx % CONSTELLATION_SHAPE_LABELS.len()],
+        });
+    }
+    out
+}
+
+/// Build constellation edges and extract connected `Constellation` asterisms across the celestial sphere.
+pub fn build_constellations_from_stars(
+    stars: &[CelestialStar],
+) -> (Vec<(usize, usize)>, Vec<Constellation>) {
+    let mut bright_indices: Vec<usize> = stars
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.app_mag <= 2.85)
+        .map(|(i, _)| i)
+        .collect();
+    bright_indices.sort_by(|&a, &b| {
+        stars[a]
+            .app_mag
+            .partial_cmp(&stars[b].app_mag)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    bright_indices.truncate(220);
+
+    let mut edges = Vec::new();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); bright_indices.len()];
+    let mut degree = vec![0u8; bright_indices.len()];
+    for i in 0..bright_indices.len() {
+        if degree[i] >= 3 {
+            continue;
+        }
+        let ia = bright_indices[i];
+        let pa = stars[ia].dir;
+        let mut best: Option<(usize, f64)> = None;
+        for j in (i + 1)..bright_indices.len() {
+            if degree[j] >= 3 {
+                continue;
+            }
+            let ib = bright_indices[j];
+            let pb = stars[ib].dir;
+            let cos_d = dot(pa, pb);
+            if (0.950..=0.998).contains(&cos_d) {
+                if best.map_or(true, |(_, b_cos)| cos_d > b_cos) {
+                    best = Some((j, cos_d));
+                }
+            }
+        }
+        if let Some((j, _)) = best {
+            degree[i] += 1;
+            degree[j] += 1;
+            adj[i].push(j);
+            adj[j].push(i);
+            edges.push((bright_indices[i], bright_indices[j]));
+        }
+    }
+
+    // Extract connected components from `adj`:
+    let mut visited = vec![false; bright_indices.len()];
+    let mut raw_groups: Vec<(Vec<usize>, Vec<(usize, usize)>, Vec3, f32, f32, f32)> = Vec::new();
+    for start in 0..bright_indices.len() {
+        if visited[start] || adj[start].is_empty() {
+            continue;
+        }
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(start);
+        visited[start] = true;
+        let mut comp_local = Vec::new();
+        while let Some(u) = queue.pop_front() {
+            comp_local.push(u);
+            for &v in &adj[u] {
+                if !visited[v] {
+                    visited[v] = true;
+                    queue.push_back(v);
+                }
+            }
+        }
+        if comp_local.len() < 2 {
+            continue;
+        }
+        let mut comp_stars = Vec::with_capacity(comp_local.len());
+        let mut sum = [0.0f64; 3];
+        let mut min_mag = f32::INFINITY;
+        for &loc in &comp_local {
+            let s_idx = bright_indices[loc];
+            comp_stars.push(s_idx);
+            let d = stars[s_idx].dir;
+            sum[0] += d[0];
+            sum[1] += d[1];
+            sum[2] += d[2];
+            if stars[s_idx].app_mag < min_mag {
+                min_mag = stars[s_idx].app_mag;
+            }
+        }
+        let mut comp_edges = Vec::new();
+        for &u in &comp_local {
+            for &v in &adj[u] {
+                if u < v {
+                    comp_edges.push((bright_indices[u], bright_indices[v]));
+                }
+            }
+        }
+        let center_dir = normal(sum);
+        let dec_deg = (center_dir[2].clamp(-1.0, 1.0).asin() * 180.0 / PI) as f32;
+        let ra_deg = ((center_dir[1].atan2(center_dir[0]) * 180.0 / PI).rem_euclid(360.0)) as f32;
+        raw_groups.push((comp_stars, comp_edges, center_dir, dec_deg, ra_deg, min_mag));
+    }
+
+    // Sort from northernmost declination to southernmost declination and cap at 16:
+    raw_groups.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    raw_groups.truncate(14);
+
+    // Ensure both deep northern (`dec >= +58°`) and deep southern (`dec <= -58°`) circumpolar bands
+    // have at least one constellation even if the galaxy vantage concentrated bright stars in one hemisphere:
+    let has_deep_north = raw_groups.iter().any(|g| g.3 >= 58.0);
+    let has_deep_south = raw_groups.iter().any(|g| g.3 <= -58.0);
+    let defaults = generate_default_constellations(stars.len() as u64);
+    let mut constellations = Vec::new();
+    if !has_deep_north {
+        if let Some(dn) = defaults.first() {
+            constellations.push(dn.clone());
+        }
+    }
+    for (comp_stars, comp_edges, center_dir, dec_deg, ra_deg, min_mag) in raw_groups {
+        let idx = constellations.len();
+        constellations.push(Constellation {
+            index: idx as u32,
+            star_count: comp_stars.len() as u32,
+            star_indices: comp_stars,
+            edges: comp_edges,
+            center_dir,
+            declination_deg: dec_deg,
+            right_ascension_deg: ra_deg,
+            brightest_mag: min_mag,
+            shape_label: CONSTELLATION_SHAPE_LABELS[idx % CONSTELLATION_SHAPE_LABELS.len()],
+        });
+    }
+    if !has_deep_south {
+        if let Some(ds) = defaults.last() {
+            constellations.push(ds.clone());
+        }
+    }
+    if constellations.len() < 8 {
+        for d in defaults {
+            if constellations.len() >= 12 {
+                break;
+            }
+            if !constellations
+                .iter()
+                .any(|c| (c.declination_deg - d.declination_deg).abs() < 12.0)
+            {
+                constellations.push(d);
+            }
+        }
+    }
+    constellations.sort_by(|a, b| {
+        b.declination_deg
+            .partial_cmp(&a.declination_deg)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (idx, c) in constellations.iter_mut().enumerate() {
+        c.index = idx as u32;
+        c.shape_label = CONSTELLATION_SHAPE_LABELS[idx % CONSTELLATION_SHAPE_LABELS.len()];
+    }
+
+    (edges, constellations)
+}
+
 /// Interactive Sun, Plausible Galaxy & Celestial Sphere Star Map model (`SunSandbox`).
 pub struct SunSandbox {
     grid: SphericalGrid,
@@ -1322,6 +1599,8 @@ pub struct SunSandbox {
     sun_dir: Vec3,
     /// Pairs of star indices forming constellation / asterism lines among bright stars.
     constellation_edges: Vec<(usize, usize)>,
+    /// Extracted constellations across the celestial sphere with declinations for latitude visibility.
+    constellations: Vec<Constellation>,
     /// 3D galaxy preview particles `(x, y, z, r, g, b)` normalized to `[-0.95, 0.95]` for galaxy view.
     galaxy_particles: Vec<[f32; 6]>,
     rng: Pcg64Mcg,
@@ -1358,6 +1637,7 @@ impl SunSandbox {
             ecliptic_pole: [0.0, 0.39, 0.92],
             sun_dir: [1.0, 0.0, 0.0],
             constellation_edges: Vec::new(),
+            constellations: Vec::new(),
             galaxy_particles: Vec::new(),
             rng: Pcg64Mcg::from_seed_u64(seed),
         };
@@ -1407,6 +1687,10 @@ impl SunSandbox {
 
     pub fn planets_summary_text(&self) -> String {
         format_solar_system_summary(&self.planets)
+    }
+
+    pub fn constellations(&self) -> &[Constellation] {
+        &self.constellations
     }
 
     /// Update the planet's atmospheric gas composition (`0..=5` explicit, or `99` for random)
@@ -2048,53 +2332,12 @@ impl SunSandbox {
         }
     }
 
-    /// Build automatic constellation / asterism lines connecting neighboring bright stars (`app_mag <= 2.75`).
+    /// Build automatic constellation / asterism lines connecting neighboring bright stars (`app_mag <= 2.85`)
+    /// and extract connected `Constellation` groups with celestial declinations.
     fn build_constellation_edges(&mut self) {
-        self.constellation_edges.clear();
-        let mut bright_indices: Vec<usize> = self
-            .stars
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.app_mag <= 2.85)
-            .map(|(i, _)| i)
-            .collect();
-        bright_indices.sort_by(|&a, &b| {
-            self.stars[a]
-                .app_mag
-                .partial_cmp(&self.stars[b].app_mag)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        bright_indices.truncate(220);
-
-        let mut degree = vec![0u8; bright_indices.len()];
-        for i in 0..bright_indices.len() {
-            if degree[i] >= 3 {
-                continue;
-            }
-            let ia = bright_indices[i];
-            let pa = self.stars[ia].dir;
-            let mut best: Option<(usize, f64)> = None;
-            for j in (i + 1)..bright_indices.len() {
-                if degree[j] >= 3 {
-                    continue;
-                }
-                let ib = bright_indices[j];
-                let pb = self.stars[ib].dir;
-                let cos_d = dot(pa, pb);
-                // Connect stars separated by ~3.5 deg to ~18 deg on the celestial sphere:
-                if (0.950..=0.998).contains(&cos_d) {
-                    if best.map_or(true, |(_, b_cos)| cos_d > b_cos) {
-                        best = Some((j, cos_d));
-                    }
-                }
-            }
-            if let Some((j, _)) = best {
-                degree[i] += 1;
-                degree[j] += 1;
-                self.constellation_edges
-                    .push((bright_indices[i], bright_indices[j]));
-            }
-        }
+        let (edges, constellations) = build_constellations_from_stars(&self.stars);
+        self.constellation_edges = edges;
+        self.constellations = constellations;
     }
 
     /// Project a 3D galactocentric / ecliptic coordinate `(gx, gy, gz)` with a `38°` inclination tilt

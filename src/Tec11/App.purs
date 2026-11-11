@@ -30,6 +30,7 @@ data Screen
   | PrehistoryScreen
   | LanguageScreen
   | TerrainScreen
+  | TravelScreen
   | HistoryScreen
   | WorldScreen
   | MoonScreen
@@ -178,6 +179,23 @@ type HistoryInfo =
   , years :: Int
   , activeStates :: Int
   , populationText :: String
+  , isRunning :: Boolean
+  , hasSavedPlanet :: Boolean
+  , selectedReport :: String
+  }
+
+type TravelInfo =
+  { planetName :: String
+  , tileCount :: Int
+  , ticks :: Int
+  , years :: Int
+  , activeStates :: Int
+  , populationText :: String
+  , activeRoutes :: Int
+  , potentialRoutes :: Int
+  , portCount :: Int
+  , tradeRoutes :: Int
+  , conflictRoutes :: Int
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
   , selectedReport :: String
@@ -393,6 +411,17 @@ foreign import saveHistoryPlanet :: (HistoryInfo -> Effect Unit) -> Effect Unit
 foreign import loadEarthIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoHistory :: (HistoryInfo -> Effect Unit) -> Effect Unit
+
+-- Travel Routes & Maritime Navigation mode FFI (`TravelScreen`)
+foreign import mountTravelView :: String -> Boolean -> Boolean -> Boolean -> (TravelInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepTravel :: (TravelInfo -> Effect Unit) -> Effect Unit
+foreign import toggleTravelRunning :: (TravelInfo -> Effect Unit) -> Effect Unit
+foreign import resetTravel :: (TravelInfo -> Effect Unit) -> Effect Unit
+foreign import setTravelDisplayOptions :: String -> Boolean -> Boolean -> Boolean -> Effect Unit
+foreign import saveTravelPlanet :: (TravelInfo -> Effect Unit) -> Effect Unit
+foreign import loadEarthIntoTravel :: (TravelInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoTravel :: (TravelInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoTravel :: (TravelInfo -> Effect Unit) -> Effect Unit
 
 -- Complete World Simulation mode FFI
 foreign import mountWorldView :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> String -> (WorldInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -612,6 +641,32 @@ mkApp = do
       , selectedReport: "Click any state on the globe to inspect its demographics, diplomacy, and language lexicon."
       }
 
+    -- Travel mode state
+    accGeoOpen /\ setAccGeoOpen <- useState' true
+    accBioOpen /\ setAccBioOpen <- useState' true
+    accHistOpen /\ setAccHistOpen <- useState' true
+    accAstroOpen /\ setAccAstroOpen <- useState' true
+    travelAspect /\ setTravelAspectState <- useState' "travel"
+    travelShowPotential /\ setTravelShowPotential <- useState' false
+    travelShowWindsCurrents /\ setTravelShowWindsCurrents <- useState' true
+    travelShowRivers /\ setTravelShowRivers <- useState' true
+    travelInfo /\ setTravelInfo <- useState'
+      { planetName: "Earth (ETOPO2)"
+      , tileCount: 7292
+      , ticks: 0
+      , years: 0
+      , activeStates: 0
+      , populationText: "0"
+      , activeRoutes: 0
+      , potentialRoutes: 0
+      , portCount: 0
+      , tradeRoutes: 0
+      , conflictRoutes: 0
+      , isRunning: false
+      , hasSavedPlanet: false
+      , selectedReport: "Click any port, ocean current, or coastal state on the globe to inspect wind & current vectors, maritime sea lanes, and riverine corridors."
+      }
+
     -- Complete World Simulation state (`world.py`, `worldpresenter.py`)
     worldSize /\ setWorldSize <- useState' 5
     worldDayHours /\ setWorldDayHours <- useState' 24
@@ -789,6 +844,9 @@ mkApp = do
         TerrainScreen -> do
           setRotationDeg 0
           mountTerrainView terrainShowRivers setTerrainInfo
+        TravelScreen -> do
+          setRotationDeg 0
+          mountTravelView travelAspect travelShowPotential travelShowWindsCurrents travelShowRivers setTravelInfo
         HistoryScreen -> do
           setRotationDeg 0
           mountHistoryView historyAspect historyShowRivers setHistoryInfo
@@ -1013,6 +1071,31 @@ mkApp = do
         let next = not historyShowRivers
         setHistoryShowRiversState next
         setHistoryShowRivers next
+
+      handleTravelAspectChange :: Maybe String -> Effect Unit
+      handleTravelAspectChange maybeVal = case maybeVal of
+        Nothing -> pure unit
+        Just asp -> do
+          setTravelAspectState asp
+          setTravelDisplayOptions asp travelShowPotential travelShowWindsCurrents travelShowRivers
+
+      handleToggleTravelPotential :: Effect Unit
+      handleToggleTravelPotential = do
+        let next = not travelShowPotential
+        setTravelShowPotential next
+        setTravelDisplayOptions travelAspect next travelShowWindsCurrents travelShowRivers
+
+      handleToggleTravelWindsCurrents :: Effect Unit
+      handleToggleTravelWindsCurrents = do
+        let next = not travelShowWindsCurrents
+        setTravelShowWindsCurrents next
+        setTravelDisplayOptions travelAspect travelShowPotential next travelShowRivers
+
+      handleToggleTravelRivers :: Effect Unit
+      handleToggleTravelRivers = do
+        let next = not travelShowRivers
+        setTravelShowRivers next
+        setTravelDisplayOptions travelAspect travelShowPotential travelShowWindsCurrents next
 
       handleWorldAspectChange :: Maybe String -> Effect Unit
       handleWorldAspectChange maybeVal = case maybeVal of
@@ -1265,131 +1348,234 @@ mkApp = do
                           , onClick: capture_ (setScreen WorldScreen)
                           , children: [ R.text "Start (World Simulation)" ]
                           }
-                      , R.button
-                          { id: "grid-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen GridScreen)
-                          , children: [ R.text "Grid" ]
+                      , R.div
+                          { className: "menu-accordion"
+                          , children:
+                              ( [ R.button
+                                    { className: "menu-accordion-header"
+                                    , onClick: capture_ (setAccGeoOpen (not accGeoOpen))
+                                    , children:
+                                        [ R.span { children: [ R.text "Geology & Terrain" ] }
+                                        , R.span { children: [ R.text (if accGeoOpen then "▼" else "▶") ] }
+                                        ]
+                                    }
+                                ]
+                                  <>
+                                    if accGeoOpen then
+                                      [ R.div
+                                          { className: "menu-accordion-body"
+                                          , children:
+                                              [ R.button
+                                                  { id: "grid-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen GridScreen)
+                                                  , children: [ R.text "Grid" ]
+                                                  }
+                                              , R.button
+                                                  { id: "pangea-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen PangeaScreen)
+                                                  , children: [ R.text "Pangea" ]
+                                                  }
+                                              , R.button
+                                                  { id: "split-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen SplitScreen)
+                                                  , children: [ R.text "Split" ]
+                                                  }
+                                              , R.button
+                                                  { id: "move-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen MoveScreen)
+                                                  , children: [ R.text "Move" ]
+                                                  }
+                                              , R.button
+                                                  { id: "erosion-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen ErosionScreen)
+                                                  , children: [ R.text "Erosion" ]
+                                                  }
+                                              , R.button
+                                                  { id: "tectonics-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen TectonicsScreen)
+                                                  , children: [ R.text "Tectonics" ]
+                                                  }
+                                              , R.button
+                                                  { id: "terrain-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen TerrainScreen)
+                                                  , children: [ R.text "Terrain" ]
+                                                  }
+                                              ]
+                                          }
+                                      ]
+                                    else
+                                      []
+                              )
                           }
-                      , R.button
-                          { id: "pangea-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen PangeaScreen)
-                          , children: [ R.text "Pangea" ]
+                      , R.div
+                          { className: "menu-accordion"
+                          , children:
+                              ( [ R.button
+                                    { className: "menu-accordion-header"
+                                    , onClick: capture_ (setAccBioOpen (not accBioOpen))
+                                    , children:
+                                        [ R.span { children: [ R.text "Climate, Rivers & Biosphere" ] }
+                                        , R.span { children: [ R.text (if accBioOpen then "▼" else "▶") ] }
+                                        ]
+                                    }
+                                ]
+                                  <>
+                                    if accBioOpen then
+                                      [ R.div
+                                          { className: "menu-accordion-body"
+                                          , children:
+                                              [ R.button
+                                                  { id: "climate-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen ClimateScreen)
+                                                  , children: [ R.text "Climate" ]
+                                                  }
+                                              , R.button
+                                                  { id: "rivers-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen RiversScreen)
+                                                  , children: [ R.text "Rivers" ]
+                                                  }
+                                              , R.button
+                                                  { id: "lifeforms-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen LifeformsScreen)
+                                                  , children: [ R.text "Lifeforms" ]
+                                                  }
+                                              ]
+                                          }
+                                      ]
+                                    else
+                                      []
+                              )
                           }
-                      , R.button
-                          { id: "split-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen SplitScreen)
-                          , children: [ R.text "Split" ]
+                      , R.div
+                          { className: "menu-accordion"
+                          , children:
+                              ( [ R.button
+                                    { className: "menu-accordion-header"
+                                    , onClick: capture_ (setAccHistOpen (not accHistOpen))
+                                    , children:
+                                        [ R.span { children: [ R.text "People, Prehistory, Travel & History" ] }
+                                        , R.span { children: [ R.text (if accHistOpen then "▼" else "▶") ] }
+                                        ]
+                                    }
+                                ]
+                                  <>
+                                    if accHistOpen then
+                                      [ R.div
+                                          { className: "menu-accordion-body"
+                                          , children:
+                                              [ R.button
+                                                  { id: "population-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen PopulationScreen)
+                                                  , children: [ R.text "Population" ]
+                                                  }
+                                              , R.button
+                                                  { id: "racination-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen RacinationScreen)
+                                                  , children: [ R.text "Racination" ]
+                                                  }
+                                              , R.button
+                                                  { id: "prehistory-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen PrehistoryScreen)
+                                                  , children: [ R.text "Prehistory" ]
+                                                  }
+                                              , R.button
+                                                  { id: "language-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen LanguageScreen)
+                                                  , children: [ R.text "Language" ]
+                                                  }
+                                              , R.button
+                                                  { id: "travel-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen TravelScreen)
+                                                  , children: [ R.text "Travel" ]
+                                                  }
+                                              , R.button
+                                                  { id: "history-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen HistoryScreen)
+                                                  , children: [ R.text "History" ]
+                                                  }
+                                              ]
+                                          }
+                                      ]
+                                    else
+                                      []
+                              )
                           }
-                      , R.button
-                          { id: "move-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen MoveScreen)
-                          , children: [ R.text "Move" ]
-                          }
-                      , R.button
-                          { id: "erosion-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen ErosionScreen)
-                          , children: [ R.text "Erosion" ]
-                          }
-                      , R.button
-                          { id: "climate-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen ClimateScreen)
-                          , children: [ R.text "Climate" ]
-                          }
-                      , R.button
-                          { id: "tectonics-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen TectonicsScreen)
-                          , children: [ R.text "Tectonics" ]
-                          }
-                      , R.button
-                          { id: "rivers-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen RiversScreen)
-                          , children: [ R.text "Rivers" ]
-                          }
-                      , R.button
-                          { id: "lifeforms-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen LifeformsScreen)
-                          , children: [ R.text "Lifeforms" ]
-                          }
-                      , R.button
-                          { id: "population-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen PopulationScreen)
-                          , children: [ R.text "Population" ]
-                          }
-                      , R.button
-                          { id: "racination-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen RacinationScreen)
-                          , children: [ R.text "Racination" ]
-                          }
-                      , R.button
-                          { id: "prehistory-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen PrehistoryScreen)
-                          , children: [ R.text "Prehistory" ]
-                          }
-                      , R.button
-                          { id: "language-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen LanguageScreen)
-                          , children: [ R.text "Language" ]
-                          }
-                      , R.button
-                          { id: "terrain-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen TerrainScreen)
-                          , children: [ R.text "Terrain" ]
-                          }
-                      , R.button
-                          { id: "history-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen HistoryScreen)
-                          , children: [ R.text "History" ]
-                          }
-                      , R.button
-                          { id: "moon-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen MoonScreen)
-                          , children: [ R.text "Moons" ]
-                          }
-                      , R.button
-                          { id: "meteor-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen MeteorScreen)
-                          , children: [ R.text "Meteors" ]
-                          }
-                      , R.button
-                          { id: "sun-btn"
-                          , className: "menu-btn"
-                          , disabled: not wasmReady
-                          , onClick: capture_ (setScreen SunScreen)
-                          , children: [ R.text "Sun" ]
+                      , R.div
+                          { className: "menu-accordion"
+                          , children:
+                              ( [ R.button
+                                    { className: "menu-accordion-header"
+                                    , onClick: capture_ (setAccAstroOpen (not accAstroOpen))
+                                    , children:
+                                        [ R.span { children: [ R.text "Astronomy, Moons & Impacts" ] }
+                                        , R.span { children: [ R.text (if accAstroOpen then "▼" else "▶") ] }
+                                        ]
+                                    }
+                                ]
+                                  <>
+                                    if accAstroOpen then
+                                      [ R.div
+                                          { className: "menu-accordion-body"
+                                          , children:
+                                              [ R.button
+                                                  { id: "moon-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen MoonScreen)
+                                                  , children: [ R.text "Moons" ]
+                                                  }
+                                              , R.button
+                                                  { id: "meteor-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen MeteorScreen)
+                                                  , children: [ R.text "Meteors" ]
+                                                  }
+                                              , R.button
+                                                  { id: "sun-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen SunScreen)
+                                                  , children: [ R.text "Sun" ]
+                                                  }
+                                              ]
+                                          }
+                                      ]
+                                    else
+                                      []
+                              )
                           }
                       ]
                   }
@@ -3582,6 +3768,227 @@ mkApp = do
               ]
           }
 
+      TravelScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.select
+                                  { id: "travel-aspect-select"
+                                  , className: "control-select"
+                                  , value: travelAspect
+                                  , onChange: handler targetValue handleTravelAspectChange
+                                  , children:
+                                      [ R.option
+                                          { value: "travel"
+                                          , children: [ R.text "Travel Routes & Ports" ]
+                                          }
+                                      , R.option
+                                          { value: "winds_currents"
+                                          , children: [ R.text "Winds & Ocean Currents" ]
+                                          }
+                                      , R.option
+                                          { value: "nations"
+                                          , children: [ R.text "Nations & Maritime Diplomacy" ]
+                                          }
+                                      , R.option
+                                          { value: "population"
+                                          , children: [ R.text "Population & Migration" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "travel-winds-btn"
+                                  , className: if travelShowWindsCurrents then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleTravelWindsCurrents
+                                  , children: [ R.text (if travelShowWindsCurrents then "Winds & Currents: On" else "Winds & Currents: Off") ]
+                                  }
+                              , R.button
+                                  { id: "travel-potential-btn"
+                                  , className: if travelShowPotential then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleTravelPotential
+                                  , children: [ R.text (if travelShowPotential then "All Corridors: On" else "Active Only") ]
+                                  }
+                              , R.button
+                                  { id: "travel-rivers-btn"
+                                  , className: if travelShowRivers then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleTravelRivers
+                                  , children: [ R.text (if travelShowRivers then "Rivers: On" else "Rivers: Off") ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "travel-start-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (toggleTravelRunning setTravelInfo)
+                                  , children: [ R.text (if travelInfo.isRunning then "Pause" else "Start") ]
+                                  }
+                              , R.button
+                                  { id: "travel-step-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: travelInfo.isRunning
+                                  , onClick: capture_ (stepTravel setTravelInfo)
+                                  , children: [ R.text "Step" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { id: "travel-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { id: "travel-planet-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (travelInfo.planetName <> " — " <> show travelInfo.ticks <> " ticks (" <> show travelInfo.years <> " yrs)") ]
+                                  }
+                              , R.div
+                                  { id: "travel-routes-label"
+                                  , className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Active Routes: "
+                                              <> show travelInfo.activeRoutes
+                                              <> " / "
+                                              <> show travelInfo.potentialRoutes
+                                              <> " corridors ("
+                                              <> show travelInfo.portCount
+                                              <> " ports)"
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { id: "travel-diplomacy-label"
+                                  , className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Maritime Trade: "
+                                              <> show travelInfo.tradeRoutes
+                                              <> " | Maritime Conflict: "
+                                              <> show travelInfo.conflictRoutes
+                                              <> " | States: "
+                                              <> show travelInfo.activeStates
+                                          )
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Travel Routes, Winds, Ocean Currents & Port Inspection (click globe)" ]
+                                  }
+                              , R.div
+                                  { id: "travel-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text travelInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "travel-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: travelInfo.isRunning
+                                  , onClick: capture_ (loadEarthIntoTravel setTravelInfo)
+                                  , children: [ R.text "Earth" ]
+                                  }
+                              , R.button
+                                  { id: "travel-load-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: travelInfo.isRunning
+                                  , onClick: capture_ (loadFilePlanetIntoTravel setTravelInfo)
+                                  , children: [ R.text "Load File" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "travel-saved-btn"
+                                  , className: "action-btn"
+                                  , disabled: travelInfo.isRunning || not travelInfo.hasSavedPlanet
+                                  , onClick: capture_ (loadSavedPlanetIntoTravel setTravelInfo)
+                                  , children: [ R.text "Load Saved" ]
+                                  }
+                              , R.button
+                                  { id: "travel-save-btn"
+                                  , className: "action-btn"
+                                  , disabled: travelInfo.isRunning
+                                  , onClick: capture_ (saveTravelPlanet setTravelInfo)
+                                  , children: [ R.text "Save" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "travel-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: travelInfo.isRunning
+                                  , onClick: capture_ (resetTravel setTravelInfo)
+                                  , children: [ R.text "Reset" ]
+                                  }
+                              , R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
       HistoryScreen ->
         R.div
           { className: "mode-layout"
@@ -3625,6 +4032,14 @@ mkApp = do
                                       [ R.option
                                           { value: "nations"
                                           , children: [ R.text "Nations & Diplomacy" ]
+                                          }
+                                      , R.option
+                                          { value: "travel"
+                                          , children: [ R.text "Travel Routes & Sea Lanes" ]
+                                          }
+                                      , R.option
+                                          { value: "winds_currents"
+                                          , children: [ R.text "Winds & Ocean Currents" ]
                                           }
                                       , R.option
                                           { value: "species"
@@ -3827,6 +4242,10 @@ mkApp = do
                                       , R.option
                                           { value: "nations"
                                           , children: [ R.text "Nations" ]
+                                          }
+                                      , R.option
+                                          { value: "travel"
+                                          , children: [ R.text "Travel Routes" ]
                                           }
                                       , R.option
                                           { value: "meteors"

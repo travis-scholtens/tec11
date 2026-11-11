@@ -326,7 +326,7 @@ impl PrehistorySimulation {
             .iter()
             .map(|t| t.elevation().max(0.0))
             .collect();
-        self.climate_model.update_for_tectonics(&land_elevs, true);
+        self.climate_model.update_for_glaciation_step(&land_elevs, true);
         self.tile_koeppen.resize(n, 0);
         self.tile_life.resize(n, 0.0);
         self.tile_precip_norm.resize(n, 0.0);
@@ -357,6 +357,12 @@ impl PrehistorySimulation {
     }
 
     fn refresh_climate_and_rivers(&mut self) {
+        let land_elevs: Vec<f32> = self
+            .tiles
+            .iter()
+            .map(|t| t.elevation().max(0.0))
+            .collect();
+        self.climate_model.update_for_tectonics(&land_elevs, true);
         self.refresh_climate();
         let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
         self.refresh_rivers(&elevations);
@@ -677,6 +683,10 @@ impl PrehistorySimulation {
 
     pub fn grid(&self) -> &SphericalGrid {
         &self.grid
+    }
+
+    pub fn climate_model(&self) -> &ClimateModel {
+        &self.climate_model
     }
 
     pub fn adjacency(&self) -> &[Vec<usize>] {

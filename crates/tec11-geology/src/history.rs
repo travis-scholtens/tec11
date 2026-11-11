@@ -14,7 +14,10 @@ use crate::population::{
 };
 use crate::prehistory::PrehistorySimulation;
 use crate::rivers::trace_coarse_rivers;
-use crate::sun_sky::{generate_solar_system_with_rng, HomeStar, SolarSystemPlanet};
+use crate::sun_sky::{
+    generate_default_constellations, generate_solar_system_with_rng, Constellation, HomeStar,
+    SolarSystemPlanet,
+};
 
 pub const HISTORY_YEARS_PER_TICK: u32 = 200;
 pub const HISTORY_MIN_RIVER_ELEV: f32 = 2.0;
@@ -36,6 +39,7 @@ pub enum ConceptKey {
     Sun(u32),
     Moon(u32),
     Planet(u32),
+    Constellation(u32),
     Species(u32),
     Nation(u32),
     State(u32),
@@ -55,6 +59,10 @@ impl ConceptKey {
             },
             Self::Planet(id) => tec11_proto::Concept {
                 kind: tec11_proto::ConceptKind::Planet as i32,
+                id,
+            },
+            Self::Constellation(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Constellation as i32,
                 id,
             },
             Self::Species(id) => tec11_proto::Concept {
@@ -83,6 +91,7 @@ impl ConceptKey {
             tec11_proto::ConceptKind::Sun => Self::Sun(c.id),
             tec11_proto::ConceptKind::Moon => Self::Moon(c.id),
             tec11_proto::ConceptKind::Planet => Self::Planet(c.id),
+            tec11_proto::ConceptKind::Constellation => Self::Constellation(c.id),
             tec11_proto::ConceptKind::Species => Self::Species(c.id),
             tec11_proto::ConceptKind::Nation => Self::Nation(c.id),
             tec11_proto::ConceptKind::State => Self::State(c.id),
@@ -393,6 +402,38 @@ pub struct StateRecord {
     pub asabiya: f32,
 }
 
+/// A maritime or riverine travel route connecting a water-access origin tile to a destination
+/// landing tile along prevailing winds, surface ocean currents, or navigable rivers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TravelRoute {
+    /// Origin fine face index (populated coastal port or river landing).
+    pub from_fine_face: usize,
+    /// Destination fine face index (reachable coastal landing or river port).
+    pub to_fine_face: usize,
+    /// Origin coarse tile index.
+    pub from_coarse_tile: usize,
+    /// Destination coarse tile index.
+    pub to_coarse_tile: usize,
+    /// Coarse tile trajectory (`from_coarse_tile ..= to_coarse_tile`) across ocean currents/winds or rivers.
+    pub coarse_path: Vec<usize>,
+    /// Effective wind/current-weighted travel cost (lower = faster/easier voyage).
+    pub effective_cost: f32,
+    /// Mean wind + ocean current alignment factor in `[0.0, 1.0]`.
+    pub wind_current_alignment: f32,
+    /// Route kind: `0` = Ocean Current & Wind Gyre, `1` = Coastal / Monsoon Sea Lane, `2` = Riverine Corridor.
+    pub route_kind: u8,
+}
+
+impl TravelRoute {
+    pub fn kind_name(&self) -> &'static str {
+        match self.route_kind {
+            0 => "Ocean Current & Wind Gyre",
+            1 => "Coastal / Monsoon Sea Lane",
+            _ => "Riverine Corridor",
+        }
+    }
+}
+
 /// Complete History simulation (`historysimulation.py`, `historydisplay.py`, `historypresenter.py`).
 pub struct HistorySimulation {
     prehistory: PrehistorySimulation,
@@ -401,12 +442,19 @@ pub struct HistorySimulation {
     history_ticks: u32,
     moon_count: u32,
     solar_system: Vec<SolarSystemPlanet>,
+    constellations: Vec<Constellation>,
     settled_species: Vec<SettledSpecies>,
     tile_species: Vec<Vec<usize>>,
     rivers: Vec<Vec<usize>>,
     river_routes: Vec<Vec<usize>>,
     river_tiles: Vec<bool>,
     capacities: Vec<f32>,
+    /// Representative coastal or river fine face (`Some(f_idx)`) for each coarse tile `c` with water access.
+    coarse_port_fine_face: Vec<Option<usize>>,
+    /// All physically navigable wind/current/river corridors connecting habitable coasts and river basins.
+    potential_travel_routes: Vec<TravelRoute>,
+    /// Active travel routes currently established by populated water-access communities/states.
+    travel_routes: Vec<TravelRoute>,
     tile_communities: BTreeMap<usize, Vec<Community>>,
     tile_states: BTreeMap<usize, u32>,
     states: BTreeMap<u32, StateRecord>,
@@ -445,9 +493,20 @@ impl HistorySimulation {
     }
 
     pub fn from_prehistory_with_system(
+        prehistory: PrehistorySimulation,
+        moon_count: u32,
+        solar_system: Vec<SolarSystemPlanet>,
+        seed: u128,
+    ) -> Self {
+        let constellations = generate_default_constellations(seed as u64);
+        Self::from_prehistory_with_sky(prehistory, moon_count, solar_system, constellations, seed)
+    }
+
+    pub fn from_prehistory_with_sky(
         mut prehistory: PrehistorySimulation,
         moon_count: u32,
         solar_system: Vec<SolarSystemPlanet>,
+        constellations: Vec<Constellation>,
         seed: u128,
     ) -> Self {
         // Ensure prehistory has populated agricultural tiles if starting directly on Earth or an unpopulated planet.
@@ -481,12 +540,16 @@ impl HistorySimulation {
             history_ticks: 0,
             moon_count,
             solar_system,
+            constellations,
             settled_species: Vec::new(),
             tile_species: vec![Vec::new(); num_fine],
             rivers: Vec::new(),
             river_routes: Vec::new(),
             river_tiles: vec![false; num_fine],
             capacities: vec![0.0; num_fine],
+            coarse_port_fine_face: Vec::new(),
+            potential_travel_routes: Vec::new(),
+            travel_routes: Vec::new(),
             tile_communities: BTreeMap::new(),
             tile_states: BTreeMap::new(),
             states: BTreeMap::new(),
@@ -524,13 +587,7 @@ impl HistorySimulation {
 
         // 1. Settle domesticable plants & animals on the planet's coarse climate,
         //    then map onto subdivided fine faces (`historysimulation.py:facespecies`).
-        let climate_for_species = tec11_climate::ClimateModel::with_elevations(
-            grid.clone(),
-            coarse_elevs.iter().map(|&h| h.max(0.0)).collect(),
-            3,
-            self.prehistory.glaciation(),
-        );
-        let biosphere = settle_species_on_climate(&coarse_elevs, &climate_for_species);
+        let biosphere = settle_species_on_climate(&coarse_elevs, self.prehistory.climate_model());
         self.settled_species = biosphere.species;
         let mut coarse_species: Vec<Vec<usize>> = vec![Vec::new(); num_coarse];
         for (sp_idx, sp) in self.settled_species.iter().enumerate() {
@@ -749,6 +806,23 @@ impl HistorySimulation {
             }
         }
 
+        // Coin all constellations visible at some point in the year from each state's territory:
+        let mut init_extents: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (&f_idx, &sid) in &self.tile_states {
+            init_extents.entry(sid).or_default().push(f_idx);
+        }
+        for (sid, tiles) in &init_extents {
+            let vis = self.visible_constellations_for_tiles(tiles);
+            let mut temp_rng = self.rng.clone();
+            if let Some(lang) = self.languages.get_mut(sid) {
+                for c_idx in vis {
+                    lang.coin_concept(ConceptKey::Constellation(c_idx), &mut temp_rng);
+                }
+                lang.refresh_phonology();
+            }
+            self.rng = temp_rng;
+        }
+
         // Initialize communities on claimed fine faces (`historysimulation.py:population`, 1/9 or 1/27 shares)
         let pre_pop = self.prehistory.populated().clone();
         for (&f_idx, &sid) in &self.tile_states {
@@ -785,8 +859,401 @@ impl HistorySimulation {
             self.tile_communities.insert(f_idx, vec![comm]);
         }
 
+        // 5. Compute navigable wind, ocean-current, and riverine travel routes and activate routes for populated water-access polities.
+        self.compute_potential_travel_routes(&ocean, &coarse_elevs, &koeppen, &coarse_adj, &fine_adj, &fine_elevs);
+        self.update_travel_routes();
+
         self.recolor_states(&fine_adj);
         self.update_diplomacy_and_trade(&fine_adj);
+    }
+
+    /// Precompute physically navigable maritime and riverine travel corridors (`potential_travel_routes`)
+    /// driven by prevailing planetary winds (`wind_vector_xyz`), 8-season surface ocean currents (`velocity_xyz`),
+    /// coastal cabotage, and major river routes (`self.rivers`).
+    fn compute_potential_travel_routes(
+        &mut self,
+        ocean_set: &BTreeSet<usize>,
+        coarse_elevs: &[f32],
+        koeppen: &[u8],
+        coarse_adj: &[Vec<usize>],
+        fine_adj: &[Vec<usize>],
+        fine_elevs: &[f32],
+    ) {
+        let num_coarse = coarse_elevs.len();
+        let num_fine = fine_elevs.len();
+        let grid = self.prehistory.grid();
+        let climate = self.prehistory.climate_model();
+
+        // 1. Identify which coarse land tiles have water access (ocean coast or major river)
+        //    and select their best coastal/river fine port face.
+        let mut on_coarse_river = vec![false; num_coarse];
+        for r in &self.rivers {
+            for &c in r {
+                if c < num_coarse {
+                    on_coarse_river[c] = true;
+                }
+            }
+        }
+        let mut is_coastal_coarse = vec![false; num_coarse];
+        for c in 0..num_coarse {
+            if coarse_elevs[c] > 0.0
+                && is_passable(coarse_elevs[c], koeppen[c], true)
+                && coarse_adj[c]
+                    .iter()
+                    .any(|&nb| ocean_set.contains(&nb) || coarse_elevs[nb] <= 0.0)
+            {
+                is_coastal_coarse[c] = true;
+            }
+        }
+
+        let mut coarse_ports: Vec<Option<usize>> = vec![None; num_coarse];
+        let mut coarse_best_score: Vec<f32> = vec![-1.0; num_coarse];
+        for f_idx in 0..num_fine {
+            if fine_elevs[f_idx] <= 0.0 || self.capacities[f_idx] <= 0.05 {
+                continue;
+            }
+            let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+            if !is_coastal_coarse[c] && !on_coarse_river[c] {
+                continue;
+            }
+            let touches_water = self.river_tiles[f_idx]
+                || fine_adj[f_idx].iter().any(|&nb| fine_elevs[nb] <= 0.0);
+            let score = self.capacities[f_idx]
+                + if touches_water { 10.0 } else { 0.0 }
+                + if self.river_tiles[f_idx] { 5.0 } else { 0.0 };
+            if score > coarse_best_score[c] {
+                coarse_best_score[c] = score;
+                coarse_ports[c] = Some(f_idx);
+            }
+        }
+        self.coarse_port_fine_face = coarse_ports;
+
+        // 2. Build directed wind + ocean-current transition table for coarse ocean tiles.
+        let num_seasons = climate.season_count().max(1);
+        let mut wind_vecs: Vec<[f32; 3]> = Vec::with_capacity(num_coarse);
+        for c in 0..num_coarse {
+            wind_vecs.push(climate.wind_vector_xyz(c));
+        }
+
+        // For each coarse ocean tile `u`, store navigable transitions `(v, step_cost, alignment)`
+        let mut nav_edges: Vec<Vec<(usize, f32, f32)>> = vec![Vec::new(); num_coarse];
+        for u in 0..num_coarse {
+            if coarse_elevs[u] > 0.0 {
+                continue;
+            }
+            let pu = grid.faces[u].0;
+            let wu = wind_vecs[u];
+            for &v in &coarse_adj[u] {
+                let pv = grid.faces[v].0;
+                let dx = (pv[0] - pu[0]) as f32;
+                let dy = (pv[1] - pu[1]) as f32;
+                let dz = (pv[2] - pu[2]) as f32;
+                let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+                let dir = [dx / len, dy / len, dz / len];
+
+                let wind_dot = wu[0] * dir[0] + wu[1] * dir[1] + wu[2] * dir[2];
+                let mut best_align = 0.45 * wind_dot;
+                for s_idx in 0..num_seasons {
+                    if let Some(oc) = climate.ocean_for_season(s_idx) {
+                        if let Some(vel) = oc.velocity_xyz.get(u) {
+                            let cur_dot = vel[0] * dir[0] + vel[1] * dir[1] + vel[2] * dir[2];
+                            let align = 0.45 * wind_dot + 0.85 * cur_dot;
+                            if align > best_align {
+                                best_align = align;
+                            }
+                        }
+                    }
+                }
+
+                let v_touches_land = coarse_elevs[v] > 0.0
+                    || coarse_adj[v].iter().any(|&nb| coarse_elevs[nb] > 0.0);
+                if best_align >= 0.06 || (v_touches_land && best_align >= -0.20) {
+                    let cost = if best_align >= 0.06 {
+                        (1.0 - 0.55 * best_align).clamp(0.35, 0.95)
+                    } else {
+                        1.05
+                    };
+                    let align_norm = ((best_align + 0.25) / 1.25).clamp(0.10, 1.0);
+                    nav_edges[u].push((v, cost, align_norm));
+                }
+            }
+            nav_edges[u].sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        let mut routes_by_pair: BTreeMap<(usize, usize), TravelRoute> = BTreeMap::new();
+
+        // 3. Trace wind & ocean-current gyre streamlines and bounded coastal/monsoon sea lanes from each coastal port.
+        let coastal_ports: Vec<(usize, usize)> = (0..num_coarse)
+            .filter_map(|c| {
+                if is_coastal_coarse[c] {
+                    self.coarse_port_fine_face[c].map(|f| (c, f))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Stride coastal ports so we get well-spaced maritime hubs across every coastline (~90 hubs)
+        let stride = (coastal_ports.len() / 90).max(1);
+        for (port_idx, &(c_start, f_start)) in coastal_ports.iter().enumerate() {
+            let is_river_mouth = on_coarse_river[c_start];
+            if port_idx % stride != 0 && !is_river_mouth {
+                continue;
+            }
+            let direct_land_nbs: BTreeSet<usize> =
+                coarse_adj[c_start].iter().copied().collect();
+
+            // (a) Wind & Ocean-Current Streamline Tracing (long-distance pelagic gyre voyages)
+            for &o_start in &coarse_adj[c_start] {
+                if coarse_elevs[o_start] > 0.0 {
+                    continue;
+                }
+                let mut curr = o_start;
+                let mut path = vec![c_start, o_start];
+                let mut visited = BTreeSet::new();
+                visited.insert(c_start);
+                visited.insert(o_start);
+                let mut total_cost = 0.6f32;
+                let mut total_align = 0.65f32;
+                let mut steps = 1usize;
+
+                for _ in 0..16 {
+                    // Check if `curr` is adjacent to a distant coastal port with favorable onshore wind/current
+                    if steps >= 2 {
+                        if let Some(&(land_v, edge_cost, edge_align)) = nav_edges[curr]
+                            .iter()
+                            .find(|&&(v, _, _)| {
+                                v != c_start
+                                    && !direct_land_nbs.contains(&v)
+                                    && self.coarse_port_fine_face.get(v).and_then(|x| *x).is_some()
+                            })
+                        {
+                            let f_end = self.coarse_port_fine_face[land_v].unwrap();
+                            let mut full_path = path.clone();
+                            full_path.push(land_v);
+                            let eff_cost = total_cost + edge_cost;
+                            let mean_align =
+                                ((total_align + edge_align) / (steps as f32 + 1.0)).clamp(0.1, 1.0);
+                            let route = TravelRoute {
+                                from_fine_face: f_start,
+                                to_fine_face: f_end,
+                                from_coarse_tile: c_start,
+                                to_coarse_tile: land_v,
+                                coarse_path: full_path,
+                                effective_cost: eff_cost,
+                                wind_current_alignment: mean_align,
+                                route_kind: 0,
+                            };
+                            let key = (c_start, land_v);
+                            if routes_by_pair
+                                .get(&key)
+                                .is_none_or(|old| eff_cost < old.effective_cost)
+                            {
+                                routes_by_pair.insert(key, route);
+                            }
+                            break;
+                        }
+                    }
+
+                    // Advance to the strongest downwind / down-current ocean tile
+                    let next_opt = nav_edges[curr]
+                        .iter()
+                        .copied()
+                        .find(|&(v, _, _)| coarse_elevs[v] <= 0.0 && !visited.contains(&v));
+                    let Some((next_o, edge_cost, edge_align)) = next_opt else {
+                        break;
+                    };
+                    visited.insert(next_o);
+                    path.push(next_o);
+                    total_cost += edge_cost;
+                    total_align += edge_align;
+                    steps += 1;
+                    curr = next_o;
+                }
+            }
+
+            // (b) Bounded Dijkstra search for nearby coastal/island/monsoon sea lanes (up to 7 ocean steps)
+            let mut best_ocean_cost: BTreeMap<usize, (u32, usize, f32, usize)> = BTreeMap::new();
+            let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
+            for &o_nb in &coarse_adj[c_start] {
+                if coarse_elevs[o_nb] <= 0.0 {
+                    best_ocean_cost.insert(o_nb, (60, c_start, 0.70, 1));
+                    heap.push(Reverse((60, o_nb)));
+                }
+            }
+            let mut found_destinations = 0usize;
+            while let Some(Reverse((cost_int, u))) = heap.pop() {
+                let Some(&(bc, _, sum_align, hops)) = best_ocean_cost.get(&u) else {
+                    continue;
+                };
+                if cost_int > bc || cost_int > 550 || hops > 7 {
+                    continue;
+                }
+                for &(v, step_cost, step_align) in &nav_edges[u] {
+                    let next_cost = cost_int + (step_cost * 100.0) as u32;
+                    if coarse_elevs[v] > 0.0 {
+                        if hops >= 2
+                            && v != c_start
+                            && !direct_land_nbs.contains(&v)
+                            && found_destinations < 2
+                        {
+                            if let Some(f_end) = self.coarse_port_fine_face[v] {
+                                let key = (c_start, v);
+                                if !routes_by_pair.contains_key(&key) {
+                                    // Reconstruct coarse path
+                                    let mut rev_path = vec![v, u];
+                                    let mut trace = u;
+                                    while let Some(&(_, prev, _, _)) = best_ocean_cost.get(&trace) {
+                                        rev_path.push(prev);
+                                        if prev == c_start || rev_path.len() > 12 {
+                                            break;
+                                        }
+                                        trace = prev;
+                                    }
+                                    rev_path.reverse();
+                                    let eff_cost = (next_cost as f32) / 100.0;
+                                    let mean_align = ((sum_align + step_align)
+                                        / (hops as f32 + 1.0))
+                                        .clamp(0.1, 1.0);
+                                    routes_by_pair.insert(
+                                        key,
+                                        TravelRoute {
+                                            from_fine_face: f_start,
+                                            to_fine_face: f_end,
+                                            from_coarse_tile: c_start,
+                                            to_coarse_tile: v,
+                                            coarse_path: rev_path,
+                                            effective_cost: eff_cost,
+                                            wind_current_alignment: mean_align,
+                                            route_kind: 1,
+                                        },
+                                    );
+                                    found_destinations += 1;
+                                }
+                            }
+                        }
+                    } else if hops < 7 && next_cost <= 520 {
+                        let is_better = best_ocean_cost
+                            .get(&v)
+                            .is_none_or(|&(old_c, _, _, _)| next_cost < old_c);
+                        if is_better {
+                            best_ocean_cost.insert(
+                                v,
+                                (next_cost, u, sum_align + step_align, hops + 1),
+                            );
+                            heap.push(Reverse((next_cost, v)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Add navigable riverine corridors (`route_kind = 2`) along major coarse rivers.
+        for r in &self.rivers {
+            let valid_land: Vec<usize> = r
+                .iter()
+                .copied()
+                .filter(|&c| {
+                    c < num_coarse
+                        && coarse_elevs[c] > 0.0
+                        && self.coarse_port_fine_face[c].is_some()
+                })
+                .collect();
+            if valid_land.len() >= 3 {
+                let c_head = valid_land[0];
+                let c_mouth = *valid_land.last().unwrap();
+                if c_head != c_mouth {
+                    let f_head = self.coarse_port_fine_face[c_head].unwrap();
+                    let f_mouth = self.coarse_port_fine_face[c_mouth].unwrap();
+                    let downstream_cost = (valid_land.len() as f32 * 0.35).clamp(0.5, 4.0);
+                    routes_by_pair.insert(
+                        (c_head, c_mouth),
+                        TravelRoute {
+                            from_fine_face: f_head,
+                            to_fine_face: f_mouth,
+                            from_coarse_tile: c_head,
+                            to_coarse_tile: c_mouth,
+                            coarse_path: valid_land.clone(),
+                            effective_cost: downstream_cost,
+                            wind_current_alignment: 0.90,
+                            route_kind: 2,
+                        },
+                    );
+                    let mut upstream_path = valid_land;
+                    upstream_path.reverse();
+                    routes_by_pair.insert(
+                        (c_mouth, c_head),
+                        TravelRoute {
+                            from_fine_face: f_mouth,
+                            to_fine_face: f_head,
+                            from_coarse_tile: c_mouth,
+                            to_coarse_tile: c_head,
+                            coarse_path: upstream_path,
+                            effective_cost: downstream_cost * 1.35,
+                            wind_current_alignment: 0.65,
+                            route_kind: 2,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut potential: Vec<TravelRoute> = routes_by_pair.into_values().collect();
+        potential.sort_by(|a, b| {
+            a.effective_cost
+                .partial_cmp(&b.effective_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.potential_travel_routes = potential;
+    }
+
+    /// Re-evaluate active `travel_routes` from `potential_travel_routes` based on which water-access
+    /// coarse tiles currently have populated communities or state presence.
+    pub fn update_travel_routes(&mut self) {
+        let coarse_elevs = self.prehistory.tile_elevations();
+        let num_coarse = coarse_elevs.len();
+        let mut coarse_active_fine: Vec<Option<usize>> = vec![None; num_coarse];
+
+        // Any populated or state-claimed fine face on a coarse tile activates that coarse tile's water access
+        for (&f_idx, &sid) in &self.tile_states {
+            let pop: f32 = self
+                .tile_communities
+                .get(&f_idx)
+                .map(|cs| cs.iter().map(|c| c.thousands).sum())
+                .unwrap_or(0.0);
+            if pop > 0.0 || self.states.contains_key(&sid) {
+                let c = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                if c < num_coarse {
+                    // Prefer the designated port fine face if it is claimed by a state
+                    if self.coarse_port_fine_face.get(c).copied().flatten() == Some(f_idx)
+                        || coarse_active_fine[c].is_none()
+                    {
+                        coarse_active_fine[c] = Some(f_idx);
+                    }
+                }
+            }
+        }
+
+        let mut active = Vec::new();
+        for route in &self.potential_travel_routes {
+            if let Some(active_origin_fine) = coarse_active_fine
+                .get(route.from_coarse_tile)
+                .copied()
+                .flatten()
+            {
+                let mut r = route.clone();
+                r.from_fine_face = active_origin_fine;
+                if let Some(active_dest_fine) = coarse_active_fine
+                    .get(route.to_coarse_tile)
+                    .copied()
+                    .flatten()
+                {
+                    r.to_fine_face = active_dest_fine;
+                }
+                active.push(r);
+            }
+        }
+        self.travel_routes = active;
     }
 
     /// Greedy 6-coloring of adjacent states (`terrainmethod.py:colornations`).
@@ -880,6 +1347,25 @@ impl HistorySimulation {
             .unwrap_or([1.0, 0.0, 0.0]);
         let dot = (c1[0] * c2[0] + c1[1] * c2[1] + c1[2] * c2[2]).clamp(-1.0, 1.0);
         dot.acos() as f32
+    }
+
+    /// Effective distance between states `s1` and `s2`, taking into account lower friction along
+    /// established maritime/riverine wind & current travel routes (`self.travel_routes`).
+    fn effective_state_distance(&self, s1: u32, s2: u32) -> f32 {
+        let mut best = self.capital_angular_distance(s1, s2);
+        for r in &self.travel_routes {
+            let st_from = self.tile_states.get(&r.from_fine_face).copied();
+            let st_to = self.tile_states.get(&r.to_fine_face).copied();
+            if (st_from == Some(s1) && st_to == Some(s2))
+                || (st_from == Some(s2) && st_to == Some(s1))
+            {
+                let water_dist = (r.effective_cost * 0.14).clamp(0.08, 1.15);
+                if water_dist < best {
+                    best = water_dist;
+                }
+            }
+        }
+        best
     }
 
     /// Total carrying capacity $K_n$ of state `state_id` across its fine faces.
@@ -993,7 +1479,8 @@ impl HistorySimulation {
         out
     }
 
-    /// Compute per-state tile extents, native species sets, and neighboring states (including across rivers: `riverneighbors`).
+    /// Compute per-state tile extents, native species sets, and neighboring states (including across rivers
+    /// and along established maritime/riverine wind & current travel routes).
     fn state_topology(
         &self,
         adjacency: &[Vec<usize>],
@@ -1032,12 +1519,26 @@ impl HistorySimulation {
                 }
             }
         }
+
+        // Also link states connected by established maritime or riverine travel routes (`self.travel_routes`)
+        for r in &self.travel_routes {
+            if let (Some(&s1), Some(&s2)) = (
+                self.tile_states.get(&r.from_fine_face),
+                self.tile_states.get(&r.to_fine_face),
+            ) {
+                if s1 != s2 {
+                    neighbors.entry(s1).or_default().insert(s2);
+                    neighbors.entry(s2).or_default().insert(s1);
+                }
+            }
+        }
+
         (extents, state_species, neighbors)
     }
 
     /// Hop-decayed Heckscher-Ohlin & Tinbergen trade pressure $\text{Pressure}_{n \leftarrow o}$:
     /// each novel species $s \notin S_n$ available in $o$ (at hop $h = 0$) or via $o$'s recursive trade
-    /// network at minimum hop $h \ge 1$ contributes $0.5^h$, damped by capital distance $e^{-0.25 d_{no}}$.
+    /// network at minimum hop $h \ge 1$ contributes $0.5^h$, damped by effective land/maritime distance $e^{-0.25 d_{no}}$.
     fn compute_trade_pressure(
         &self,
         n: u32,
@@ -1070,7 +1571,7 @@ impl HistorySimulation {
             .values()
             .map(|&h| 0.5f32.powi(h as i32))
             .sum();
-        let dist = self.capital_angular_distance(n, o);
+        let dist = self.effective_state_distance(n, o);
         raw_gain * (-0.25 * dist).exp()
     }
 
@@ -1079,6 +1580,7 @@ impl HistorySimulation {
     /// 2. Polachek commercial peace (active war blocks trade; trade raises war threshold by peace dividend $\tau_{\text{trade}}$),
     /// 3. Collins resource + territorial carrying-capacity + demographic tension with Boulding distance decay (`e^{-0.5 d}`).
     fn update_diplomacy_and_trade(&mut self, adjacency: &[Vec<usize>]) {
+        self.update_travel_routes();
         let (extents, state_species, neighbors) = self.state_topology(adjacency);
         let active_states: BTreeSet<u32> = extents.keys().copied().collect();
         for st in self.states.values_mut() {
@@ -1187,7 +1689,7 @@ impl HistorySimulation {
                     };
                     let dk = cap_o / (cap_n + cap_o);
                     let dp = (eff_n - eff_o) / eff_o;
-                    let dist = self.capital_angular_distance(n, o);
+                    let dist = self.effective_state_distance(n, o);
                     let boulding_lsg = (-0.5 * dist).exp();
                     let tension = (dr + 0.15 * dk + dp) * boulding_lsg;
 
@@ -1229,6 +1731,33 @@ impl HistorySimulation {
         self.accumulate_and_borrow_concepts(&extents, &state_species);
     }
 
+    /// Geographic latitude in degrees `[-90.0, 90.0]` of fine face `f_idx`.
+    pub fn fine_face_latitude_deg(&self, f_idx: usize) -> f64 {
+        let z = self
+            .terrain
+            .terrain_grid
+            .faces
+            .get(f_idx)
+            .map(|(c, _)| c[2])
+            .unwrap_or(0.0)
+            .clamp(-1.0, 1.0);
+        z.asin() * 180.0 / std::f64::consts::PI
+    }
+
+    /// Set of constellation indices `c.index` visible at some point in the year from any of `tiles`.
+    pub fn visible_constellations_for_tiles(&self, tiles: &[usize]) -> BTreeSet<u32> {
+        let mut visible = BTreeSet::new();
+        for c in &self.constellations {
+            if tiles
+                .iter()
+                .any(|&f_idx| c.is_visible_at_latitude_deg(self.fine_face_latitude_deg(f_idx)))
+            {
+                visible.insert(c.index);
+            }
+        }
+        visible
+    }
+
     /// Accumulate concepts across co-resident communities, trade partners, rivals, and recursive trade imports,
     /// borrowing missing words from source state majority languages (`historysimulation.py:664-705`).
     fn accumulate_and_borrow_concepts(
@@ -1237,12 +1766,15 @@ impl HistorySimulation {
         state_species: &BTreeMap<u32, BTreeSet<usize>>,
     ) {
         let mut state_langs: BTreeMap<u32, Option<u32>> = BTreeMap::new();
-        for &sid in extents.keys() {
+        let mut state_visible_constellations: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        for (&sid, tiles) in extents {
             state_langs.insert(sid, self.primary_language_for_state(sid));
+            state_visible_constellations.insert(sid, self.visible_constellations_for_tiles(tiles));
         }
 
         let mut lang_concepts: BTreeMap<u32, BTreeMap<ConceptKey, Option<u32>>> = BTreeMap::new();
         let mut state_sources: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut lang_visible_constellations: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
 
         for (&f, comms) in &self.tile_communities {
             let Some(&sid) = self.tile_states.get(&f) else {
@@ -1267,15 +1799,27 @@ impl HistorySimulation {
             let Some(states_for_lang) = state_sources.get(&lang_id) else {
                 continue;
             };
+            let mut all_vis_for_lang = BTreeSet::new();
+            for &state_id in states_for_lang {
+                if let Some(vis) = state_visible_constellations.get(&state_id) {
+                    all_vis_for_lang.extend(vis.iter().copied());
+                }
+            }
+            lang_visible_constellations.insert(lang_id, all_vis_for_lang.clone());
+
             for &state_id in states_for_lang {
                 let native = state_species.get(&state_id).cloned().unwrap_or_default();
+                let vis_here = state_visible_constellations
+                    .get(&state_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let rec_partners = self.recursive_trade_partners(state_id);
                 let direct_partners = self.lookup_trade_partners(state_id);
                 let rivals = self.lookup_opponents(state_id);
 
                 let mut related_states = BTreeSet::new();
                 related_states.insert(state_id);
-                related_states.extend(direct_partners);
+                related_states.extend(direct_partners.iter().copied());
                 related_states.extend(rivals);
                 related_states.extend(rec_partners.iter().copied());
 
@@ -1295,6 +1839,37 @@ impl HistorySimulation {
                     }
                 }
 
+                // Borrow names from trade partners (direct and recursive) for constellations this language cannot see:
+                let mut trade_network = direct_partners;
+                trade_network.extend(rec_partners.iter().copied());
+                for partner in &trade_network {
+                    let p_lang = state_langs.get(partner).copied().flatten();
+                    if let Some(p_vis) = state_visible_constellations.get(partner) {
+                        for &c_idx in p_vis {
+                            if !all_vis_for_lang.contains(&c_idx) {
+                                if let Some(plid) = p_lang {
+                                    concepts
+                                        .entry(ConceptKey::Constellation(c_idx))
+                                        .or_insert(Some(plid));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(plid) = p_lang {
+                        if let Some(plang) = self.languages.get(&plid) {
+                            for c in &self.constellations {
+                                if !all_vis_for_lang.contains(&c.index)
+                                    && plang.describes(ConceptKey::Constellation(c.index))
+                                {
+                                    concepts
+                                        .entry(ConceptKey::Constellation(c.index))
+                                        .or_insert(Some(plid));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Imported species from recursive trade network (`imports`)
                 for partner in rec_partners {
                     let p_lang = state_langs.get(&partner).copied().flatten();
@@ -1305,8 +1880,11 @@ impl HistorySimulation {
                     }
                 }
 
-                // Native species and core celestial concepts (`Sun`, `Moons`, and the actual `solar_system` planets) in `state_id`
+                // Native species, visible constellations (`vis_here`), and core celestial concepts (`Sun`, `Moons`, `Planets`) in `state_id`
                 let s_lang = state_langs.get(&state_id).copied().flatten();
+                for &c_idx in &vis_here {
+                    concepts.insert(ConceptKey::Constellation(c_idx), s_lang);
+                }
                 concepts.entry(ConceptKey::Sun(0)).or_insert(s_lang);
                 for m in 0..self.moon_count {
                     concepts.entry(ConceptKey::Moon(m)).or_insert(s_lang);
@@ -1325,10 +1903,50 @@ impl HistorySimulation {
         }
 
         let lang_ids: Vec<u32> = lang_concepts.keys().copied().collect();
+
+        // Pass 1: Coin native concepts (including all constellations visible at some point in the year)
+        // so that donor languages have their visible constellations coined before trade partners borrow them.
+        for &lang_id in &lang_ids {
+            let Some(concepts) = lang_concepts.get(&lang_id).cloned() else {
+                continue;
+            };
+            let vis_set = lang_visible_constellations
+                .get(&lang_id)
+                .cloned()
+                .unwrap_or_default();
+            for (concept, src_lang_opt) in concepts {
+                if src_lang_opt != Some(lang_id) && src_lang_opt.is_some() {
+                    continue;
+                }
+                if let ConceptKey::Constellation(c_idx) = concept {
+                    if !vis_set.contains(&c_idx) {
+                        continue;
+                    }
+                }
+                let already = self
+                    .languages
+                    .get(&lang_id)
+                    .is_some_and(|l| l.describes(concept));
+                if already {
+                    continue;
+                }
+                let mut temp_rng = self.rng.clone();
+                if let Some(lang) = self.languages.get_mut(&lang_id) {
+                    lang.coin_concept(concept, &mut temp_rng);
+                }
+                self.rng = temp_rng;
+            }
+        }
+
+        // Pass 2: Borrow concepts from donor languages (including invisible constellations from trade partners).
         for lang_id in lang_ids {
             let Some(concepts) = lang_concepts.get(&lang_id).cloned() else {
                 continue;
             };
+            let vis_set = lang_visible_constellations
+                .get(&lang_id)
+                .cloned()
+                .unwrap_or_default();
             for (concept, src_lang_opt) in concepts {
                 let already = self
                     .languages
@@ -1345,6 +1963,12 @@ impl HistorySimulation {
                         lang.borrow_concept(concept, &donor);
                     }
                 } else {
+                    // Never coin an invisible constellation natively; it can only be borrowed from a trade partner.
+                    if let ConceptKey::Constellation(c_idx) = concept {
+                        if !vis_set.contains(&c_idx) {
+                            continue;
+                        }
+                    }
                     let mut temp_rng = self.rng.clone();
                     if let Some(lang) = self.languages.get_mut(&lang_id) {
                         lang.coin_concept(concept, &mut temp_rng);
@@ -1645,6 +2269,47 @@ impl HistorySimulation {
             self.tile_communities.entry(nb).or_default().push(migrant);
         }
 
+        // 2b. Maritime & riverine expansion along established wind/current travel routes (`self.travel_routes`)
+        let mut maritime_spillover: Vec<(usize, u32, Community)> = Vec::new();
+        for route in &self.travel_routes {
+            let src = route.from_fine_face;
+            let dst = route.to_fine_face;
+            let Some(&sid) = self.tile_states.get(&src) else {
+                continue;
+            };
+            let Some(src_comms) = self.tile_communities.get(&src) else {
+                continue;
+            };
+            let src_pop: f32 = src_comms.iter().map(|c| c.thousands).sum();
+            let src_cap = self.capacities[src].max(0.2);
+            if src_pop <= src_cap * 0.55 || src_comms.is_empty() {
+                continue;
+            }
+            let c_dst = self.terrain.primary_coarse_tile(dst, &coarse_elevs);
+            if fine_elevs[dst] <= 0.0
+                || !is_passable(fine_elevs[dst], koeppen[c_dst], true)
+                || self.capacities[dst] <= 0.1
+            {
+                continue;
+            }
+            let dst_pop: f32 = self
+                .tile_communities
+                .get(&dst)
+                .map(|cs| cs.iter().map(|c| c.thousands).sum())
+                .unwrap_or(0.0);
+            if dst_pop < self.capacities[dst] * 0.85 {
+                let mut migrant = src_comms[0].clone();
+                let frac = (0.06 * route.wind_current_alignment.max(0.35)).clamp(0.02, 0.08);
+                migrant.thousands = (src_comms[0].thousands * frac).max(0.02);
+                maritime_spillover.push((dst, sid, migrant));
+            }
+        }
+        for (dst, sid, migrant) in maritime_spillover {
+            self.tile_states.entry(dst).or_insert(sid);
+            self.tile_communities.entry(dst).or_default().push(migrant);
+        }
+        self.update_travel_routes();
+
         // 3. Intermingle and assimilate (`people/community.py:16-92`), modulated by Turchin asabiya
         let tile_asabiya: BTreeMap<usize, f32> = self
             .tile_states
@@ -1733,7 +2398,7 @@ impl HistorySimulation {
             let opp_total_o = opp_pop_totals.get(&o).copied().unwrap_or(1.0).max(0.1);
             let weight_n_to_o = po.max(0.1) / opp_total_n;
             let weight_o_to_n = pn.max(0.1) / opp_total_o;
-            let dist_no = self.capital_angular_distance(n, o);
+            let dist_no = self.effective_state_distance(n, o);
             let lsg = (-0.5 * dist_no).exp();
             let fn_val = pn * weight_n_to_o * lsg;
             let fo_val = po * weight_o_to_n * lsg;
@@ -1779,6 +2444,29 @@ impl HistorySimulation {
                                 .any(|&nb| self.tile_states.get(&nb) == Some(&winner))
                         })
                         .collect();
+                    // If the conflict was across a maritime/riverine travel route, capture the landing port & adjacent coastal faces
+                    if border_faces.is_empty() {
+                        for r in &self.travel_routes {
+                            let from_st = self.tile_states.get(&r.from_fine_face).copied();
+                            let to_st = self.tile_states.get(&r.to_fine_face).copied();
+                            let landing = if from_st == Some(winner) && to_st == Some(loser) {
+                                Some(r.to_fine_face)
+                            } else if to_st == Some(winner) && from_st == Some(loser) {
+                                Some(r.from_fine_face)
+                            } else {
+                                None
+                            };
+                            if let Some(port_f) = landing {
+                                border_faces.push(port_f);
+                                for &nb in &fine_adj[port_f] {
+                                    if self.tile_states.get(&nb) == Some(&loser) {
+                                        border_faces.push(nb);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
                     border_faces.truncate(6.min(loser_tiles.len().saturating_sub(1)));
                     for t in border_faces {
                         self.tile_states.insert(t, winner);
@@ -2127,6 +2815,425 @@ impl HistorySimulation {
         self.solar_system = solar_system;
     }
 
+    pub fn constellations(&self) -> &[Constellation] {
+        &self.constellations
+    }
+
+    pub fn set_constellations(&mut self, constellations: Vec<Constellation>) {
+        self.constellations = constellations;
+        let fine_adj = self.terrain.terrain_adj.clone();
+        let (extents, state_species, _) = self.state_topology(&fine_adj);
+        self.accumulate_and_borrow_concepts(&extents, &state_species);
+    }
+
+    pub fn travel_routes(&self) -> &[TravelRoute] {
+        &self.travel_routes
+    }
+
+    pub fn potential_travel_routes(&self) -> &[TravelRoute] {
+        &self.potential_travel_routes
+    }
+
+    pub fn active_travel_route_count(&self) -> usize {
+        self.travel_routes.len()
+    }
+
+    pub fn potential_travel_route_count(&self) -> usize {
+        self.potential_travel_routes.len()
+    }
+
+    pub fn water_access_port_count(&self) -> usize {
+        let mut ports = BTreeSet::new();
+        for r in &self.travel_routes {
+            ports.insert(r.from_fine_face);
+            ports.insert(r.to_fine_face);
+        }
+        ports.len()
+    }
+
+    /// Classify the diplomatic/historical usage of a `TravelRoute`:
+    /// `3` = Active Trade Route (Gold),
+    /// `2` = Active Military Conflict Route (Red),
+    /// `1` = Active Expansion / Sea Lane (Cyan for ocean, Emerald-Turquoise for river),
+    /// `0` = Potential Unsettled Wind/Current Corridor (Indigo).
+    pub fn route_status(&self, route: &TravelRoute, is_active: bool) -> u8 {
+        if !is_active {
+            return 0;
+        }
+        if let (Some(&s1), Some(&s2)) = (
+            self.tile_states.get(&route.from_fine_face),
+            self.tile_states.get(&route.to_fine_face),
+        ) {
+            if s1 != s2 {
+                let pair = (s1.min(s2), s1.max(s2));
+                if self.conflicts.contains(&pair) {
+                    return 2;
+                }
+                if self.trade_partners.contains(&pair) {
+                    return 3;
+                }
+            }
+        }
+        1
+    }
+
+    pub fn maritime_trade_route_count(&self) -> usize {
+        self.travel_routes
+            .iter()
+            .filter(|r| self.route_status(r, true) == 3)
+            .count()
+    }
+
+    pub fn maritime_conflict_route_count(&self) -> usize {
+        self.travel_routes
+            .iter()
+            .filter(|r| self.route_status(r, true) == 2)
+            .count()
+    }
+
+    /// Packed colored 3D line segments `[x0, y0, z0, x1, y1, z1, r, g, b, ...]` (`9` `f32`s per segment)
+    /// for rendering established `travel_routes` (and optionally `potential_travel_routes`) on the globe,
+    /// including directional chevron arrowheads at the midpoint of each route showing wind/current flow.
+    pub fn travel_route_segments_colored(&self, include_potential: bool) -> Vec<f32> {
+        let grid = self.prehistory.grid();
+        let active_pairs: BTreeSet<(usize, usize)> = self
+            .travel_routes
+            .iter()
+            .map(|r| (r.from_coarse_tile, r.to_coarse_tile))
+            .collect();
+
+        let mut out = Vec::new();
+        let mut append_route = |route: &TravelRoute, is_active: bool| {
+            let status = self.route_status(route, is_active);
+            let rgb: [f32; 3] = match status {
+                3 => [1.00, 0.88, 0.18], // Gold: Maritime Trade Route
+                2 => [1.00, 0.22, 0.22], // Crimson: Maritime Conflict / Naval War Route
+                1 => {
+                    if route.route_kind == 2 {
+                        [0.25, 0.96, 0.68] // Emerald-Turquoise: Active Riverine Corridor
+                    } else {
+                        [0.18, 0.90, 0.98] // Cyan: Active Wind/Current Expansion Sea Lane
+                    }
+                }
+                _ => [0.36, 0.50, 0.84], // Muted Indigo: Potential Wind/Current Corridor
+            };
+            let radius_lift: f32 = match status {
+                3 | 2 => 1.010,
+                1 => 1.008,
+                _ => 1.005,
+            };
+
+            let mut pts: Vec<[f32; 3]> = Vec::with_capacity(route.coarse_path.len() + 2);
+            if let Some(&(c, _)) = self.terrain.terrain_grid.faces.get(route.from_fine_face) {
+                pts.push([
+                    c[0] as f32 * radius_lift,
+                    c[1] as f32 * radius_lift,
+                    c[2] as f32 * radius_lift,
+                ]);
+            }
+            for &c_idx in &route.coarse_path {
+                if let Some(&(c, _)) = grid.faces.get(c_idx) {
+                    pts.push([
+                        c[0] as f32 * radius_lift,
+                        c[1] as f32 * radius_lift,
+                        c[2] as f32 * radius_lift,
+                    ]);
+                }
+            }
+            if let Some(&(c, _)) = self.terrain.terrain_grid.faces.get(route.to_fine_face) {
+                pts.push([
+                    c[0] as f32 * radius_lift,
+                    c[1] as f32 * radius_lift,
+                    c[2] as f32 * radius_lift,
+                ]);
+            }
+
+            if pts.len() < 2 {
+                return;
+            }
+            for i in 0..(pts.len() - 1) {
+                let p0 = pts[i];
+                let p1 = pts[i + 1];
+                out.extend_from_slice(&[
+                    p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], rgb[0], rgb[1], rgb[2],
+                ]);
+            }
+
+            // Add directional arrowhead V-chevron at the midpoint segment
+            let mid = (pts.len() - 1) / 2;
+            let p0 = pts[mid];
+            let p1 = pts[mid + 1];
+            let mx = 0.5 * (p0[0] + p1[0]);
+            let my = 0.5 * (p0[1] + p1[1]);
+            let mz = 0.5 * (p0[2] + p1[2]);
+            let dx = p1[0] - p0[0];
+            let dy = p1[1] - p0[1];
+            let dz = p1[2] - p0[2];
+            let dlen = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+            let tx = dx / dlen;
+            let ty = dy / dlen;
+            let tz = dz / dlen;
+            // Tangent perpendicular on the sphere: n x t
+            let sx = my * tz - mz * ty;
+            let sy = mz * tx - mx * tz;
+            let sz = mx * ty - my * tx;
+            let slen = (sx * sx + sy * sy + sz * sz).sqrt().max(1e-6);
+            let ux = sx / slen;
+            let uy = sy / slen;
+            let uz = sz / slen;
+            let scale = 0.016f32;
+            let w1 = [
+                mx - scale * tx + 0.65 * scale * ux,
+                my - scale * ty + 0.65 * scale * uy,
+                mz - scale * tz + 0.65 * scale * uz,
+            ];
+            let w2 = [
+                mx - scale * tx - 0.65 * scale * ux,
+                my - scale * ty - 0.65 * scale * uy,
+                mz - scale * tz - 0.65 * scale * uz,
+            ];
+            out.extend_from_slice(&[
+                mx, my, mz, w1[0], w1[1], w1[2], rgb[0], rgb[1], rgb[2],
+                mx, my, mz, w2[0], w2[1], w2[2], rgb[0], rgb[1], rgb[2],
+            ]);
+        };
+
+        if include_potential {
+            for r in &self.potential_travel_routes {
+                if !active_pairs.contains(&(r.from_coarse_tile, r.to_coarse_tile)) {
+                    append_route(r, false);
+                }
+            }
+        }
+        for r in &self.travel_routes {
+            append_route(r, true);
+        }
+        out
+    }
+
+    /// Packed colored 3D line segments `[x0, y0, z0, x1, y1, z1, r, g, b, ...]` (`9` `f32`s per segment)
+    /// showing surface ocean current vectors and prevailing wind vectors across the globe.
+    pub fn wind_current_vector_segments(&self) -> Vec<f32> {
+        let grid = self.prehistory.grid();
+        let climate = self.prehistory.climate_model();
+        let ocean = climate.ocean();
+        let coarse_elevs = self.prehistory.tile_elevations();
+        let num_coarse = coarse_elevs.len();
+
+        let mut out = Vec::new();
+        let stride = (num_coarse / 450).max(1);
+        for c in (0..num_coarse).step_by(stride) {
+            let p = grid.faces[c].0;
+            let r_lift = 1.004f32;
+            let p0 = [
+                p[0] as f32 * r_lift,
+                p[1] as f32 * r_lift,
+                p[2] as f32 * r_lift,
+            ];
+
+            if coarse_elevs[c] <= 0.0 {
+                // Ocean current vector (warm = orange-gold, cold = cyan-blue)
+                let vel = ocean.velocity_xyz.get(c).copied().unwrap_or([0.0; 3]);
+                let spd = ocean.speed.get(c).copied().unwrap_or(0.0);
+                let sst = ocean.sst_anomaly.get(c).copied().unwrap_or(0.0);
+                if spd > 0.04 {
+                    let len = 0.032 * spd.sqrt().clamp(0.35, 1.0);
+                    let p1 = [
+                        p0[0] + len * vel[0],
+                        p0[1] + len * vel[1],
+                        p0[2] + len * vel[2],
+                    ];
+                    let rgb = if sst >= 0.05 {
+                        [0.98, 0.58, 0.20]
+                    } else if sst <= -0.05 {
+                        [0.25, 0.78, 0.98]
+                    } else {
+                        [0.45, 0.85, 0.78]
+                    };
+                    out.extend_from_slice(&[
+                        p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], rgb[0], rgb[1], rgb[2],
+                    ]);
+                }
+            }
+            // Prevailing wind vector (every 2nd sampled tile, subtle sky-white)
+            if (c / stride) % 2 == 0 {
+                let w = climate.wind_vector_xyz(c);
+                let len = 0.022f32;
+                let p1 = [p0[0] + len * w[0], p0[1] + len * w[1], p0[2] + len * w[2]];
+                out.extend_from_slice(&[
+                    p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], 0.78, 0.86, 0.96,
+                ]);
+            }
+        }
+        out
+    }
+
+    /// Detailed multi-line inspection report for the Travel mode (or `"travel"` / `"winds_currents"` aspects).
+    pub fn inspect_travel_tile(&self, display_idx: usize) -> String {
+        if display_idx >= self.terrain.display_faces.len() {
+            return String::new();
+        }
+        let climate = self.prehistory.climate_model();
+        let ocean = climate.ocean();
+        let coarse_elevs = self.prehistory.tile_elevations();
+
+        match self.terrain.display_faces[display_idx].2 {
+            DisplayFaceSource::OceanCoarse(c_idx) => {
+                let lat = climate.lats_deg().get(c_idx).copied().unwrap_or(0.0);
+                let lon = climate.lons_deg().get(c_idx).copied().unwrap_or(0.0);
+                let wind_deg = tec11_climate::wind_direction_deg(lat, climate.cells(), climate.spin());
+                let spd = ocean.speed.get(c_idx).copied().unwrap_or(0.0);
+                let sst = ocean.sst_anomaly.get(c_idx).copied().unwrap_or(0.0);
+                let sst_desc = if sst >= 0.08 {
+                    "Warm Boundary Current"
+                } else if sst <= -0.08 {
+                    "Cold Upwelling / Return Current"
+                } else {
+                    "Temperate Drift"
+                };
+
+                let mut lines = vec![format!(
+                    "Ocean Tile #{c_idx} ({lat:+.1}°, {lon:+.1}°) | Wind Bearing: {wind_deg:.0}° | Current Speed: {:.0}% ({sst_desc}, SST {sst:+.2})",
+                    spd * 100.0
+                )];
+
+                // Find any travel routes passing through or within 1 hop of `c_idx`
+                let adj = self.prehistory.adjacency();
+                let mut nearby_coarse = BTreeSet::new();
+                nearby_coarse.insert(c_idx);
+                if let Some(nbs) = adj.get(c_idx) {
+                    for &nb in nbs {
+                        nearby_coarse.insert(nb);
+                    }
+                }
+
+                let mut matching_routes = Vec::new();
+                for r in &self.travel_routes {
+                    if r.coarse_path.iter().any(|c| nearby_coarse.contains(c)) {
+                        matching_routes.push((r, true));
+                    }
+                }
+                if matching_routes.is_empty() {
+                    for r in &self.potential_travel_routes {
+                        if r.coarse_path.iter().any(|c| nearby_coarse.contains(c)) {
+                            matching_routes.push((r, false));
+                        }
+                    }
+                }
+
+                if matching_routes.is_empty() {
+                    lines.push("No established travel routes pass directly through this ocean sector.".to_string());
+                } else {
+                    lines.push(format!("--- Travel Routes in Sector ({}) ---", matching_routes.len()));
+                    for (r, is_active) in matching_routes.into_iter().take(8) {
+                        let from_label = self
+                            .tile_states
+                            .get(&r.from_fine_face)
+                            .map(|&s| self.state_name(s))
+                            .unwrap_or_else(|| format!("Coast #{}", r.from_coarse_tile));
+                        let to_label = self
+                            .tile_states
+                            .get(&r.to_fine_face)
+                            .map(|&s| self.state_name(s))
+                            .unwrap_or_else(|| format!("Coast #{}", r.to_coarse_tile));
+                        let status_str = match self.route_status(r, is_active) {
+                            3 => "TRADE ROUTE (gold)",
+                            2 => "NAVAL CONFLICT (red)",
+                            1 => "ACTIVE SEA LANE (cyan)",
+                            _ => "Potential Wind/Current Corridor",
+                        };
+                        lines.push(format!(
+                            "• {from_label} → {to_label} [{status_str}] | {} | Wind/Current Align: {:.0}% | Cost: {:.2}",
+                            r.kind_name(),
+                            r.wind_current_alignment * 100.0,
+                            r.effective_cost
+                        ));
+                    }
+                }
+                lines.join("\n")
+            }
+            DisplayFaceSource::Fine(fine_idx) => {
+                let c_idx = self.terrain.primary_coarse_tile(fine_idx, &coarse_elevs);
+                let lat = climate.lats_deg().get(c_idx).copied().unwrap_or(0.0);
+                let wind_deg = tec11_climate::wind_direction_deg(lat, climate.cells(), climate.spin());
+                let mut lines = Vec::new();
+
+                if let Some(&sid) = self.tile_states.get(&fine_idx) {
+                    let st_name = self.state_name(sid);
+                    let st_pop = self.state_population_thousands(sid);
+                    lines.push(format!(
+                        "State: {st_name} | Pop: {:.0}K | Fine Face #{fine_idx} (Coarse #{c_idx}, {lat:+.1}°, Prevailing Wind {wind_deg:.0}°)",
+                        st_pop
+                    ));
+                    let mut state_routes = Vec::new();
+                    for r in &self.travel_routes {
+                        let s_from = self.tile_states.get(&r.from_fine_face).copied();
+                        let s_to = self.tile_states.get(&r.to_fine_face).copied();
+                        if s_from == Some(sid) || s_to == Some(sid) {
+                            state_routes.push(r);
+                        }
+                    }
+                    if state_routes.is_empty() {
+                        lines.push("Water Travel Routes: None (inland or no active coastal ports)".to_string());
+                    } else {
+                        lines.push(format!(
+                            "--- Active Water Travel Routes for {st_name} ({}) ---",
+                            state_routes.len()
+                        ));
+                        for r in state_routes.into_iter().take(12) {
+                            let from_label = self
+                                .tile_states
+                                .get(&r.from_fine_face)
+                                .map(|&s| self.state_name(s))
+                                .unwrap_or_else(|| format!("Unclaimed Coast #{}", r.from_coarse_tile));
+                            let to_label = self
+                                .tile_states
+                                .get(&r.to_fine_face)
+                                .map(|&s| self.state_name(s))
+                                .unwrap_or_else(|| format!("Unclaimed Coast #{}", r.to_coarse_tile));
+                            let status_str = match self.route_status(r, true) {
+                                3 => "MARITIME TRADE",
+                                2 => "NAVAL CONFLICT",
+                                _ => "EXPANSION / SEA LANE",
+                            };
+                            lines.push(format!(
+                                "• {from_label} → {to_label} [{status_str}] ({}, Align {:.0}%, Cost {:.2})",
+                                r.kind_name(),
+                                r.wind_current_alignment * 100.0,
+                                r.effective_cost
+                            ));
+                        }
+                    }
+                } else {
+                    lines.push(format!(
+                        "Unclaimed Land Face #{fine_idx} (Coarse #{c_idx}, {lat:+.1}°, Prevailing Wind {wind_deg:.0}°)"
+                    ));
+                    let pot: Vec<&TravelRoute> = self
+                        .potential_travel_routes
+                        .iter()
+                        .filter(|r| r.from_coarse_tile == c_idx || r.to_coarse_tile == c_idx)
+                        .collect();
+                    if pot.is_empty() {
+                        lines.push("No potential wind/current travel corridors originate or land on this tile.".to_string());
+                    } else {
+                        lines.push(format!("--- Potential Wind/Current Corridors ({}) ---", pot.len()));
+                        for r in pot.into_iter().take(8) {
+                            lines.push(format!(
+                                "• Coast #{} → Coast #{} ({}, Wind/Current Align {:.0}%, Cost {:.2})",
+                                r.from_coarse_tile,
+                                r.to_coarse_tile,
+                                r.kind_name(),
+                                r.wind_current_alignment * 100.0,
+                                r.effective_cost
+                            ));
+                        }
+                    }
+                }
+                lines.join("\n")
+            }
+        }
+    }
+
     /// Detailed multi-line inspection report for a clicked display face and its State (`historypresenter.py`).
     pub fn inspect_tile(&self, display_idx: usize) -> String {
         if display_idx >= self.terrain.display_faces.len() {
@@ -2273,11 +3380,39 @@ impl HistorySimulation {
             }
         ));
 
-        // Sample lexicon from primary language (including celestial Sun, Moons & actual Solar System Planets)
+        // Active maritime/riverine travel routes for this state
+        let mut route_summaries = Vec::new();
+        for r in &self.travel_routes {
+            let s_from = self.tile_states.get(&r.from_fine_face).copied();
+            let s_to = self.tile_states.get(&r.to_fine_face).copied();
+            if s_from == Some(sid) {
+                let dst_label = s_to
+                    .map(|s| self.state_name(s))
+                    .unwrap_or_else(|| format!("Coast #{}", r.to_coarse_tile));
+                route_summaries.push(format!("→ {dst_label} ({})", r.kind_name()));
+            } else if s_to == Some(sid) {
+                let src_label = s_from
+                    .map(|s| self.state_name(s))
+                    .unwrap_or_else(|| format!("Coast #{}", r.from_coarse_tile));
+                route_summaries.push(format!("← {src_label} ({})", r.kind_name()));
+            }
+        }
+        route_summaries.dedup();
+        lines.push(format!(
+            "Water Travel Routes ({}): {}",
+            route_summaries.len(),
+            if route_summaries.is_empty() {
+                "None".to_string()
+            } else {
+                route_summaries.into_iter().take(6).collect::<Vec<_>>().join(", ")
+            }
+        ));
+
+        // Sample lexicon from primary language (including celestial Sun, Moons, Planets & Constellations)
         if let Some(lid) = dom_lang {
             if let Some(lang) = self.languages.get(&lid) {
                 lines.push(format!("--- {} Lexicon ---", lang.name()));
-                for (&ck, orig) in lang.lexicon.iter().take(20) {
+                for (&ck, orig) in lang.lexicon.iter().take(28) {
                     let gloss = match ck {
                         ConceptKey::Sun(0) => "sun (host star)".to_string(),
                         ConceptKey::Sun(id) => format!("sun #{}", id + 1),
@@ -2299,6 +3434,11 @@ impl HistorySimulation {
                             .get(p as usize)
                             .map(|pl| pl.lexicon_gloss())
                             .unwrap_or_else(|| format!("planet #{}", p + 1)),
+                        ConceptKey::Constellation(c) => self
+                            .constellations
+                            .get(c as usize)
+                            .map(|con| con.lexicon_gloss())
+                            .unwrap_or_else(|| format!("constellation #{}", c + 1)),
                         ConceptKey::Species(sp_id) => self
                             .settled_species
                             .get(sp_id as usize)
@@ -2397,18 +3537,71 @@ impl HistorySimulation {
             .unwrap_or(1)
             .max(1) as f32;
 
+        let mut active_ports = BTreeSet::new();
+        if aspect == "travel" || aspect == "winds_currents" {
+            for r in &self.travel_routes {
+                active_ports.insert(r.from_fine_face);
+                active_ports.insert(r.to_fine_face);
+            }
+        }
+        let ocean = self.prehistory.climate_model().ocean();
+
         let mut out = Vec::with_capacity(num_display * 3);
         for (_, _, source) in &self.terrain.display_faces {
             let f_idx = match *source {
-                DisplayFaceSource::OceanCoarse(_) => {
-                    out.extend_from_slice(&ocean_rgb);
+                DisplayFaceSource::OceanCoarse(c_idx) => {
+                    if aspect == "winds_currents" || aspect == "travel" {
+                        let spd = ocean.speed.get(c_idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                        let sst = ocean.sst_anomaly.get(c_idx).copied().unwrap_or(0.0);
+                        let (r, g, b) = if aspect == "winds_currents" {
+                            if sst >= 0.0 {
+                                let warm = (sst / 6.0).clamp(0.0, 1.0);
+                                (
+                                    (ocean_rgb[0] + 0.55 * spd + 0.25 * warm).clamp(0.0, 1.0),
+                                    (ocean_rgb[1] + 0.35 * spd + 0.10 * warm).clamp(0.0, 1.0),
+                                    (ocean_rgb[2] + 0.15 * spd).clamp(0.0, 1.0),
+                                )
+                            } else {
+                                let cold = (-sst / 6.0).clamp(0.0, 1.0);
+                                (
+                                    (ocean_rgb[0] + 0.08 * spd).clamp(0.0, 1.0),
+                                    (ocean_rgb[1] + 0.45 * spd + 0.18 * cold).clamp(0.0, 1.0),
+                                    (ocean_rgb[2] + 0.55 * spd + 0.28 * cold).clamp(0.0, 1.0),
+                                )
+                            }
+                        } else {
+                            // Subtle gyre shading in "travel" mode so route lines stand out clearly
+                            (
+                                (ocean_rgb[0] + 0.16 * spd).clamp(0.0, 1.0),
+                                (ocean_rgb[1] + 0.22 * spd).clamp(0.0, 1.0),
+                                (ocean_rgb[2] + 0.28 * spd).clamp(0.0, 1.0),
+                            )
+                        };
+                        out.extend_from_slice(&[r, g, b]);
+                    } else {
+                        out.extend_from_slice(&ocean_rgb);
+                    }
                     continue;
                 }
                 DisplayFaceSource::Fine(f) => f,
             };
 
             if self.terrain.fine_elevations[f_idx] <= 0.0 {
-                out.extend_from_slice(&ocean_rgb);
+                if aspect == "winds_currents" || aspect == "travel" {
+                    let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                    let spd = ocean.speed.get(c_idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                    out.extend_from_slice(&[
+                        (ocean_rgb[0] + 0.16 * spd).clamp(0.0, 1.0),
+                        (ocean_rgb[1] + 0.22 * spd).clamp(0.0, 1.0),
+                        (ocean_rgb[2] + 0.28 * spd).clamp(0.0, 1.0),
+                    ]);
+                } else {
+                    out.extend_from_slice(&ocean_rgb);
+                }
+                continue;
+            }
+            if active_ports.contains(&f_idx) {
+                out.extend_from_slice(&[1.0, 0.92, 0.25]);
                 continue;
             }
             if show_rivers && self.river_tiles[f_idx] {
@@ -2619,6 +3812,7 @@ impl HistorySimulation {
                     .iter()
                     .map(|sp| (sp.state_a, sp.state_b))
                     .collect();
+                sim.update_travel_routes();
             }
         }
         *self = sim;
@@ -2675,9 +3869,147 @@ mod tests {
             ConceptKey::Moon(1),
             ConceptKey::Planet(0),
             ConceptKey::Planet(4),
+            ConceptKey::Constellation(0),
+            ConceptKey::Constellation(7),
         ] {
             let p = ck.to_proto();
             assert_eq!(ConceptKey::from_proto(&p), ck);
         }
+    }
+
+    #[test]
+    fn test_constellation_visibility_and_trade_partner_borrowing() {
+        let mut sim = HistorySimulation::new_earth(42);
+        assert!(
+            sim.constellations.len() >= 12,
+            "Expected at least 12 constellations, got {}",
+            sim.constellations.len()
+        );
+
+        let fine_adj = sim.terrain.terrain_adj.clone();
+        let (extents, state_species, _) = sim.state_topology(&fine_adj);
+
+        // Verify that every state's language natively describes all constellations visible
+        // from its tiles at some point in the year.
+        for (&sid, tiles) in &extents {
+            let vis = sim.visible_constellations_for_tiles(tiles);
+            let Some(lid) = sim.primary_language_for_state(sid) else {
+                continue;
+            };
+            let Some(lang) = sim.languages.get(&lid) else {
+                continue;
+            };
+            for c in &sim.constellations {
+                let ck = ConceptKey::Constellation(c.index);
+                if vis.contains(&c.index) {
+                    assert!(
+                        lang.describes(ck),
+                        "State {sid} language should describe visible constellation {}",
+                        c.index
+                    );
+                }
+            }
+        }
+
+        // Find two states in different hemispheres (one northern, one southern) so each sees
+        // constellations that the other cannot see, then link them as trade partners and verify
+        // that accumulate_and_borrow_concepts borrows the unseen constellations from the trade partner.
+        let mut north_sid = None;
+        let mut south_sid = None;
+        for (&sid, tiles) in &extents {
+            let vis = sim.visible_constellations_for_tiles(tiles);
+            let sees_north_pole = sim
+                .constellations
+                .iter()
+                .any(|c| c.declination_deg > 60.0 && vis.contains(&c.index));
+            let misses_south_pole = sim
+                .constellations
+                .iter()
+                .any(|c| c.declination_deg < -60.0 && !vis.contains(&c.index));
+            let sees_south_pole = sim
+                .constellations
+                .iter()
+                .any(|c| c.declination_deg < -60.0 && vis.contains(&c.index));
+            let misses_north_pole = sim
+                .constellations
+                .iter()
+                .any(|c| c.declination_deg > 60.0 && !vis.contains(&c.index));
+
+            if sees_north_pole && misses_south_pole && north_sid.is_none() {
+                north_sid = Some(sid);
+            }
+            if sees_south_pole && misses_north_pole && south_sid.is_none() {
+                south_sid = Some(sid);
+            }
+        }
+
+        if let (Some(n_id), Some(s_id)) = (north_sid, south_sid) {
+            let n_vis = sim.visible_constellations_for_tiles(&extents[&n_id]);
+            let s_vis = sim.visible_constellations_for_tiles(&extents[&s_id]);
+            let unseen_by_north: Vec<u32> = s_vis.difference(&n_vis).copied().collect();
+            assert!(
+                !unseen_by_north.is_empty(),
+                "Northern state should miss at least one constellation seen by southern state"
+            );
+
+            // Connect them as trade partners and run accumulate_and_borrow_concepts
+            sim.trade_partners.push((n_id.min(s_id), n_id.max(s_id)));
+            sim.accumulate_and_borrow_concepts(&extents, &state_species);
+
+            let n_lang_id = sim
+                .primary_language_for_state(n_id)
+                .expect("Northern state should have a primary language");
+            let n_lang = &sim.languages[&n_lang_id];
+            for c_idx in unseen_by_north {
+                let ck = ConceptKey::Constellation(c_idx);
+                assert!(
+                    n_lang.describes(ck),
+                    "Northern state language should borrow unseen constellation {c_idx} from southern trade partner"
+                );
+                let borrowed_origin = n_lang
+                    .lexicon
+                    .get(&ck)
+                    .expect("Lexicon entry for borrowed constellation should exist");
+                assert!(
+                    borrowed_origin.parent.is_some(),
+                    "Word for unseen constellation {c_idx} should be a loanword (parent.is_some())"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_travel_routes_winds_currents_and_maritime_diplomacy() {
+        let mut sim = HistorySimulation::new_earth(42);
+        assert!(
+            sim.potential_travel_route_count() > 0,
+            "Expected potential wind/current/river travel routes on Earth"
+        );
+        assert!(
+            sim.water_access_port_count() > 0,
+            "Expected water-access port coarse tiles on Earth"
+        );
+        assert!(
+            sim.active_travel_route_count() > 0,
+            "Expected populated coastal/river communities to establish active travel routes"
+        );
+
+        let route_segs = sim.travel_route_segments_colored(true);
+        assert!(
+            !route_segs.is_empty() && route_segs.len() % 9 == 0,
+            "Travel route segments should be non-empty multiples of 9 floats"
+        );
+
+        let vec_segs = sim.wind_current_vector_segments();
+        assert!(
+            !vec_segs.is_empty() && vec_segs.len() % 9 == 0,
+            "Wind & ocean current vector segments should be non-empty multiples of 9 floats"
+        );
+
+        let travel_colors = sim.tile_colors_rgb("travel", true, None);
+        assert_eq!(travel_colors.len(), sim.tile_count() * 3);
+
+        sim.step();
+        assert!(sim.active_travel_route_count() > 0);
     }
 }
