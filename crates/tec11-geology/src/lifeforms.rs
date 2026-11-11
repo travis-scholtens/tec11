@@ -67,9 +67,241 @@ pub struct TileSeasonPresence {
 pub struct SettledSpecies {
     pub id: usize,
     pub kind: SpeciesKind,
+    pub subkind: String,
+    /// `1` = Primary Producer (Plant), `2` = Primary Consumer (Herbivore / Invertebrate),
+    /// `3` = Secondary Consumer (Mesopredator / Omnivore), `4` = Apex Predator.
+    pub trophic_level: u8,
+    pub sealife: bool,
     pub name: String,
     /// Tile presence entries where `season_mask != 0`.
     pub tile_seasons: Vec<TileSeasonPresence>,
+}
+
+const RES_FOLIAGE: u16 = 1 << 0;
+const RES_GRASS: u16 = 1 << 1;
+const RES_WOOD_BARK: u16 = 1 << 2;
+const RES_FLOWER_NECTAR: u16 = 1 << 3;
+const RES_FRUIT: u16 = 1 << 4;
+const RES_NUT: u16 = 1 << 5;
+const RES_SEED: u16 = 1 << 6;
+const RES_TUBER_FUNGUS: u16 = 1 << 7;
+const RES_MARINE_BASE: u16 = 1 << 8;
+
+const PREY_INSECT: usize = 0;
+const PREY_SMALL_FISH: usize = 1;
+const PREY_LARGE_FISH: usize = 2;
+const PREY_SMALL_AMPHIBIAN: usize = 3;
+const PREY_LARGE_AMPHIBIAN: usize = 4;
+const PREY_SMALL_REPTILE: usize = 5;
+const PREY_LARGE_REPTILE: usize = 6;
+const PREY_SMALL_BIRD: usize = 7;
+const PREY_LARGE_BIRD: usize = 8;
+const PREY_SMALL_MAMMAL: usize = 9;
+const PREY_LARGE_MAMMAL: usize = 10;
+const NUM_PREY_GUILDS: usize = 11;
+
+fn plant_output_mask(json_str: &str, kind_str: &str, sealife: bool) -> u16 {
+    if sealife {
+        return RES_MARINE_BASE | RES_FOLIAGE;
+    }
+    let mut mask = RES_FOLIAGE;
+    match kind_str {
+        "grass" => mask |= RES_GRASS | RES_SEED,
+        "tree" | "bush" => mask |= RES_WOOD_BARK,
+        "tuber" | "fungus" => mask |= RES_TUBER_FUNGUS,
+        "flower" => mask |= RES_FLOWER_NECTAR,
+        "fruit" => mask |= RES_FRUIT,
+        _ => {}
+    }
+    if extract_json_bool(json_str, "flower").unwrap_or(false) {
+        mask |= RES_FLOWER_NECTAR;
+    }
+    if extract_json_bool(json_str, "fruits").unwrap_or(false) {
+        mask |= RES_FRUIT;
+    }
+    if extract_json_bool(json_str, "nuts").unwrap_or(false) {
+        mask |= RES_NUT;
+    }
+    if extract_json_bool(json_str, "seeds").unwrap_or(false)
+        || extract_json_bool(json_str, "cones").unwrap_or(false)
+    {
+        mask |= RES_SEED;
+    }
+    if extract_json_bool(json_str, "tuber").unwrap_or(false) {
+        mask |= RES_TUBER_FUNGUS;
+    }
+    mask
+}
+
+fn prey_guild_for_animal_kind(kind_str: &str) -> usize {
+    match kind_str {
+        "insect" => PREY_INSECT,
+        "small fish" => PREY_SMALL_FISH,
+        "large fish" => PREY_LARGE_FISH,
+        "small amphibian" => PREY_SMALL_AMPHIBIAN,
+        "large amphibian" => PREY_LARGE_AMPHIBIAN,
+        "small reptile" => PREY_SMALL_REPTILE,
+        "large reptile" => PREY_LARGE_REPTILE,
+        "small bird" => PREY_SMALL_BIRD,
+        "large bird" => PREY_LARGE_BIRD,
+        "small mammal" => PREY_SMALL_MAMMAL,
+        "large mammal" | "giant mammal" => PREY_LARGE_MAMMAL,
+        _ => PREY_SMALL_MAMMAL,
+    }
+}
+
+fn parse_animal_diet_masks(json_str: &str) -> (u16, u16) {
+    let needle = "\"diet\":";
+    let Some(pos) = json_str.find(needle) else {
+        return (RES_FOLIAGE, 0);
+    };
+    let rest = &json_str[pos + needle.len()..];
+    let Some(open_b) = rest.find('[') else {
+        return (RES_FOLIAGE, 0);
+    };
+    let after_open = &rest[open_b + 1..];
+    let Some(close_b) = after_open.find(']') else {
+        return (RES_FOLIAGE, 0);
+    };
+    let list_str = &after_open[..close_b];
+
+    let mut plant_mask = 0u16;
+    let mut prey_mask = 0u16;
+    for raw_item in list_str.split(',') {
+        let item = raw_item.trim().trim_matches('"').trim();
+        match item {
+            "plant" | "leaf" | "eucalyptus leaves" | "forb" | "forbs" | "herb" | "shrub"
+            | "shrubs" | "bud" | "cactus" | "succulent" | "crop" => {
+                plant_mask |= RES_FOLIAGE;
+            }
+            "grass" | "grain" | "sedge" => {
+                plant_mask |= RES_GRASS | RES_FOLIAGE;
+            }
+            "wood" | "bark" | "twig" | "sap" | "tree sap" | "gum" => {
+                plant_mask |= RES_WOOD_BARK;
+            }
+            "flower" | "nectar" | "pollen" | "honey" | "honeydew" => {
+                plant_mask |= RES_FLOWER_NECTAR;
+            }
+            "fruit" | "small fruit" | "berry" => {
+                plant_mask |= RES_FRUIT;
+            }
+            "nut" => {
+                plant_mask |= RES_NUT;
+            }
+            "seed" => {
+                plant_mask |= RES_SEED;
+            }
+            "tuber" | "tubers" | "root" | "bulb" | "fungi" | "mushroom" | "moss" | "lichen" => {
+                plant_mask |= RES_TUBER_FUNGUS | RES_FOLIAGE;
+            }
+            "algae" | "seaweed" | "plankton" | "zooplankton" | "krill" | "copepods" | "coral" => {
+                plant_mask |= RES_MARINE_BASE | RES_FOLIAGE;
+            }
+            "insect" | "large insect" | "ant" | "flying ant" | "termite" | "termite larvae"
+            | "bee" | "wasp" | "hornet" | "butterfly" | "dragonfly" | "locust" | "spider"
+            | "scorpion" | "centipede" | "worm" | "snail" | "mollusk" | "crustacean" | "crab"
+            | "crayfish" | "shrimp" | "yabbies" | "invertebrate" | "small invertebrate"
+            | "other invertebrates" => {
+                prey_mask |= 1u16 << PREY_INSECT;
+            }
+            "small fish" | "squid" | "octopus" | "cuttlefish" => {
+                prey_mask |= 1u16 << PREY_SMALL_FISH;
+            }
+            "large fish" | "shark" | "rays" => {
+                prey_mask |= (1u16 << PREY_LARGE_FISH) | (1u16 << PREY_SMALL_FISH);
+            }
+            "small amphibian" => {
+                prey_mask |= 1u16 << PREY_SMALL_AMPHIBIAN;
+            }
+            "large amphibian" => {
+                prey_mask |= (1u16 << PREY_LARGE_AMPHIBIAN) | (1u16 << PREY_SMALL_AMPHIBIAN);
+            }
+            "small reptile" | "turtle" => {
+                prey_mask |= 1u16 << PREY_SMALL_REPTILE;
+            }
+            "large reptile" => {
+                prey_mask |= (1u16 << PREY_LARGE_REPTILE) | (1u16 << PREY_SMALL_REPTILE);
+            }
+            "small bird" | "egg" | "penguin" => {
+                prey_mask |= 1u16 << PREY_SMALL_BIRD;
+            }
+            "large bird" => {
+                prey_mask |= (1u16 << PREY_LARGE_BIRD) | (1u16 << PREY_SMALL_BIRD);
+            }
+            "small mammal" => {
+                prey_mask |= 1u16 << PREY_SMALL_MAMMAL;
+            }
+            "carcass" | "bone" | "bone marrow" | "suet" | "seal placenta" | "garbage" => {
+                prey_mask |= (1u16 << PREY_SMALL_MAMMAL)
+                    | (1u16 << PREY_SMALL_BIRD)
+                    | (1u16 << PREY_SMALL_REPTILE);
+            }
+            "large mammal" | "giant mammal" | "pig" | "water buffalo" | "seal" | "sea lion"
+            | "walrus" | "dolphin" | "whale" => {
+                prey_mask |= (1u16 << PREY_LARGE_MAMMAL) | (1u16 << PREY_SMALL_MAMMAL);
+            }
+            _ => {}
+        }
+    }
+    (plant_mask, prey_mask)
+}
+
+fn classify_animal_trophic_level(
+    kind_str: &str,
+    sealife: bool,
+    plant_mask: u16,
+    prey_mask: u16,
+) -> u8 {
+    if kind_str == "insect" || prey_mask == 0 {
+        return 2;
+    }
+    let vertebrate_prey_mask = prey_mask & !(1u16 << PREY_INSECT);
+    if vertebrate_prey_mask == 0 {
+        // Pure insectivore / omnivore eating plants + insects
+        return if plant_mask != 0
+            && !matches!(kind_str, "large mammal" | "large bird" | "large reptile")
+        {
+            2
+        } else {
+            3
+        };
+    }
+    let is_large_predator = matches!(
+        kind_str,
+        "large mammal" | "giant mammal" | "large reptile" | "large bird" | "large fish"
+    );
+    let large_vertebrate_mask = (1u16 << PREY_LARGE_MAMMAL)
+        | (1u16 << PREY_LARGE_REPTILE)
+        | (1u16 << PREY_LARGE_BIRD)
+        | (1u16 << PREY_LARGE_FISH);
+    let eats_insects = (prey_mask & (1u16 << PREY_INSECT)) != 0;
+    let is_marine_mammal_pinniped = sealife
+        && matches!(kind_str, "large mammal" | "giant mammal")
+        && (prey_mask & (1u16 << PREY_LARGE_MAMMAL)) == 0;
+    if is_large_predator
+        && plant_mask == 0
+        && !eats_insects
+        && !is_marine_mammal_pinniped
+        && (prey_mask & large_vertebrate_mask) != 0
+    {
+        4
+    } else {
+        3
+    }
+}
+
+#[derive(Clone)]
+struct ParsedAnimalSpec<'a> {
+    name: &'a str,
+    kind_str: &'a str,
+    prey_guild: usize,
+    trophic_level: u8,
+    sealife: bool,
+    is_obligate_freshwater: bool,
+    tol: ClimateTolerance,
+    plant_diet_mask: u16,
+    animal_prey_mask: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -210,7 +442,99 @@ pub fn settle_species_on_climate(
     let mut seasonal_plant_counts = vec![vec![0u16; n]; num_seasons];
     let mut tile_all_species = vec![Vec::new(); n];
 
-    // 1. Settle Animals (combining year-round core, hibernation peripheral range, and seasonal migration)
+    // Per-(season, tile) plant food output bitmask and total settled plant species count.
+    let mut plant_res_mask = vec![0u16; num_seasons * n];
+    let mut plant_species_count = vec![0u16; num_seasons * n];
+    for &t in &sea_tiles {
+        for s in 0..num_seasons {
+            let idx = s * n + t;
+            if sun_s[idx] > 0.05 && temp_s[idx] > 0.25 {
+                plant_res_mask[idx] |= RES_MARINE_BASE | RES_FOLIAGE;
+            }
+        }
+    }
+
+    // --- Pass 1 (Trophic Level 1): Primary Producers (Plants & Marine Flora) ---
+    for line in PLANTS_TSV.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name_part, json_part)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(t_range) = extract_json_range(json_part, "temperatureRange") else {
+            continue;
+        };
+        let Some(p_range) = extract_json_range(json_part, "precipitationRange") else {
+            continue;
+        };
+        let Some(s_range) = extract_json_range(json_part, "sunlightRange") else {
+            continue;
+        };
+        let sealife = extract_json_bool(json_part, "sealife").unwrap_or(false);
+        let plant_kind = extract_json_str(json_part, "kind").unwrap_or("bush");
+        let out_mask = plant_output_mask(json_part, plant_kind, sealife);
+        let tol = ClimateTolerance {
+            temp_norm: normalize_temp(t_range),
+            precip_norm: if sealife {
+                ValueRange::new(0.0, 2.0)
+            } else {
+                normalize_precip(p_range)
+            },
+            sun_norm: normalize_sun(s_range),
+        };
+
+        let candidate_tiles: &[usize] = if sealife { &sea_tiles } else { &land_tiles };
+        let plant_tiles: Vec<TileSeasonPresence> = candidate_tiles
+            .iter()
+            .copied()
+            .filter_map(|t| {
+                let mask = (0..num_seasons).fold(0u8, |acc, s| {
+                    let idx = s * n + t;
+                    let eff_precip = if sealife { 1.0 } else { precip_s[idx] };
+                    if tol.in_range(temp_s[idx], eff_precip, sun_s[idx]) {
+                        acc | (1u8 << s)
+                    } else {
+                        acc
+                    }
+                });
+                (mask != 0).then_some(TileSeasonPresence {
+                    tile: t,
+                    season_mask: mask,
+                })
+            })
+            .collect();
+
+        if !plant_tiles.is_empty() {
+            let sp_id = settled.len();
+            for &presence in &plant_tiles {
+                tile_all_species[presence.tile].push(sp_id);
+                for s in 0..num_seasons {
+                    if (presence.season_mask & (1u8 << s)) != 0 {
+                        let idx = s * n + presence.tile;
+                        plant_res_mask[idx] |= out_mask;
+                        plant_species_count[idx] = plant_species_count[idx].saturating_add(1);
+                        seasonal_plant_counts[s][presence.tile] =
+                            seasonal_plant_counts[s][presence.tile].saturating_add(1);
+                    }
+                }
+            }
+            settled.push(SettledSpecies {
+                id: sp_id,
+                kind: SpeciesKind::Plant,
+                subkind: plant_kind.to_string(),
+                trophic_level: 1,
+                sealife,
+                name: name_part.trim().to_string(),
+                tile_seasons: plant_tiles,
+            });
+        }
+    }
+
+    // Parse all animal templates and sort by trophic level:
+    // Level 2 insects first -> Level 2 vertebrate herbivores -> Level 3 mesopredators/omnivores -> Level 4 apex predators.
+    let mut parsed_animals: Vec<ParsedAnimalSpec<'_>> = Vec::new();
     for line in ANIMALS_TSV.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -226,13 +550,15 @@ pub fn settle_species_on_climate(
             continue;
         };
         let sealife = extract_json_bool(json_part, "sealife").unwrap_or(false);
-        let animal_kind = extract_json_str(json_part, "kind").unwrap_or("small mammal");
+        let kind_str = extract_json_str(json_part, "kind").unwrap_or("small mammal");
         let is_obligate_freshwater = !sealife
             && matches!(
-                animal_kind,
+                kind_str,
                 "small fish" | "large fish" | "small amphibian" | "large amphibian"
             );
-
+        let (plant_diet_mask, animal_prey_mask) = parse_animal_diet_masks(json_part);
+        let trophic_level =
+            classify_animal_trophic_level(kind_str, sealife, plant_diet_mask, animal_prey_mask);
         let tol = ClimateTolerance {
             temp_norm: normalize_temp(t_range),
             precip_norm: if sealife {
@@ -242,19 +568,59 @@ pub fn settle_species_on_climate(
             },
             sun_norm: ValueRange::new(0.0, 2.0),
         };
+        parsed_animals.push(ParsedAnimalSpec {
+            name: name_part.trim(),
+            kind_str,
+            prey_guild: prey_guild_for_animal_kind(kind_str),
+            trophic_level,
+            sealife,
+            is_obligate_freshwater,
+            tol,
+            plant_diet_mask,
+            animal_prey_mask,
+        });
+    }
 
-        let candidate_tiles: &[usize] = if sealife {
+    parsed_animals.sort_by_key(|a| (a.trophic_level, a.kind_str != "insect", a.name));
+
+    let mut prey_mask = vec![0u16; num_seasons * n];
+    let mut prey_guild_counts = vec![0u16; num_seasons * n * NUM_PREY_GUILDS];
+    // Baseline marine invertebrates/forage fish food web on productive sea tiles so Level 2/3 marine trophic chains bootstrap:
+    for &t in &sea_tiles {
+        for s in 0..num_seasons {
+            let idx = s * n + t;
+            if (plant_res_mask[idx] & RES_MARINE_BASE) != 0 {
+                prey_mask[idx] |= (1u16 << PREY_INSECT) | (1u16 << PREY_SMALL_FISH);
+            }
+        }
+    }
+
+    let find_viable_animal_tiles = |spec: &ParsedAnimalSpec<'_>,
+                                    plant_res_mask: &[u16],
+                                    plant_species_count: &[u16],
+                                    prey_mask: &[u16]|
+     -> Vec<TileSeasonPresence> {
+        let candidate_tiles: &[usize] = if spec.sealife {
             &sea_tiles
-        } else if is_obligate_freshwater {
+        } else if spec.is_obligate_freshwater {
             &freshwater_tiles
         } else {
             &land_tiles
         };
 
         let winter_range = ValueRange::new(
-            (tol.temp_norm.min - 0.25).clamp(0.0, 0.45),
-            tol.temp_norm.min,
+            (spec.tol.temp_norm.min - 0.25).clamp(0.0, 0.45),
+            spec.tol.temp_norm.min,
         );
+        let min_plants_required: u16 = if spec.sealife {
+            0
+        } else if spec.kind_str == "giant mammal" {
+            4
+        } else if spec.kind_str == "large mammal" && spec.trophic_level == 2 {
+            2
+        } else {
+            1
+        };
 
         let mut combined_tiles: Vec<TileSeasonPresence> = Vec::new();
         let mut mig_candidates: Vec<TileSeasonPresence> = Vec::new();
@@ -263,8 +629,17 @@ pub fn settle_species_on_climate(
             let (mask, winter_ok) =
                 (0..num_seasons).fold((0u8, true), |(mask, winter_ok), s| {
                     let idx = s * n + t;
-                    let eff_precip = if sealife { 1.0 } else { precip_s[idx] };
-                    if tol.in_range(temp_s[idx], eff_precip, sun_s[idx]) {
+                    let eff_precip = if spec.sealife { 1.0 } else { precip_s[idx] };
+                    let climate_ok = spec.tol.in_range(temp_s[idx], eff_precip, sun_s[idx]);
+                    let has_plant_food = (plant_res_mask[idx] & spec.plant_diet_mask) != 0
+                        && plant_species_count[idx] >= min_plants_required;
+                    let has_animal_prey = (prey_mask[idx] & spec.animal_prey_mask) != 0;
+                    let food_ok = match spec.trophic_level {
+                        2 => has_plant_food || (spec.plant_diet_mask == 0 && has_animal_prey),
+                        3 => has_animal_prey || has_plant_food,
+                        _ => has_animal_prey,
+                    };
+                    if climate_ok && food_ok {
                         (mask | (1u8 << s), winter_ok)
                     } else {
                         (mask, winter_ok && winter_range.contains(temp_s[idx]))
@@ -276,7 +651,7 @@ pub fn settle_species_on_climate(
                     tile: t,
                     season_mask: all_seasons_mask,
                 });
-            } else if mask != 0 && winter_ok && !sealife {
+            } else if mask != 0 && winter_ok && !spec.sealife {
                 combined_tiles.push(TileSeasonPresence {
                     tile: t,
                     season_mask: mask,
@@ -289,11 +664,9 @@ pub fn settle_species_on_climate(
             }
         }
 
-        // Seasonal migration: check per continent (or per ocean/globally for birds and sealife)
-        // whether seasonal masks complement either a year-round core or another seasonal mask in that realm.
         if !mig_candidates.is_empty() {
             let can_fly_or_swim_globally =
-                sealife || matches!(animal_kind, "small bird" | "large bird");
+                spec.sealife || matches!(spec.kind_str, "small bird" | "large bird");
             let num_realms = if can_fly_or_swim_globally {
                 1
             } else {
@@ -346,95 +719,199 @@ pub fn settle_species_on_climate(
             }
         }
 
-        if !combined_tiles.is_empty() {
-            combined_tiles.sort_by_key(|p| p.tile);
-            let sp_id = settled.len();
-            for &presence in &combined_tiles {
-                tile_all_species[presence.tile].push(sp_id);
-                for s in 0..num_seasons {
-                    if (presence.season_mask & (1u8 << s)) != 0 {
-                        seasonal_animal_counts[s][presence.tile] =
-                            seasonal_animal_counts[s][presence.tile].saturating_add(1);
+        combined_tiles.sort_by_key(|p| p.tile);
+        combined_tiles
+    };
+
+    // --- Passes 2 & 3: Settle Level 2 (Insects & Herbivores) and Level 3 (Mesopredators & Omnivores) ---
+    let mut apex_candidates: Vec<(ParsedAnimalSpec<'_>, Vec<TileSeasonPresence>)> = Vec::new();
+    for spec in parsed_animals {
+        if spec.trophic_level >= 4 {
+            apex_candidates.push((spec, Vec::new()));
+            continue;
+        }
+        let tile_seasons =
+            find_viable_animal_tiles(&spec, &plant_res_mask, &plant_species_count, &prey_mask);
+        if tile_seasons.is_empty() {
+            continue;
+        }
+        let sp_id = settled.len();
+        for &presence in &tile_seasons {
+            tile_all_species[presence.tile].push(sp_id);
+            for s in 0..num_seasons {
+                if (presence.season_mask & (1u8 << s)) != 0 {
+                    let idx = s * n + presence.tile;
+                    prey_mask[idx] |= 1u16 << spec.prey_guild;
+                    let g_idx = idx * NUM_PREY_GUILDS + spec.prey_guild;
+                    prey_guild_counts[g_idx] = prey_guild_counts[g_idx].saturating_add(1);
+                    seasonal_animal_counts[s][presence.tile] =
+                        seasonal_animal_counts[s][presence.tile].saturating_add(1);
+                }
+            }
+        }
+        settled.push(SettledSpecies {
+            id: sp_id,
+            kind: SpeciesKind::Animal,
+            subkind: spec.kind_str.to_string(),
+            trophic_level: spec.trophic_level,
+            sealife: spec.sealife,
+            name: spec.name.to_string(),
+            tile_seasons,
+        });
+    }
+
+    // --- Pass 4 (Trophic Level 4): Apex Predators with Emergent Prey-Limited Competition ---
+    for (spec, tiles_out) in &mut apex_candidates {
+        *tiles_out =
+            find_viable_animal_tiles(spec, &plant_res_mask, &plant_species_count, &prey_mask);
+    }
+
+    // Group candidate apex predators by tile and hunting class (0 = mammalian, 1 = reptilian, 2 = avian, 3 = marine/fish)
+    // and select winners per tile up to the emergent prey-supported capacity on that tile.
+    let mut tile_class_candidates: Vec<[Vec<(usize, u8, f32)>; 4]> =
+        vec![[Vec::new(), Vec::new(), Vec::new(), Vec::new()]; n];
+    for (cand_idx, (spec, tile_seasons)) in apex_candidates.iter().enumerate() {
+        let apex_class = if spec.sealife || spec.kind_str == "large fish" {
+            3
+        } else if matches!(spec.kind_str, "large mammal" | "giant mammal") {
+            0
+        } else if spec.kind_str == "large reptile" {
+            1
+        } else {
+            2
+        };
+        let t_mid = 0.5 * (spec.tol.temp_norm.min + spec.tol.temp_norm.max);
+        let t_half = (0.5 * (spec.tol.temp_norm.max - spec.tol.temp_norm.min)).max(0.05);
+        let p_mid = 0.5 * (spec.tol.precip_norm.min + spec.tol.precip_norm.max);
+        let p_half = (0.5 * (spec.tol.precip_norm.max - spec.tol.precip_norm.min)).max(0.05);
+        let name_hash = spec
+            .name
+            .bytes()
+            .fold(0x811C_9DC5u32, |acc, b| (acc ^ (b as u32)).wrapping_mul(0x0100_0193));
+
+        for &presence in tile_seasons {
+            let t = presence.tile;
+            let realm_id = if spec.sealife {
+                geography.tile_ocean[t].unwrap_or(0)
+            } else {
+                geography.tile_continent[t].unwrap_or(0)
+            };
+            // Deterministic continental lineage affinity so different continents favor distinct apex predators
+            let lineage_affinity = (((name_hash
+                ^ ((realm_id as u32).wrapping_mul(0x9E37_79B9)))
+                .wrapping_mul(0x85EB_CA6B))
+                & 0xFFFF) as f32
+                / 65535.0;
+
+            let mut active_s = 0u32;
+            let mut climate_fit_sum = 0.0f32;
+            let mut matching_prey_sum = 0u32;
+            for s in 0..num_seasons {
+                if (presence.season_mask & (1u8 << s)) != 0 {
+                    active_s += 1;
+                    let idx = s * n + t;
+                    let dt = ((temp_s[idx] - t_mid) / t_half).abs();
+                    let dp = if spec.sealife {
+                        0.0
+                    } else {
+                        ((precip_s[idx] - p_mid) / p_half).abs()
+                    };
+                    climate_fit_sum += (2.0 - dt - dp).max(0.0);
+                    for g in 0..NUM_PREY_GUILDS {
+                        if (spec.animal_prey_mask & (1u16 << g)) != 0 {
+                            matching_prey_sum +=
+                                prey_guild_counts[idx * NUM_PREY_GUILDS + g] as u32;
+                        }
                     }
                 }
             }
-            settled.push(SettledSpecies {
-                id: sp_id,
-                kind: SpeciesKind::Animal,
-                name: name_part.trim().to_string(),
-                tile_seasons: combined_tiles,
-            });
+            let mean_climate_fit = climate_fit_sum / (active_s.max(1) as f32);
+            let mean_prey = (matching_prey_sum as f32) / (active_s.max(1) as f32);
+            let score = mean_climate_fit * 1.5 + (mean_prey.sqrt() * 0.4) + lineage_affinity * 1.8;
+            tile_class_candidates[t][apex_class].push((cand_idx, presence.season_mask, score));
         }
     }
 
-    // 2. Settle Plants (`findseasonalregions`)
-    for line in PLANTS_TSV.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+    let mut accepted_apex_tiles: Vec<Vec<TileSeasonPresence>> =
+        vec![Vec::new(); apex_candidates.len()];
+    for t in 0..n {
+        // Compute peak seasonal vertebrate prey richness on tile `t`
+        let mut max_mammal_prey = 0u16;
+        let mut max_herp_fish_prey = 0u16;
+        let mut max_avian_prey = 0u16;
+        let mut max_marine_prey = 0u16;
+        for s in 0..num_seasons {
+            let base = (s * n + t) * NUM_PREY_GUILDS;
+            let mam = prey_guild_counts[base + PREY_SMALL_MAMMAL]
+                + prey_guild_counts[base + PREY_LARGE_MAMMAL];
+            let herp = mam
+                + prey_guild_counts[base + PREY_SMALL_REPTILE]
+                + prey_guild_counts[base + PREY_LARGE_REPTILE]
+                + prey_guild_counts[base + PREY_SMALL_AMPHIBIAN]
+                + prey_guild_counts[base + PREY_SMALL_FISH];
+            let avi = mam
+                + prey_guild_counts[base + PREY_SMALL_BIRD]
+                + prey_guild_counts[base + PREY_SMALL_REPTILE]
+                + prey_guild_counts[base + PREY_SMALL_FISH];
+            let mar = prey_guild_counts[base + PREY_SMALL_FISH]
+                + prey_guild_counts[base + PREY_LARGE_FISH]
+                + mam;
+            max_mammal_prey = max_mammal_prey.max(mam);
+            max_herp_fish_prey = max_herp_fish_prey.max(herp);
+            max_avian_prey = max_avian_prey.max(avi);
+            max_marine_prey = max_marine_prey.max(mar);
+        }
+
+        // Emergent trophic pyramid capacity per apex class (no hardcoded biome labels):
+        let class_caps: [usize; 4] = [
+            ((max_mammal_prey as usize) / 4).clamp(0, 3),
+            ((max_herp_fish_prey as usize) / 6).clamp(0, 2),
+            ((max_avian_prey as usize) / 5).clamp(0, 3),
+            ((max_marine_prey as usize) / 2).clamp(0, 3),
+        ];
+
+        for apex_class in 0..4 {
+            let cap = class_caps[apex_class];
+            if cap == 0 || tile_class_candidates[t][apex_class].is_empty() {
+                continue;
+            }
+            tile_class_candidates[t][apex_class]
+                .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            for &(cand_idx, season_mask, _) in
+                tile_class_candidates[t][apex_class].iter().take(cap)
+            {
+                accepted_apex_tiles[cand_idx].push(TileSeasonPresence {
+                    tile: t,
+                    season_mask,
+                });
+            }
+        }
+    }
+
+    for ((spec, _), mut tile_seasons) in apex_candidates.into_iter().zip(accepted_apex_tiles) {
+        if tile_seasons.is_empty() {
             continue;
         }
-        let Some((name_part, json_part)) = line.split_once('\t') else {
-            continue;
-        };
-        let Some(t_range) = extract_json_range(json_part, "temperatureRange") else {
-            continue;
-        };
-        let Some(p_range) = extract_json_range(json_part, "precipitationRange") else {
-            continue;
-        };
-        let Some(s_range) = extract_json_range(json_part, "sunlightRange") else {
-            continue;
-        };
-        let sealife = extract_json_bool(json_part, "sealife").unwrap_or(false);
-        let tol = ClimateTolerance {
-            temp_norm: normalize_temp(t_range),
-            precip_norm: if sealife {
-                ValueRange::new(0.0, 2.0)
-            } else {
-                normalize_precip(p_range)
-            },
-            sun_norm: normalize_sun(s_range),
-        };
-
-        let candidate_tiles: &[usize] = if sealife { &sea_tiles } else { &land_tiles };
-        let plant_tiles: Vec<TileSeasonPresence> = candidate_tiles
-            .iter()
-            .copied()
-            .filter_map(|t| {
-                let mask = (0..num_seasons).fold(0u8, |acc, s| {
-                    let idx = s * n + t;
-                    let eff_precip = if sealife { 1.0 } else { precip_s[idx] };
-                    if tol.in_range(temp_s[idx], eff_precip, sun_s[idx]) {
-                        acc | (1u8 << s)
-                    } else {
-                        acc
-                    }
-                });
-                (mask != 0).then_some(TileSeasonPresence {
-                    tile: t,
-                    season_mask: mask,
-                })
-            })
-            .collect();
-
-        if !plant_tiles.is_empty() {
-            let sp_id = settled.len();
-            for &presence in &plant_tiles {
-                tile_all_species[presence.tile].push(sp_id);
-                for s in 0..num_seasons {
-                    if (presence.season_mask & (1u8 << s)) != 0 {
-                        seasonal_plant_counts[s][presence.tile] =
-                            seasonal_plant_counts[s][presence.tile].saturating_add(1);
-                    }
+        tile_seasons.sort_by_key(|p| p.tile);
+        let sp_id = settled.len();
+        for &presence in &tile_seasons {
+            tile_all_species[presence.tile].push(sp_id);
+            for s in 0..num_seasons {
+                if (presence.season_mask & (1u8 << s)) != 0 {
+                    seasonal_animal_counts[s][presence.tile] =
+                        seasonal_animal_counts[s][presence.tile].saturating_add(1);
                 }
             }
-            settled.push(SettledSpecies {
-                id: sp_id,
-                kind: SpeciesKind::Plant,
-                name: name_part.trim().to_string(),
-                tile_seasons: plant_tiles,
-            });
         }
+        settled.push(SettledSpecies {
+            id: sp_id,
+            kind: SpeciesKind::Animal,
+            subkind: spec.kind_str.to_string(),
+            trophic_level: 4,
+            sealife: spec.sealife,
+            name: spec.name.to_string(),
+            tile_seasons,
+        });
     }
 
     SettledBiosphere {
@@ -741,6 +1218,51 @@ mod tests {
                         "{label} still contains Earth-named species '{name}' with prefix '{prefix}'"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_trophic_food_web_and_apex_predator_competition() {
+        let sim = LifeformsSandbox::new_earth(0.5);
+        let bio = &sim.biosphere;
+        let level_1 = bio.species.iter().filter(|s| s.trophic_level == 1).count();
+        let level_2 = bio.species.iter().filter(|s| s.trophic_level == 2).count();
+        let level_3 = bio.species.iter().filter(|s| s.trophic_level == 3).count();
+        let level_4 = bio.species.iter().filter(|s| s.trophic_level == 4).count();
+        assert!(level_1 > 300, "Expected >300 plants (trophic level 1), got {level_1}");
+        assert!(level_2 > 100, "Expected >100 herbivores/insects (trophic level 2), got {level_2}");
+        assert!(level_3 > 50, "Expected >50 mesopredators/omnivores (trophic level 3), got {level_3}");
+        assert!(level_4 > 15, "Expected >15 apex predators (trophic level 4), got {level_4}");
+
+        // Verify that on every tile, the number of mammalian apex predators is bounded by emergent prey capacity (<= 3)
+        // and that every tile with an apex predator also has lower-trophic animal prey present.
+        for t in 0..sim.tile_count() {
+            let mut mam_apex_on_tile = 0usize;
+            let mut any_apex_on_tile = 0usize;
+            let mut non_apex_animals_on_tile = 0usize;
+            for &sp_id in &bio.tile_all_species[t] {
+                let sp = &bio.species[sp_id];
+                if sp.kind == SpeciesKind::Animal {
+                    if sp.trophic_level == 4 {
+                        any_apex_on_tile += 1;
+                        if !sp.sealife && (sp.subkind == "large mammal" || sp.subkind == "giant mammal") {
+                            mam_apex_on_tile += 1;
+                        }
+                    } else {
+                        non_apex_animals_on_tile += 1;
+                    }
+                }
+            }
+            assert!(
+                mam_apex_on_tile <= 3,
+                "Tile {t} has {mam_apex_on_tile} mammalian apex predators (expected <= 3)"
+            );
+            if any_apex_on_tile > 0 {
+                assert!(
+                    non_apex_animals_on_tile >= 2,
+                    "Tile {t} has {any_apex_on_tile} apex predators but only {non_apex_animals_on_tile} prey species"
+                );
             }
         }
     }
