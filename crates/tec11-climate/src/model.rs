@@ -3,7 +3,9 @@ use tec11_math_grid::SphericalGrid;
 
 use crate::earth_data::EARTH_SIZE6_ELEVATIONS_M;
 use crate::koeppen::{classify_tile, TileClimateClassification};
-use crate::ocean::{solve_seasonal_ocean_circulation, OceanCirculation};
+use crate::ocean::{
+    solve_seasonal_ocean_circulation_with_geom, OceanCirculation, OceanGridGeometry,
+};
 
 /// Standard 8 seasonal steps used in `Tec-Nine` (`climatesimulation.py:41`).
 pub const DEFAULT_SEASONS: [f64; 8] = [-1.0, -0.5, 0.0, 0.5, 1.0, 0.5, 0.0, -0.5];
@@ -129,6 +131,7 @@ pub struct SeasonalSnapshot {
 pub struct ClimateModel {
     grid: SphericalGrid,
     adjacency: Vec<Vec<usize>>,
+    ocean_geom: OceanGridGeometry,
     lats_deg: Vec<f64>,
     lons_deg: Vec<f64>,
     /// Scaled tile elevations matching `Tec-Nine` (`<= 0.0` for ocean, `(0.0..=10.0]` for land).
@@ -201,9 +204,12 @@ impl ClimateModel {
             })
             .unzip();
 
+        let ocean_geom = OceanGridGeometry::new(&grid, &adjacency, &lats_deg);
+
         let mut model = Self {
             grid,
             adjacency,
+            ocean_geom,
             lats_deg,
             lons_deg,
             elevations,
@@ -377,9 +383,12 @@ impl ClimateModel {
             })
             .unzip();
 
+        let ocean_geom = OceanGridGeometry::new(&grid, &adjacency, &lats_deg);
+
         let mut model = Self {
             grid,
             adjacency,
+            ocean_geom,
             lats_deg,
             lons_deg,
             elevations: vec![0.0; n],
@@ -412,9 +421,8 @@ impl ClimateModel {
         self.elevations.copy_from_slice(elevations);
         self.compute_seabreeze();
 
-        self.ocean_seasons = solve_seasonal_ocean_circulation(
-            &self.grid,
-            &self.adjacency,
+        self.ocean_seasons = solve_seasonal_ocean_circulation_with_geom(
+            &self.ocean_geom,
             &self.lats_deg,
             &self.elevations,
             self.cells,
@@ -498,17 +506,21 @@ impl ClimateModel {
             })
             .collect();
 
+        let mut rts = [0.0f64; DEFAULT_SEASONS.len()];
+        let mut rps = [0.0f64; DEFAULT_SEASONS.len()];
         let classifications: Vec<TileClimateClassification> = (0..n)
             .map(|v| {
-                let rts: Vec<f64> = snapshots
-                    .iter()
-                    .map(|snap| snap.temperature[v] as f64)
-                    .collect();
-                let rps: Vec<f64> = snapshots
-                    .iter()
-                    .map(|snap| snap.precipitation[v] as f64)
-                    .collect();
-                classify_tile(self.elevations[v], &rts, &rps, templimits, has_life)
+                for (s_idx, snap) in snapshots.iter().enumerate() {
+                    rts[s_idx] = snap.temperature[v] as f64;
+                    rps[s_idx] = snap.precipitation[v] as f64;
+                }
+                classify_tile(
+                    self.elevations[v],
+                    &rts[..snapshots.len()],
+                    &rps[..snapshots.len()],
+                    templimits,
+                    has_life,
+                )
             })
             .collect();
 
@@ -534,9 +546,8 @@ impl ClimateModel {
             glaciation_bits: self.glaciation.to_bits(),
         };
         if self.cached_ocean_params != Some(ocean_key) {
-            self.ocean_seasons = solve_seasonal_ocean_circulation(
-                &self.grid,
-                &self.adjacency,
+            self.ocean_seasons = solve_seasonal_ocean_circulation_with_geom(
+                &self.ocean_geom,
                 &self.lats_deg,
                 &self.elevations,
                 self.cells,

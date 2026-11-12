@@ -21,18 +21,123 @@ pub struct OceanCirculation {
     pub coastal_sst_influence: Vec<f32>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct TangentBasis {
     east: [f64; 3],
     north: [f64; 3],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct NeighborGeom {
     idx: usize,
     dx_east: f64,
     dy_north: f64,
     inv_d2: f64,
+    d_len: f64,
+}
+
+/// Precomputed static spherical tangent-plane geometry and CSR neighbor offsets
+/// for a planetary grid, avoiding repeated basis and neighbor distance calculations
+/// on every climate/ocean update.
+#[derive(Clone, Debug)]
+pub struct OceanGridGeometry {
+    bases: Vec<TangentBasis>,
+    neighbor_geoms: Vec<NeighborGeom>,
+    neighbor_offsets: Vec<usize>,
+    adj_flat: Vec<usize>,
+    lat_cos: Vec<f64>,
+    lat_sin: Vec<f64>,
+    meridional_grad: Vec<f64>,
+}
+
+impl OceanGridGeometry {
+    pub fn new(grid: &SphericalGrid, adjacency: &[Vec<usize>], lats_deg: &[f64]) -> Self {
+        let n = grid.faces.len();
+        let bases: Vec<TangentBasis> = grid
+            .faces
+            .iter()
+            .map(|&([x, y, z], _)| {
+                let xy = (x * x + y * y).sqrt();
+                if xy > 1e-9 {
+                    // In our globe coordinate convention (lat = asin(z), lon = atan2(-y, x)):
+                    // East (+lon) is (y, -x, 0) / xy, and North (+lat) is (-x*z, -y*z, xy*xy) / xy.
+                    TangentBasis {
+                        east: [y / xy, -x / xy, 0.0],
+                        north: [-x * z / xy, -y * z / xy, xy],
+                    }
+                } else {
+                    TangentBasis {
+                        east: [0.0, -1.0, 0.0],
+                        north: [1.0, 0.0, 0.0],
+                    }
+                }
+            })
+            .collect();
+
+        let total_edges: usize = adjacency.iter().map(|a| a.len()).sum();
+        let mut neighbor_geoms = Vec::with_capacity(total_edges);
+        let mut adj_flat = Vec::with_capacity(total_edges);
+        let mut neighbor_offsets = Vec::with_capacity(n + 1);
+        neighbor_offsets.push(0);
+
+        for v in 0..n {
+            let ([vx, vy, vz], _) = grid.faces[v];
+            let TangentBasis { east, north } = bases[v];
+            for &u in &adjacency[v] {
+                let ([ux, uy, uz], _) = grid.faces[u];
+                let rx = ux - vx;
+                let ry = uy - vy;
+                let rz = uz - vz;
+                let dx = rx * east[0] + ry * east[1] + rz * east[2];
+                let dy = rx * north[0] + ry * north[1] + rz * north[2];
+                let d2 = (dx * dx + dy * dy).max(1e-7);
+                let d_len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                neighbor_geoms.push(NeighborGeom {
+                    idx: u,
+                    dx_east: dx,
+                    dy_north: dy,
+                    inv_d2: 1.0 / d2,
+                    d_len,
+                });
+                adj_flat.push(u);
+            }
+            neighbor_offsets.push(neighbor_geoms.len());
+        }
+
+        let mut lat_cos = Vec::with_capacity(n);
+        let mut lat_sin = Vec::with_capacity(n);
+        let mut meridional_grad = Vec::with_capacity(n);
+        for &lat_deg in lats_deg {
+            let lat_rad = lat_deg * PI / 180.0;
+            lat_cos.push(lat_rad.cos());
+            lat_sin.push(lat_rad.sin());
+            meridional_grad.push((2.0 * lat_rad.abs()).sin().max(0.25));
+        }
+
+        Self {
+            bases,
+            neighbor_geoms,
+            neighbor_offsets,
+            adj_flat,
+            lat_cos,
+            lat_sin,
+            meridional_grad,
+        }
+    }
+
+    #[inline]
+    fn neighbors(&self, v: usize) -> &[NeighborGeom] {
+        let start = self.neighbor_offsets[v];
+        let end = self.neighbor_offsets[v + 1];
+        &self.neighbor_geoms[start..end]
+    }
+
+    #[inline]
+    fn adj(&self, v: usize) -> &[usize] {
+        let start = self.neighbor_offsets[v];
+        let end = self.neighbor_offsets[v + 1];
+        &self.adj_flat[start..end]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -95,79 +200,50 @@ pub fn solve_seasonal_ocean_circulation(
     glaciation: f64,
     seasons: &[f64],
 ) -> Vec<OceanCirculation> {
-    let n = grid.faces.len();
+    let geom = OceanGridGeometry::new(grid, adjacency, lats_deg);
+    solve_seasonal_ocean_circulation_with_geom(
+        &geom, lats_deg, elevations, cells, spin, tilt_deg, glaciation, seasons,
+    )
+}
+
+/// Solve the coupled wind-driven Stommel–Ekman ocean circulation and SST anomaly field
+/// using precomputed [`OceanGridGeometry`] and reusable ping-pong buffers.
+pub fn solve_seasonal_ocean_circulation_with_geom(
+    geom: &OceanGridGeometry,
+    lats_deg: &[f64],
+    elevations: &[f32],
+    cells: u32,
+    spin: f64,
+    tilt_deg: f64,
+    glaciation: f64,
+    seasons: &[f64],
+) -> Vec<OceanCirculation> {
+    let n = geom.bases.len();
     let num_seasons = seasons.len().max(1);
     // In Tec-Nine (`climatemethod.py:51`), `glaciation = 0.0` is coldest (maximum glaciation / ice age),
     // `0.5` is present-day baseline, and `1.0` is warmest (greenhouse).
     // Define `ice_index` in `[-1.0, +1.0]` where `+1.0` = glacial maximum, `0.0` = baseline, `-1.0` = greenhouse.
     let ice_index = ((0.5 - glaciation.clamp(0.0, 1.0)) / 0.5).clamp(-1.0, 1.0);
 
-    // 1. Precompute local orthonormal tangent basis (east, north) at each tile.
-    let bases: Vec<TangentBasis> = grid
-        .faces
-        .iter()
-        .map(|&([x, y, z], _)| {
-            let xy = (x * x + y * y).sqrt();
-            if xy > 1e-9 {
-                // In our globe coordinate convention (lat = asin(z), lon = atan2(-y, x)):
-                // East (+lon) is (y, -x, 0) / xy, and North (+lat) is (-x*z, -y*z, xy*xy) / xy.
-                TangentBasis {
-                    east: [y / xy, -x / xy, 0.0],
-                    north: [-x * z / xy, -y * z / xy, xy],
-                }
-            } else {
-                TangentBasis {
-                    east: [0.0, -1.0, 0.0],
-                    north: [1.0, 0.0, 0.0],
-                }
-            }
-        })
-        .collect();
-
-    // 2. Precompute local neighbor offsets (dx_east, dy_north) in radians on the unit sphere.
-    let neighbor_geoms: Vec<Vec<NeighborGeom>> = (0..n)
-        .map(|v| {
-            let ([vx, vy, vz], _) = grid.faces[v];
-            let TangentBasis { east, north } = bases[v];
-            adjacency[v]
-                .iter()
-                .map(|&u| {
-                    let ([ux, uy, uz], _) = grid.faces[u];
-                    let rx = ux - vx;
-                    let ry = uy - vy;
-                    let rz = uz - vz;
-                    let dx = rx * east[0] + ry * east[1] + rz * east[2];
-                    let dy = rx * north[0] + ry * north[1] + rz * north[2];
-                    let d2 = (dx * dx + dy * dy).max(1e-7);
-                    NeighborGeom {
-                        idx: u,
-                        dx_east: dx,
-                        dy_north: dy,
-                        inv_d2: 1.0 / d2,
-                    }
-                })
-                .collect()
-        })
-        .collect();
-
     // 3. Precompute smoothed regional continentality and its spatial gradient
     //    (east, north) pointing toward nearby landmasses (~25-35 deg scale).
-    let init_land: Vec<f64> = elevations
+    let mut smooth_land: Vec<f64> = elevations
         .iter()
         .map(|&h| if h > 0.0 { 1.0 } else { 0.0 })
         .collect();
-    let smooth_land = (0..12).fold(init_land, |prev, _| {
-        (0..n)
-            .map(|v| {
-                let sum = prev[v] + adjacency[v].iter().map(|&u| prev[u]).sum::<f64>();
-                sum / ((adjacency[v].len() + 1) as f64)
-            })
-            .collect()
-    });
+    let mut smooth_next: Vec<f64> = vec![0.0; n];
+    for _ in 0..12 {
+        for v in 0..n {
+            let adj_v = geom.adj(v);
+            let sum = smooth_land[v] + adj_v.iter().map(|&u| smooth_land[u]).sum::<f64>();
+            smooth_next[v] = sum / ((adj_v.len() + 1) as f64);
+        }
+        std::mem::swap(&mut smooth_land, &mut smooth_next);
+    }
 
     let land_grads: Vec<LandGradient> = (0..n)
         .map(|v| {
-            let ngs = &neighbor_geoms[v];
+            let ngs = geom.neighbors(v);
             let k = ngs.len().max(1) as f64;
             let (ge, gn) = ngs.iter().fold((0.0, 0.0), |(acc_e, acc_n), ng| {
                 let dl = smooth_land[ng.idx] - smooth_land[v];
@@ -235,8 +311,8 @@ pub fn solve_seasonal_ocean_circulation(
             let hemi_summer = season_phase * ((lat + 0.4 * subsolar_lat_deg) / 20.0).tanh();
             let tropical_weight = (-((lat / 42.0).powi(2))).exp();
             let monsoon_strength = 0.65 * hemi_summer * tropical_weight;
-            let lat_rad = lat * PI / 180.0;
-            let cor_angle = -30.0 * (PI / 180.0) * lat_rad.sin() * spin.signum();
+            let lat_sin = geom.lat_sin[v];
+            let cor_angle = -30.0 * (PI / 180.0) * lat_sin * spin.signum();
             let cos_c = cor_angle.cos();
             let sin_c = cor_angle.sin();
             let mon_e = lge * cos_c - lgn * sin_c;
@@ -251,7 +327,7 @@ pub fn solve_seasonal_ocean_circulation(
             tau_n.push(wn);
 
             // Surface Ekman deflection: ~35 deg to the right in NH (clockwise), left in SH.
-            let ek_angle = -35.0 * (PI / 180.0) * lat_rad.sin() * spin.signum();
+            let ek_angle = -35.0 * (PI / 180.0) * lat_sin * spin.signum();
             let cos_a = ek_angle.cos();
             let sin_a = ek_angle.sin();
             ekman_e.push(we * cos_a - wn * sin_a);
@@ -263,7 +339,7 @@ pub fn solve_seasonal_ocean_circulation(
                 if elevations[v] > 0.0 {
                     return 0.0;
                 }
-                let ngs = &neighbor_geoms[v];
+                let ngs = geom.neighbors(v);
                 let k = ngs.len().max(1) as f64;
                 let (dtaun_dx, dtaue_dy) =
                     ngs.iter().fold((0.0, 0.0), |(acc_nx, acc_ey), ng| {
@@ -302,10 +378,9 @@ pub fn solve_seasonal_ocean_circulation(
                         psi[v] = 0.0;
                         continue;
                     }
-                    let lat_rad = lats_deg[v] * PI / 180.0;
-                    let beta = beta_0 * lat_rad.cos();
+                    let beta = beta_0 * geom.lat_cos[v];
                     let r_b = r_b_base * (1.0 + 2.5 * ice_cover[v]);
-                    let ngs = &neighbor_geoms[v];
+                    let ngs = geom.neighbors(v);
                     let k = ngs.len().max(1) as f64;
 
                     let (weight_sum, neighbor_sum) =
@@ -336,14 +411,12 @@ pub fn solve_seasonal_ocean_circulation(
         };
 
     // 4. Solve the annual-mean Stommel streamfunction first (equinox baseline).
-    let annual_forcing = compute_wind_forcing(0.0);
+    let mut annual_forcing = Some(compute_wind_forcing(0.0));
     let zero_psi = vec![0.0f64; n];
-    let annual_psi = solve_stommel_sor(
-        &annual_forcing.wind_curl,
-        &annual_forcing.ice_cover,
-        &zero_psi,
-        36,
-    );
+    let annual_psi = {
+        let af = annual_forcing.as_ref().unwrap();
+        solve_stommel_sor(&af.wind_curl, &af.ice_cover, &zero_psi, 36)
+    };
 
     // 5. For each season, compute wind forcing, blended Stommel streamfunction,
     //    surface velocity (geostrophic + seasonal Ekman + monsoonal coastal current),
@@ -369,7 +442,13 @@ pub fn solve_seasonal_ocean_circulation(
             ekman_n,
             wind_curl,
             ice_cover,
-        } = compute_wind_forcing(season_val);
+        } = if season_val.abs() < 1e-9 {
+            annual_forcing
+                .take()
+                .unwrap_or_else(|| compute_wind_forcing(season_val))
+        } else {
+            compute_wind_forcing(season_val)
+        };
         let eq_psi = if season_val.abs() < 1e-9 {
             annual_psi.clone()
         } else {
@@ -397,7 +476,7 @@ pub fn solve_seasonal_ocean_circulation(
             if elevations[v] > 0.0 {
                 continue;
             }
-            let ngs = &neighbor_geoms[v];
+            let ngs = geom.neighbors(v);
             let k = ngs.len().max(1) as f64;
             let (raw_dx, raw_dy, has_land_neighbor, max_offshore_ekman) = ngs.iter().fold(
                 (0.0, 0.0, false, 0.0f64),
@@ -407,9 +486,7 @@ pub fn solve_seasonal_ocean_circulation(
                     let next_dx = acc_dx + (psi_u - psi[v]) * ng.dx_east * ng.inv_d2;
                     let next_dy = acc_dy + (psi_u - psi[v]) * ng.dy_north * ng.inv_d2;
                     if elevations[u] > 0.0 {
-                        let d_len = (ng.dx_east * ng.dx_east + ng.dy_north * ng.dy_north)
-                            .sqrt()
-                            .max(1e-6);
+                        let d_len = ng.d_len;
                         let dir_to_land_e = ng.dx_east / d_len;
                         let dir_to_land_n = ng.dy_north / d_len;
                         let offshore = -(ekman_e[v] * dir_to_land_e + ekman_n[v] * dir_to_land_n);
@@ -433,9 +510,7 @@ pub fn solve_seasonal_ocean_circulation(
                     ngs.iter()
                         .fold((init_ve, init_vn), |(cur_e, cur_n), ng| {
                             if elevations[ng.idx] > 0.0 {
-                                let d_len = (ng.dx_east * ng.dx_east + ng.dy_north * ng.dy_north)
-                                    .sqrt()
-                                    .max(1e-6);
+                                let d_len = ng.d_len;
                                 let nx = ng.dx_east / d_len;
                                 let ny = ng.dy_north / d_len;
                                 let dot = cur_e * nx + cur_n * ny;
@@ -482,56 +557,56 @@ pub fn solve_seasonal_ocean_circulation(
         .flat_map(|sf| sf.raw_speed.iter().copied())
         .filter(|&spd| spd > 0.0)
         .collect();
-    all_ocean_speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let scale_speed = if all_ocean_speeds.is_empty() {
         1.0
     } else {
         let p98 = ((all_ocean_speeds.len() - 1) * 98) / 100;
-        all_ocean_speeds[p98].max(1e-6)
+        let (_, val, _) = all_ocean_speeds.select_nth_unstable_by(p98, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        (*val).max(1e-6)
     };
 
     // 7. Solve periodic seasonal Sea Surface Temperature T_SST with thermal inertia
     //    and glacial/greenhouse polar cooling/warming.
-    let mut t_sst: Vec<f64> = (0..n).map(|v| (lats_deg[v] * PI / 180.0).cos()).collect();
+    let mut t_sst: Vec<f64> = geom.lat_cos.clone();
+    let mut prev_sst: Vec<f64> = vec![0.0; n];
 
     let s0 = if num_seasons > 2 { 2 } else { 0 };
     let sf0 = &seasonal_fields[s0];
     for _iter in 0..14 {
-        let prev = t_sst.clone();
+        std::mem::swap(&mut t_sst, &mut prev_sst);
         for v in 0..n {
             if elevations[v] > 0.0 {
                 continue;
             }
-            let lat_rad = lats_deg[v] * PI / 180.0;
-            let eq_temp = lat_rad.cos();
-            let poleward_vel =
-                (sf0.u_north[v] / scale_speed).clamp(-1.2, 1.2) * lat_rad.sin().signum();
-            let meridional_grad = (2.0 * lat_rad.abs()).sin().max(0.25);
+            let eq_temp = geom.lat_cos[v];
+            let lat_sin = geom.lat_sin[v];
+            let poleward_vel = (sf0.u_north[v] / scale_speed).clamp(-1.2, 1.2) * lat_sin.signum();
+            let meridional_grad = geom.meridional_grad[v];
             let relax_rate = 0.09;
             // High-latitude glacial cooling vs greenhouse polar amplification:
             let polar_glacial_forcing =
-                -0.08 * ice_index * lat_rad.sin().powi(2) - 0.10 * sf0.ice_cover[v];
+                -0.08 * ice_index * lat_sin.powi(2) - 0.10 * sf0.ice_cover[v];
             let thermal_forcing =
                 0.14 * (1.0 - 0.20 * ice_index) * poleward_vel.max(0.0) * meridional_grad
                     - 0.13 * sf0.upwelling[v]
                     + polar_glacial_forcing;
-            let (w_sum, val_sum) = neighbor_geoms[v].iter().fold(
+            let (w_sum, val_sum) = geom.neighbors(v).iter().fold(
                 (relax_rate, relax_rate * (eq_temp + thermal_forcing)),
                 |(w_acc, val_acc), ng| {
                     let u = ng.idx;
                     if elevations[u] > 0.0 {
                         return (w_acc, val_acc);
                     }
-                    let d_len = (ng.dx_east * ng.dx_east + ng.dy_north * ng.dy_north)
-                        .sqrt()
-                        .max(1e-6);
+                    let d_len = ng.d_len;
                     let vel_u_into_v =
                         -(sf0.u_east[u] * ng.dx_east + sf0.u_north[u] * ng.dy_north) / d_len;
                     let vel_v_from_u =
                         -(sf0.u_east[v] * ng.dx_east + sf0.u_north[v] * ng.dy_north) / d_len;
                     let inflow = (0.5 * (vel_u_into_v + vel_v_from_u) / scale_speed).max(0.0);
                     let w = 0.03 + 1.15 * inflow;
-                    (w_acc + w, val_acc + w * prev[u])
+                    (w_acc + w, val_acc + w * prev_sst[u])
                 },
             );
             t_sst[v] = val_sum / w_sum;
@@ -554,22 +629,22 @@ pub fn solve_seasonal_ocean_circulation(
             let subsolar_lat_deg = -tilt_deg * season_val;
 
             for _sweep in 0..sweeps_per_season {
-                let prev = t_sst.clone();
+                std::mem::swap(&mut t_sst, &mut prev_sst);
                 for v in 0..n {
                     if elevations[v] > 0.0 {
                         continue;
                     }
                     let lat_deg = lats_deg[v];
-                    let lat_rad = lat_deg * PI / 180.0;
+                    let lat_sin = geom.lat_sin[v];
                     let shifted_lat_rad = (lat_deg - 0.20 * subsolar_lat_deg) * PI / 180.0;
                     let t_rad_season = shifted_lat_rad.cos();
 
                     let poleward_vel =
-                        (sf.u_north[v] / scale_speed).clamp(-1.2, 1.2) * lat_rad.sin().signum();
-                    let meridional_grad = (2.0 * lat_rad.abs()).sin().max(0.25);
+                        (sf.u_north[v] / scale_speed).clamp(-1.2, 1.2) * lat_sin.signum();
+                    let meridional_grad = geom.meridional_grad[v];
                     let relax_rate = 0.09;
                     let polar_glacial_forcing =
-                        -0.08 * ice_index * lat_rad.sin().powi(2) - 0.10 * sf.ice_cover[v];
+                        -0.08 * ice_index * lat_sin.powi(2) - 0.10 * sf.ice_cover[v];
                     let thermal_forcing = 0.15
                         * (1.0 - 0.20 * ice_index)
                         * poleward_vel.max(0.0)
@@ -579,20 +654,18 @@ pub fn solve_seasonal_ocean_circulation(
 
                     let inertia_weight = 0.35;
                     let init_w = inertia_weight + relax_rate;
-                    let init_val =
-                        inertia_weight * prev[v] + relax_rate * (t_rad_season + thermal_forcing);
+                    let init_val = inertia_weight * prev_sst[v]
+                        + relax_rate * (t_rad_season + thermal_forcing);
 
                     let (w_sum, val_sum) =
-                        neighbor_geoms[v]
+                        geom.neighbors(v)
                             .iter()
                             .fold((init_w, init_val), |(w_acc, val_acc), ng| {
                                 let u = ng.idx;
                                 if elevations[u] > 0.0 {
                                     return (w_acc, val_acc);
                                 }
-                                let d_len = (ng.dx_east * ng.dx_east + ng.dy_north * ng.dy_north)
-                                    .sqrt()
-                                    .max(1e-6);
+                                let d_len = ng.d_len;
                                 let vel_u_into_v = -(sf.u_east[u] * ng.dx_east
                                     + sf.u_north[u] * ng.dy_north)
                                     / d_len;
@@ -602,7 +675,7 @@ pub fn solve_seasonal_ocean_circulation(
                                 let inflow =
                                     (0.5 * (vel_u_into_v + vel_v_from_u) / scale_speed).max(0.0);
                                 let w = 0.03 + 1.15 * inflow;
-                                (w_acc + w, val_acc + w * prev[u])
+                                (w_acc + w, val_acc + w * prev_sst[u])
                             });
                     t_sst[v] = val_sum / w_sum;
                 }
@@ -632,18 +705,24 @@ pub fn solve_seasonal_ocean_circulation(
         .filter(|&d| d < 0.0)
         .map(|d| -d)
         .collect();
-    pos_diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    neg_diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let p95_pos = if pos_diffs.is_empty() {
         0.045
     } else {
-        pos_diffs[((pos_diffs.len() - 1) * 95) / 100].max(0.025)
+        let idx = ((pos_diffs.len() - 1) * 95) / 100;
+        let (_, val, _) = pos_diffs.select_nth_unstable_by(idx, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        (*val).max(0.025)
     };
     let p95_neg = if neg_diffs.is_empty() {
         0.045
     } else {
-        neg_diffs[((neg_diffs.len() - 1) * 95) / 100].max(0.025)
+        let idx = ((neg_diffs.len() - 1) * 95) / 100;
+        let (_, val, _) = neg_diffs.select_nth_unstable_by(idx, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        (*val).max(0.025)
     };
     // Blend adaptive percentile with fixed physical reference (`0.045`) so changing glaciation
     // expands/shrinks warm and cold current zones directly.
@@ -651,14 +730,19 @@ pub fn solve_seasonal_ocean_circulation(
     let neg_scale = 0.5 * p95_neg + 0.5 * 0.045;
 
     // 8. Build final OceanCirculation struct for each season.
+    let mut coastal_buf_a = vec![0.0f64; n];
+    let mut coastal_buf_b = vec![0.0f64; n];
+
     seasonal_fields
         .into_iter()
         .enumerate()
         .map(|(s_idx, sf)| {
             let mut speed = vec![0.0f32; n];
             let mut velocity_xyz = vec![[0.0f32; 3]; n];
+            let mut sst_anomaly = vec![0.0f32; n];
             for v in 0..n {
                 if elevations[v] > 0.0 {
+                    coastal_buf_a[v] = 0.0;
                     continue;
                 }
                 let norm_s = (sf.raw_speed[v] / scale_speed).min(1.0);
@@ -666,64 +750,55 @@ pub fn solve_seasonal_ocean_circulation(
                 if sf.raw_speed[v] > 1e-9 {
                     let ue = (sf.u_east[v] / sf.raw_speed[v]) * norm_s;
                     let un = (sf.u_north[v] / sf.raw_speed[v]) * norm_s;
-                    let TangentBasis { east, north } = bases[v];
+                    let TangentBasis { east, north } = geom.bases[v];
                     velocity_xyz[v] = [
                         (ue * east[0] + un * north[0]) as f32,
                         (ue * east[1] + un * north[1]) as f32,
                         (ue * east[2] + un * north[2]) as f32,
                     ];
                 }
+                let d = seasonal_raw_diff[s_idx][v];
+                let sst_v = if d >= 0.0 {
+                    (d / pos_scale).clamp(0.0, 1.0)
+                } else {
+                    (d / neg_scale).clamp(-1.0, 0.0)
+                };
+                coastal_buf_a[v] = sst_v;
+                sst_anomaly[v] = sst_v as f32;
             }
 
-            let sst: Vec<f64> = (0..n)
-                .map(|v| {
-                    if elevations[v] <= 0.0 {
-                        let d = seasonal_raw_diff[s_idx][v];
-                        if d >= 0.0 {
-                            (d / pos_scale).clamp(0.0, 1.0)
-                        } else {
-                            (d / neg_scale).clamp(-1.0, 0.0)
-                        }
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
-
             // Diffuse marine SST anomaly onto coastal/maritime land tiles (weighted by seasonal onshore wind).
-            let coastal_sst = (0..8).fold(sst.clone(), |prev, _| {
-                (0..n)
-                    .map(|v| {
-                        if elevations[v] <= 0.0 {
-                            return prev[v];
-                        }
-                        let (w_sum, val_sum) = neighbor_geoms[v].iter().fold(
-                            (0.15, 0.0),
-                            |(w_acc, val_acc), ng| {
-                                let u = ng.idx;
-                                let d_len = (ng.dx_east * ng.dx_east + ng.dy_north * ng.dy_north)
-                                    .sqrt()
-                                    .max(1e-6);
-                                let wind_inflow = (-(sf.tau_e[u] * ng.dx_east
-                                    + sf.tau_n[u] * ng.dy_north)
-                                    / d_len)
-                                    .max(0.0);
-                                let w = 0.1 + 0.9 * wind_inflow;
-                                (w_acc + w, val_acc + w * prev[u])
-                            },
-                        );
-                        let elev_decay = (1.0 - (elevations[v] as f64) * 0.25).clamp(0.1, 0.88);
-                        ((val_sum / w_sum) * elev_decay).clamp(-1.0, 1.0)
-                    })
-                    .collect()
-            });
+            for _ in 0..8 {
+                for v in 0..n {
+                    if elevations[v] <= 0.0 {
+                        coastal_buf_b[v] = coastal_buf_a[v];
+                        continue;
+                    }
+                    let (w_sum, val_sum) = geom.neighbors(v).iter().fold(
+                        (0.15, 0.0),
+                        |(w_acc, val_acc), ng| {
+                            let u = ng.idx;
+                            let d_len = ng.d_len;
+                            let wind_inflow = (-(sf.tau_e[u] * ng.dx_east
+                                + sf.tau_n[u] * ng.dy_north)
+                                / d_len)
+                                .max(0.0);
+                            let w = 0.1 + 0.9 * wind_inflow;
+                            (w_acc + w, val_acc + w * coastal_buf_a[u])
+                        },
+                    );
+                    let elev_decay = (1.0 - (elevations[v] as f64) * 0.25).clamp(0.1, 0.88);
+                    coastal_buf_b[v] = ((val_sum / w_sum) * elev_decay).clamp(-1.0, 1.0);
+                }
+                std::mem::swap(&mut coastal_buf_a, &mut coastal_buf_b);
+            }
 
             OceanCirculation {
                 streamfunction: sf.psi.into_iter().map(|p| p as f32).collect(),
                 velocity_xyz,
                 speed,
-                sst_anomaly: sst.into_iter().map(|t| t as f32).collect(),
-                coastal_sst_influence: coastal_sst.into_iter().map(|t| t as f32).collect(),
+                sst_anomaly,
+                coastal_sst_influence: coastal_buf_a.iter().map(|&t| t as f32).collect(),
             }
         })
         .collect()

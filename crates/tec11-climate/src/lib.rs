@@ -10,4 +10,7 @@ pub use model::{
     ClimateModel, DownwindLink, SeasonalSnapshot, TemperatureRange, BREEZE_DISTANCE,
     DEFAULT_SEASONS, DEFAULT_SPIN, DEFAULT_TILT_DEG, MEAN_TEMPRANGE_C,
 };
-pub use ocean::{solve_ocean_circulation, OceanCirculation};
+pub use ocean::{
+    solve_ocean_circulation, solve_seasonal_ocean_circulation,
+    solve_seasonal_ocean_circulation_with_geom, OceanCirculation, OceanGridGeometry,
+};
