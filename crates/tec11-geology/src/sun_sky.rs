@@ -1338,25 +1338,6 @@ pub fn format_solar_system_summary(planets: &[SolarSystemPlanet]) -> String {
         .join(" | ")
 }
 
-const CONSTELLATION_SHAPE_LABELS: [&str; 16] = [
-    "Northern Crown",
-    "Polar Serpent",
-    "Great Wain",
-    "Chained Chariot",
-    "Hunter's Bow",
-    "Twin Pillars",
-    "River Herd",
-    "Winged Steed",
-    "Golden Scales",
-    "Sea Leviathan",
-    "Scorpion's Tail",
-    "Archer's Arrow",
-    "Southern Ship",
-    "Altar Flame",
-    "Southern Cross",
-    "South Pole Octant",
-];
-
 /// A constellation (connected asterism of bright stars on the celestial sphere).
 #[derive(Clone, Debug)]
 pub struct Constellation {
@@ -1376,8 +1357,6 @@ pub struct Constellation {
     pub star_count: u32,
     /// Apparent magnitude `m_V` of the brightest (alpha) star in the constellation.
     pub brightest_mag: f32,
-    /// Descriptive asterism figure label.
-    pub shape_label: &'static str,
 }
 
 impl Constellation {
@@ -1407,9 +1386,8 @@ impl Constellation {
     /// Gloss used for `ConceptKey::Constellation(self.index)` in `history.rs`.
     pub fn lexicon_gloss(&self) -> String {
         format!(
-            "constellation #{} ({}, {} stars, dec {:+.0}° {})",
+            "constellation #{} ({} stars, dec {:+.0}° {})",
             self.index + 1,
-            self.shape_label,
             self.star_count,
             self.declination_deg,
             self.hemisphere_band_label()
@@ -1448,7 +1426,6 @@ pub fn generate_default_constellations(seed: u64) -> Vec<Constellation> {
             right_ascension_deg: ra_deg,
             star_count,
             brightest_mag,
-            shape_label: CONSTELLATION_SHAPE_LABELS[idx % CONSTELLATION_SHAPE_LABELS.len()],
         });
     }
     out
@@ -1598,7 +1575,6 @@ pub fn build_constellations_from_stars(
             declination_deg: group.declination_deg,
             right_ascension_deg: group.right_ascension_deg,
             brightest_mag: group.brightest_mag,
-            shape_label: CONSTELLATION_SHAPE_LABELS[idx % CONSTELLATION_SHAPE_LABELS.len()],
         });
     }
     if !has_deep_south {
@@ -1626,7 +1602,6 @@ pub fn build_constellations_from_stars(
     });
     for (idx, c) in constellations.iter_mut().enumerate() {
         c.index = idx as u32;
-        c.shape_label = CONSTELLATION_SHAPE_LABELS[idx % CONSTELLATION_SHAPE_LABELS.len()];
     }
 
     (edges, constellations)

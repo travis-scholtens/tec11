@@ -3456,10 +3456,10 @@ function paintTileSkyCanvas(view) {
       }
 
       // Constellation label at its brightest star if above horizon
-      if (projStars.length > 0 && projStars[0].up > 0.08) {
+      if (c.name && projStars.length > 0 && projStars[0].up > 0.08) {
         ctx.fillStyle = `rgba(125, 211, 252, ${(0.82 * starAlpha).toFixed(3)})`;
         ctx.font = "9px sans-serif";
-        ctx.fillText(c.name || c.shapeLabel || "", projStars[0].x + 4, projStars[0].y - 3);
+        ctx.fillText(c.name, projStars[0].x + 4, projStars[0].y - 3);
       }
     }
   }

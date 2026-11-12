@@ -379,7 +379,6 @@ impl TileSkyPlanet {
 pub struct TileSkyConstellation {
     pub index: u32,
     pub name: String,
-    pub shape_label: String,
     pub ra_deg: f32,
     pub dec_deg: f32,
     pub stars: Vec<[f32; 3]>,
@@ -399,10 +398,9 @@ impl TileSkyConstellation {
             .map(|e| format!("[{},{}]", e[0], e[1]))
             .collect();
         format!(
-            "{{\"index\":{},\"name\":{},\"shapeLabel\":{},\"raDeg\":{:.2},\"decDeg\":{:.2},\"stars\":[{}],\"edges\":[{}]}}",
+            "{{\"index\":{},\"name\":{},\"raDeg\":{:.2},\"decDeg\":{:.2},\"stars\":[{}],\"edges\":[{}]}}",
             self.index,
             json_escape(&self.name),
-            json_escape(&self.shape_label),
             self.ra_deg,
             self.dec_deg,
             stars_json.join(","),
@@ -5164,15 +5162,16 @@ impl HistorySimulation {
                 edges.push([0, 2]);
             }
 
+            let ck = ConceptKey::Constellation(c.index);
             let name = lang_rec
-                .and_then(|l| l.lexicon.get(&ConceptKey::Constellation(c.index)))
-                .map(|orig| format!("{} ({})", orig.word.write(true), c.shape_label))
-                .unwrap_or_else(|| c.shape_label.to_string());
+                .and_then(|l| l.lexicon.get(&ck))
+                .or_else(|| self.languages.values().find_map(|l| l.lexicon.get(&ck)))
+                .map(|orig| orig.word.write(true))
+                .unwrap_or_default();
 
             constellations.push(TileSkyConstellation {
                 index: c.index,
                 name,
-                shape_label: c.shape_label.to_string(),
                 ra_deg: c.right_ascension_deg,
                 dec_deg: c.declination_deg,
                 stars,
