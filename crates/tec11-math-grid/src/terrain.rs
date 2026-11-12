@@ -283,6 +283,10 @@ impl SubdividedTerrainGrid {
     }
 
     /// Route coarse rivers across the subdivided terrain grid (`terrainmethod.py:41-86`).
+    /// Each coarse transition `r[i] -> r[i + 1]` routes deterministically from the center fine face
+    /// of `r[i]` to the center fine face of `r[i + 1]` (or the coastal mouth fine face adjacent to
+    /// the ocean tile `r.last()`) along the shortest monotonic descent path, so tributaries that
+    /// join at a coarse tile converge at its center fine face and never cross or braid.
     pub fn route_rivers(
         &self,
         coarse: &SphericalGrid,
@@ -295,44 +299,47 @@ impl SubdividedTerrainGrid {
                 let start_key = Vec3Key::from_vec3(coarse.faces[first_coarse].0);
                 let &start_fine = self.terrain_grid.face_index.get(&start_key)?;
                 let route = (0..r.len()).fold(vec![start_fine], |mut route, i| {
-                    let pool = &self.coarse_to_fine_children[r[i]];
-                    if pool.is_empty() {
+                    let c_curr = r[i];
+                    let pool_curr = &self.coarse_to_fine_children[c_curr];
+                    if pool_curr.is_empty() {
                         return route;
                     }
-                    let pool_set: BTreeSet<usize> = pool.iter().copied().collect();
-                    let edge: BTreeSet<usize> = if let Some(&next_coarse) = r.get(i + 1) {
-                        let next_center = coarse.faces[next_coarse].0;
-                        let mut sorted_pool = pool.clone();
-                        sorted_pool.sort_by(|&a, &b| {
-                            let da = dist2(self.terrain_grid.faces[a].0, next_center);
-                            let db = dist2(self.terrain_grid.faces[b].0, next_center);
-                            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        sorted_pool.into_iter().take(3).collect()
+                    let Some(&next_coarse) = r.get(i + 1) else {
+                        return route;
+                    };
+                    let next_center = coarse.faces[next_coarse].0;
+                    let next_key = Vec3Key::from_vec3(next_center);
+
+                    let mut allowed: BTreeSet<usize> = pool_curr.iter().copied().collect();
+                    let target_fine = if let Some(&next_center_fine) =
+                        self.terrain_grid.face_index.get(&next_key)
+                    {
+                        allowed.extend(self.coarse_to_fine_children[next_coarse].iter().copied());
+                        next_center_fine
                     } else {
-                        let mut sorted_pool = pool.clone();
-                        sorted_pool.sort_by(|&a, &b| {
-                            self.fine_elevations[a]
-                                .partial_cmp(&self.fine_elevations[b])
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        sorted_pool.into_iter().take(1).collect()
+                        // `next_coarse` is an un-subdivided ocean tile: route to the coastal fine face
+                        // in `pool_curr` closest to `next_center`.
+                        *pool_curr
+                            .iter()
+                            .min_by(|&&a, &&b| {
+                                let da = dist2(self.terrain_grid.faces[a].0, next_center);
+                                let db = dist2(self.terrain_grid.faces[b].0, next_center);
+                                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .unwrap_or(&start_fine)
                     };
 
                     let cur = *route.last().unwrap();
-                    let mut seen = BTreeSet::new();
-                    if let Some(steps) = find_fine_path(
+                    for s in find_shortest_fine_segment(
                         cur,
-                        &edge,
-                        &pool_set,
-                        &mut seen,
+                        target_fine,
+                        &allowed,
                         &self.terrain_adj,
+                        &self.terrain_grid.faces,
                         &self.fine_elevations,
                     ) {
-                        for s in steps {
-                            if route.last().copied() != Some(s) {
-                                route.push(s);
-                            }
+                        if route.last().copied() != Some(s) {
+                            route.push(s);
                         }
                     }
                     route
@@ -388,33 +395,53 @@ impl SubdividedTerrainGrid {
     }
 }
 
-fn find_fine_path(
+fn find_shortest_fine_segment(
     source: usize,
-    edge: &BTreeSet<usize>,
-    pool: &BTreeSet<usize>,
-    seen: &mut BTreeSet<usize>,
+    target: usize,
+    allowed: &BTreeSet<usize>,
     adj: &[Vec<usize>],
+    faces: &[(Vec3, Vec<Vec3>)],
     elevations: &[f32],
-) -> Option<Vec<usize>> {
-    seen.insert(source);
-    if edge.contains(&source) {
-        return Some(vec![source]);
+) -> Vec<usize> {
+    if source == target {
+        return vec![source];
     }
+    let target_pos = faces[target].0;
+    let mut path = vec![source];
+    let mut curr = source;
+    let mut visited = BTreeSet::from([source]);
 
-    let mut neighbors = adj[source].clone();
-    neighbors.sort_by(|&a, &b| {
-        elevations[a]
-            .partial_cmp(&elevations[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.cmp(&b))
-    });
-
-    neighbors.into_iter().find_map(|n| {
-        (pool.contains(&n) && !seen.contains(&n))
-            .then(|| find_fine_path(n, edge, pool, seen, adj, elevations))
-            .flatten()
-            .map(|steps| std::iter::once(source).chain(steps).collect())
-    })
+    for _ in 0..8 {
+        if curr == target {
+            break;
+        }
+        let curr_dist = dist2(faces[curr].0, target_pos);
+        let next_opt = adj[curr]
+            .iter()
+            .copied()
+            .filter(|&nb| {
+                allowed.contains(&nb)
+                    && !visited.contains(&nb)
+                    && (nb == target || dist2(faces[nb].0, target_pos) < curr_dist)
+            })
+            .min_by(|&a, &b| {
+                let da = dist2(faces[a].0, target_pos);
+                let db = dist2(faces[b].0, target_pos);
+                let score_a = da + (elevations[a].max(0.0) as f64) * 0.0002;
+                let score_b = db + (elevations[b].max(0.0) as f64) * 0.0002;
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.cmp(&b))
+            });
+        let Some(next_face) = next_opt else {
+            break;
+        };
+        visited.insert(next_face);
+        path.push(next_face);
+        curr = next_face;
+    }
+    path
 }
 
 #[cfg(test)]

@@ -3281,7 +3281,7 @@ function buildTravelInfo(view) {
   const selectedReport =
     view.selectedTileIdx >= 0
       ? s.inspect_travel_tile(view.selectedTileIdx)
-      : "Click any coastal port, ocean tile, or river corridor on the globe to inspect prevailing wind & current vectors, active maritime sea lanes (gold = trade, red = conflict, green = expansion), and riverine routes (cyan).";
+      : "Click any coastal port, ocean tile, or river corridor on the globe to inspect prevailing wind & current vectors and travel routes (yellow = active trade, red = naval conflict, cyan/emerald = connected sea/river lane, violet = hypothetical/unconnected drift).";
   return {
     planetName,
     tileCount: s.tile_count(),

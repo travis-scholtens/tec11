@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{normal, SphericalGrid};
@@ -8,42 +9,51 @@ use crate::rock::{Rock, RockKind, RockLayer};
 use crate::tectonics::TectonicsSimulation;
 use crate::tile::TileGeology;
 
-/// Recursively trace a steepest-descent path from `tile` to the first ocean tile (`elevation <= 0.0`),
-/// matching `riversmethod.follow(tile, adj, seen)` (`riversmethod.py:7-16`).
-fn follow_to_sea(
-    tile: usize,
-    elevations: &[f32],
-    adjacency: &[Vec<usize>],
-    seen: &mut BTreeSet<usize>,
-) -> Option<Vec<usize>> {
-    if elevations[tile] <= 0.0 {
-        return Some(vec![tile]);
-    }
-    seen.insert(tile);
+/// Compute a globally consistent, cycle-free downstream flow target `downstream[t]` for every land tile `t`
+/// using Priority-Flood depression routing from the ocean (`elevation <= 0.0`).
+/// Because every land tile has at most one downstream neighbor, coarse river networks form a strict
+/// dendritic forest where tributaries merge cleanly at confluences and never cross or diverge.
+fn compute_downstream_targets(elevations: &[f32], adjacency: &[Vec<usize>]) -> Vec<Option<usize>> {
+    let n = elevations.len();
+    let mut downstream = vec![None; n];
+    let mut visited = vec![false; n];
+    let mut heap: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
 
-    let mut neighbors = adjacency[tile].clone();
-    neighbors.sort_by(|&a, &b| {
-        elevations[a]
-            .partial_cmp(&elevations[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.cmp(&b))
-    });
+    let elev_key = |e: f32| -> i64 { (e as f64 * 1_000_000.0).round() as i64 };
 
-    for n in neighbors {
-        if seen.contains(&n) {
-            continue;
-        }
-        if let Some(mut sink) = follow_to_sea(n, elevations, adjacency, seen) {
-            let mut path = Vec::with_capacity(1 + sink.len());
-            path.push(tile);
-            path.append(&mut sink);
-            seen.remove(&tile);
-            return Some(path);
+    for t in 0..n {
+        if elevations[t] <= 0.0 {
+            visited[t] = true;
+            heap.push(Reverse((elev_key(elevations[t]), t)));
         }
     }
 
-    seen.remove(&tile);
-    None
+    // Priority-Flood from the sea inward: each unvisited land tile `nb` is reached first from its
+    // lowest-elevation spill path `u`, establishing a unique monotonic drainage tree to the ocean.
+    while let Some(Reverse((_, u))) = heap.pop() {
+        for &nb in &adjacency[u] {
+            if !visited[nb] {
+                visited[nb] = true;
+                // If `nb` has an already-visited neighbor with strictly lower elevation than `u`,
+                // prefer the steepest-descent visited neighbor so hillslopes follow steepest gradient.
+                let best_down = adjacency[nb]
+                    .iter()
+                    .copied()
+                    .filter(|&cand| visited[cand])
+                    .min_by(|&a, &b| {
+                        elevations[a]
+                            .partial_cmp(&elevations[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.cmp(&b))
+                    })
+                    .unwrap_or(u);
+                downstream[nb] = Some(best_down);
+                heap.push(Reverse((elev_key(elevations[nb]), nb)));
+            }
+        }
+    }
+
+    downstream
 }
 
 /// Trace coarse rivers from local elevation peaks (`elevation >= hmin`) down to the sea,
@@ -58,6 +68,7 @@ pub fn trace_coarse_rivers(
     pmin: f32,
 ) -> Vec<Vec<usize>> {
     let n = elevations.len();
+    let downstream = compute_downstream_targets(elevations, adjacency);
     let mut rivers = Vec::new();
 
     for t in 0..n {
@@ -66,8 +77,18 @@ pub fn trace_coarse_rivers(
             && elev_t >= hmin
             && adjacency[t].iter().all(|&nb| elev_t >= elevations[nb])
         {
-            let mut seen = BTreeSet::new();
-            if let Some(ts) = follow_to_sea(t, elevations, adjacency, &mut seen) {
+            let mut ts = Vec::new();
+            let mut cur_opt = Some(t);
+            let mut steps = 0usize;
+            while let Some(u) = cur_opt {
+                ts.push(u);
+                if elevations[u] <= 0.0 || steps > n {
+                    break;
+                }
+                cur_opt = downstream[u];
+                steps += 1;
+            }
+            if ts.last().is_some_and(|&last| elevations[last] <= 0.0) {
                 let mut p_cum = 0.0f32;
                 for i in 0..ts.len() {
                     let u = ts[i];

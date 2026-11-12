@@ -498,6 +498,8 @@ impl TravelRouteKind {
 pub enum TravelRouteStatus {
     /// Unsettled wind/current corridor with no active port polity at its origin.
     PotentialCorridor,
+    /// Hypothetical / exploratory wind or current route from a populated port whose destination is unclaimed/unpopulated.
+    HypotheticalRoute,
     /// Active expansion or domestic sea/river lane established by a water-access polity.
     ActiveSeaLane,
     /// Active naval or amphibious war route between conflicting states.
@@ -515,7 +517,8 @@ impl TravelRouteStatus {
                 TravelRouteKind::RiverCorridor => [0.25, 0.96, 0.68],
                 TravelRouteKind::OceanGyre | TravelRouteKind::CoastalSeaLane => [0.18, 0.90, 0.98],
             },
-            Self::PotentialCorridor => [0.36, 0.50, 0.84],
+            Self::HypotheticalRoute => [0.58, 0.46, 0.88],
+            Self::PotentialCorridor => [0.32, 0.42, 0.66],
         }
     }
 
@@ -523,24 +526,28 @@ impl TravelRouteStatus {
         match self {
             Self::MaritimeTrade | Self::NavalConflict => 1.010,
             Self::ActiveSeaLane => 1.008,
-            Self::PotentialCorridor => 1.005,
+            Self::HypotheticalRoute => 1.006,
+            Self::PotentialCorridor => 1.004,
         }
     }
 
     pub fn ocean_sector_label(self) -> &'static str {
         match self {
-            Self::MaritimeTrade => "TRADE ROUTE (gold)",
+            Self::MaritimeTrade => "TRADE ROUTE (yellow/gold)",
             Self::NavalConflict => "NAVAL CONFLICT (red)",
-            Self::ActiveSeaLane => "ACTIVE SEA LANE (cyan)",
-            Self::PotentialCorridor => "Potential Wind/Current Corridor",
+            Self::ActiveSeaLane => "CONNECTED SEA LANE (cyan)",
+            Self::HypotheticalRoute => "HYPOTHETICAL / UNCONNECTED DRIFT (violet)",
+            Self::PotentialCorridor => "Potential Wind/Current Corridor (steel-blue)",
         }
     }
 
     pub fn land_label(self) -> &'static str {
         match self {
-            Self::MaritimeTrade => "MARITIME TRADE",
-            Self::NavalConflict => "NAVAL CONFLICT",
-            Self::ActiveSeaLane | Self::PotentialCorridor => "EXPANSION / SEA LANE",
+            Self::MaritimeTrade => "MARITIME TRADE (yellow)",
+            Self::NavalConflict => "NAVAL CONFLICT (red)",
+            Self::ActiveSeaLane => "CONNECTED SEA LANE (cyan)",
+            Self::HypotheticalRoute => "HYPOTHETICAL / UNCONNECTED (violet)",
+            Self::PotentialCorridor => "POTENTIAL CORRIDOR",
         }
     }
 }
@@ -1242,26 +1249,45 @@ impl HistorySimulation {
                             let f_end = self.coarse_port_fine_face[land_v].unwrap();
                             let mut full_path = path.clone();
                             full_path.push(land_v);
-                            let eff_cost = total_cost + edge.cost;
-                            let mean_align = ((total_align + edge.alignment)
-                                / (steps as f32 + 1.0))
-                                .clamp(0.1, 1.0);
-                            let route = TravelRoute {
-                                from_fine_face: f_start,
-                                to_fine_face: f_end,
-                                from_coarse_tile: c_start,
-                                to_coarse_tile: land_v,
-                                coarse_path: full_path,
-                                effective_cost: eff_cost,
-                                wind_current_alignment: mean_align,
-                                route_kind: TravelRouteKind::OceanGyre,
-                            };
-                            let key = (c_start, land_v);
-                            if routes_by_pair
-                                .get(&key)
-                                .is_none_or(|old| eff_cost < old.effective_cost)
-                            {
-                                routes_by_pair.insert(key, route);
+                            let p_start = grid.faces[c_start].0;
+                            let p_end = grid.faces[land_v].0;
+                            let direct_dist = ((p_end[0] - p_start[0]).powi(2)
+                                + (p_end[1] - p_start[1]).powi(2)
+                                + (p_end[2] - p_start[2]).powi(2))
+                            .sqrt();
+                            let path_dist: f64 = full_path
+                                .windows(2)
+                                .map(|w| {
+                                    let a = grid.faces[w[0]].0;
+                                    let b = grid.faces[w[1]].0;
+                                    ((b[0] - a[0]).powi(2)
+                                        + (b[1] - a[1]).powi(2)
+                                        + (b[2] - a[2]).powi(2))
+                                    .sqrt()
+                                })
+                                .sum();
+                            if direct_dist >= 0.52 * path_dist {
+                                let eff_cost = total_cost + edge.cost;
+                                let mean_align = ((total_align + edge.alignment)
+                                    / (steps as f32 + 1.0))
+                                    .clamp(0.1, 1.0);
+                                let route = TravelRoute {
+                                    from_fine_face: f_start,
+                                    to_fine_face: f_end,
+                                    from_coarse_tile: c_start,
+                                    to_coarse_tile: land_v,
+                                    coarse_path: full_path,
+                                    effective_cost: eff_cost,
+                                    wind_current_alignment: mean_align,
+                                    route_kind: TravelRouteKind::OceanGyre,
+                                };
+                                let key = (c_start, land_v);
+                                if routes_by_pair
+                                    .get(&key)
+                                    .is_none_or(|old| eff_cost < old.effective_cost)
+                                {
+                                    routes_by_pair.insert(key, route);
+                                }
                             }
                             break;
                         }
@@ -3137,21 +3163,22 @@ impl HistorySimulation {
         if !is_active {
             return TravelRouteStatus::PotentialCorridor;
         }
-        if let (Some(&s1), Some(&s2)) = (
-            self.tile_states.get(&route.from_fine_face),
-            self.tile_states.get(&route.to_fine_face),
-        ) {
-            if s1 != s2 {
+        let s1_opt = self.tile_states.get(&route.from_fine_face).copied();
+        let s2_opt = self.tile_states.get(&route.to_fine_face).copied();
+        match (s1_opt, s2_opt) {
+            (Some(s1), Some(s2)) if s1 != s2 => {
                 let pair = StatePair::new(s1, s2);
                 if self.conflicts.contains(&pair) {
-                    return TravelRouteStatus::NavalConflict;
-                }
-                if self.trade_partners.contains(&pair) {
-                    return TravelRouteStatus::MaritimeTrade;
+                    TravelRouteStatus::NavalConflict
+                } else if self.trade_partners.contains(&pair) {
+                    TravelRouteStatus::MaritimeTrade
+                } else {
+                    TravelRouteStatus::ActiveSeaLane
                 }
             }
+            (Some(_), Some(_)) => TravelRouteStatus::ActiveSeaLane,
+            _ => TravelRouteStatus::HypotheticalRoute,
         }
-        TravelRouteStatus::ActiveSeaLane
     }
 
     pub fn maritime_trade_route_count(&self) -> usize {
@@ -3187,13 +3214,19 @@ impl HistorySimulation {
 
             let lift_pt = |c: Vec3| -> [f32; 3] {
                 [
-                    c[0] as f32 * radius_lift,
-                    c[1] as f32 * radius_lift,
+                    -c[1] as f32 * radius_lift,
                     c[2] as f32 * radius_lift,
+                    c[0] as f32 * radius_lift,
                 ]
             };
 
-            let pts: Vec<[f32; 3]> = self
+            let interior_coarse = if route.coarse_path.len() >= 2 {
+                &route.coarse_path[1..route.coarse_path.len() - 1]
+            } else {
+                &[][..]
+            };
+
+            let mut pts: Vec<[f32; 3]> = self
                 .terrain
                 .terrain_grid
                 .faces
@@ -3201,8 +3234,7 @@ impl HistorySimulation {
                 .map(|&(c, _)| lift_pt(c))
                 .into_iter()
                 .chain(
-                    route
-                        .coarse_path
+                    interior_coarse
                         .iter()
                         .filter_map(|&c_idx| grid.faces.get(c_idx).map(|&(c, _)| lift_pt(c))),
                 )
@@ -3214,6 +3246,24 @@ impl HistorySimulation {
                         .map(|&(c, _)| lift_pt(c)),
                 )
                 .collect();
+
+            if pts.len() >= 3 && route.route_kind != TravelRouteKind::RiverCorridor {
+                let raw = pts.clone();
+                for i in 1..(pts.len() - 1) {
+                    let p_prev = raw[i - 1];
+                    let p_curr = raw[i];
+                    let p_next = raw[i + 1];
+                    let sx = 0.25 * p_prev[0] + 0.50 * p_curr[0] + 0.25 * p_next[0];
+                    let sy = 0.25 * p_prev[1] + 0.50 * p_curr[1] + 0.25 * p_next[1];
+                    let sz = 0.25 * p_prev[2] + 0.50 * p_curr[2] + 0.25 * p_next[2];
+                    let len = (sx * sx + sy * sy + sz * sz).sqrt().max(1e-6);
+                    pts[i] = [
+                        sx * radius_lift / len,
+                        sy * radius_lift / len,
+                        sz * radius_lift / len,
+                    ];
+                }
+            }
 
             if pts.len() < 2 {
                 return;
@@ -3292,11 +3342,12 @@ impl HistorySimulation {
         for c in (0..num_coarse).step_by(stride) {
             let p = grid.faces[c].0;
             let r_lift = 1.004f32;
-            let p0 = [
+            let p0_grid = [
                 p[0] as f32 * r_lift,
                 p[1] as f32 * r_lift,
                 p[2] as f32 * r_lift,
             ];
+            let p0 = [-p0_grid[1], p0_grid[2], p0_grid[0]];
 
             if coarse_elevs[c] <= 0.0 {
                 // Ocean current vector (warm = orange-gold, cold = cyan-blue)
@@ -3305,11 +3356,12 @@ impl HistorySimulation {
                 let sst = ocean.sst_anomaly.get(c).copied().unwrap_or(0.0);
                 if spd > 0.04 {
                     let len = 0.032 * spd.sqrt().clamp(0.35, 1.0);
-                    let p1 = [
-                        p0[0] + len * vel[0],
-                        p0[1] + len * vel[1],
-                        p0[2] + len * vel[2],
+                    let p1_grid = [
+                        p0_grid[0] + len * vel[0],
+                        p0_grid[1] + len * vel[1],
+                        p0_grid[2] + len * vel[2],
                     ];
+                    let p1 = [-p1_grid[1], p1_grid[2], p1_grid[0]];
                     let rgb = if sst >= 0.05 {
                         [0.98, 0.58, 0.20]
                     } else if sst <= -0.05 {
@@ -3326,7 +3378,12 @@ impl HistorySimulation {
             if (c / stride) % 2 == 0 {
                 let w = climate.wind_vector_xyz(c);
                 let len = 0.022f32;
-                let p1 = [p0[0] + len * w[0], p0[1] + len * w[1], p0[2] + len * w[2]];
+                let p1_grid = [
+                    p0_grid[0] + len * w[0],
+                    p0_grid[1] + len * w[1],
+                    p0_grid[2] + len * w[2],
+                ];
+                let p1 = [-p1_grid[1], p1_grid[2], p1_grid[0]];
                 out.extend_from_slice(&[
                     p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], 0.78, 0.86, 0.96,
                 ]);
@@ -3821,6 +3878,7 @@ impl HistorySimulation {
             self.travel_routes
                 .iter()
                 .flat_map(|r| [r.from_fine_face, r.to_fine_face])
+                .filter(|f_idx| self.tile_states.contains_key(f_idx))
                 .collect()
         } else {
             BTreeSet::new()
