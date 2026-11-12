@@ -1121,18 +1121,10 @@ impl TectonicsSimulation {
                 if incoming_batches[t].is_empty() {
                     continue;
                 }
-                let koeppen_group = match self.tile_koeppen[t] {
-                    1..=3 => 'A',
-                    4..=5 => 'B',
-                    6..=8 => 'C',
-                    9..=11 => 'D',
-                    12..=13 => 'E',
-                    _ => ' ',
-                };
                 let clim_summary = DepositClimate {
                     temperature_c: self.tile_temp_c[t],
                     precipitation_norm: self.tile_precip_norm[t],
-                    koeppen_group,
+                    life: self.tile_life[t],
                 };
 
                 if !overlapping[t].is_empty() {

@@ -138,12 +138,12 @@ pub struct ErodedMaterialBatch {
     pub substance: Vec<RockLayer>,
 }
 
-/// Climate summary for a tile used during sedimentary deposition (`rock/sedimentary.py:41-50`).
+/// Physical climate inputs for a tile used during sedimentary deposition (`rock/sedimentary.py:41-50`).
 #[derive(Copy, Clone, Debug)]
 pub struct DepositClimate {
     pub temperature_c: f32,
     pub precipitation_norm: f32,
-    pub koeppen_group: char,
+    pub life: f32,
 }
 
 /// Combine eroded material batches into a newly deposited sedimentary `RockLayer`
@@ -256,9 +256,18 @@ pub fn deposit_sedimentary(
                 } else if calc > 0.75 {
                     chosen_name = Some("limestone");
                 }
-            } else if clim.koeppen_group == 'C' && clim.temperature_c < 18.0 {
-                let bog = ((clim.precipitation_norm - 0.75) * 4.0).max(0.0);
-                bogginess = Some(bog);
+            } else if clim.life > 0.0 && clim.temperature_c > -5.0 {
+                // Peat/bog accumulation from physical water-table saturation (precipitation vs.
+                // temperature-dependent evapotranspiration) and local biomass (`clim.life`):
+                // - Cool/temperate & boreal wetlands saturate above `precip_norm > ~0.55`
+                // - Warm tropical swamp forests require higher rainfall (`precip_norm > ~0.68`) to stay waterlogged
+                let evap_threshold =
+                    (0.55 + 0.005 * (clim.temperature_c - 5.0).max(0.0)).clamp(0.52, 0.72);
+                let bog =
+                    ((clim.precipitation_norm - evap_threshold) * 3.2 * clim.life).clamp(0.0, 1.0);
+                if bog > 1e-4 {
+                    bogginess = Some(bogginess.unwrap_or(0.0).max(bog));
+                }
             }
         }
     }
@@ -674,9 +683,60 @@ mod tests {
             Some(DepositClimate {
                 temperature_c: 40.0,
                 precipitation_norm: 0.5,
-                koeppen_group: 'A',
+                life: 1.0,
             }),
         );
         assert_eq!(warm_sea_dep.rock.name, "limestone");
+
+        // Wet terrestrial basins with life accumulate bogginess across both cool temperate/boreal
+        // peatlands and warm tropical swamp forests, keyed purely off physical temp/precip/life:
+        let cool_bog_dep = deposit_sedimentary(
+            &[ErodedMaterialBatch {
+                amount: 1.0,
+                total: 1.0,
+                substance: vec![dummy_layer(1.0)],
+            }],
+            true,
+            false,
+            Some(DepositClimate {
+                temperature_c: 10.0,
+                precipitation_norm: 0.75,
+                life: 1.0,
+            }),
+        );
+        assert!(cool_bog_dep.rock.bogginess.unwrap_or(0.0) > 0.4);
+
+        let tropical_swamp_dep = deposit_sedimentary(
+            &[ErodedMaterialBatch {
+                amount: 1.0,
+                total: 1.0,
+                substance: vec![dummy_layer(1.0)],
+            }],
+            true,
+            false,
+            Some(DepositClimate {
+                temperature_c: 26.0,
+                precipitation_norm: 0.85,
+                life: 1.0,
+            }),
+        );
+        assert!(tropical_swamp_dep.rock.bogginess.unwrap_or(0.0) > 0.5);
+
+        // Arid terrestrial basin has no bogginess:
+        let arid_dep = deposit_sedimentary(
+            &[ErodedMaterialBatch {
+                amount: 1.0,
+                total: 1.0,
+                substance: vec![dummy_layer(1.0)],
+            }],
+            true,
+            false,
+            Some(DepositClimate {
+                temperature_c: 25.0,
+                precipitation_norm: 0.35,
+                life: 1.0,
+            }),
+        );
+        assert_eq!(arid_dep.rock.bogginess, None);
     }
 }
