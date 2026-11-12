@@ -5,7 +5,7 @@ use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::lifeforms::{settle_species_on_climate, SpeciesKind};
+use crate::lifeforms::{settle_species_on_climate, SettledBiosphere, SpeciesKind};
 use crate::pangea::PangeaWorld;
 use crate::population::{
     eden_tile, expand_population_with_technologies, is_habitable,
@@ -14,7 +14,7 @@ use crate::population::{
 use crate::racination::{racinate_with_technologies, racination_shades, Heritage};
 use crate::rivers::trace_coarse_rivers;
 use crate::rock::{Rock, RockKind, RockLayer};
-use crate::tectonics::LithosphericGroup;
+use crate::tectonics::{LithosphericGroup, TectonicsSimulation};
 use crate::tile::TileGeology;
 
 pub const PREHISTORY_COAST_PROX: usize = 2;
@@ -133,6 +133,7 @@ pub struct PrehistorySimulation {
     seafaring_heritages: BTreeSet<u32>,
     next_heritage_id: u32,
     is_custom: bool,
+    settled_biosphere: Option<SettledBiosphere>,
     rng: Pcg64Mcg,
 }
 
@@ -184,7 +185,13 @@ impl PrehistorySimulation {
         }
 
         let groups = build_continent_groups_from_elevations(&tiles, &adjacency);
-        let climate_model = ClimateModel::new_for_tectonics(grid.clone(), 3, 1.0, 23.0);
+        let climate_model = ClimateModel::new_for_tectonics_with_adjacency(
+            grid.clone(),
+            adjacency.clone(),
+            3,
+            1.0,
+            23.0,
+        );
         let radius_km = PangeaWorld::planet_radius_km(6);
 
         let mut sim = Self {
@@ -213,9 +220,145 @@ impl PrehistorySimulation {
             seafaring_heritages: BTreeSet::new(),
             next_heritage_id: 0,
             is_custom: false,
+            settled_biosphere: None,
             rng: Pcg64Mcg::new(seed),
         };
         sim.refresh_climate_and_rivers();
+        sim
+    }
+
+    /// Transition directly from a `TectonicsSimulation` in memory without serializing to protobuf
+    /// or reconstructing the `SphericalGrid`, adjacency graph, or `OceanGridGeometry`.
+    pub fn from_tectonics_mut(tec: &mut TectonicsSimulation) -> Self {
+        let (
+            grid,
+            adjacency,
+            tiles,
+            mut groups,
+            mut climate_model,
+            radius_km,
+            spin,
+            tilt_deg,
+            tectonics_ticks,
+            rng,
+        ) = tec.take_parts_for_prehistory();
+        let n = tiles.len();
+        if groups.is_empty() {
+            groups = build_continent_groups_from_elevations(&tiles, &adjacency);
+        }
+        let cells = tec11_climate::nominal_cells_for_spin(spin);
+        climate_model.reset_for_stage(cells, spin, tilt_deg, 0.5);
+        let mut sim = Self {
+            grid,
+            adjacency,
+            radius_km,
+            spin,
+            tilt_deg,
+            tectonics_ticks,
+            prehistory_ticks: 0,
+            glaciation_tick: 0,
+            glaciation: 0.5,
+            tiles,
+            groups,
+            climate_model,
+            tile_koeppen: vec![0; n],
+            tile_life: vec![0.0; n],
+            tile_precip_norm: vec![0.0; n],
+            tile_ag_potential: vec![1.0; n],
+            rivers: Vec::new(),
+            river_tiles: vec![false; n],
+            populated: BTreeMap::new(),
+            heritages: BTreeMap::new(),
+            agricultural_heritages: BTreeSet::new(),
+            rivergoing_heritages: BTreeSet::new(),
+            seafaring_heritages: BTreeSet::new(),
+            next_heritage_id: 0,
+            is_custom: true,
+            settled_biosphere: None,
+            rng,
+        };
+        sim.refresh_climate_and_rivers();
+        sim
+    }
+
+    /// Take ownership of this `PrehistorySimulation` for transitioning directly into `HistorySimulation`
+    /// without serializing/deserializing a `PlanetSnapshot` or running `settle_species_on_climate` twice.
+    pub fn take_for_history(&mut self) -> Self {
+        let grid_size = self.grid.size;
+        let grid = std::mem::replace(&mut self.grid, SphericalGrid::new_empty(grid_size));
+        let adjacency = std::mem::take(&mut self.adjacency);
+        let mut tiles = std::mem::take(&mut self.tiles);
+        for t in &mut tiles {
+            t.normalize_for_snapshot();
+        }
+        let n = tiles.len();
+        let mut groups = std::mem::take(&mut self.groups);
+        for g in &mut groups {
+            g.tiles.retain(|&id| id < n);
+            g.velocity = [
+                (g.velocity[0] as f32) as f64,
+                (g.velocity[1] as f32) as f64,
+                (g.velocity[2] as f32) as f64,
+            ];
+        }
+        if groups.is_empty() {
+            groups = build_continent_groups_from_elevations(&tiles, &adjacency);
+        }
+        let r_f32 = self.radius_km as f32;
+        let radius_km = if r_f32 > 0.0 {
+            r_f32 as f64
+        } else {
+            PangeaWorld::planet_radius_km(grid_size)
+        };
+        let spin_f32 = self.spin as f32;
+        let spin = if spin_f32 > 0.0 { spin_f32 as f64 } else { 1.0 };
+        let cells = tec11_climate::nominal_cells_for_spin(spin);
+        let tilt_f32 = self.tilt_deg as f32;
+        let tilt_deg = if tilt_f32 > 0.0 {
+            tilt_f32 as f64
+        } else {
+            23.0
+        };
+        let glaciation = if self.glaciation_tick > 0 {
+            0.5 - (((self.glaciation_tick - 1) as f64) * PI / (PREHISTORY_GLACIATION_STEP as f64))
+                .cos()
+                / 2.0
+        } else {
+            0.5
+        };
+        let mut climate_model = std::mem::replace(&mut self.climate_model, ClimateModel::empty());
+        climate_model.reset_for_stage(cells, spin, tilt_deg, glaciation);
+        let rng = Pcg64Mcg::from_bytes(self.rng.to_bytes());
+        let mut sim = Self {
+            grid,
+            adjacency,
+            radius_km,
+            spin,
+            tilt_deg,
+            tectonics_ticks: self.tectonics_ticks,
+            prehistory_ticks: self.prehistory_ticks,
+            glaciation_tick: self.glaciation_tick,
+            glaciation,
+            tiles,
+            groups,
+            climate_model,
+            tile_koeppen: std::mem::take(&mut self.tile_koeppen),
+            tile_life: std::mem::take(&mut self.tile_life),
+            tile_precip_norm: std::mem::take(&mut self.tile_precip_norm),
+            tile_ag_potential: std::mem::take(&mut self.tile_ag_potential),
+            rivers: std::mem::take(&mut self.rivers),
+            river_tiles: std::mem::take(&mut self.river_tiles),
+            populated: std::mem::take(&mut self.populated),
+            heritages: std::mem::take(&mut self.heritages),
+            agricultural_heritages: std::mem::take(&mut self.agricultural_heritages),
+            rivergoing_heritages: std::mem::take(&mut self.rivergoing_heritages),
+            seafaring_heritages: std::mem::take(&mut self.seafaring_heritages),
+            next_heritage_id: self.next_heritage_id,
+            is_custom: true,
+            settled_biosphere: None,
+            rng,
+        };
+        sim.refresh_climate_and_rivers_without_biosphere();
         sim
     }
 
@@ -240,6 +383,7 @@ impl PrehistorySimulation {
     /// Advance the prehistory simulation by 1 tick (`4,000` years, matching `PrehistorySimulation.update`
     /// in `prehistorysimulation.py:103-146`).
     pub fn step(&mut self) {
+        self.settled_biosphere = None;
         let _span_glac = crate::profile::span(crate::profile::ProfilePhase::PreGlaciationClimate);
         // 1. Count initial glacial tiles (`EF = 12`, `ET = 13`) per continent group (`prehistorysimulation.py:104-106`).
         let old_glaciers: Vec<usize> = self
@@ -419,14 +563,8 @@ impl PrehistorySimulation {
         h
     }
 
-    fn refresh_climate(&mut self) {
+    fn sync_classification_arrays(&mut self) {
         let n = self.tiles.len();
-        let land_elevs: Vec<f32> = self
-            .tiles
-            .iter()
-            .map(|t| t.elevation().max(0.0))
-            .collect();
-        self.climate_model.update_for_glaciation_step(&land_elevs, true);
         self.tile_koeppen.resize(n, 0);
         self.tile_life.resize(n, 0.0);
         self.tile_precip_norm.resize(n, 0.0);
@@ -436,6 +574,16 @@ impl PrehistorySimulation {
             self.tile_life[v] = if c.life { 1.0 } else { 0.0 };
             self.tile_precip_norm[v] = c.mean_precipitation as f32;
         }
+    }
+
+    fn refresh_climate(&mut self) {
+        let land_elevs: Vec<f32> = self
+            .tiles
+            .iter()
+            .map(|t| t.elevation().max(0.0))
+            .collect();
+        self.climate_model.update_for_glaciation_step(&land_elevs, true);
+        self.sync_classification_arrays();
     }
 
     fn refresh_rivers(&mut self, elevations: &[f32]) {
@@ -456,19 +604,8 @@ impl PrehistorySimulation {
         }
     }
 
-    fn refresh_climate_and_rivers(&mut self) {
-        let land_elevs: Vec<f32> = self
-            .tiles
-            .iter()
-            .map(|t| t.elevation().max(0.0))
-            .collect();
-        self.climate_model.update_for_tectonics(&land_elevs, true);
-        self.refresh_climate();
-        let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
-        self.refresh_rivers(&elevations);
-
-        let biosphere = settle_species_on_climate(&elevations, &self.climate_model);
-        let n = elevations.len();
+    fn update_ag_potential_from_biosphere(&mut self, biosphere: &SettledBiosphere) {
+        let n = self.tiles.len();
         self.tile_ag_potential.resize(n, 0.0);
         for t in 0..n {
             let mut plant_count = 0u32;
@@ -487,6 +624,37 @@ impl PrehistorySimulation {
                 (0.5 + (plant_count as f32) / 30.0 + (herbivore_count as f32) / 20.0).clamp(0.5, 2.0)
             };
         }
+    }
+
+    pub(crate) fn take_or_settle_biosphere(&mut self, elevations: &[f32]) -> SettledBiosphere {
+        if let Some(bio) = self.settled_biosphere.take() {
+            bio
+        } else {
+            let bio = settle_species_on_climate(elevations, &self.climate_model);
+            self.update_ag_potential_from_biosphere(&bio);
+            bio
+        }
+    }
+
+    fn refresh_climate_and_rivers_without_biosphere(&mut self) -> Vec<f32> {
+        let land_elevs: Vec<f32> = self
+            .tiles
+            .iter()
+            .map(|t| t.elevation().max(0.0))
+            .collect();
+        self.climate_model.update_for_tectonics(&land_elevs, true);
+        self.sync_classification_arrays();
+        let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
+        self.refresh_rivers(&elevations);
+        self.settled_biosphere = None;
+        elevations
+    }
+
+    fn refresh_climate_and_rivers(&mut self) {
+        let elevations = self.refresh_climate_and_rivers_without_biosphere();
+        let biosphere = settle_species_on_climate(&elevations, &self.climate_model);
+        self.update_ag_potential_from_biosphere(&biosphere);
+        self.settled_biosphere = Some(biosphere);
     }
 
     /// Serialize this simulation state as a `PrehistoryStage` inside a `tec11_proto::PlanetSnapshot`.
@@ -623,8 +791,13 @@ impl PrehistorySimulation {
                     groups = build_continent_groups_from_elevations(&tiles, &adjacency);
                 }
 
-                let climate_model =
-                    ClimateModel::new_for_tectonics(grid.clone(), cells, spin, tilt_deg);
+                let climate_model = ClimateModel::new_for_tectonics_with_adjacency(
+                    grid.clone(),
+                    adjacency.clone(),
+                    cells,
+                    spin,
+                    tilt_deg,
+                );
                 let mut sim = Self {
                     grid,
                     adjacency,
@@ -651,6 +824,7 @@ impl PrehistorySimulation {
                     seafaring_heritages: BTreeSet::new(),
                     next_heritage_id: 0,
                     is_custom: true,
+                    settled_biosphere: None,
                     rng,
                 };
                 sim.refresh_climate_and_rivers();
@@ -773,8 +947,13 @@ impl PrehistorySimulation {
             0.5
         };
 
-        let mut climate_model =
-            ClimateModel::new_for_tectonics(grid.clone(), cells, spin, tilt_deg);
+        let mut climate_model = ClimateModel::new_for_tectonics_with_adjacency(
+            grid.clone(),
+            adjacency.clone(),
+            cells,
+            spin,
+            tilt_deg,
+        );
         climate_model.set_glaciation_only(glaciation);
 
         let mut sim = Self {
@@ -803,6 +982,7 @@ impl PrehistorySimulation {
             seafaring_heritages,
             next_heritage_id,
             is_custom: true,
+            settled_biosphere: None,
             rng,
         };
         sim.refresh_climate_and_rivers();

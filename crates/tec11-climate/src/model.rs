@@ -233,6 +233,37 @@ impl ClimateModel {
         &self.grid
     }
 
+    pub fn adjacency(&self) -> &[Vec<usize>] {
+        &self.adjacency
+    }
+
+    pub fn empty() -> Self {
+        let grid = SphericalGrid::new_empty(0);
+        let adjacency = Vec::new();
+        let lats_deg = Vec::new();
+        let lons_deg = Vec::new();
+        let ocean_geom = OceanGridGeometry::new(&grid, &adjacency, &lats_deg);
+        Self {
+            grid,
+            adjacency,
+            ocean_geom,
+            lats_deg,
+            lons_deg,
+            elevations: Vec::new(),
+            cells: 3,
+            glaciation: 0.5,
+            spin: DEFAULT_SPIN,
+            tilt_deg: DEFAULT_TILT_DEG,
+            cached_dest_params: None,
+            cached_ocean_params: None,
+            dest_map: Vec::new(),
+            seabased: Vec::new(),
+            ocean_seasons: Vec::new(),
+            seasons: Vec::new(),
+            classifications: Vec::new(),
+        }
+    }
+
     pub fn tile_count(&self) -> usize {
         self.grid.faces.len()
     }
@@ -370,8 +401,21 @@ impl ClimateModel {
         spin: f64,
         tilt_deg: f64,
     ) -> Self {
-        let n = grid.faces.len();
         let adjacency = grid.adjacency();
+        Self::new_for_tectonics_with_adjacency(grid, adjacency, cells, spin, tilt_deg)
+    }
+
+    /// Construct a `ClimateModel` reusing an already-computed `adjacency` list.
+    pub fn new_for_tectonics_with_adjacency(
+        mut grid: SphericalGrid,
+        adjacency: Vec<Vec<usize>>,
+        cells: u32,
+        spin: f64,
+        tilt_deg: f64,
+    ) -> Self {
+        let n = grid.faces.len();
+        grid.vertices.clear();
+        grid.face_index.clear();
 
         let (lats_deg, lons_deg): (Vec<f64>, Vec<f64>) = grid
             .faces
@@ -411,6 +455,27 @@ impl ClimateModel {
             spin_bits: quant_spin.to_bits(),
         });
         model
+    }
+
+    /// Reset climate state for a stage transition while preserving precomputed grid geometry,
+    /// adjacency, and lat/lon tables.
+    pub fn reset_for_stage(&mut self, cells: u32, spin: f64, tilt_deg: f64, glaciation: f64) {
+        self.elevations.fill(0.0);
+        self.cells = cells.max(1);
+        self.glaciation = glaciation.clamp(0.0, 1.0);
+        self.spin = spin;
+        self.tilt_deg = tilt_deg;
+        self.cached_ocean_params = None;
+        self.seabased.fill(0.0);
+        self.ocean_seasons.clear();
+        self.seasons.clear();
+        self.classifications.clear();
+        self.compute_wind_dest_map();
+        let quant_spin = (spin * 20.0).round() / 20.0;
+        self.cached_dest_params = Some(WindDestCacheKey {
+            cells: self.cells,
+            spin_bits: quant_spin.to_bits(),
+        });
     }
 
     /// Per-tick climate & ocean circulation update across all 8 (half-)seasons (`DEFAULT_SEASONS`:

@@ -103,6 +103,7 @@ impl SubdividedTerrainGrid {
         }
 
         let terrain_adj = terrain_grid.adjacency();
+        terrain_grid.vertices.clear();
         let num_fine = terrain_grid.faces.len();
 
         let resolve_coarse_vertex = |vkey: &Vec3Key| -> [usize; 3] {

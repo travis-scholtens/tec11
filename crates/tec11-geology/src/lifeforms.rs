@@ -2,7 +2,7 @@ use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{normal, PointTree, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::population::{identify_continents_and_oceans, PlanetaryGeography};
+use crate::population::{identify_continents_and_oceans_with_adj, PlanetaryGeography};
 use crate::rivers::trace_coarse_rivers;
 use crate::tectonics::TectonicsSimulation;
 
@@ -390,8 +390,8 @@ pub fn settle_species_on_climate(
     };
 
     let grid = climate_model.grid();
-    let adj = grid.adjacency();
-    let geography = identify_continents_and_oceans(grid, elevations);
+    let adj = climate_model.adjacency();
+    let geography = identify_continents_and_oceans_with_adj(grid, adj, elevations);
 
     let land_tiles: Vec<usize> = (0..n).filter(|&t| elevations[t] > 0.0).collect();
     let sea_tiles: Vec<usize> = (0..n).filter(|&t| elevations[t] <= 0.0).collect();
@@ -595,10 +595,15 @@ pub fn settle_species_on_climate(
         }
     }
 
-    let find_viable_animal_tiles = |spec: &ParsedAnimalSpec<'_>,
-                                    plant_res_mask: &[u16],
-                                    plant_species_count: &[u16],
-                                    prey_mask: &[u16]|
+    let max_realms = geography.continents.len().max(1);
+    let mut mig_candidates: Vec<TileSeasonPresence> = Vec::with_capacity(512);
+    let mut realm_masks: Vec<[bool; 256]> = vec![[false; 256]; max_realms];
+    let mut valid_realm_mask: Vec<[bool; 256]> = vec![[false; 256]; max_realms];
+
+    let mut find_viable_animal_tiles = |spec: &ParsedAnimalSpec<'_>,
+                                        plant_res_mask: &[u16],
+                                        plant_species_count: &[u16],
+                                        prey_mask: &[u16]|
      -> Vec<TileSeasonPresence> {
         let candidate_tiles: &[usize] = if spec.sealife {
             &sea_tiles
@@ -623,7 +628,7 @@ pub fn settle_species_on_climate(
         };
 
         let mut combined_tiles: Vec<TileSeasonPresence> = Vec::new();
-        let mut mig_candidates: Vec<TileSeasonPresence> = Vec::new();
+        mig_candidates.clear();
 
         for &t in candidate_tiles {
             let (mask, winter_ok) =
@@ -670,9 +675,12 @@ pub fn settle_species_on_climate(
             let num_realms = if can_fly_or_swim_globally {
                 1
             } else {
-                geography.continents.len().max(1)
+                max_realms
             };
-            let mut realm_masks = vec![vec![false; 256]; num_realms];
+            for r in 0..num_realms {
+                realm_masks[r].fill(false);
+                valid_realm_mask[r].fill(false);
+            }
             for &p in &combined_tiles {
                 if p.season_mask == all_seasons_mask {
                     let r = if can_fly_or_swim_globally {
@@ -695,19 +703,22 @@ pub fn settle_species_on_climate(
                     realm_masks[r][p.season_mask as usize] = true;
                 }
             }
-            let mut valid_realm_mask = vec![vec![false; 256]; num_realms];
             for r in 0..num_realms {
-                for m1 in 1..(all_seasons_mask as usize) {
-                    if realm_masks[r][m1]
-                        && (1..=(all_seasons_mask as usize)).any(|m2| {
-                            realm_masks[r][m2] && ((m1 | m2) as u8) == all_seasons_mask
-                        })
-                    {
-                        valid_realm_mask[r][m1] = true;
+                if realm_masks[r][all_seasons_mask as usize] {
+                    valid_realm_mask[r] = realm_masks[r];
+                } else {
+                    for m1 in 1..(all_seasons_mask as usize) {
+                        if realm_masks[r][m1]
+                            && (1..=(all_seasons_mask as usize)).any(|m2| {
+                                realm_masks[r][m2] && ((m1 | m2) as u8) == all_seasons_mask
+                            })
+                        {
+                            valid_realm_mask[r][m1] = true;
+                        }
                     }
                 }
             }
-            for p in mig_candidates {
+            for &p in &mig_candidates {
                 let r = if can_fly_or_swim_globally {
                     0
                 } else {

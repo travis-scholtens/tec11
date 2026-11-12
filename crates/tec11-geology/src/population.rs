@@ -251,12 +251,21 @@ pub fn identify_continents_and_oceans(
     grid: &SphericalGrid,
     elevations: &[f32],
 ) -> PlanetaryGeography {
+    let adj = grid.adjacency();
+    identify_continents_and_oceans_with_adj(grid, &adj, elevations)
+}
+
+/// Identify all continents and ocean basins on `grid` reusing a precomputed `adj` table.
+pub fn identify_continents_and_oceans_with_adj(
+    grid: &SphericalGrid,
+    adj: &[Vec<usize>],
+    elevations: &[f32],
+) -> PlanetaryGeography {
     let n = elevations.len().min(grid.faces.len());
     if n == 0 {
         return PlanetaryGeography::default();
     }
 
-    let adj = grid.adjacency();
     let mut used_names = BTreeSet::new();
 
     // --- 1. Continents & Island Realms ---

@@ -445,37 +445,33 @@ impl WorldSimulation {
 
     fn enter_prehistory_stage(&mut self) {
         let _span = crate::profile::span(crate::profile::ProfilePhase::StageToPrehistory);
-        if let WorldStageState::Tectonics(tec) = &self.stage {
-            let snap = tec.to_snapshot();
-            let sub_seed = self.rng.next_u64();
-            if let Some(mut pre) = PrehistorySimulation::from_snapshot(&snap, sub_seed) {
-                pre.step();
-                self.prehistory_ticks = pre.prehistory_ticks();
-                self.stage = WorldStageState::Prehistory(pre);
-            }
+        if let WorldStageState::Tectonics(tec) = &mut self.stage {
+            let _sub_seed = self.rng.next_u64();
+            let mut pre = PrehistorySimulation::from_tectonics_mut(tec);
+            pre.step();
+            self.prehistory_ticks = pre.prehistory_ticks();
+            self.stage = WorldStageState::Prehistory(pre);
         }
     }
 
     fn enter_history_stage(&mut self) {
         let _span = crate::profile::span(crate::profile::ProfilePhase::StageToHistory);
-        if let WorldStageState::Prehistory(pre) = &self.stage {
+        if let WorldStageState::Prehistory(pre) = &mut self.stage {
             let sub_seed = self.rng.next_u64();
-            let pre_copy_opt = {
-                let _span_copy = crate::profile::span(crate::profile::ProfilePhase::HistInitPrehistoryCopy);
-                let snap = pre.to_snapshot();
-                PrehistorySimulation::from_snapshot(&snap, sub_seed)
+            let pre_copy = {
+                let _span_copy =
+                    crate::profile::span(crate::profile::ProfilePhase::HistInitPrehistoryCopy);
+                pre.take_for_history()
             };
-            if let Some(pre_copy) = pre_copy_opt {
-                let mut hist = HistorySimulation::from_prehistory_with_system(
-                    pre_copy,
-                    self.params.moon_count,
-                    self.solar_system.clone(),
-                    sub_seed as u128,
-                );
-                hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
-                self.history_ticks = hist.history_ticks();
-                self.stage = WorldStageState::History(hist);
-            }
+            let mut hist = HistorySimulation::from_prehistory_with_system(
+                pre_copy,
+                self.params.moon_count,
+                self.solar_system.clone(),
+                sub_seed as u128,
+            );
+            hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
+            self.history_ticks = hist.history_ticks();
+            self.stage = WorldStageState::History(hist);
         }
     }
 

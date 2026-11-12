@@ -8,7 +8,7 @@ use tec11_math_grid::{
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::language::{Language, SoundChangeKind, Word, WordOrigin};
-use crate::lifeforms::{settle_species_on_climate, SettledSpecies, SpeciesKind};
+use crate::lifeforms::{SettledSpecies, SpeciesKind};
 use crate::population::{
     is_farmable, is_habitable, is_passable, main_ocean, tile_population_thousands,
     PlanetaryGeography,
@@ -1203,6 +1203,9 @@ pub struct HistorySimulation {
     river_tiles: Vec<bool>,
     fine_face_rivers: Vec<Vec<u32>>,
     is_coastal_fine: Vec<bool>,
+    fine_adj: std::sync::Arc<Vec<Vec<usize>>>,
+    coarse_elevs: Vec<f32>,
+    coarse_koeppen: Vec<u8>,
     fine_primary_coarse: Vec<usize>,
     fine_lat_deg: Vec<f64>,
     base_capacities: Vec<f32>,
@@ -1302,6 +1305,7 @@ impl HistorySimulation {
 
         let home_star = HomeStar::sol();
         let optics = PlanetaryOptics::compute(&home_star, AtmosphereType::EarthLikeN2O2);
+        let fine_adj = std::sync::Arc::new(terrain.terrain_adj.clone());
         let mut sim = Self {
             prehistory,
             terrain,
@@ -1320,6 +1324,9 @@ impl HistorySimulation {
             river_tiles: vec![false; num_fine],
             fine_face_rivers: vec![Vec::new(); num_fine],
             is_coastal_fine: vec![false; num_fine],
+            fine_adj,
+            coarse_elevs,
+            coarse_koeppen: Vec::new(),
             fine_primary_coarse: vec![0; num_fine],
             fine_lat_deg: vec![0.0; num_fine],
             base_capacities: vec![0.0; num_fine],
@@ -1352,15 +1359,15 @@ impl HistorySimulation {
     }
 
     fn initialize_terrain_and_polities(&mut self) {
-        let grid = self.prehistory.grid().clone();
         let coarse_adj = self.prehistory.adjacency().to_vec();
         let coarse_elevs = self.prehistory.tile_elevations();
         let koeppen = self.prehistory.tile_koeppen_ids().to_vec();
         let precip = self.prehistory.tile_precip_norm().to_vec();
         let num_coarse = coarse_elevs.len();
         let num_fine = self.terrain.terrain_grid.faces.len();
-        let fine_adj = self.terrain.terrain_adj.clone();
-        let fine_elevs = self.terrain.fine_elevations.clone();
+        let fine_adj = std::sync::Arc::clone(&self.fine_adj);
+        self.coarse_elevs = coarse_elevs.clone();
+        self.coarse_koeppen = koeppen.clone();
         self.fine_primary_coarse = (0..num_fine)
             .map(|f_idx| self.terrain.primary_coarse_tile(f_idx, &coarse_elevs))
             .collect();
@@ -1375,7 +1382,7 @@ impl HistorySimulation {
         // 1. Identify continents and ocean basins, settle plants & animals on the planet's coarse climate,
         //    then map culturally/economically salient flora & fauna onto subdivided fine faces (`historysimulation.py:facespecies`).
         let _span_bio = crate::profile::span(crate::profile::ProfilePhase::HistInitBiosphereAndSpecies);
-        let biosphere = settle_species_on_climate(&coarse_elevs, self.prehistory.climate_model());
+        let biosphere = self.prehistory.take_or_settle_biosphere(&coarse_elevs);
         self.geography = biosphere.geography;
         let coarse_species = biosphere.tile_all_species;
         self.settled_species = biosphere.species;
@@ -1434,7 +1441,7 @@ impl HistorySimulation {
             HISTORY_MIN_RIVER_ELEV,
             HISTORY_MIN_RIVER_PRECIP,
         );
-        self.river_routes = self.terrain.route_rivers(&grid, &self.rivers);
+        self.river_routes = self.terrain.route_rivers(self.prehistory.grid(), &self.rivers);
         self.river_tiles = vec![false; num_fine];
         self.fine_face_rivers = vec![Vec::new(); num_fine];
         for (rid, route) in self.river_routes.iter().enumerate() {
@@ -1475,7 +1482,7 @@ impl HistorySimulation {
         self.capacities = vec![0.0; num_fine];
         let mut coast_fine = Vec::new();
         for f_idx in 0..num_fine {
-            if fine_elevs[f_idx] <= 0.0 {
+            if self.terrain.fine_elevations[f_idx] <= 0.0 {
                 continue;
             }
             let river_mult = if self.river_tiles[f_idx] { 1.75 } else { 1.0 };
@@ -1518,11 +1525,13 @@ impl HistorySimulation {
         self.base_capacities = self.capacities.clone();
         self.is_coastal_fine = (0..num_fine)
             .map(|f_idx| {
-                if fine_elevs[f_idx] <= 0.0 {
+                if self.terrain.fine_elevations[f_idx] <= 0.0 {
                     return false;
                 }
-                let c = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
-                fine_adj[f_idx].iter().any(|&nb| fine_elevs[nb] <= 0.0)
+                let c = self.fine_primary_coarse[f_idx];
+                fine_adj[f_idx]
+                    .iter()
+                    .any(|&nb| self.terrain.fine_elevations[nb] <= 0.0)
                     || coarse_adj[c].iter().any(|nb| ocean.contains(nb))
             })
             .collect();
@@ -1542,9 +1551,10 @@ impl HistorySimulation {
 
         let mut candidate_tiles: Vec<usize> = (0..num_fine)
             .filter(|&f_idx| {
-                let c = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
-                fine_elevs[f_idx] > 0.0
-                    && (is_farmable(fine_elevs[f_idx], koeppen[c])
+                let c = self.fine_primary_coarse[f_idx];
+                let fe = self.terrain.fine_elevations[f_idx];
+                fe > 0.0
+                    && (is_farmable(fe, koeppen[c])
                         || self.river_tiles[f_idx]
                         || self.is_coastal_fine[f_idx])
                     && self.capacities[f_idx] >= 0.5
@@ -1596,10 +1606,10 @@ impl HistorySimulation {
             let lid = self.next_language_id;
             self.next_language_id += 1;
 
-            let city_c = self.terrain.primary_coarse_tile(city_f, &coarse_elevs);
+            let city_c = self.fine_primary_coarse[city_f];
             let city_hid = pre_pop.get(&city_c).copied();
             let has_ag = city_hid.is_some_and(|h| pre_ag.contains(&h))
-                || is_farmable(fine_elevs[city_f], koeppen[city_c]);
+                || is_farmable(self.terrain.fine_elevations[city_f], koeppen[city_c]);
             let has_riv =
                 city_hid.is_some_and(|h| pre_riv.contains(&h)) || self.river_tiles[city_f];
             let has_sea =
@@ -1637,7 +1647,7 @@ impl HistorySimulation {
             }
             let (_, state_riv, _) = state_init_tech.get(&sid).copied().unwrap_or((true, false, false));
             for &nb in &fine_adj[curr] {
-                let c = self.terrain.primary_coarse_tile(nb, &coarse_elevs);
+                let c = self.fine_primary_coarse[nb];
                 let step_cost = if self.river_tiles[nb] {
                     if state_riv {
                         2
@@ -1647,10 +1657,11 @@ impl HistorySimulation {
                 } else {
                     1
                 };
+                let nb_elev = self.terrain.fine_elevations[nb];
                 if dist + step_cost <= 16
                     && !self.tile_states.contains_key(&nb)
-                    && fine_elevs[nb] > 0.0
-                    && is_passable(fine_elevs[nb], koeppen[c], true)
+                    && nb_elev > 0.0
+                    && is_passable(nb_elev, koeppen[c], true)
                 {
                     self.tile_states.insert(nb, sid);
                     if let Some(lang) = self.languages.get_mut(&sid) {
@@ -1751,8 +1762,10 @@ impl HistorySimulation {
             if mix.is_empty() {
                 mix.insert(0, 1.0);
             }
-            let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
-            let agriculture = state_ag || mix_ag || is_farmable(fine_elevs[f_idx], koeppen[c_idx]);
+            let c_idx = self.fine_primary_coarse[f_idx];
+            let agriculture = state_ag
+                || mix_ag
+                || is_farmable(self.terrain.fine_elevations[f_idx], koeppen[c_idx]);
             let rivergoing = state_riv || mix_riv || self.river_tiles[f_idx];
             let seafaring = state_sea || mix_sea || self.is_coastal_fine[f_idx];
             let pop = (self.capacities[f_idx] * 0.45).max(0.15);
@@ -1775,7 +1788,7 @@ impl HistorySimulation {
         {
             let _span_routes = crate::profile::span(crate::profile::ProfilePhase::HistInitTravelRoutes);
             self.refresh_fishing_capacities();
-            self.compute_potential_travel_routes(&ocean, &coarse_elevs, &koeppen, &coarse_adj, &fine_adj, &fine_elevs);
+            self.compute_potential_travel_routes(&ocean, &coarse_elevs, &koeppen, &coarse_adj, &fine_adj);
             self.update_travel_routes();
         }
 
@@ -1818,8 +1831,8 @@ impl HistorySimulation {
         koeppen: &[u8],
         coarse_adj: &[Vec<usize>],
         fine_adj: &[Vec<usize>],
-        fine_elevs: &[f32],
     ) {
+        let fine_elevs = &self.terrain.fine_elevations;
         let num_coarse = coarse_elevs.len();
         let num_fine = fine_elevs.len();
         let grid = self.prehistory.grid();
@@ -3638,14 +3651,9 @@ impl HistorySimulation {
     /// Advance the History simulation by 1 tick (`200` years, matching `HistorySimulation.update`
     /// in `historysimulation.py:504-706`).
     pub fn step(&mut self) {
-        let (fine_adj, fine_elevs, coarse_elevs, koeppen) = {
+        let fine_adj = {
             let _span_clones = crate::profile::span(crate::profile::ProfilePhase::HistStepGridClones);
-            (
-                self.terrain.terrain_adj.clone(),
-                self.terrain.fine_elevations.clone(),
-                self.prehistory.tile_elevations(),
-                self.prehistory.tile_koeppen_ids().to_vec(),
-            )
+            std::sync::Arc::clone(&self.fine_adj)
         };
 
         // 1. Language sound changes (`historysimulation.py:511-515`: 2-4 cascaded per-language sound changes per 200-year tick)
@@ -3694,8 +3702,9 @@ impl HistorySimulation {
                 if let Some(&nb) = fine_adj[t].iter().find(|&&nb| {
                     let c = self.fine_primary_coarse[nb];
                     let nb_pop = tile_pops.get(&nb).copied().unwrap_or(0.0);
-                    fine_elevs[nb] > 0.0
-                        && is_passable(fine_elevs[nb], koeppen[c], true)
+                    let nb_elev = self.terrain.fine_elevations[nb];
+                    nb_elev > 0.0
+                        && is_passable(nb_elev, self.coarse_koeppen[c], true)
                         && self.capacities[nb] > 0.1
                         && nb_pop < self.capacities[nb] * 0.9
                 }) {
@@ -3745,9 +3754,10 @@ impl HistorySimulation {
                             }
                         }
                 })?;
-                let c_dst = self.cached_primary_coarse(dst, &coarse_elevs);
-                if fine_elevs[dst] <= 0.0
-                    || !is_passable(fine_elevs[dst], koeppen[c_dst], true)
+                let c_dst = self.fine_primary_coarse[dst];
+                let dst_elev = self.terrain.fine_elevations[dst];
+                if dst_elev <= 0.0
+                    || !is_passable(dst_elev, self.coarse_koeppen[c_dst], true)
                     || self.capacities[dst] <= 0.1
                 {
                     return None;
@@ -3815,8 +3825,9 @@ impl HistorySimulation {
         for t in populated_keys {
             let is_riv_tile = self.river_tiles.get(t).copied().unwrap_or(false);
             let is_coast_tile = self.is_coastal_fine.get(t).copied().unwrap_or(false);
-            let c_coarse = self.cached_primary_coarse(t, &coarse_elevs);
-            let farmable_tile = is_farmable(fine_elevs[t], koeppen[c_coarse]);
+            let c_coarse = self.fine_primary_coarse[t];
+            let farmable_tile =
+                is_farmable(self.terrain.fine_elevations[t], self.coarse_koeppen[c_coarse]);
             let adj_has_ag = fine_adj[t].iter().any(|nb| ag_tiles.contains(nb));
             let adj_has_riv = fine_adj[t].iter().any(|nb| riv_tiles.contains(nb))
                 || route_neighbors
@@ -4217,7 +4228,7 @@ impl HistorySimulation {
             }
             let mut cities: Vec<usize> = Vec::new();
             for &f in tiles {
-                let p = self.city_prob(f, &coarse_elevs, &koeppen, &fine_adj);
+                let p = self.city_prob(f, &self.coarse_elevs, &self.coarse_koeppen, &fine_adj);
                 if self.rng.uniform(0.0, 1.0) < p {
                     cities.push(f);
                 }

@@ -496,6 +496,70 @@ impl TileGeology {
         self.intrusion = None;
     }
 
+    /// Normalize rock layers and temporary fields in-place to match a snapshot roundtrip
+    /// (`from_proto_geological_tile(&self.to_proto_geological_tile())`) without heap allocations.
+    pub fn normalize_for_snapshot(&mut self) {
+        use tec11_proto::MetamorphicFaciesExt;
+        for l in &mut self.layers {
+            match l.rock.kind {
+                RockKind::Igneous => {
+                    let is_intrusive = matches!(l.rock.name, "gabbro" | "andesite" | "granite");
+                    l.rock = if is_intrusive {
+                        Rock::intrusive(l.rock.felsity)
+                    } else {
+                        Rock::extrusive(l.rock.felsity)
+                    };
+                }
+                RockKind::Sedimentary => {
+                    let clasticity = l.rock.clasticity.unwrap_or(1.0).max(1e-6);
+                    let felsity = l.rock.felsity;
+                    let calcity = l.rock.calcity;
+                    let bogginess = l.rock.bogginess;
+                    let name = if calcity.unwrap_or(0.0) > 0.99 {
+                        "chalk"
+                    } else if calcity.unwrap_or(0.0) > 0.75 {
+                        "limestone"
+                    } else {
+                        let grain = 1e-3 / clasticity;
+                        if grain < 4e-6 {
+                            "claystone"
+                        } else if grain < 60e-6 {
+                            "siltstone"
+                        } else if grain < 2e-3 {
+                            "sandstone"
+                        } else {
+                            "conglomerate"
+                        }
+                    };
+                    l.rock = Rock {
+                        kind: RockKind::Sedimentary,
+                        name,
+                        felsity,
+                        toughness: 0.0,
+                        clasticity: Some(clasticity),
+                        calcity,
+                        bogginess,
+                    };
+                }
+                RockKind::Metamorphic => {
+                    let facies = tec11_proto::MetamorphicFacies::from_rock_name(l.rock.name);
+                    l.rock = Rock {
+                        kind: RockKind::Metamorphic,
+                        name: facies.rock_name(),
+                        felsity: l.rock.felsity,
+                        toughness: l.rock.toughness,
+                        clasticity: None,
+                        calcity: l.rock.calcity,
+                        bogginess: l.rock.bogginess,
+                    };
+                }
+            }
+        }
+        self.subduction = 0.0;
+        self.intrusion = None;
+        self.impact_scar = self.stratigraphic_impact_signature();
+    }
+
     pub fn to_proto_geological_tile(&self) -> tec11_proto::GeologicalTile {
         let layers = self
             .layers

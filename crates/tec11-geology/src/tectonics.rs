@@ -181,8 +181,13 @@ impl TectonicsSimulation {
             })
             .collect();
 
-        let climate_model =
-            ClimateModel::new_for_tectonics(grid.clone(), cells, spin, base_tilt_deg);
+        let climate_model = ClimateModel::new_for_tectonics_with_adjacency(
+            grid.clone(),
+            adjacency.clone(),
+            cells,
+            spin,
+            base_tilt_deg,
+        );
 
         let mut sim = Self {
             grid,
@@ -342,6 +347,75 @@ impl TectonicsSimulation {
 
     pub fn grid(&self) -> &SphericalGrid {
         &self.grid
+    }
+
+    pub(crate) fn take_parts_for_prehistory(
+        &mut self,
+    ) -> (
+        SphericalGrid,
+        Vec<Vec<usize>>,
+        Vec<TileGeology>,
+        Vec<LithosphericGroup>,
+        ClimateModel,
+        f64,
+        f64,
+        f64,
+        u32,
+        Pcg64Mcg,
+    ) {
+        let grid_size = self.grid.size;
+        let grid = std::mem::replace(&mut self.grid, SphericalGrid::new_empty(grid_size));
+        let adjacency = std::mem::take(&mut self.adjacency);
+        let mut tiles = std::mem::take(&mut self.tiles);
+        for t in &mut tiles {
+            t.normalize_for_snapshot();
+        }
+        let n = tiles.len();
+        let mut groups = std::mem::take(&mut self.groups);
+        for g in &mut groups {
+            g.tiles.retain(|&id| id < n);
+            g.velocity = [
+                (g.velocity[0] as f32) as f64,
+                (g.velocity[1] as f32) as f64,
+                (g.velocity[2] as f32) as f64,
+            ];
+        }
+        let climate_model = std::mem::replace(&mut self.climate_model, ClimateModel::empty());
+        let r_f32 = self.radius_km as f32;
+        let radius_km = if r_f32 > 0.0 {
+            r_f32 as f64
+        } else {
+            PangeaWorld::planet_radius_km(grid_size)
+        };
+        let spin_f32 = (24.0 / self.target_day_hours.max(1.0)) as f32;
+        let spin = if spin_f32 > 0.0 { spin_f32 as f64 } else { 1.0 };
+        let tilt_f32 = self.base_tilt_deg as f32;
+        let tilt_deg = if tilt_f32 > 0.0 {
+            tilt_f32 as f64
+        } else {
+            23.0
+        };
+        let tectonics_ticks = self.geoticks;
+        let rng = Pcg64Mcg::from_bytes(self.rng.to_bytes());
+        self.ridges = Vec::new();
+        self.tile_koeppen = Vec::new();
+        self.tile_life = Vec::new();
+        self.tile_temp_norm = Vec::new();
+        self.tile_temp_c = Vec::new();
+        self.tile_precip_norm = Vec::new();
+        self.tile_impact_scars = Vec::new();
+        (
+            grid,
+            adjacency,
+            tiles,
+            groups,
+            climate_model,
+            radius_km,
+            spin,
+            tilt_deg,
+            tectonics_ticks,
+            rng,
+        )
     }
 
     pub fn tile_count(&self) -> usize {
@@ -1806,7 +1880,13 @@ impl TectonicsSimulation {
             Pcg64Mcg::from_seed_u64(fallback_seed.wrapping_add(geoticks as u64))
         };
 
-        let climate_model = ClimateModel::new_for_tectonics(grid.clone(), cells, spin, tilt_deg);
+        let climate_model = ClimateModel::new_for_tectonics_with_adjacency(
+            grid.clone(),
+            adjacency.clone(),
+            cells,
+            spin,
+            tilt_deg,
+        );
 
         let mut sim = Self {
             grid,
