@@ -622,6 +622,29 @@ pub fn tile_population_thousands(koeppen: u8, is_agricultural: bool) -> f32 {
     }
 }
 
+/// Count coarse tile population in thousands including freshwater fishing (`is_river_fishing`)
+/// and coastal/marine fishing (`is_sea_fishing`) carrying capacity bonuses.
+#[inline]
+pub fn tile_population_thousands_with_water_tech(
+    koeppen: u8,
+    is_agricultural: bool,
+    is_river_fishing: bool,
+    is_sea_fishing: bool,
+) -> f32 {
+    let base = tile_population_thousands(koeppen, is_agricultural);
+    let river_bonus = if is_river_fishing {
+        if is_agricultural { 35.0 } else { 25.0 }
+    } else {
+        0.0
+    };
+    let sea_bonus = if is_sea_fishing {
+        if is_agricultural { 45.0 } else { 30.0 }
+    } else {
+        0.0
+    };
+    base + river_bonus + sea_bonus
+}
+
 /// Expand `populated` map (`tile_idx -> heritage_id`) by one migration step,
 /// matching `populationmethod.expandpopulation` (`populationmethod.py:45-72`).
 pub fn expand_population(
@@ -635,21 +658,74 @@ pub fn expand_population(
     coastal_proximity: usize,
     cmemo: &mut BTreeMap<(usize, bool), bool>,
 ) -> bool {
+    let empty_set = BTreeSet::new();
+    expand_population_with_technologies(
+        elevations,
+        koeppen_ids,
+        adjacency,
+        river_tiles,
+        populated,
+        agricultural_heritages,
+        &empty_set,
+        &empty_set,
+        travel_range,
+        coastal_proximity,
+        cmemo,
+    )
+}
+
+/// Expand `populated` map by one migration step taking into account `agricultural_heritages`,
+/// `rivergoing_heritages` (extended range along river corridors), and `seafaring_heritages`
+/// (extended range across coastal and sea tiles).
+pub fn expand_population_with_technologies(
+    elevations: &[f32],
+    koeppen_ids: &[u8],
+    adjacency: &[Vec<usize>],
+    river_tiles: &[bool],
+    populated: &mut BTreeMap<usize, u32>,
+    agricultural_heritages: &BTreeSet<u32>,
+    rivergoing_heritages: &BTreeSet<u32>,
+    seafaring_heritages: &BTreeSet<u32>,
+    travel_range: usize,
+    coastal_proximity: usize,
+    cmemo: &mut BTreeMap<(usize, bool), bool>,
+) -> bool {
     let mut frontier: BTreeMap<usize, u32> = BTreeMap::new();
 
     for (&t, &heritage_id) in populated.iter() {
         let farms = agricultural_heritages.contains(&heritage_id);
+        let rivers_tech = rivergoing_heritages.contains(&heritage_id);
+        let seas_tech = seafaring_heritages.contains(&heritage_id);
+        let eff_range = travel_range
+            + usize::from(rivers_tech && river_tiles.get(t).copied().unwrap_or(false))
+            + usize::from(seas_tech);
+        let eff_coast_prox = if seas_tech {
+            coastal_proximity + 1
+        } else {
+            coastal_proximity
+        };
         let mut distance = 0usize;
         let mut adjs: Vec<usize> = adjacency[t].clone();
 
-        while distance < travel_range {
+        while distance < eff_range {
             let mut added = false;
             for &n in &adjs {
                 if !populated.contains_key(&n) {
-                    let cand = *cmemo.entry((n, farms)).or_insert_with(|| {
-                        if farms {
-                            is_farmable(elevations[n], koeppen_ids[n])
-                        } else {
+                    let cand = if farms {
+                        *cmemo
+                            .entry((n, true))
+                            .or_insert_with(|| is_farmable(elevations[n], koeppen_ids[n]))
+                    } else if seas_tech {
+                        is_squattable(
+                            n,
+                            elevations,
+                            koeppen_ids,
+                            adjacency,
+                            eff_coast_prox,
+                            river_tiles,
+                        )
+                    } else {
+                        *cmemo.entry((n, false)).or_insert_with(|| {
                             is_squattable(
                                 n,
                                 elevations,
@@ -658,8 +734,8 @@ pub fn expand_population(
                                 coastal_proximity,
                                 river_tiles,
                             )
-                        }
-                    });
+                        })
+                    };
                     if cand {
                         frontier.insert(n, heritage_id);
                         added = true;
@@ -671,7 +747,9 @@ pub fn expand_population(
             }
             let curr_set: BTreeSet<usize> = adjs.into_iter().collect();
             let next_set = expand_within(&curr_set, adjacency, |u| {
-                is_hoppable(elevations[u], koeppen_ids[u], farms)
+                (rivers_tech && river_tiles.get(u).copied().unwrap_or(false))
+                    || (seas_tech && elevations[u] <= 0.0)
+                    || is_hoppable(elevations[u], koeppen_ids[u], farms)
             });
             adjs = next_set.into_iter().collect();
             distance += 1;

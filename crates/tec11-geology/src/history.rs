@@ -120,6 +120,8 @@ pub struct Community {
     pub nationality_id: u32,
     pub language_id: u32,
     pub agriculture: bool,
+    pub rivergoing: bool,
+    pub seafaring: bool,
     pub racial_mix: BTreeMap<u32, f32>,
 }
 
@@ -146,6 +148,8 @@ impl Community {
         }
         self.thousands += other.thousands;
         self.agriculture = self.agriculture || other.agriculture;
+        self.rivergoing = self.rivergoing || other.rivergoing;
+        self.seafaring = self.seafaring || other.seafaring;
         self.racial_mix = new_mix;
         self.normalize_racial_mix();
     }
@@ -1070,6 +1074,8 @@ pub struct HistorySimulation {
     rivers: Vec<Vec<usize>>,
     river_routes: Vec<Vec<usize>>,
     river_tiles: Vec<bool>,
+    is_coastal_fine: Vec<bool>,
+    base_capacities: Vec<f32>,
     capacities: Vec<f32>,
     /// Representative coastal or river fine face (`Some(f_idx)`) for each coarse tile `c` with water access.
     coarse_port_fine_face: Vec<Option<usize>>,
@@ -1131,11 +1137,18 @@ impl HistorySimulation {
         constellations: Vec<Constellation>,
         seed: u128,
     ) -> Self {
-        // Ensure prehistory has populated agricultural tiles if starting directly on Earth or an unpopulated planet.
-        if prehistory.active_agricultural_race_count() == 0 {
+        // Ensure prehistory has populated technological tiles if starting directly on Earth or an unpopulated planet.
+        if prehistory.active_agricultural_race_count() == 0
+            && prehistory.active_rivergoing_race_count() == 0
+            && prehistory.active_seafaring_race_count() == 0
+        {
             for _ in 0..8 {
                 prehistory.step();
-                if prehistory.active_agricultural_race_count() > 0 && prehistory.populated_count() > 80 {
+                if (prehistory.active_agricultural_race_count() > 0
+                    || prehistory.active_rivergoing_race_count() > 0
+                    || prehistory.active_seafaring_race_count() > 0)
+                    && prehistory.populated_count() > 80
+                {
                     break;
                 }
             }
@@ -1173,6 +1186,8 @@ impl HistorySimulation {
             rivers: Vec::new(),
             river_routes: Vec::new(),
             river_tiles: vec![false; num_fine],
+            is_coastal_fine: vec![false; num_fine],
+            base_capacities: vec![0.0; num_fine],
             capacities: vec![0.0; num_fine],
             coarse_port_fine_face: Vec::new(),
             potential_travel_routes: Vec::new(),
@@ -1342,8 +1357,19 @@ impl HistorySimulation {
                 self.capacities[f_idx] = nbs.iter().sum::<f32>() / (nbs.len() as f32);
             }
         }
+        self.base_capacities = self.capacities.clone();
+        self.is_coastal_fine = (0..num_fine)
+            .map(|f_idx| {
+                if fine_elevs[f_idx] <= 0.0 {
+                    return false;
+                }
+                let c = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                fine_adj[f_idx].iter().any(|&nb| fine_elevs[nb] <= 0.0)
+                    || coarse_adj[c].iter().any(|nb| ocean.contains(nb))
+            })
+            .collect();
 
-        // 4. Seed cities & initial states across farmable fine faces (`historysimulation.py:stateboundaries`)
+        // 4. Seed cities & initial states across farmable, riverine, or coastal fine faces (`historysimulation.py:stateboundaries`)
         self.tile_communities.clear();
         self.tile_states.clear();
         self.states.clear();
@@ -1358,7 +1384,9 @@ impl HistorySimulation {
             .filter(|&f_idx| {
                 let c = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
                 fine_elevs[f_idx] > 0.0
-                    && is_farmable(fine_elevs[f_idx], koeppen[c])
+                    && (is_farmable(fine_elevs[f_idx], koeppen[c])
+                        || self.river_tiles[f_idx]
+                        || self.is_coastal_fine[f_idx])
                     && self.capacities[f_idx] >= 0.5
             })
             .collect();
@@ -1396,12 +1424,27 @@ impl HistorySimulation {
         }
 
         // Create initial states, nationalities, and languages at each city (`langfromspecies`)
+        let pre_pop = self.prehistory.populated().clone();
+        let pre_ag = self.prehistory.agricultural_heritages().clone();
+        let pre_riv = self.prehistory.rivergoing_heritages().clone();
+        let pre_sea = self.prehistory.seafaring_heritages().clone();
+        let mut state_init_tech: BTreeMap<u32, (bool, bool, bool)> = BTreeMap::new();
         let mut q = VecDeque::new();
         for &city_f in &city_tiles {
             let sid = self.next_state_id;
             self.next_state_id += 1;
             let lid = self.next_language_id;
             self.next_language_id += 1;
+
+            let city_c = self.terrain.primary_coarse_tile(city_f, &coarse_elevs);
+            let city_hid = pre_pop.get(&city_c).copied();
+            let has_ag = city_hid.is_some_and(|h| pre_ag.contains(&h))
+                || is_farmable(fine_elevs[city_f], koeppen[city_c]);
+            let has_riv =
+                city_hid.is_some_and(|h| pre_riv.contains(&h)) || self.river_tiles[city_f];
+            let has_sea =
+                city_hid.is_some_and(|h| pre_sea.contains(&h)) || self.is_coastal_fine[city_f];
+            state_init_tech.insert(sid, (has_ag, has_riv, has_sea));
 
             let lang = LanguageRecord::new_for_state_with_system(
                 lid,
@@ -1432,9 +1475,18 @@ impl HistorySimulation {
             if dist >= 16 {
                 continue;
             }
+            let (_, state_riv, _) = state_init_tech.get(&sid).copied().unwrap_or((true, false, false));
             for &nb in &fine_adj[curr] {
                 let c = self.terrain.primary_coarse_tile(nb, &coarse_elevs);
-                let step_cost = if self.river_tiles[nb] { 10 } else { 1 };
+                let step_cost = if self.river_tiles[nb] {
+                    if state_riv {
+                        2
+                    } else {
+                        10
+                    }
+                } else {
+                    1
+                };
                 if dist + step_cost <= 16
                     && !self.tile_states.contains_key(&nb)
                     && fine_elevs[nb] > 0.0
@@ -1478,7 +1530,6 @@ impl HistorySimulation {
         }
 
         // Initialize communities on claimed fine faces (`historysimulation.py:population`, 1/9 or 1/27 shares)
-        let pre_pop = self.prehistory.populated().clone();
         for (&f_idx, &sid) in &self.tile_states {
             let mut mix = BTreeMap::new();
             match self.terrain.parentage[f_idx] {
@@ -1498,27 +1549,65 @@ impl HistorySimulation {
                     }
                 }
             }
+            let (state_ag, state_riv, state_sea) = state_init_tech
+                .get(&sid)
+                .copied()
+                .unwrap_or((true, false, false));
+            let mix_ag = mix.keys().any(|h| pre_ag.contains(h));
+            let mix_riv = mix.keys().any(|h| pre_riv.contains(h));
+            let mix_sea = mix.keys().any(|h| pre_sea.contains(h));
             if mix.is_empty() {
                 mix.insert(0, 1.0);
             }
+            let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+            let agriculture = state_ag || mix_ag || is_farmable(fine_elevs[f_idx], koeppen[c_idx]);
+            let rivergoing = state_riv || mix_riv || self.river_tiles[f_idx];
+            let seafaring = state_sea || mix_sea || self.is_coastal_fine[f_idx];
             let pop = (self.capacities[f_idx] * 0.45).max(0.15);
             let mut comm = Community {
                 thousands: pop,
                 nationality_id: sid,
                 language_id: sid,
-                agriculture: true,
+                agriculture,
+                rivergoing,
+                seafaring,
                 racial_mix: mix,
             };
             comm.normalize_racial_mix();
             self.tile_communities.insert(f_idx, vec![comm]);
         }
 
-        // 5. Compute navigable wind, ocean-current, and riverine travel routes and activate routes for populated water-access polities.
+        // 5. Apply fishing carrying capacity bonuses from rivergoing/seafaring and activate water travel routes.
+        self.refresh_fishing_capacities();
         self.compute_potential_travel_routes(&ocean, &coarse_elevs, &koeppen, &coarse_adj, &fine_adj, &fine_elevs);
         self.update_travel_routes();
 
         self.recolor_states(&fine_adj);
         self.update_diplomacy_and_trade(&fine_adj);
+    }
+
+    /// Recompute `self.capacities` from `self.base_capacities`, granting a `+35%` freshwater fishing
+    /// carrying capacity bonus on river tiles with `rivergoing` communities and a `+45%` marine fishing
+    /// carrying capacity bonus on coastal tiles with `seafaring` communities.
+    pub fn refresh_fishing_capacities(&mut self) {
+        let num_fine = self.base_capacities.len();
+        if self.capacities.len() != num_fine {
+            self.capacities = self.base_capacities.clone();
+        }
+        for f_idx in 0..num_fine {
+            let mut mult = 1.0f32;
+            if let Some(comms) = self.tile_communities.get(&f_idx) {
+                let has_riv = comms.iter().any(|c| c.thousands > 0.0 && c.rivergoing);
+                let has_sea = comms.iter().any(|c| c.thousands > 0.0 && c.seafaring);
+                if has_riv && self.river_tiles.get(f_idx).copied().unwrap_or(false) {
+                    mult *= 1.35;
+                }
+                if has_sea && self.is_coastal_fine.get(f_idx).copied().unwrap_or(false) {
+                    mult *= 1.45;
+                }
+            }
+            self.capacities[f_idx] = self.base_capacities[f_idx] * mult;
+        }
     }
 
     /// Precompute physically navigable maritime and riverine travel corridors (`potential_travel_routes`)
@@ -1903,22 +1992,31 @@ impl HistorySimulation {
     }
 
     /// Re-evaluate active `travel_routes` from `potential_travel_routes` based on which water-access
-    /// coarse tiles currently have populated communities or state presence.
+    /// coarse tiles currently have populated communities possessing the required water technology
+    /// (`rivergoing` for `RiverCorridor` routes, `seafaring` for `OceanGyre` and `CoastalSeaLane` routes).
     pub fn update_travel_routes(&mut self) {
         let coarse_elevs = self.prehistory.tile_elevations();
         let num_coarse = coarse_elevs.len();
         let mut coarse_active_fine: Vec<Option<usize>> = vec![None; num_coarse];
+        let mut coarse_has_rivergoing: Vec<bool> = vec![false; num_coarse];
+        let mut coarse_has_seafaring: Vec<bool> = vec![false; num_coarse];
 
-        // Any populated or state-claimed fine face on a coarse tile activates that coarse tile's water access
         for (&f_idx, &sid) in &self.tile_states {
-            let pop: f32 = self
+            let (pop, has_riv, has_sea) = self
                 .tile_communities
                 .get(&f_idx)
-                .map(|cs| cs.iter().map(|c| c.thousands).sum())
-                .unwrap_or(0.0);
+                .map(|cs| {
+                    let p: f32 = cs.iter().map(|c| c.thousands).sum();
+                    let r = cs.iter().any(|c| c.thousands > 0.0 && c.rivergoing);
+                    let s = cs.iter().any(|c| c.thousands > 0.0 && c.seafaring);
+                    (p, r, s)
+                })
+                .unwrap_or((0.0, false, false));
             if pop > 0.0 || self.states.contains_key(&sid) {
                 let c = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
                 if c < num_coarse {
+                    coarse_has_rivergoing[c] |= has_riv;
+                    coarse_has_seafaring[c] |= has_sea;
                     // Prefer the designated port fine face if it is claimed by a state
                     if self.coarse_port_fine_face.get(c).copied().flatten() == Some(f_idx)
                         || coarse_active_fine[c].is_none()
@@ -1937,6 +2035,23 @@ impl HistorySimulation {
                     .get(route.from_coarse_tile)
                     .copied()
                     .flatten()?;
+                let has_required_tech = match route.route_kind {
+                    TravelRouteKind::RiverCorridor => {
+                        coarse_has_rivergoing
+                            .get(route.from_coarse_tile)
+                            .copied()
+                            .unwrap_or(false)
+                    }
+                    TravelRouteKind::OceanGyre | TravelRouteKind::CoastalSeaLane => {
+                        coarse_has_seafaring
+                            .get(route.from_coarse_tile)
+                            .copied()
+                            .unwrap_or(false)
+                    }
+                };
+                if !has_required_tech {
+                    return None;
+                }
                 let to_fine_face = coarse_active_fine
                     .get(route.to_coarse_tile)
                     .copied()
@@ -2064,17 +2179,27 @@ impl HistorySimulation {
     }
 
     /// Metaethnic faultline intensity $I_f \in [0.0, 1.0]$ on fine face `f_idx` across political borders
-    /// (Turchin, *Historical Dynamics*, 2003, Ch. 4):
-    /// `+0.50` across the agricultural/pastoral divide, `+0.30` across nationality boundaries,
-    /// and `+0.20` across language boundaries.
-    fn tile_metaethnic_intensity(&self, f_idx: usize, fine_adj: &[Vec<usize>]) -> f32 {
+    /// (Turchin, *Historical Dynamics*, 2003, Ch. 4), incorporating agricultural, seafaring, and rivergoing
+    /// lifeway faultlines alongside nationality and linguistic divides:
+    /// `+0.35` across the agricultural/foraging divide, `+0.25` across the seafaring/landlocked divide,
+    /// `+0.15` across the rivergoing/upland divide, `+0.25` across nationality boundaries, and
+    /// `+0.20` across language boundaries (with `-0.05` solidarity dampening when neighboring states share
+    /// the same waterborne lifeway).
+    pub fn tile_metaethnic_intensity(&self, f_idx: usize, fine_adj: &[Vec<usize>]) -> f32 {
         let Some(&sid) = self.tile_states.get(&f_idx) else {
             return 0.0;
         };
-        let f_ag = self
+        let (f_ag, f_riv, f_sea) = self
             .tile_communities
             .get(&f_idx)
-            .is_some_and(|cs| cs.iter().any(|c| c.agriculture));
+            .map(|cs| {
+                (
+                    cs.iter().any(|c| c.thousands > 0.0 && c.agriculture),
+                    cs.iter().any(|c| c.thousands > 0.0 && c.rivergoing),
+                    cs.iter().any(|c| c.thousands > 0.0 && c.seafaring),
+                )
+            })
+            .unwrap_or((false, false, false));
         let f_nat = self.majority_nationality(f_idx);
         let f_lang = self.majority_language(f_idx);
 
@@ -2089,19 +2214,32 @@ impl HistorySimulation {
                 if nb_pop <= 0.0 {
                     return None;
                 }
-                let nb_ag = nb_comms.iter().any(|c| c.agriculture);
-                let ag_diff = if f_ag != nb_ag { 0.50 } else { 0.0 };
+                let nb_ag = nb_comms.iter().any(|c| c.thousands > 0.0 && c.agriculture);
+                let nb_riv = nb_comms.iter().any(|c| c.thousands > 0.0 && c.rivergoing);
+                let nb_sea = nb_comms.iter().any(|c| c.thousands > 0.0 && c.seafaring);
+                let ag_diff = if f_ag != nb_ag { 0.35f32 } else { 0.0f32 };
+                let sea_diff = if f_sea != nb_sea { 0.25f32 } else { 0.0f32 };
+                let riv_diff = if f_riv != nb_riv { 0.15f32 } else { 0.0f32 };
                 let nat_diff = if f_nat != self.majority_nationality(nb) {
-                    0.30
+                    0.25f32
                 } else {
-                    0.0
+                    0.0f32
                 };
                 let lang_diff = if f_lang != self.majority_language(nb) {
-                    0.20
+                    0.20f32
                 } else {
-                    0.0
+                    0.0f32
                 };
-                Some(ag_diff + nat_diff + lang_diff)
+                let shared_water_solidarity =
+                    if f_ag == nb_ag && f_riv == nb_riv && f_sea == nb_sea && (f_riv || f_sea) {
+                        -0.05f32
+                    } else {
+                        0.0f32
+                    };
+                Some(
+                    (ag_diff + sea_diff + riv_diff + nat_diff + lang_diff + shared_water_solidarity)
+                        .clamp(0.0, 1.0),
+                )
             })
             .fold(0.0f32, f32::max)
             .clamp(0.0, 1.0)
@@ -2800,10 +2938,17 @@ impl HistorySimulation {
                     continue;
                 }
             }
-            let curr_ag = self
+            let (curr_ag, curr_riv, curr_sea) = self
                 .tile_communities
                 .get(&curr)
-                .is_some_and(|cs| cs.iter().any(|c| c.agriculture));
+                .map(|cs| {
+                    (
+                        cs.iter().any(|c| c.agriculture),
+                        cs.iter().any(|c| c.rivergoing),
+                        cs.iter().any(|c| c.seafaring),
+                    )
+                })
+                .unwrap_or((false, false, false));
             let curr_nat = self.majority_nationality(curr);
             let curr_lang = self.majority_language(curr);
 
@@ -2811,20 +2956,29 @@ impl HistorySimulation {
                 if !tile_set.contains(&next) {
                     continue;
                 }
-                let next_pop: f32 = self
+                let (next_pop, next_ag, next_riv, next_sea) = self
                     .tile_communities
                     .get(&next)
-                    .map(|cs| cs.iter().map(|c| c.thousands).sum())
-                    .unwrap_or(0.0);
-                let next_ag = self
-                    .tile_communities
-                    .get(&next)
-                    .is_some_and(|cs| cs.iter().any(|c| c.agriculture));
+                    .map(|cs| {
+                        (
+                            cs.iter().map(|c| c.thousands).sum::<f32>(),
+                            cs.iter().any(|c| c.agriculture),
+                            cs.iter().any(|c| c.rivergoing),
+                            cs.iter().any(|c| c.seafaring),
+                        )
+                    })
+                    .unwrap_or((0.0, false, false, false));
                 if self.terrain.fine_elevations[next] <= 0.0 || next_pop <= 0.0 || curr_ag != next_ag {
                     continue;
                 }
-                let step_cost = if self.river_tiles[next] {
-                    10
+                let base_step_cost = if self.river_tiles[next] {
+                    if curr_riv && next_riv {
+                        1
+                    } else if curr_riv || next_riv {
+                        3
+                    } else {
+                        10
+                    }
                 } else if curr_nat != self.majority_nationality(next) {
                     3
                 } else if curr_lang != self.majority_language(next) {
@@ -2832,6 +2986,9 @@ impl HistorySimulation {
                 } else {
                     1
                 };
+                let water_faultline =
+                    u32::from(curr_riv != next_riv) * 2 + u32::from(curr_sea != next_sea) * 2;
+                let step_cost = base_step_cost + water_faultline;
                 let next_cost = cost.saturating_add(step_cost);
                 let is_better = match best_cost.get(&next) {
                     Some(&(bc, b_idx)) => (next_cost, city_idx) < (bc, b_idx),
@@ -2996,7 +3153,8 @@ impl HistorySimulation {
                 .push(item.community);
         }
 
-        // 2b. Maritime & riverine expansion along established wind/current travel routes (`self.travel_routes`)
+        // 2b. Maritime & riverine expansion along established wind/current travel routes (`self.travel_routes`),
+        // gated by `rivergoing` on `RiverCorridor` routes and `seafaring` on `OceanGyre` / `CoastalSeaLane` routes.
         let maritime_spillover: Vec<MigrationSpillover> = self
             .travel_routes
             .iter()
@@ -3010,6 +3168,15 @@ impl HistorySimulation {
                 if src_pop <= src_cap * 0.55 || src_comms.is_empty() {
                     return None;
                 }
+                let source_comm = src_comms.iter().find(|c| {
+                    c.thousands > 0.0
+                        && match route.route_kind {
+                            TravelRouteKind::RiverCorridor => c.rivergoing,
+                            TravelRouteKind::OceanGyre | TravelRouteKind::CoastalSeaLane => {
+                                c.seafaring
+                            }
+                        }
+                })?;
                 let c_dst = self.terrain.primary_coarse_tile(dst, &coarse_elevs);
                 if fine_elevs[dst] <= 0.0
                     || !is_passable(fine_elevs[dst], koeppen[c_dst], true)
@@ -3025,9 +3192,9 @@ impl HistorySimulation {
                 if dst_pop >= self.capacities[dst] * 0.85 {
                     return None;
                 }
-                let mut migrant = src_comms[0].clone();
+                let mut migrant = source_comm.clone();
                 let frac = (0.06 * route.wind_current_alignment.max(0.35)).clamp(0.02, 0.08);
-                migrant.thousands = (src_comms[0].thousands * frac).max(0.02);
+                migrant.thousands = (source_comm.thousands * frac).max(0.02);
                 Some(MigrationSpillover {
                     target_face: dst,
                     state_id,
@@ -3044,6 +3211,98 @@ impl HistorySimulation {
                 .or_default()
                 .push(item.community);
         }
+
+        // 2c. Independent invention and neighbor/route diffusion of agriculture, rivergoing, and seafaring
+        // (rivergoing and seafaring develop independently of agriculture and of each other, with a 3x mutual synergy boost).
+        let mut ag_tiles = BTreeSet::new();
+        let mut riv_tiles = BTreeSet::new();
+        let mut sea_tiles = BTreeSet::new();
+        for (&t, comms) in &self.tile_communities {
+            for c in comms {
+                if c.thousands > 0.0 {
+                    if c.agriculture {
+                        ag_tiles.insert(t);
+                    }
+                    if c.rivergoing {
+                        riv_tiles.insert(t);
+                    }
+                    if c.seafaring {
+                        sea_tiles.insert(t);
+                    }
+                }
+            }
+        }
+        let mut route_neighbors: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for r in &self.travel_routes {
+            route_neighbors
+                .entry(r.from_fine_face)
+                .or_default()
+                .push(r.to_fine_face);
+            route_neighbors
+                .entry(r.to_fine_face)
+                .or_default()
+                .push(r.from_fine_face);
+        }
+        let populated_keys: Vec<usize> = self.tile_communities.keys().copied().collect();
+        for t in populated_keys {
+            let is_riv_tile = self.river_tiles.get(t).copied().unwrap_or(false);
+            let is_coast_tile = self.is_coastal_fine.get(t).copied().unwrap_or(false);
+            let c_coarse = self.terrain.primary_coarse_tile(t, &coarse_elevs);
+            let farmable_tile = is_farmable(fine_elevs[t], koeppen[c_coarse]);
+            let adj_has_ag = fine_adj[t].iter().any(|nb| ag_tiles.contains(nb));
+            let adj_has_riv = fine_adj[t].iter().any(|nb| riv_tiles.contains(nb))
+                || route_neighbors
+                    .get(&t)
+                    .is_some_and(|nbs| nbs.iter().any(|nb| riv_tiles.contains(nb)));
+            let adj_has_sea = fine_adj[t].iter().any(|nb| sea_tiles.contains(nb))
+                || route_neighbors
+                    .get(&t)
+                    .is_some_and(|nbs| nbs.iter().any(|nb| sea_tiles.contains(nb)));
+
+            if let Some(comms) = self.tile_communities.get_mut(&t) {
+                for c in comms.iter_mut() {
+                    if c.thousands <= 0.0 {
+                        continue;
+                    }
+                    if !c.agriculture && farmable_tile {
+                        let spark_p = if is_riv_tile { 0.025 } else { 0.006 };
+                        let diff_p = if adj_has_ag { 0.10 } else { 0.0 };
+                        if self.rng.next_f64() < (spark_p + diff_p) {
+                            c.agriculture = true;
+                        }
+                    }
+                    if !c.rivergoing && (is_riv_tile || adj_has_riv) {
+                        let synergy = if c.seafaring { 3.0f64 } else { 1.0f64 };
+                        let spark_p = if is_riv_tile { 0.020f64 * synergy } else { 0.0f64 };
+                        let diff_p = if adj_has_riv && is_riv_tile {
+                            0.12f64 * synergy
+                        } else if adj_has_riv {
+                            0.04f64 * synergy
+                        } else {
+                            0.0f64
+                        };
+                        if self.rng.next_f64() < (spark_p + diff_p).min(0.85f64) {
+                            c.rivergoing = true;
+                        }
+                    }
+                    if !c.seafaring && (is_coast_tile || adj_has_sea) {
+                        let synergy = if c.rivergoing { 3.0f64 } else { 1.0f64 };
+                        let spark_p = if is_coast_tile { 0.016f64 * synergy } else { 0.0f64 };
+                        let diff_p = if adj_has_sea && is_coast_tile {
+                            0.12f64 * synergy
+                        } else if adj_has_sea {
+                            0.04f64 * synergy
+                        } else {
+                            0.0f64
+                        };
+                        if self.rng.next_f64() < (spark_p + diff_p).min(0.85f64) {
+                            c.seafaring = true;
+                        }
+                    }
+                }
+            }
+        }
+        self.refresh_fishing_capacities();
         self.update_travel_routes();
 
         // 3. Intermingle and assimilate (`people/community.py:16-92`), modulated by Turchin asabiya
@@ -3065,11 +3324,34 @@ impl HistorySimulation {
                     .filter(|c| c.agriculture)
                     .map(|c| c.thousands)
                     .sum();
-                // Cultural assimilation (`assimilateculture`: >= 75% agricultural converts communities > 5%)
-                if total_pop > 0.0 && ag_pop / total_pop >= 0.75 {
-                    for c in comms.iter_mut() {
-                        if c.thousands / total_pop > 0.05 {
-                            c.agriculture = true;
+                let riv_pop: f32 = comms
+                    .iter()
+                    .filter(|c| c.rivergoing)
+                    .map(|c| c.thousands)
+                    .sum();
+                let sea_pop: f32 = comms
+                    .iter()
+                    .filter(|c| c.seafaring)
+                    .map(|c| c.thousands)
+                    .sum();
+                // Cultural assimilation (`assimilateculture`: >= 75% agricultural or >= 65% rivergoing/seafaring converts communities > 5%)
+                if total_pop > 0.0 {
+                    let adopt_ag = ag_pop / total_pop >= 0.75;
+                    let adopt_riv = riv_pop / total_pop >= 0.65;
+                    let adopt_sea = sea_pop / total_pop >= 0.65;
+                    if adopt_ag || adopt_riv || adopt_sea {
+                        for c in comms.iter_mut() {
+                            if c.thousands / total_pop > 0.05 {
+                                if adopt_ag {
+                                    c.agriculture = true;
+                                }
+                                if adopt_riv {
+                                    c.rivergoing = true;
+                                }
+                                if adopt_sea {
+                                    c.seafaring = true;
+                                }
+                            }
                         }
                     }
                 }
@@ -4528,6 +4810,8 @@ impl HistorySimulation {
         let mut lang_totals: BTreeMap<u32, f32> = BTreeMap::new();
         let mut st_pop = 0.0f32;
         let mut agri_pop = 0.0f32;
+        let mut riv_pop = 0.0f32;
+        let mut sea_pop = 0.0f32;
         for &t in tiles {
             if let Some(comms) = self.tile_communities.get(&t) {
                 for c in comms {
@@ -4535,6 +4819,12 @@ impl HistorySimulation {
                         st_pop += c.thousands;
                         if c.agriculture {
                             agri_pop += c.thousands;
+                        }
+                        if c.rivergoing {
+                            riv_pop += c.thousands;
+                        }
+                        if c.seafaring {
+                            sea_pop += c.thousands;
                         }
                         *nat_totals.entry(c.nationality_id).or_insert(0.0) += c.thousands;
                         *lang_totals.entry(c.language_id).or_insert(0.0) += c.thousands;
@@ -4554,16 +4844,27 @@ impl HistorySimulation {
                 avail_sp.extend(psp.iter().copied());
             }
         }
-        let technology = if agri_pop > 0.0 {
-            let pct = (agri_pop * 100.0 / st_pop.max(1e-4)).clamp(0.0, 100.0);
-            format!(
+        let denom_pop = st_pop.max(1e-4);
+        let mut tech_parts = Vec::new();
+        if agri_pop > 0.0 {
+            let pct = (agri_pop * 100.0 / denom_pop).clamp(0.0, 100.0);
+            tech_parts.push(format!(
                 "Agricultural ({:.0}% farming, {} domesticates)",
                 pct,
                 avail_sp.len()
-            )
+            ));
         } else {
-            "Pre-Agricultural / Foraging (0% farming)".to_string()
-        };
+            tech_parts.push("Pre-Agricultural / Foraging (0% farming)".to_string());
+        }
+        if riv_pop > 0.0 {
+            let pct = (riv_pop * 100.0 / denom_pop).clamp(0.0, 100.0);
+            tech_parts.push(format!("Rivergoing ({:.0}%)", pct));
+        }
+        if sea_pop > 0.0 {
+            let pct = (sea_pop * 100.0 / denom_pop).clamp(0.0, 100.0);
+            tech_parts.push(format!("Seafaring ({:.0}%)", pct));
+        }
+        let technology = tech_parts.join(" · ");
 
         let st_asabiya = self.state_asabiya(state_id);
         let frontier_label = if st_asabiya >= 0.70 {
@@ -4984,6 +5285,8 @@ impl HistorySimulation {
         let mut lang_totals: BTreeMap<u32, f32> = BTreeMap::new();
         let mut tile_pop = 0.0f32;
         let mut agri_pop = 0.0f32;
+        let mut riv_pop = 0.0f32;
+        let mut sea_pop = 0.0f32;
         if let Some(comms) = self.tile_communities.get(&fine_idx) {
             for c in comms {
                 if c.thousands > 1e-4 {
@@ -4991,20 +5294,48 @@ impl HistorySimulation {
                     if c.agriculture {
                         agri_pop += c.thousands;
                     }
+                    if c.rivergoing {
+                        riv_pop += c.thousands;
+                    }
+                    if c.seafaring {
+                        sea_pop += c.thousands;
+                    }
                     *nat_totals.entry(c.nationality_id).or_insert(0.0) += c.thousands;
                     *lang_totals.entry(c.language_id).or_insert(0.0) += c.thousands;
                 }
             }
         }
         let cap = self.capacities[fine_idx];
+        let is_coast = self.is_coastal_fine.get(fine_idx).copied().unwrap_or(false);
 
         let technology = if tile_pop <= 1e-4 {
             "Uninhabited".to_string()
-        } else if agri_pop > 0.0 {
-            let pct = (agri_pop * 100.0 / tile_pop.max(1e-4)).clamp(0.0, 100.0);
-            format!("Agricultural ({:.0}% farming)", pct)
         } else {
-            "Pre-Agricultural / Foraging".to_string()
+            let denom = tile_pop.max(1e-4);
+            let mut parts = Vec::new();
+            if agri_pop > 0.0 {
+                let pct = (agri_pop * 100.0 / denom).clamp(0.0, 100.0);
+                parts.push(format!("Agricultural ({:.0}% farming)", pct));
+            } else {
+                parts.push("Pre-Agricultural / Foraging".to_string());
+            }
+            if riv_pop > 0.0 {
+                let pct = (riv_pop * 100.0 / denom).clamp(0.0, 100.0);
+                if is_river {
+                    parts.push(format!("Rivergoing ({:.0}%, +35% river fishing)", pct));
+                } else {
+                    parts.push(format!("Rivergoing ({:.0}%)", pct));
+                }
+            }
+            if sea_pop > 0.0 {
+                let pct = (sea_pop * 100.0 / denom).clamp(0.0, 100.0);
+                if is_coast {
+                    parts.push(format!("Seafaring ({:.0}%, +45% marine fishing)", pct));
+                } else {
+                    parts.push(format!("Seafaring ({:.0}%)", pct));
+                }
+            }
+            parts.join(" · ")
         };
 
         let mut nationalities: Vec<DemographicShareItem> = nat_totals
@@ -5565,6 +5896,8 @@ impl HistorySimulation {
                         nationality_id: c.nationality_id,
                         language_id: c.language_id,
                         agriculture: c.agriculture,
+                        rivergoing: c.rivergoing,
+                        seafaring: c.seafaring,
                         racial_mix: c
                             .racial_mix
                             .iter()
@@ -5664,6 +5997,8 @@ impl HistorySimulation {
                                 nationality_id: pc.nationality_id,
                                 language_id: pc.language_id,
                                 agriculture: pc.agriculture,
+                                rivergoing: pc.rivergoing,
+                                seafaring: pc.seafaring,
                                 racial_mix: pc
                                     .racial_mix
                                     .iter()
@@ -5680,6 +6015,7 @@ impl HistorySimulation {
                     .map(StatePair::from_proto)
                     .collect();
                 sim.conflicts = hist.conflicts.iter().map(StatePair::from_proto).collect();
+                sim.refresh_fishing_capacities();
                 sim.update_travel_routes();
             }
         }
@@ -5946,5 +6282,159 @@ mod tests {
         assert!(!nat_view.current_locations.is_empty());
         assert!(!nat_view.spoken_languages.is_empty());
         assert!(nat_view.to_json().contains("\"hasNation\":true"));
+    }
+
+    #[test]
+    fn test_rivergoing_and_seafaring_technologies_capacity_routes_and_faultlines() {
+        // 1. Verify Prehistory spark probabilities & sea-neighbor requirements
+        let p_riv_base = crate::prehistory::rivergoing_spark_prob(2);
+        assert!(p_riv_base > 0.0);
+        assert_eq!(
+            crate::prehistory::rivergoing_spark_prob(12),
+            0.0,
+            "Rivergoing should not spark on EF ice cap tiles"
+        );
+
+        let p_sea_base = crate::prehistory::seafaring_spark_prob(3, 1);
+        let p_sea_archipelago = crate::prehistory::seafaring_spark_prob(3, 3);
+        assert!(p_sea_base > 0.0);
+        assert!(p_sea_archipelago > p_sea_base);
+        assert_eq!(
+            crate::prehistory::seafaring_spark_prob(3, 0),
+            0.0,
+            "Seafaring requires a coastal tile with at least 1 sea neighbor"
+        );
+
+        // 2. Verify History fishing carrying capacity boosts (+35% rivergoing on rivers, +45% seafaring on coasts)
+        let mut sim = HistorySimulation::new_earth(42);
+        let river_face = (0..sim.fine_face_count())
+            .find(|&f| {
+                sim.river_tiles[f]
+                    && !sim.is_coastal_fine[f]
+                    && sim.base_capacities[f] > 0.1
+                    && sim.tile_communities.contains_key(&f)
+            })
+            .expect("Expected a populated inland river fine face");
+        let coast_face = (0..sim.fine_face_count())
+            .find(|&f| {
+                sim.is_coastal_fine[f]
+                    && !sim.river_tiles[f]
+                    && sim.base_capacities[f] > 0.1
+                    && sim.tile_communities.contains_key(&f)
+            })
+            .expect("Expected a populated non-river coastal fine face");
+
+        for c in sim.tile_communities.get_mut(&river_face).unwrap() {
+            c.rivergoing = false;
+            c.seafaring = false;
+        }
+        for c in sim.tile_communities.get_mut(&coast_face).unwrap() {
+            c.rivergoing = false;
+            c.seafaring = false;
+        }
+        sim.refresh_fishing_capacities();
+        assert!((sim.capacities[river_face] - sim.base_capacities[river_face]).abs() < 1e-5);
+        assert!((sim.capacities[coast_face] - sim.base_capacities[coast_face]).abs() < 1e-5);
+
+        for c in sim.tile_communities.get_mut(&river_face).unwrap() {
+            c.rivergoing = true;
+        }
+        for c in sim.tile_communities.get_mut(&coast_face).unwrap() {
+            c.seafaring = true;
+        }
+        sim.refresh_fishing_capacities();
+        assert!(
+            (sim.capacities[river_face] - sim.base_capacities[river_face] * 1.35).abs() < 1e-4,
+            "Rivergoing should grant +35% freshwater fishing capacity on river faces"
+        );
+        assert!(
+            (sim.capacities[coast_face] - sim.base_capacities[coast_face] * 1.45).abs() < 1e-4,
+            "Seafaring should grant +45% marine fishing capacity on coastal faces"
+        );
+
+        // 3. Verify travel route gating: stripping rivergoing/seafaring deactivates water routes
+        for comms in sim.tile_communities.values_mut() {
+            for c in comms.iter_mut() {
+                c.rivergoing = false;
+                c.seafaring = false;
+            }
+        }
+        sim.update_travel_routes();
+        assert_eq!(
+            sim.active_travel_route_count(),
+            0,
+            "Water travel routes should require rivergoing or seafaring communities"
+        );
+
+        for comms in sim.tile_communities.values_mut() {
+            for c in comms.iter_mut() {
+                c.rivergoing = true;
+                c.seafaring = true;
+            }
+        }
+        sim.update_travel_routes();
+        assert!(
+            sim.active_travel_route_count() > 0,
+            "Restoring rivergoing and seafaring should re-activate water travel routes"
+        );
+
+        // 4. Verify metaethnic faultline intensity from rivergoing and seafaring divides
+        let fine_adj = sim.terrain.terrain_adj.clone();
+        let border_pair = sim.tile_states.iter().find_map(|(&f1, &s1)| {
+            fine_adj[f1].iter().find_map(|&f2| {
+                let &s2 = sim.tile_states.get(&f2)?;
+                (s1 != s2
+                    && sim.tile_communities.contains_key(&f1)
+                    && sim.tile_communities.contains_key(&f2))
+                .then_some((f1, f2))
+            })
+        });
+        if let Some((f1, f2)) = border_pair {
+            for &nb in &fine_adj[f1] {
+                if let Some(comms) = sim.tile_communities.get_mut(&nb) {
+                    for c in comms.iter_mut() {
+                        c.nationality_id = 0;
+                        c.language_id = 0;
+                        c.agriculture = true;
+                        c.rivergoing = false;
+                        c.seafaring = false;
+                    }
+                }
+            }
+            for c in sim.tile_communities.get_mut(&f1).unwrap() {
+                c.nationality_id = 0;
+                c.language_id = 0;
+                c.agriculture = true;
+                c.rivergoing = false;
+                c.seafaring = false;
+            }
+            let base_i = sim.tile_metaethnic_intensity(f1, &fine_adj);
+            assert_eq!(base_i, 0.0);
+
+            for c in sim.tile_communities.get_mut(&f2).unwrap() {
+                c.rivergoing = true;
+                c.seafaring = true;
+            }
+            let water_divide_i = sim.tile_metaethnic_intensity(f1, &fine_adj);
+            assert!(
+                (water_divide_i - 0.40).abs() < 1e-4,
+                "Expected +0.15 rivergoing +0.25 seafaring faultline intensity (0.40), got {water_divide_i}"
+            );
+        }
+
+        // 5. Proto snapshot roundtrip preserves rivergoing and seafaring
+        let bytes = sim.encode_snapshot();
+        let mut restored = HistorySimulation::new_earth(99);
+        assert!(restored.load_snapshot_bytes(&bytes));
+        assert!(restored
+            .tile_communities
+            .values()
+            .flatten()
+            .any(|c| c.rivergoing));
+        assert!(restored
+            .tile_communities
+            .values()
+            .flatten()
+            .any(|c| c.seafaring));
     }
 }

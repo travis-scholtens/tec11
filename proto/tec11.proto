@@ -100,6 +100,8 @@ message Heritage {
   string name = 1;
   repeated uint32 parent_heritage_ids = 2 [packed = true];
   bool agricultural = 3;
+  bool rivergoing = 4;
+  bool seafaring = 5;
 }
 
 message PrehistoryStage {
@@ -124,6 +126,8 @@ message Community {
   uint32 language_id = 3;
   bool agriculture = 4;
   repeated RaceContribution racial_mix = 5;
+  bool rivergoing = 6;
+  bool seafaring = 7;
 }
 
 // Only stored for populated/claimed fine faces (capacities & species are derived on load)

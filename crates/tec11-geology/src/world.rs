@@ -2,7 +2,7 @@ use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::history::HistorySimulation;
-use crate::population::tile_population_thousands;
+use crate::population::tile_population_thousands_with_water_tech;
 use crate::prehistory::PrehistorySimulation;
 use crate::racination::Heritage;
 use crate::sun_sky::{
@@ -407,7 +407,10 @@ impl WorldSimulation {
             WorldStageState::Prehistory(pre) => {
                 pre.step();
                 self.prehistory_ticks = pre.prehistory_ticks();
-                if self.prehistory_ticks >= 32 && pre.active_agricultural_race_count() > 0 {
+                let has_civilization_tech = pre.active_agricultural_race_count() > 0
+                    || pre.active_rivergoing_race_count() > 0
+                    || pre.active_seafaring_race_count() > 0;
+                if self.prehistory_ticks >= 32 && has_civilization_tech {
                     StageTransition::ToHistory
                 } else {
                     StageTransition::None
@@ -654,11 +657,36 @@ impl WorldSimulation {
                 );
                 if let Some(&hid) = pre.populated().get(&tile_idx) {
                     let is_ag = pre.agricultural_heritages().contains(&hid);
-                    let pop_k = tile_population_thousands(pre.tile_koeppen_ids()[tile_idx], is_ag);
+                    let is_riv = pre.rivergoing_heritages().contains(&hid);
+                    let is_sea = pre.seafaring_heritages().contains(&hid);
+                    let has_river = pre.river_tiles().get(tile_idx).copied().unwrap_or(false);
+                    let is_coastal = pre
+                        .adjacency()
+                        .get(tile_idx)
+                        .is_some_and(|nbs| nbs.iter().any(|&nb| pre.tiles()[nb].elevation() <= 0.0));
+                    let pop_k = tile_population_thousands_with_water_tech(
+                        pre.tile_koeppen_ids()[tile_idx],
+                        is_ag,
+                        is_riv && has_river,
+                        is_sea && is_coastal,
+                    );
+                    let mut tech_labels = Vec::new();
+                    if is_ag {
+                        tech_labels.push("Agricultural");
+                    }
+                    if is_riv {
+                        tech_labels.push("Rivergoing");
+                    }
+                    if is_sea {
+                        tech_labels.push("Seafaring");
+                    }
+                    if tech_labels.is_empty() {
+                        tech_labels.push("Paleolithic");
+                    }
                     text.push_str(&format!(
                         "\nPopulation: {:.1}K ({})\n",
                         pop_k,
-                        if is_ag { "Agricultural" } else { "Paleolithic" }
+                        tech_labels.join(" · ")
                     ));
                     text.push_str(&Self::format_heritage_ancestry(hid, pre.heritages(), 0));
                 }

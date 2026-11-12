@@ -8,9 +8,10 @@ use tec11_proto::PlanetSnapshotExt;
 use crate::lifeforms::{settle_species_on_climate, SpeciesKind};
 use crate::pangea::PangeaWorld;
 use crate::population::{
-    eden_tile, expand_population, is_habitable, tile_population_thousands, DisjointSet,
+    eden_tile, expand_population_with_technologies, is_habitable,
+    tile_population_thousands_with_water_tech, DisjointSet,
 };
-use crate::racination::{racinate, racination_shades, Heritage};
+use crate::racination::{racinate_with_technologies, racination_shades, Heritage};
 use crate::rivers::trace_coarse_rivers;
 use crate::rock::{Rock, RockKind, RockLayer};
 use crate::tectonics::LithosphericGroup;
@@ -33,6 +34,45 @@ pub fn agriculture_spark_prob(koeppen: u8) -> f64 {
         3 => 0.0001,           // Aw
         _ => 0.0,
     }
+}
+
+/// Rivergoing (canoe/barge/freshwater navigation & fishing) discovery probability per river tile by Köppen climate code.
+/// Develops independently of agriculture and seafaring, and is boosted `3.0x` if the population already has seafaring.
+#[inline]
+pub fn rivergoing_spark_prob(koeppen: u8) -> f64 {
+    match koeppen {
+        1 | 2 => 0.015,        // Af, Am (tropical rainforest / monsoon river systems)
+        6 | 7 | 8 => 0.008,    // Cf, Cs, Cw (temperate forested river basins)
+        3 => 0.004,            // Aw (savanna floodplains)
+        9 | 10 | 11 => 0.003,  // Df, Ds, Dw (boreal / continental rivers)
+        4 | 5 => 0.002,        // BS, BW (arid river corridors)
+        _ => 0.0,
+    }
+}
+
+/// Seafaring (outrigger/sailing/coastal & pelagic navigation & marine fishing) discovery probability per coastal tile.
+/// Develops independently of agriculture and rivergoing, and is boosted `3.0x` if the population already has rivergoing.
+#[inline]
+pub fn seafaring_spark_prob(koeppen: u8, sea_neighbors: usize) -> f64 {
+    if sea_neighbors == 0 {
+        return 0.0;
+    }
+    let base = match koeppen {
+        1 | 2 | 3 => 0.004,    // Af, Am, Aw (tropical / monsoon coasts & archipelagos)
+        6 | 7 | 8 => 0.005,    // Cf, Cs, Cw (Mediterranean / temperate maritime coasts)
+        9 | 10 | 11 => 0.0025, // Df, Ds, Dw (subarctic / fjords / Baltic-style coasts)
+        4 | 5 => 0.0015,       // BS, BW (arid trade-wind coasts)
+        13 => 0.001,           // ET (tundra maritime hunters/fishers)
+        _ => 0.0,
+    };
+    let island_mult = if sea_neighbors >= 3 {
+        2.2
+    } else if sea_neighbors == 2 {
+        1.4
+    } else {
+        1.0
+    };
+    base * island_mult
 }
 
 /// Build connected-component continent groups for a static elevation map (such as Earth).
@@ -89,6 +129,8 @@ pub struct PrehistorySimulation {
     populated: BTreeMap<usize, u32>,
     heritages: BTreeMap<u32, Heritage>,
     agricultural_heritages: BTreeSet<u32>,
+    rivergoing_heritages: BTreeSet<u32>,
+    seafaring_heritages: BTreeSet<u32>,
     next_heritage_id: u32,
     is_custom: bool,
     rng: Pcg64Mcg,
@@ -167,6 +209,8 @@ impl PrehistorySimulation {
             populated: BTreeMap::new(),
             heritages: BTreeMap::new(),
             agricultural_heritages: BTreeSet::new(),
+            rivergoing_heritages: BTreeSet::new(),
+            seafaring_heritages: BTreeSet::new(),
             next_heritage_id: 0,
             is_custom: false,
             rng: Pcg64Mcg::new(seed),
@@ -186,6 +230,8 @@ impl PrehistorySimulation {
         self.populated.clear();
         self.heritages.clear();
         self.agricultural_heritages.clear();
+        self.rivergoing_heritages.clear();
+        self.seafaring_heritages.clear();
         self.next_heritage_id = 0;
         self.climate_model.set_glaciation_only(0.5);
         self.refresh_climate_and_rivers();
@@ -258,8 +304,9 @@ impl PrehistorySimulation {
         // 7. Trace coarse rivers (`prehistorysimulation.py:130`).
         self.refresh_rivers(&elevations);
 
-        // 8. Spark agriculture along river tiles (`prehistorysimulation.py:133-137`),
-        //    modulated by local domesticable plant & herbivore richness (`tile_ag_potential`).
+        // 8. Spark agriculture and rivergoing along river tiles (`prehistorysimulation.py:133-137`),
+        //    and seafaring along coastal tiles. Rivergoing and seafaring develop independently of
+        //    agriculture and of each other, though having one boosts the probability of developing the other (`3.0x`).
         let gfactor = glaciation * glaciation;
         for r in &self.rivers {
             for &t in r {
@@ -269,6 +316,41 @@ impl PrehistorySimulation {
                     if prob > 0.0 && self.rng.uniform(0.0, 1.0) < prob {
                         self.agricultural_heritages.insert(hid);
                     }
+                    if !self.rivergoing_heritages.contains(&hid) {
+                        let sea_synergy = if self.seafaring_heritages.contains(&hid) {
+                            3.0
+                        } else {
+                            1.0
+                        };
+                        let r_prob =
+                            (0.25 + 0.75 * gfactor) * rivergoing_spark_prob(self.tile_koeppen[t]) * sea_synergy;
+                        if r_prob > 0.0 && self.rng.uniform(0.0, 1.0) < r_prob {
+                            self.rivergoing_heritages.insert(hid);
+                        }
+                    }
+                }
+            }
+        }
+        let populated_snapshot: Vec<(usize, u32)> =
+            self.populated.iter().map(|(&t, &h)| (t, h)).collect();
+        for (t, hid) in populated_snapshot {
+            if !self.seafaring_heritages.contains(&hid) {
+                let sea_nbs = self.adjacency[t]
+                    .iter()
+                    .filter(|&&nb| elevations[nb] <= 0.0)
+                    .count();
+                if sea_nbs > 0 {
+                    let riv_synergy = if self.rivergoing_heritages.contains(&hid) {
+                        3.0
+                    } else {
+                        1.0
+                    };
+                    let s_prob = (0.25 + 0.75 * gfactor)
+                        * seafaring_spark_prob(self.tile_koeppen[t], sea_nbs)
+                        * riv_synergy;
+                    if s_prob > 0.0 && self.rng.uniform(0.0, 1.0) < s_prob {
+                        self.seafaring_heritages.insert(hid);
+                    }
                 }
             }
         }
@@ -276,13 +358,15 @@ impl PrehistorySimulation {
         // 9. Run up to `PREHISTORY_ANTHROGLACIAL_STEPS` (6) migration steps (`prehistorysimulation.py:140-143`).
         let mut popcache: BTreeMap<(usize, bool), bool> = BTreeMap::new();
         for _ in 0..PREHISTORY_ANTHROGLACIAL_STEPS {
-            if !expand_population(
+            if !expand_population_with_technologies(
                 &elevations,
                 &self.tile_koeppen,
                 &self.adjacency,
                 &self.river_tiles,
                 &mut self.populated,
                 &self.agricultural_heritages,
+                &self.rivergoing_heritages,
+                &self.seafaring_heritages,
                 PREHISTORY_TRAVEL_RANGE,
                 PREHISTORY_COAST_PROX,
                 &mut popcache,
@@ -293,12 +377,14 @@ impl PrehistorySimulation {
 
         // 10. Speciate / racinate isolated or admixed populations (`prehistorysimulation.py:146`).
         let mut next_id = self.next_heritage_id;
-        racinate(
+        racinate_with_technologies(
             &elevations,
             &self.tile_koeppen,
             &self.adjacency,
             &mut self.populated,
             &mut self.agricultural_heritages,
+            &mut self.rivergoing_heritages,
+            &mut self.seafaring_heritages,
             &mut self.heritages,
             |ancestry| {
                 let id = next_id;
@@ -428,12 +514,16 @@ impl PrehistorySimulation {
                     name: h.name.clone(),
                     parent_heritage_ids: h.ancestry.clone(),
                     agricultural: self.agricultural_heritages.contains(&id),
+                    rivergoing: self.rivergoing_heritages.contains(&id),
+                    seafaring: self.seafaring_heritages.contains(&id),
                 });
             } else {
                 proto_heritages.push(tec11_proto::Heritage {
                     name: format!("people_{}", id + 1),
                     parent_heritage_ids: Vec::new(),
                     agricultural: false,
+                    rivergoing: false,
+                    seafaring: false,
                 });
             }
         }
@@ -550,6 +640,8 @@ impl PrehistorySimulation {
                     populated: BTreeMap::new(),
                     heritages: BTreeMap::new(),
                     agricultural_heritages: BTreeSet::new(),
+                    rivergoing_heritages: BTreeSet::new(),
+                    seafaring_heritages: BTreeSet::new(),
                     next_heritage_id: 0,
                     is_custom: true,
                     rng,
@@ -631,6 +723,8 @@ impl PrehistorySimulation {
 
         let mut heritages = BTreeMap::new();
         let mut agricultural_heritages = BTreeSet::new();
+        let mut rivergoing_heritages = BTreeSet::new();
+        let mut seafaring_heritages = BTreeSet::new();
         for (idx, ph) in pre.heritages.iter().enumerate() {
             let id = idx as u32;
             let name = if ph.name.is_empty() {
@@ -648,6 +742,12 @@ impl PrehistorySimulation {
             );
             if ph.agricultural {
                 agricultural_heritages.insert(id);
+            }
+            if ph.rivergoing {
+                rivergoing_heritages.insert(id);
+            }
+            if ph.seafaring {
+                seafaring_heritages.insert(id);
             }
         }
         let next_heritage_id = (pre.heritages.len() as u32).max(
@@ -692,6 +792,8 @@ impl PrehistorySimulation {
             populated,
             heritages,
             agricultural_heritages,
+            rivergoing_heritages,
+            seafaring_heritages,
             next_heritage_id,
             is_custom: true,
             rng,
@@ -781,6 +883,18 @@ impl PrehistorySimulation {
         &self.agricultural_heritages
     }
 
+    pub fn rivergoing_heritages(&self) -> &BTreeSet<u32> {
+        &self.rivergoing_heritages
+    }
+
+    pub fn seafaring_heritages(&self) -> &BTreeSet<u32> {
+        &self.seafaring_heritages
+    }
+
+    pub fn river_tiles(&self) -> &[bool] {
+        &self.river_tiles
+    }
+
     pub fn populated_count(&self) -> usize {
         self.populated.len()
     }
@@ -802,13 +916,45 @@ impl PrehistorySimulation {
         active_ag.len()
     }
 
-    /// Total planet population in thousands (`prehistorysimulation.py:93`).
+    pub fn active_rivergoing_race_count(&self) -> usize {
+        let active_riv: BTreeSet<u32> = self
+            .populated
+            .values()
+            .copied()
+            .filter(|h| self.rivergoing_heritages.contains(h))
+            .collect();
+        active_riv.len()
+    }
+
+    pub fn active_seafaring_race_count(&self) -> usize {
+        let active_sea: BTreeSet<u32> = self
+            .populated
+            .values()
+            .copied()
+            .filter(|h| self.seafaring_heritages.contains(h))
+            .collect();
+        active_sea.len()
+    }
+
+    /// Total planet population in thousands (`prehistorysimulation.py:93`), including freshwater
+    /// and coastal fishing carrying capacity bonuses from rivergoing and seafaring technologies.
     pub fn total_population_thousands(&self) -> f32 {
         self.populated
             .iter()
             .map(|(&t, &h)| {
                 let is_ag = self.agricultural_heritages.contains(&h);
-                tile_population_thousands(self.tile_koeppen[t], is_ag)
+                let is_riv_fish = self.rivergoing_heritages.contains(&h)
+                    && self.river_tiles.get(t).copied().unwrap_or(false);
+                let is_sea_fish = self.seafaring_heritages.contains(&h)
+                    && self.adjacency[t]
+                        .iter()
+                        .any(|&nb| self.tiles[nb].elevation() <= 0.0);
+                tile_population_thousands_with_water_tech(
+                    self.tile_koeppen[t],
+                    is_ag,
+                    is_riv_fish,
+                    is_sea_fish,
+                )
             })
             .sum()
     }

@@ -23,6 +23,38 @@ pub fn racinate<F>(
     populated: &mut BTreeMap<usize, u32>,
     agricultural_heritages: &mut BTreeSet<u32>,
     heritages: &mut BTreeMap<u32, Heritage>,
+    new_heritage: F,
+    travel_range: usize,
+) where
+    F: FnMut(Vec<u32>) -> Heritage,
+{
+    let mut rivergoing_heritages = BTreeSet::new();
+    let mut seafaring_heritages = BTreeSet::new();
+    racinate_with_technologies(
+        elevations,
+        koeppen_ids,
+        adjacency,
+        populated,
+        agricultural_heritages,
+        &mut rivergoing_heritages,
+        &mut seafaring_heritages,
+        heritages,
+        new_heritage,
+        travel_range,
+    );
+}
+
+/// Group populated tiles into connected components and propagate `agricultural_heritages`,
+/// `rivergoing_heritages`, and `seafaring_heritages` across admixed and branched heritages.
+pub fn racinate_with_technologies<F>(
+    elevations: &[f32],
+    koeppen_ids: &[u8],
+    adjacency: &[Vec<usize>],
+    populated: &mut BTreeMap<usize, u32>,
+    agricultural_heritages: &mut BTreeSet<u32>,
+    rivergoing_heritages: &mut BTreeSet<u32>,
+    seafaring_heritages: &mut BTreeSet<u32>,
+    heritages: &mut BTreeMap<u32, Heritage>,
     mut new_heritage: F,
     travel_range: usize,
 ) where
@@ -38,8 +70,14 @@ pub fn racinate<F>(
     let pop_entries: Vec<(usize, u32)> = populated.iter().map(|(&t, &h)| (t, h)).collect();
     for &(t, h) in &pop_entries {
         let is_ag = agricultural_heritages.contains(&h);
-        let reachable = within_steps(t, adjacency, travel_range, |u| {
-            is_passable(elevations[u], koeppen_ids[u], is_ag)
+        let is_sea = seafaring_heritages.contains(&h);
+        let eff_range = if is_sea { travel_range + 1 } else { travel_range };
+        let reachable = within_steps(t, adjacency, eff_range, |u| {
+            if is_sea && elevations[u] <= 0.0 {
+                true
+            } else {
+                is_passable(elevations[u], koeppen_ids[u], is_ag)
+            }
         });
         for nb in reachable {
             if populated.contains_key(&nb) {
@@ -64,6 +102,12 @@ pub fn racinate<F>(
             if hs.iter().any(|old_id| agricultural_heritages.contains(old_id)) {
                 agricultural_heritages.insert(new_id);
             }
+            if hs.iter().any(|old_id| rivergoing_heritages.contains(old_id)) {
+                rivergoing_heritages.insert(new_id);
+            }
+            if hs.iter().any(|old_id| seafaring_heritages.contains(old_id)) {
+                seafaring_heritages.insert(new_id);
+            }
             heritages.insert(new_id, h);
             for &t in ts {
                 populated.insert(t, new_id);
@@ -83,11 +127,19 @@ pub fn racinate<F>(
     for (h, rs) in heritage_races {
         if rs.len() > 1 {
             let was_ag = agricultural_heritages.contains(&h);
+            let was_riv = rivergoing_heritages.contains(&h);
+            let was_sea = seafaring_heritages.contains(&h);
             for r in rs {
                 let nh = new_heritage(vec![h]);
                 let new_id = nh.id;
                 if was_ag {
                     agricultural_heritages.insert(new_id);
+                }
+                if was_riv {
+                    rivergoing_heritages.insert(new_id);
+                }
+                if was_sea {
+                    seafaring_heritages.insert(new_id);
                 }
                 heritages.insert(new_id, nh);
                 if let Some(ts) = races.get(&r) {
