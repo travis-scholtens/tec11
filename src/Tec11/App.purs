@@ -646,10 +646,10 @@ mkApp = do
       }
 
     -- Travel mode state
-    accGeoOpen /\ setAccGeoOpen <- useState' true
-    accBioOpen /\ setAccBioOpen <- useState' true
-    accHistOpen /\ setAccHistOpen <- useState' true
-    accAstroOpen /\ setAccAstroOpen <- useState' true
+    accGeoOpen /\ setAccGeoOpen <- useState' false
+    accBioOpen /\ setAccBioOpen <- useState' false
+    accHistOpen /\ setAccHistOpen <- useState' false
+    accAstroOpen /\ setAccAstroOpen <- useState' false
     travelAspect /\ setTravelAspectState <- useState' "travel"
     travelShowPotential /\ setTravelShowPotential <- useState' false
     travelShowWindsCurrents /\ setTravelShowWindsCurrents <- useState' true
