@@ -89,6 +89,10 @@ impl WasmLifeformsSession {
         self.sim.nearest_tile(x, y, z)
     }
 
+    pub fn tile_region_name(&self, tile_idx: usize) -> String {
+        self.sim.tile_region_name(tile_idx)
+    }
+
     pub fn species_on_tile_tsv(&self, tile_idx: usize, season_idx: usize, attribute: &str) -> String {
         self.sim.species_on_tile_tsv(tile_idx, season_idx, attribute)
     }

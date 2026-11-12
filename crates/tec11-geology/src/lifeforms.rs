@@ -894,15 +894,6 @@ pub fn settle_species_on_climate(
         }
         tile_seasons.sort_by_key(|p| p.tile);
         let sp_id = settled.len();
-        for &presence in &tile_seasons {
-            tile_all_species[presence.tile].push(sp_id);
-            for s in 0..num_seasons {
-                if (presence.season_mask & (1u8 << s)) != 0 {
-                    seasonal_animal_counts[s][presence.tile] =
-                        seasonal_animal_counts[s][presence.tile].saturating_add(1);
-                }
-            }
-        }
         settled.push(SettledSpecies {
             id: sp_id,
             kind: SpeciesKind::Animal,
@@ -914,9 +905,102 @@ pub fn settle_species_on_climate(
         });
     }
 
+    // --- Pass 5: Allopatric Continental Speciation ---
+    // Any terrestrial species (`!sealife`) that has settled across 2 or more named continents
+    // speciates into distinct continent-named varieties (`"<continent_adj> <base_name>"`), while
+    // species endemic to a single continent (or marine species) retain their generic base name.
+    let mut final_species: Vec<SettledSpecies> = Vec::with_capacity(settled.len() * 2);
+    for sp in settled {
+        if !sp.sealife && geography.continents.len() >= 2 {
+            let mut by_continent: std::collections::BTreeMap<usize, Vec<TileSeasonPresence>> =
+                std::collections::BTreeMap::new();
+            let mut unmapped: Vec<TileSeasonPresence> = Vec::new();
+            for &presence in &sp.tile_seasons {
+                if let Some(cid) = geography.tile_continent[presence.tile] {
+                    by_continent.entry(cid).or_default().push(presence);
+                } else {
+                    unmapped.push(presence);
+                }
+            }
+            let max_cont_tiles = by_continent
+                .values()
+                .map(|tiles| tiles.len())
+                .max()
+                .unwrap_or(0);
+            if max_cont_tiles >= 4 {
+                by_continent.retain(|_, tiles| tiles.len() >= 4);
+            }
+            if !unmapped.is_empty() {
+                if let Some((&largest_cid, _)) =
+                    by_continent.iter().max_by_key(|(_, tiles)| tiles.len())
+                {
+                    if let Some(vec) = by_continent.get_mut(&largest_cid) {
+                        vec.extend(unmapped);
+                    }
+                }
+            }
+            if by_continent.len() >= 2 {
+                for (cid, mut c_tiles) in by_continent {
+                    c_tiles.sort_by_key(|p| p.tile);
+                    let id = final_species.len();
+                    let prefix = &geography.continents[cid].adjectival_prefix;
+                    final_species.push(SettledSpecies {
+                        id,
+                        kind: sp.kind,
+                        subkind: sp.subkind.clone(),
+                        trophic_level: sp.trophic_level,
+                        sealife: sp.sealife,
+                        name: format!("{prefix} {}", sp.name),
+                        tile_seasons: c_tiles,
+                    });
+                }
+                continue;
+            } else if let Some((_, mut c_tiles)) = by_continent.into_iter().next() {
+                c_tiles.sort_by_key(|p| p.tile);
+                let id = final_species.len();
+                final_species.push(SettledSpecies {
+                    id,
+                    tile_seasons: c_tiles,
+                    ..sp
+                });
+                continue;
+            }
+        }
+        let id = final_species.len();
+        final_species.push(SettledSpecies { id, ..sp });
+    }
+
+    // Rebuild per-tile species lists and seasonal counts from `final_species`:
+    for vec in &mut tile_all_species {
+        vec.clear();
+    }
+    for s in 0..num_seasons {
+        seasonal_animal_counts[s].fill(0);
+        seasonal_plant_counts[s].fill(0);
+    }
+    for sp in &final_species {
+        for &presence in &sp.tile_seasons {
+            tile_all_species[presence.tile].push(sp.id);
+            for s in 0..num_seasons {
+                if (presence.season_mask & (1u8 << s)) != 0 {
+                    match sp.kind {
+                        SpeciesKind::Animal => {
+                            seasonal_animal_counts[s][presence.tile] =
+                                seasonal_animal_counts[s][presence.tile].saturating_add(1);
+                        }
+                        SpeciesKind::Plant => {
+                            seasonal_plant_counts[s][presence.tile] =
+                                seasonal_plant_counts[s][presence.tile].saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     SettledBiosphere {
         geography,
-        species: settled,
+        species: final_species,
         seasonal_animal_counts,
         seasonal_plant_counts,
         tile_all_species,
@@ -1137,12 +1221,14 @@ impl LifeformsSandbox {
             })
             .collect();
 
-        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list.sort_by(|a, b| b.trophic_level.cmp(&a.trophic_level).then_with(|| a.name.cmp(&b.name)));
         list.into_iter()
             .map(|sp| {
-                let kind_code = match sp.kind {
-                    SpeciesKind::Animal => "A",
-                    SpeciesKind::Plant => "P",
+                let kind_code = match (sp.kind, sp.trophic_level) {
+                    (SpeciesKind::Animal, 4) => "A-Apex",
+                    (SpeciesKind::Animal, 3) => "A-Meso",
+                    (SpeciesKind::Animal, _) => "A-Herb",
+                    (SpeciesKind::Plant, _) => "P",
                 };
                 format!("{}\t{}\t{}\n", sp.id, kind_code, sp.name)
             })
@@ -1265,5 +1351,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_allopatric_continental_varieties() {
+        let sim = LifeformsSandbox::new_earth(0.5);
+        let bio = &sim.biosphere;
+        assert!(
+            bio.geography.continents.len() >= 4,
+            "Expected >= 4 named continents on Earth, got {}",
+            bio.geography.continents.len()
+        );
+
+        let prefixes: Vec<&str> = bio
+            .geography
+            .continents
+            .iter()
+            .map(|c| c.adjectival_prefix.as_str())
+            .collect();
+
+        let mut prefixed_species_count = 0usize;
+        let mut endemic_terrestrial_count = 0usize;
+        for sp in &bio.species {
+            if !sp.sealife {
+                let has_cont_prefix = prefixes
+                    .iter()
+                    .any(|p| sp.name.starts_with(&format!("{p} ")));
+                if has_cont_prefix {
+                    prefixed_species_count += 1;
+                } else {
+                    endemic_terrestrial_count += 1;
+                }
+                // Verify that every terrestrial SettledSpecies (whether a split continental variety
+                // or a single-continent endemic) is confined to at most 1 named continent!
+                let mut conts = std::collections::BTreeSet::new();
+                for &presence in &sp.tile_seasons {
+                    if let Some(cid) = bio.geography.tile_continent[presence.tile] {
+                        conts.insert(cid);
+                    }
+                }
+                assert!(
+                    conts.len() <= 1,
+                    "Terrestrial species '{}' spans multiple continents {:?} without allopatric split",
+                    sp.name,
+                    conts
+                );
+            }
+        }
+        assert!(
+            prefixed_species_count > 500,
+            "Expected > 500 continent-prefixed allopatric varieties on Earth, got {prefixed_species_count}"
+        );
+        assert!(
+            endemic_terrestrial_count > 10,
+            "Expected > 10 single-continent endemic species retaining generic names, got {endemic_terrestrial_count}"
+        );
     }
 }

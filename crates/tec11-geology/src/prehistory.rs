@@ -5,6 +5,7 @@ use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
+use crate::lifeforms::{settle_species_on_climate, SpeciesKind};
 use crate::pangea::PangeaWorld;
 use crate::population::{
     eden_tile, expand_population, is_habitable, tile_population_thousands, DisjointSet,
@@ -82,6 +83,7 @@ pub struct PrehistorySimulation {
     tile_koeppen: Vec<u8>,
     tile_life: Vec<f32>,
     tile_precip_norm: Vec<f32>,
+    tile_ag_potential: Vec<f32>,
     rivers: Vec<Vec<usize>>,
     river_tiles: Vec<bool>,
     populated: BTreeMap<usize, u32>,
@@ -159,6 +161,7 @@ impl PrehistorySimulation {
             tile_koeppen: vec![0; n],
             tile_life: vec![0.0; n],
             tile_precip_norm: vec![0.0; n],
+            tile_ag_potential: vec![1.0; n],
             rivers: Vec::new(),
             river_tiles: vec![false; n],
             populated: BTreeMap::new(),
@@ -255,12 +258,14 @@ impl PrehistorySimulation {
         // 7. Trace coarse rivers (`prehistorysimulation.py:130`).
         self.refresh_rivers(&elevations);
 
-        // 8. Spark agriculture along river tiles (`prehistorysimulation.py:133-137`).
+        // 8. Spark agriculture along river tiles (`prehistorysimulation.py:133-137`),
+        //    modulated by local domesticable plant & herbivore richness (`tile_ag_potential`).
         let gfactor = glaciation * glaciation;
         for r in &self.rivers {
             for &t in r {
                 if let Some(&hid) = self.populated.get(&t) {
-                    let prob = gfactor * agriculture_spark_prob(self.tile_koeppen[t]);
+                    let ag_mult = self.tile_ag_potential.get(t).copied().unwrap_or(1.0) as f64;
+                    let prob = gfactor * agriculture_spark_prob(self.tile_koeppen[t]) * ag_mult;
                     if prob > 0.0 && self.rng.uniform(0.0, 1.0) < prob {
                         self.agricultural_heritages.insert(hid);
                     }
@@ -368,6 +373,27 @@ impl PrehistorySimulation {
         self.refresh_climate();
         let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
         self.refresh_rivers(&elevations);
+
+        let biosphere = settle_species_on_climate(&elevations, &self.climate_model);
+        let n = elevations.len();
+        self.tile_ag_potential.resize(n, 0.0);
+        for t in 0..n {
+            let mut plant_count = 0u32;
+            let mut herbivore_count = 0u32;
+            for &sp_id in &biosphere.tile_all_species[t] {
+                let sp = &biosphere.species[sp_id];
+                match sp.kind {
+                    SpeciesKind::Plant => plant_count += 1,
+                    SpeciesKind::Animal if sp.trophic_level == 2 => herbivore_count += 1,
+                    _ => {}
+                }
+            }
+            self.tile_ag_potential[t] = if plant_count == 0 {
+                0.0
+            } else {
+                (0.5 + (plant_count as f32) / 30.0 + (herbivore_count as f32) / 20.0).clamp(0.5, 2.0)
+            };
+        }
     }
 
     /// Serialize this simulation state as a `PrehistoryStage` inside a `tec11_proto::PlanetSnapshot`.
@@ -518,6 +544,7 @@ impl PrehistorySimulation {
                     tile_koeppen: vec![0; n],
                     tile_life: vec![0.0; n],
                     tile_precip_norm: vec![0.0; n],
+                    tile_ag_potential: vec![1.0; n],
                     rivers: Vec::new(),
                     river_tiles: vec![false; n],
                     populated: BTreeMap::new(),
@@ -659,6 +686,7 @@ impl PrehistorySimulation {
             tile_koeppen: vec![0; n],
             tile_life: vec![0.0; n],
             tile_precip_norm: vec![0.0; n],
+            tile_ag_potential: vec![1.0; n],
             rivers: Vec::new(),
             river_tiles: vec![false; n],
             populated,

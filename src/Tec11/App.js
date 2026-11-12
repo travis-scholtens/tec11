@@ -2164,7 +2164,9 @@ function buildLifeformsInfo(view) {
     : "Earth (ETOPO2)";
   const seasonIdx = getLifeformsSeasonIndex(view);
   const tileSpecies = [];
+  let selectedTileRegion = "";
   if (view.selectedTileIdx >= 0) {
+    selectedTileRegion = s.tile_region_name(view.selectedTileIdx) || "";
     const tsv = s.species_on_tile_tsv(view.selectedTileIdx, seasonIdx, view.attribute);
     const lines = tsv.split("\n");
     for (const line of lines) {
@@ -2186,6 +2188,7 @@ function buildLifeformsInfo(view) {
     settledPlants: s.settled_plant_count(),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
     selectedTileIdx: view.selectedTileIdx,
+    selectedTileRegion,
     selectedSpeciesId: view.selectedSpeciesId,
     tileSpecies,
   };

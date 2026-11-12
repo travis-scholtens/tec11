@@ -10,8 +10,8 @@ use tec11_proto::PlanetSnapshotExt;
 use crate::language::{Language, SoundChangeKind, Word, WordOrigin};
 use crate::lifeforms::{settle_species_on_climate, SettledSpecies, SpeciesKind};
 use crate::population::{
-    identify_continents_and_oceans, is_farmable, is_habitable, is_passable, main_ocean,
-    tile_population_thousands, PlanetaryGeography,
+    is_farmable, is_habitable, is_passable, main_ocean, tile_population_thousands,
+    PlanetaryGeography,
 };
 use crate::prehistory::PrehistorySimulation;
 use crate::rivers::trace_coarse_rivers;
@@ -341,26 +341,35 @@ impl LanguageRecord {
     }
 
     pub fn borrow_concept(&mut self, key: ConceptKey, donor: &LanguageRecord) {
+        if let Some(donor_origin) = donor.lexicon.get(&key) {
+            self.borrow_concept_origin(key, donor.id, donor_origin);
+        }
+    }
+
+    pub fn borrow_concept_origin(
+        &mut self,
+        key: ConceptKey,
+        donor_id: u32,
+        donor_origin: &WordOrigin,
+    ) {
         if self.lexicon.contains_key(&key) {
             return;
         }
-        if let Some(donor_origin) = donor.lexicon.get(&key) {
-            let mut local_rng = Pcg64Mcg::new(
-                ((self.id as u128) << 64)
-                    ^ ((donor.id as u128) << 32)
-                    ^ (self.lexicon.len() as u128),
-            );
-            let borrowed_word = self.phonology.borrow_word_unique(
-                &donor_origin.word,
-                &self.used_words,
-                &mut local_rng,
-            );
-            self.used_wordkeys.insert(borrowed_word.wordkey());
-            self.used_words.insert(borrowed_word.clone());
-            let my_name = self.name();
-            let origin = WordOrigin::new(borrowed_word, my_name, Some(donor_origin.clone()));
-            self.lexicon.insert(key, origin);
-        }
+        let mut local_rng = Pcg64Mcg::new(
+            ((self.id as u128) << 64)
+                ^ ((donor_id as u128) << 32)
+                ^ (self.lexicon.len() as u128),
+        );
+        let borrowed_word = self.phonology.borrow_word_unique(
+            &donor_origin.word,
+            &self.used_words,
+            &mut local_rng,
+        );
+        self.used_wordkeys.insert(borrowed_word.wordkey());
+        self.used_words.insert(borrowed_word.clone());
+        let my_name = self.name();
+        let origin = WordOrigin::new(borrowed_word, my_name, Some(donor_origin.clone()));
+        self.lexicon.insert(key, origin);
     }
 
     /// Clone a dialect and redefine `Language(self.id)` to `Language(new_id)`
@@ -754,26 +763,50 @@ impl HistorySimulation {
         let fine_elevs = self.terrain.fine_elevations.clone();
 
         // 1. Identify continents and ocean basins, settle plants & animals on the planet's coarse climate,
-        //    then map onto subdivided fine faces (`historysimulation.py:facespecies`).
-        self.geography = identify_continents_and_oceans(&grid, &coarse_elevs);
+        //    then map culturally/economically salient flora & fauna onto subdivided fine faces (`historysimulation.py:facespecies`).
         let biosphere = settle_species_on_climate(&coarse_elevs, self.prehistory.climate_model());
+        self.geography = biosphere.geography;
         let coarse_species = biosphere.tile_all_species;
         self.settled_species = biosphere.species;
+        let salient_coarse_species: Vec<Vec<usize>> = (0..num_coarse)
+            .map(|c| {
+                let mut sp_list = coarse_species[c].clone();
+                if sp_list.len() > 4 {
+                    sp_list.sort_by_key(|&sp_id| {
+                        let sp = &self.settled_species[sp_id];
+                        let priority = match (sp.kind, sp.trophic_level) {
+                            (SpeciesKind::Animal, 4) => 0u32,
+                            (SpeciesKind::Animal, 3) => 1u32,
+                            (SpeciesKind::Animal, _) => 2u32,
+                            (SpeciesKind::Plant, _) => 2u32,
+                        };
+                        let hash = (sp_id as u32)
+                            .wrapping_mul(0x9E37_79B9)
+                            .rotate_left(13)
+                            ^ (c as u32).wrapping_mul(0x85EB_CA6B);
+                        (priority, hash)
+                    });
+                    sp_list.truncate(4);
+                    sp_list.sort_unstable();
+                }
+                sp_list
+            })
+            .collect();
         self.tile_species = Vec::with_capacity(num_fine);
         for f_idx in 0..num_fine {
             let sp_vec = match self.terrain.parentage[f_idx] {
                 FineParentage::CoarseFace(c)
                 | FineParentage::CoarseEdge {
                     primary_coarse: c, ..
-                } => coarse_species[c].clone(),
+                } => salient_coarse_species[c].clone(),
                 FineParentage::CoarseVertex([c0, c1, c2]) => {
                     let mut set = BTreeSet::new();
                     for &c in &[c0, c1, c2] {
-                        for &sp in &coarse_species[c] {
+                        for &sp in &salient_coarse_species[c] {
                             set.insert(sp);
                         }
                     }
-                    set.into_iter().collect()
+                    set.into_iter().take(6).collect()
                 }
             };
             self.tile_species.push(sp_vec);
@@ -959,8 +992,10 @@ impl HistorySimulation {
                 {
                     self.tile_states.insert(nb, sid);
                     if let Some(lang) = self.languages.get_mut(&sid) {
-                        for &sp_idx in &self.tile_species[nb] {
-                            lang.coin_concept(ConceptKey::Species(sp_idx as u32), &mut self.rng);
+                        if lang.lexicon.len() < 28 {
+                            for &sp_idx in &self.tile_species[nb] {
+                                lang.coin_concept(ConceptKey::Species(sp_idx as u32), &mut self.rng);
+                            }
                         }
                     }
                     q.push_back((nb, sid, dist + step_cost));
@@ -1652,10 +1687,15 @@ impl HistorySimulation {
 
         for (&t, &s1) in &self.tile_states {
             extents.entry(s1).or_default().push(t);
-            species
-                .entry(s1)
-                .or_default()
-                .extend(self.tile_species[t].iter().copied());
+            let sp_set = species.entry(s1).or_default();
+            if sp_set.len() < 20 {
+                for &sp in &self.tile_species[t] {
+                    if sp_set.len() >= 20 {
+                        break;
+                    }
+                    sp_set.insert(sp);
+                }
+            }
             let nb_set = neighbors.entry(s1).or_default();
             let mut checked_river = false;
             for &nb in &adjacency[t] {
@@ -2069,7 +2109,7 @@ impl HistorySimulation {
                 for partner in rec_partners {
                     let p_lang = state_langs.get(&partner).copied().flatten();
                     if let Some(psp) = state_species.get(&partner) {
-                        for &sp in psp.difference(&native) {
+                        for &sp in psp.difference(&native).take(6) {
                             concepts.insert(ConceptKey::Species(sp as u32), p_lang);
                         }
                     }
@@ -2166,12 +2206,13 @@ impl HistorySimulation {
                 if already {
                     continue;
                 }
-                let donor_opt = src_lang_opt
-                    .and_then(|src_id| self.languages.get(&src_id).cloned())
-                    .filter(|d| d.describes(concept));
-                if let Some(donor) = donor_opt {
+                let donor_origin_opt = src_lang_opt.and_then(|src_id| {
+                    let d = self.languages.get(&src_id)?;
+                    Some((d.id, d.lexicon.get(&concept)?.clone()))
+                });
+                if let Some((donor_id, donor_origin)) = donor_origin_opt {
                     if let Some(lang) = self.languages.get_mut(&lang_id) {
-                        lang.borrow_concept(concept, &donor);
+                        lang.borrow_concept_origin(concept, donor_id, &donor_origin);
                     }
                 } else {
                     // Never coin an invisible constellation natively; it can only be borrowed from a trade partner.

@@ -112,6 +112,7 @@ type LifeformsInfo =
   , settledPlants :: Int
   , hasSavedPlanet :: Boolean
   , selectedTileIdx :: Int
+  , selectedTileRegion :: String
   , selectedSpeciesId :: Int
   , tileSpecies :: Array LifeformsSpeciesItem
   }
@@ -569,6 +570,7 @@ mkApp = do
       , settledPlants: 0
       , hasSavedPlanet: false
       , selectedTileIdx: -1
+      , selectedTileRegion: ""
       , selectedSpeciesId: -1
       , tileSpecies: []
       }
@@ -2916,8 +2918,10 @@ mkApp = do
                                       [ R.text
                                           ( if lifeformsInfo.selectedTileIdx < 0 then
                                               "Species in Selected Tile (Click Globe)"
-                                            else
+                                            else if lifeformsInfo.selectedTileRegion == "" then
                                               "Tile #" <> show lifeformsInfo.selectedTileIdx <> " — Click species to map range"
+                                            else
+                                              "Tile #" <> show lifeformsInfo.selectedTileIdx <> " (" <> lifeformsInfo.selectedTileRegion <> ") — Click species to map range"
                                           )
                                       ]
                                   }
