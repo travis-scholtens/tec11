@@ -213,6 +213,11 @@ type TileViewInfo =
   , languages :: Array DemographicShareItem
   , flora :: Array String
   , fauna :: Array String
+  , skyYear :: Int
+  , skyDay :: Int
+  , skyDaysPerYear :: Int
+  , skyLatLonSummary :: String
+  , skyAnimated :: Boolean
   }
 
 type LexiconEntryItem =
@@ -279,6 +284,11 @@ defaultTileViewInfo =
   , languages: []
   , flora: []
   , fauna: []
+  , skyYear: 0
+  , skyDay: 0
+  , skyDaysPerYear: 365
+  , skyLatLonSummary: ""
+  , skyAnimated: true
   }
 
 defaultLanguageDetailInfo :: LanguageDetailInfo
@@ -618,6 +628,9 @@ foreign import selectInspectorLanguage :: Int -> Effect Unit
 foreign import selectInspectorNation :: Int -> Effect Unit
 foreign import closeInspectorLanguage :: Effect Unit
 foreign import closeInspectorNation :: Effect Unit
+foreign import setTileSkyYear :: Int -> Effect Unit
+foreign import setTileSkyDay :: Int -> Effect Unit
+foreign import toggleTileSkyAnimation :: Effect Unit
 
 renderDemographicPills :: Array DemographicShareItem -> Int -> (Int -> Effect Unit) -> String -> JSX
 renderDemographicPills items activeId onSelect emptyText =
@@ -1027,6 +1040,146 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                                       }
                                   , renderStringBulletList tile.fauna "None settled"
                                   ]
+                              }
+                          ]
+                      }
+                  , R.div
+                      { id: "tile-sky-box"
+                      , style:
+                          R.css
+                            { marginTop: "8px"
+                            , paddingTop: "7px"
+                            , borderTop: "1px solid #334155"
+                            }
+                      , children:
+                          [ R.div
+                              { style:
+                                  R.css
+                                    { display: "flex"
+                                    , justifyContent: "space-between"
+                                    , alignItems: "center"
+                                    , marginBottom: "4px"
+                                    }
+                              , children:
+                                  [ R.div
+                                      { style: R.css { fontSize: "0.76rem", fontWeight: "700", color: "#fde047" }
+                                      , children:
+                                          [ R.text
+                                              ( "Local 2D Sky View ("
+                                                  <> tile.skyLatLonSummary
+                                                  <> ")"
+                                              )
+                                          ]
+                                      }
+                                  , R.button
+                                      { id: "tile-sky-anim-btn"
+                                      , className: "action-btn secondary"
+                                      , style: R.css { padding: "1px 8px", fontSize: "0.72rem" }
+                                      , onClick: capture_ toggleTileSkyAnimation
+                                      , children:
+                                          [ R.text (if tile.skyAnimated then "⏸ Pause Sky" else "▶ Animate Sky") ]
+                                      }
+                                  ]
+                              }
+                          , R.div
+                              { style:
+                                  R.css
+                                    { display: "flex"
+                                    , alignItems: "center"
+                                    , justifyContent: "space-between"
+                                    , gap: "8px"
+                                    , marginBottom: "5px"
+                                    }
+                              , children:
+                                  [ R.label
+                                      { style: R.css { fontSize: "0.74rem", color: "#cbd5e1", whiteSpace: "nowrap" }
+                                      , children: [ R.text "Year (0 = start of history):" ]
+                                      }
+                                  , R.input
+                                      { id: "tile-sky-year-input"
+                                      , type: "number"
+                                      , min: "0"
+                                      , step: "1"
+                                      , value: show tile.skyYear
+                                      , style:
+                                          R.css
+                                            { width: "86px"
+                                            , padding: "2px 6px"
+                                            , fontSize: "0.76rem"
+                                            , background: "#0f172a"
+                                            , color: "#f8fafc"
+                                            , border: "1px solid #475569"
+                                            , borderRadius: "4px"
+                                            }
+                                      , onChange:
+                                          handler targetValue \mv -> case mv >>= Int.fromString of
+                                            Just y -> setTileSkyYear (max 0 y)
+                                            Nothing -> pure unit
+                                      }
+                                  ]
+                              }
+                          , R.div
+                              { style: R.css { marginBottom: "5px" }
+                              , children:
+                                  [ R.div
+                                      { style:
+                                          R.css
+                                            { display: "flex"
+                                            , justifyContent: "space-between"
+                                            , fontSize: "0.73rem"
+                                            , color: "#cbd5e1"
+                                            , marginBottom: "2px"
+                                            }
+                                      , children:
+                                          [ R.span
+                                              { id: "tile-sky-day-label"
+                                              , children:
+                                                  [ R.text
+                                                      ( "Day in Year: Day "
+                                                          <> show tile.skyDay
+                                                          <> " / "
+                                                          <> show (max 1 (tile.skyDaysPerYear - 1))
+                                                      )
+                                                  ]
+                                              }
+                                          , R.span
+                                              { id: "tile-sky-time-label"
+                                              , style: R.css { color: "#93c5fd" }
+                                              , children: [ R.text "Sun · Moons · Planets · Stars" ]
+                                              }
+                                          ]
+                                      }
+                                  , R.input
+                                      { id: "tile-sky-day-slider"
+                                      , type: "range"
+                                      , min: "0"
+                                      , max: show (max 1 (tile.skyDaysPerYear - 1))
+                                      , step: "1"
+                                      , value: show tile.skyDay
+                                      , style: R.css { width: "100%", cursor: "pointer" }
+                                      , onChange:
+                                          handler targetValue \mv -> case mv >>= Int.fromString of
+                                            Just d -> setTileSkyDay (max 0 d)
+                                            Nothing -> pure unit
+                                      }
+                                  ]
+                              }
+                          , R.canvas
+                              { id: "tile-sky-canvas"
+                              , style:
+                                  R.css
+                                    { width: "100%"
+                                    , height: "230px"
+                                    , display: "block"
+                                    , borderRadius: "6px"
+                                    , border: "1px solid #334155"
+                                    , background: "#040914"
+                                    }
+                              }
+                          , R.div
+                              { style: R.css { fontSize: "0.70rem", color: "#94a3b8", marginTop: "3px" }
+                              , children:
+                                  [ R.text "Gold arc: Sun path | Silver arcs: Moon paths & phases | Colored arcs: Planet paths | Cyan lines: Constellations & star paths" ]
                               }
                           ]
                       }

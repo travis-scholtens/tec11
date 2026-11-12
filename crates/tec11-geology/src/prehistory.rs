@@ -751,6 +751,14 @@ impl PrehistorySimulation {
         self.glaciation
     }
 
+    pub fn spin(&self) -> f64 {
+        self.spin
+    }
+
+    pub fn tilt_deg(&self) -> f64 {
+        self.tilt_deg
+    }
+
     pub fn is_custom_planet(&self) -> bool {
         self.is_custom
     }

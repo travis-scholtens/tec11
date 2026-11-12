@@ -16,8 +16,8 @@ use crate::population::{
 use crate::prehistory::PrehistorySimulation;
 use crate::rivers::trace_coarse_rivers;
 use crate::sun_sky::{
-    generate_default_constellations, generate_solar_system_with_rng, Constellation, HomeStar,
-    SolarSystemPlanet,
+    generate_default_constellations, generate_solar_system_with_rng, AtmosphereType, Constellation,
+    HomeStar, PlanetaryOptics, SolarSystemPlanet,
 };
 
 pub const HISTORY_YEARS_PER_TICK: u32 = 200;
@@ -314,7 +314,162 @@ impl StateInspectionView {
     }
 }
 
-/// Level-2 Tile inspection view (individual tile's nationalities, languages, and native flora & fauna).
+/// Ephemeris parameters for a moon visible from a clicked tile's local sky.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileSkyMoon {
+    pub index: u32,
+    pub name: String,
+    pub period_days: f32,
+    pub inclination_deg: f32,
+    pub init_angle_rad: f32,
+    pub node_asc_rad: f32,
+}
+
+impl TileSkyMoon {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"index\":{},\"name\":{},\"periodDays\":{:.4},\"inclinationDeg\":{:.3},\"initAngleRad\":{:.4},\"nodeAscRad\":{:.4}}}",
+            self.index,
+            json_escape(&self.name),
+            self.period_days,
+            self.inclination_deg,
+            self.init_angle_rad,
+            self.node_asc_rad
+        )
+    }
+}
+
+/// Ephemeris parameters for a solar-system planet visible from a clicked tile's local sky.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileSkyPlanet {
+    pub index: u32,
+    pub name: String,
+    pub orbit_au: f32,
+    pub period_days: f32,
+    pub init_angle_rad: f32,
+    pub inclination_deg: f32,
+    pub rgb: [f32; 3],
+    pub has_rings: bool,
+}
+
+impl TileSkyPlanet {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"index\":{},\"name\":{},\"orbitAu\":{:.4},\"periodDays\":{:.4},\"initAngleRad\":{:.4},\"inclinationDeg\":{:.3},\"rgb\":[{:.3},{:.3},{:.3}],\"hasRings\":{}}}",
+            self.index,
+            json_escape(&self.name),
+            self.orbit_au,
+            self.period_days,
+            self.init_angle_rad,
+            self.inclination_deg,
+            self.rgb[0],
+            self.rgb[1],
+            self.rgb[2],
+            if self.has_rings { "true" } else { "false" }
+        )
+    }
+}
+
+/// Constellation asterism figure for a clicked tile's local sky.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileSkyConstellation {
+    pub index: u32,
+    pub name: String,
+    pub shape_label: String,
+    pub ra_deg: f32,
+    pub dec_deg: f32,
+    pub stars: Vec<[f32; 3]>,
+    pub edges: Vec<[usize; 2]>,
+}
+
+impl TileSkyConstellation {
+    pub fn to_json(&self) -> String {
+        let stars_json: Vec<String> = self
+            .stars
+            .iter()
+            .map(|s| format!("[{:.2},{:.2},{:.2}]", s[0], s[1], s[2]))
+            .collect();
+        let edges_json: Vec<String> = self
+            .edges
+            .iter()
+            .map(|e| format!("[{},{}]", e[0], e[1]))
+            .collect();
+        format!(
+            "{{\"index\":{},\"name\":{},\"shapeLabel\":{},\"raDeg\":{:.2},\"decDeg\":{:.2},\"stars\":[{}],\"edges\":[{}]}}",
+            self.index,
+            json_escape(&self.name),
+            json_escape(&self.shape_label),
+            self.ra_deg,
+            self.dec_deg,
+            stars_json.join(","),
+            edges_json.join(",")
+        )
+    }
+}
+
+/// Complete local 2D sky view configuration and ephemeris for a clicked tile (`display_idx`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileSkyView {
+    pub lat_deg: f32,
+    pub lon_deg: f32,
+    pub tilt_deg: f32,
+    pub days_per_year: u32,
+    pub day_hours: f32,
+    pub current_history_year: u32,
+    pub sun_name: String,
+    pub sun_rgb: [f32; 3],
+    pub sky_zenith_rgb: [f32; 3],
+    pub sky_horizon_rgb: [f32; 3],
+    pub sunset_rgb: [f32; 3],
+    pub twilight_rgb: [f32; 3],
+    pub home_orbit_au: f32,
+    pub home_period_days: f32,
+    pub home_init_angle_rad: f32,
+    pub moons: Vec<TileSkyMoon>,
+    pub planets: Vec<TileSkyPlanet>,
+    pub constellations: Vec<TileSkyConstellation>,
+}
+
+impl TileSkyView {
+    pub fn to_json(&self) -> String {
+        let moons_json: Vec<String> = self.moons.iter().map(|m| m.to_json()).collect();
+        let planets_json: Vec<String> = self.planets.iter().map(|p| p.to_json()).collect();
+        let consts_json: Vec<String> = self.constellations.iter().map(|c| c.to_json()).collect();
+        format!(
+            "{{\"latDeg\":{:.2},\"lonDeg\":{:.2},\"tiltDeg\":{:.2},\"daysPerYear\":{},\"dayHours\":{:.2},\"currentHistoryYear\":{},\"sunName\":{},\"sunRgb\":[{:.3},{:.3},{:.3}],\"skyZenithRgb\":[{:.3},{:.3},{:.3}],\"skyHorizonRgb\":[{:.3},{:.3},{:.3}],\"sunsetRgb\":[{:.3},{:.3},{:.3}],\"twilightRgb\":[{:.3},{:.3},{:.3}],\"homeOrbitAu\":{:.4},\"homePeriodDays\":{:.4},\"homeInitAngleRad\":{:.4},\"moons\":[{}],\"planets\":[{}],\"constellations\":[{}]}}",
+            self.lat_deg,
+            self.lon_deg,
+            self.tilt_deg,
+            self.days_per_year,
+            self.day_hours,
+            self.current_history_year,
+            json_escape(&self.sun_name),
+            self.sun_rgb[0],
+            self.sun_rgb[1],
+            self.sun_rgb[2],
+            self.sky_zenith_rgb[0],
+            self.sky_zenith_rgb[1],
+            self.sky_zenith_rgb[2],
+            self.sky_horizon_rgb[0],
+            self.sky_horizon_rgb[1],
+            self.sky_horizon_rgb[2],
+            self.sunset_rgb[0],
+            self.sunset_rgb[1],
+            self.sunset_rgb[2],
+            self.twilight_rgb[0],
+            self.twilight_rgb[1],
+            self.twilight_rgb[2],
+            self.home_orbit_au,
+            self.home_period_days,
+            self.home_init_angle_rad,
+            moons_json.join(","),
+            planets_json.join(","),
+            consts_json.join(",")
+        )
+    }
+}
+
+/// Level-2 Tile inspection view (individual tile's nationalities, languages, native flora & fauna, and local 2D sky view).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TileInspectionView {
     pub display_idx: usize,
@@ -329,6 +484,7 @@ pub struct TileInspectionView {
     pub languages: Vec<DemographicShareItem>,
     pub flora: Vec<String>,
     pub fauna: Vec<String>,
+    pub sky: TileSkyView,
 }
 
 impl TileInspectionView {
@@ -336,7 +492,7 @@ impl TileInspectionView {
         let nats: Vec<String> = self.nationalities.iter().map(|n| n.to_json()).collect();
         let langs: Vec<String> = self.languages.iter().map(|l| l.to_json()).collect();
         format!(
-            "{{\"hasTile\":true,\"displayIdx\":{},\"stateId\":{},\"title\":{},\"locationSummary\":{},\"populationSummary\":{},\"technology\":{},\"nationalities\":[{}],\"languages\":[{}],\"flora\":{},\"fauna\":{}}}",
+            "{{\"hasTile\":true,\"displayIdx\":{},\"stateId\":{},\"title\":{},\"locationSummary\":{},\"populationSummary\":{},\"technology\":{},\"nationalities\":[{}],\"languages\":[{}],\"flora\":{},\"fauna\":{},\"sky\":{}}}",
             self.display_idx,
             self.state_id.map(|s| s as i32).unwrap_or(-1),
             json_escape(&self.title),
@@ -346,7 +502,8 @@ impl TileInspectionView {
             nats.join(","),
             langs.join(","),
             json_str_array(&self.flora),
-            json_str_array(&self.fauna)
+            json_str_array(&self.fauna),
+            self.sky.to_json()
         )
     }
 }
@@ -903,6 +1060,8 @@ pub struct HistorySimulation {
     tree: PointTree,
     history_ticks: u32,
     moon_count: u32,
+    home_star: HomeStar,
+    optics: PlanetaryOptics,
     solar_system: Vec<SolarSystemPlanet>,
     constellations: Vec<Constellation>,
     geography: PlanetaryGeography,
@@ -996,12 +1155,16 @@ impl HistorySimulation {
             .collect();
         let tree = PointTree::new(&indexed_pts);
 
+        let home_star = HomeStar::sol();
+        let optics = PlanetaryOptics::compute(&home_star, AtmosphereType::EarthLikeN2O2);
         let mut sim = Self {
             prehistory,
             terrain,
             tree,
             history_ticks: 0,
             moon_count,
+            home_star,
+            optics,
             solar_system,
             constellations,
             geography: PlanetaryGeography::default(),
@@ -3398,6 +3561,11 @@ impl HistorySimulation {
         self.solar_system = solar_system;
     }
 
+    pub fn set_sky_optics(&mut self, home_star: HomeStar, optics: PlanetaryOptics) {
+        self.home_star = home_star;
+        self.optics = optics;
+    }
+
     pub fn constellations(&self) -> &[Constellation] {
         &self.constellations
     }
@@ -4558,8 +4726,183 @@ impl HistorySimulation {
         })
     }
 
+    /// Build the local 2D sky view configuration and ephemeris as seen from `display_idx`
+    /// starting at Day 0, Year 0 (`0` = beginning of history).
+    pub fn build_tile_sky_view(
+        &self,
+        display_idx: usize,
+        primary_lang: Option<u32>,
+    ) -> TileSkyView {
+        let center = self
+            .terrain
+            .display_faces
+            .get(display_idx)
+            .map(|f| f.center)
+            .unwrap_or([1.0, 0.0, 0.0]);
+        let lat_deg = (center[2].clamp(-1.0, 1.0).asin() * 180.0 / std::f64::consts::PI) as f32;
+        let lon_deg = (center[1].atan2(center[0]) * 180.0 / std::f64::consts::PI) as f32;
+        let tilt_deg = (self.prehistory.tilt_deg() as f32).clamp(0.0, 89.0);
+        let spin = (self.prehistory.spin() as f32).max(0.1);
+        let day_hours = (24.0 / spin).clamp(2.0, 240.0);
+
+        // Home world orbital parameters
+        let home_planet = self.solar_system.iter().find(|p| p.is_home_world);
+        let home_orbit_au = home_planet
+            .map(|p| p.orbit_au)
+            .unwrap_or(self.home_star.habitable_au)
+            .max(0.02);
+        let earth_days_period = home_planet
+            .map(|p| p.orbital_period_days)
+            .unwrap_or(self.home_star.orbital_period_days)
+            .max(5.0);
+        let home_period_days = (earth_days_period * spin).clamp(8.0, 5000.0);
+        let days_per_year = home_period_days.round().clamp(8.0, 5000.0) as u32;
+        let home_init_angle_rad = home_planet.map(|p| p.orbit_angle_rad).unwrap_or(0.0);
+
+        let lang_rec = primary_lang.and_then(|lid| self.languages.get(&lid));
+        let sun_name = lang_rec
+            .and_then(|l| l.lexicon.get(&ConceptKey::Sun(0)))
+            .map(|orig| format!("{} (Sun)", orig.word.write(true)))
+            .unwrap_or_else(|| "Sun".to_string());
+
+        let base_lunar_days = (27.32166 * spin).max(2.0);
+        let mut moons = Vec::with_capacity(self.moon_count as usize);
+        for m in 0..self.moon_count {
+            let period_days = base_lunar_days * ((1u32 << m.min(6)) as f32);
+            let inclination_deg = 5.14 + (m as f32) * 1.25;
+            let init_angle_rad = ((m as f32) * 1.854) % std::f32::consts::TAU;
+            let node_asc_rad = ((m as f32) * 2.399) % std::f32::consts::TAU;
+            let name = lang_rec
+                .and_then(|l| l.lexicon.get(&ConceptKey::Moon(m)))
+                .map(|orig| format!("{} (M{})", orig.word.write(true), m + 1))
+                .unwrap_or_else(|| format!("Moon {}", m + 1));
+            moons.push(TileSkyMoon {
+                index: m,
+                name,
+                period_days,
+                inclination_deg,
+                init_angle_rad,
+                node_asc_rad,
+            });
+        }
+
+        let mut planets = Vec::new();
+        for p in &self.solar_system {
+            if p.is_home_world {
+                continue;
+            }
+            let period_days = (p.orbital_period_days * spin).max(2.0);
+            let inclination_deg = 1.1 + ((p.index % 5) as f32) * 0.65;
+            let name = lang_rec
+                .and_then(|l| l.lexicon.get(&ConceptKey::Planet(p.index)))
+                .map(|orig| format!("{} (P{})", orig.word.write(true), p.index + 1))
+                .unwrap_or_else(|| format!("Planet {}", p.index + 1));
+            planets.push(TileSkyPlanet {
+                index: p.index,
+                name,
+                orbit_au: p.orbit_au.max(0.02),
+                period_days,
+                init_angle_rad: p.orbit_angle_rad,
+                inclination_deg,
+                rgb: p.rgb,
+                has_rings: p.has_rings,
+            });
+        }
+
+        let mut constellations = Vec::with_capacity(self.constellations.len());
+        for c in &self.constellations {
+            let n_stars = (c.star_count as usize).clamp(3, 7);
+            let seed_u64 = (c.index as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (c.right_ascension_deg.to_bits() as u64)
+                ^ ((c.declination_deg.to_bits() as u64) << 16);
+            let mut crng = Pcg64Mcg::from_seed_u64(seed_u64);
+            let c_dir = normal(c.center_dir);
+            let raw_east = [-c_dir[1], c_dir[0], 0.0];
+            let east_norm =
+                (raw_east[0] * raw_east[0] + raw_east[1] * raw_east[1]).sqrt();
+            let e_ra = if east_norm > 1e-5 {
+                [raw_east[0] / east_norm, raw_east[1] / east_norm, 0.0]
+            } else {
+                [1.0, 0.0, 0.0]
+            };
+            let e_dec = normal([
+                c_dir[1] * e_ra[2] - c_dir[2] * e_ra[1],
+                c_dir[2] * e_ra[0] - c_dir[0] * e_ra[2],
+                c_dir[0] * e_ra[1] - c_dir[1] * e_ra[0],
+            ]);
+
+            let mut stars = Vec::with_capacity(n_stars);
+            stars.push([
+                c.right_ascension_deg,
+                c.declination_deg,
+                c.brightest_mag.clamp(0.1, 3.0),
+            ]);
+            for k in 1..n_stars {
+                let ang = (k as f64) * std::f64::consts::TAU / ((n_stars - 1) as f64)
+                    + crng.uniform(-0.32, 0.32);
+                let rad = crng.uniform(0.055, 0.135);
+                let dx = rad * (ang.cos() * e_ra[0] + ang.sin() * e_dec[0]);
+                let dy = rad * (ang.cos() * e_ra[1] + ang.sin() * e_dec[1]);
+                let dz = rad * (ang.cos() * e_ra[2] + ang.sin() * e_dec[2]);
+                let s_dir = normal([c_dir[0] + dx, c_dir[1] + dy, c_dir[2] + dz]);
+                let s_dec = (s_dir[2].clamp(-1.0, 1.0).asin() * 180.0 / std::f64::consts::PI) as f32;
+                let s_ra = ((s_dir[1].atan2(s_dir[0]) * 180.0 / std::f64::consts::PI)
+                    .rem_euclid(360.0)) as f32;
+                let s_mag = (c.brightest_mag + 0.25 * (k as f32)).clamp(0.4, 3.4);
+                stars.push([s_ra, s_dec, s_mag]);
+            }
+
+            let mut edges = Vec::with_capacity(n_stars);
+            for k in 0..(n_stars - 1) {
+                edges.push([k, k + 1]);
+            }
+            if n_stars >= 4 && c.index % 2 == 0 {
+                edges.push([0, n_stars - 1]);
+            } else if n_stars >= 5 {
+                edges.push([0, 2]);
+            }
+
+            let name = lang_rec
+                .and_then(|l| l.lexicon.get(&ConceptKey::Constellation(c.index)))
+                .map(|orig| format!("{} ({})", orig.word.write(true), c.shape_label))
+                .unwrap_or_else(|| c.shape_label.to_string());
+
+            constellations.push(TileSkyConstellation {
+                index: c.index,
+                name,
+                shape_label: c.shape_label.to_string(),
+                ra_deg: c.right_ascension_deg,
+                dec_deg: c.declination_deg,
+                stars,
+                edges,
+            });
+        }
+
+        TileSkyView {
+            lat_deg,
+            lon_deg,
+            tilt_deg,
+            days_per_year,
+            day_hours,
+            current_history_year: self.years(),
+            sun_name,
+            sun_rgb: self.home_star.rgb,
+            sky_zenith_rgb: self.optics.sky_zenith_rgb,
+            sky_horizon_rgb: self.optics.sky_horizon_rgb,
+            sunset_rgb: self.optics.sunset_rgb,
+            twilight_rgb: self.optics.twilight_rgb,
+            home_orbit_au,
+            home_period_days,
+            home_init_angle_rad,
+            moons,
+            planets,
+            constellations,
+        }
+    }
+
     /// Structured inspection report for a single clicked tile (`display_idx`), including tile-level
-    /// nationalities, languages, and native flora & fauna.
+    /// nationalities, languages, native flora & fauna, and local 2D sky ephemeris.
     pub fn inspect_tile_structured(&self, display_idx: usize) -> Option<TileInspectionView> {
         let face = self.terrain.display_faces.get(display_idx)?;
         let fine_idx = match face.source {
@@ -4571,6 +4914,7 @@ impl HistorySimulation {
                     .get(c_idx)
                     .map(|t| t.elevation())
                     .unwrap_or(-4.0);
+                let sky = self.build_tile_sky_view(display_idx, None);
                 return Some(TileInspectionView {
                     display_idx,
                     fine_idx: None,
@@ -4584,6 +4928,7 @@ impl HistorySimulation {
                     languages: Vec::new(),
                     flora: Vec::new(),
                     fauna: Vec::new(),
+                    sky,
                 });
             }
             DisplayFaceSource::Fine(f) => f,
@@ -4597,6 +4942,7 @@ impl HistorySimulation {
                 .geography
                 .ocean_name(primary_c)
                 .unwrap_or("Coastal Sea");
+            let sky = self.build_tile_sky_view(display_idx, None);
             return Some(TileInspectionView {
                 display_idx,
                 fine_idx: Some(fine_idx),
@@ -4610,6 +4956,7 @@ impl HistorySimulation {
                 languages: Vec::new(),
                 flora: Vec::new(),
                 fauna: Vec::new(),
+                sky,
             });
         }
 
@@ -4725,6 +5072,9 @@ impl HistorySimulation {
             format_thousands_compact(cap)
         );
 
+        let primary_tile_lang = languages.first().map(|l| l.id).or(dom_lang);
+        let sky = self.build_tile_sky_view(display_idx, primary_tile_lang);
+
         Some(TileInspectionView {
             display_idx,
             fine_idx: Some(fine_idx),
@@ -4738,6 +5088,7 @@ impl HistorySimulation {
             languages,
             flora,
             fauna,
+            sky,
         })
     }
 
@@ -5566,7 +5917,15 @@ mod tests {
         assert_eq!(tile_view.state_id, Some(sample_sid));
         assert!(!tile_view.nationalities.is_empty());
         assert!(!tile_view.languages.is_empty());
+        assert!(tile_view.sky.days_per_year >= 100);
+        assert!(tile_view.sky.sun_name.contains("(Sun)"));
+        assert_eq!(tile_view.sky.moons.len(), 1);
+        assert!(!tile_view.sky.planets.is_empty());
+        assert!(!tile_view.sky.constellations.is_empty());
+        assert!(!tile_view.sky.constellations[0].stars.is_empty());
+        assert!(!tile_view.sky.constellations[0].edges.is_empty());
         assert!(tile_view.to_json().contains("\"hasTile\":true"));
+        assert!(tile_view.to_json().contains("\"sky\":{\"latDeg\":"));
 
         let lang_id = state_view.languages[0].id;
         let lang_view = sim

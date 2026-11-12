@@ -257,6 +257,7 @@ impl WorldSimulation {
         );
         if let WorldStageState::History(hist) = &mut self.stage {
             hist.set_solar_system(self.solar_system.clone());
+            hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
         }
     }
 
@@ -452,12 +453,13 @@ impl WorldSimulation {
             let snap = pre.to_snapshot();
             let sub_seed = self.rng.next_u64();
             if let Some(pre_copy) = PrehistorySimulation::from_snapshot(&snap, sub_seed) {
-                let hist = HistorySimulation::from_prehistory_with_system(
+                let mut hist = HistorySimulation::from_prehistory_with_system(
                     pre_copy,
                     self.params.moon_count,
                     self.solar_system.clone(),
                     sub_seed as u128,
                 );
+                hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
                 self.history_ticks = hist.history_ticks();
                 self.stage = WorldStageState::History(hist);
             }
@@ -1111,6 +1113,7 @@ impl WorldSimulation {
                     return false;
                 }
                 hist.set_solar_system(self.solar_system.clone());
+                hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
                 if let Some(pre_base) = &hist_proto.prehistory_base {
                     self.tectonics_ticks = pre_base.tectonics_ticks;
                     self.prehistory_ticks = pre_base.prehistory_ticks;

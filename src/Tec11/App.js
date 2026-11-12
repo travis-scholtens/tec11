@@ -3116,6 +3116,11 @@ function emptyTileView() {
     languages: [],
     flora: [],
     fauna: [],
+    skyYear: 0,
+    skyDay: 0,
+    skyDaysPerYear: 365,
+    skyLatLonSummary: "",
+    skyAnimated: true,
   };
 }
 
@@ -3172,6 +3177,486 @@ function refreshActiveInspectorView(view) {
     updateWorldDataBuffers(view, false);
     view.setWorldInfo(buildWorldInfo(view))();
   }
+}
+
+function eclipticToEquatorial(lamRad, betaRad, epsRad) {
+  const cosB = Math.cos(betaRad);
+  const xEcl = cosB * Math.cos(lamRad);
+  const yEcl = cosB * Math.sin(lamRad);
+  const zEcl = Math.sin(betaRad);
+  const cosE = Math.cos(epsRad);
+  const sinE = Math.sin(epsRad);
+  return [xEcl, yEcl * cosE - zEcl * sinE, yEcl * sinE + zEcl * cosE];
+}
+
+function raDecDegToEquatorial(raDeg, decDeg) {
+  const ra = (raDeg * Math.PI) / 180.0;
+  const dec = (decDeg * Math.PI) / 180.0;
+  const cosD = Math.cos(dec);
+  return [cosD * Math.cos(ra), cosD * Math.sin(ra), Math.sin(dec)];
+}
+
+function equatorialToHorizontal(eqVec, siderealRad, latRad) {
+  const cosT = Math.cos(siderealRad);
+  const sinT = Math.sin(siderealRad);
+  const xm = eqVec[0] * cosT + eqVec[1] * sinT;
+  const ym = -eqVec[0] * sinT + eqVec[1] * cosT;
+  const zm = eqVec[2];
+  const sinPhi = Math.sin(latRad);
+  const cosPhi = Math.cos(latRad);
+  const east = ym;
+  const north = -sinPhi * xm + cosPhi * zm;
+  const up = cosPhi * xm + sinPhi * zm;
+  return [east, north, up];
+}
+
+function projectHorizontalToDome(horiz, cx, cy, radius) {
+  const east = horiz[0];
+  const north = horiz[1];
+  const up = Math.max(-1.0, Math.min(1.0, horiz[2]));
+  const alt = Math.asin(up);
+  const rFrac = (Math.PI * 0.5 - alt) / (Math.PI * 0.5);
+  const hLen = Math.hypot(east, north);
+  const ux = hLen > 1e-6 ? east / hLen : 0.0;
+  const uy = hLen > 1e-6 ? north / hLen : 0.0;
+  return {
+    x: cx + radius * rFrac * ux,
+    y: cy - radius * rFrac * uy,
+    up,
+    alt,
+    rFrac,
+  };
+}
+
+function sunEquatorialAtDays(sky, totalDays, epsRad) {
+  const daysPerYear = Math.max(1.0, sky.homePeriodDays || sky.daysPerYear || 365.0);
+  const lamSun = (sky.homeInitAngleRad || 0.0) + (2.0 * Math.PI * totalDays) / daysPerYear;
+  return eclipticToEquatorial(lamSun, 0.0, epsRad);
+}
+
+function moonEquatorialAtDays(moon, totalDays, epsRad) {
+  const period = Math.max(1.0, moon.periodDays || 27.32);
+  const incRad = ((moon.inclinationDeg || 5.1) * Math.PI) / 180.0;
+  const lam = (moon.initAngleRad || 0.0) + (2.0 * Math.PI * totalDays) / period;
+  const node = (moon.nodeAscRad || 0.0) - (2.0 * Math.PI * totalDays) / (period * 248.0);
+  const beta = Math.asin(Math.sin(incRad) * Math.sin(lam - node));
+  return eclipticToEquatorial(lam, beta, epsRad);
+}
+
+function planetEquatorialAtDays(planet, sky, totalDays, epsRad) {
+  const homeP = Math.max(1.0, sky.homePeriodDays || sky.daysPerYear || 365.0);
+  const homeR = Math.max(0.02, sky.homeOrbitAu || 1.0);
+  const thHome = (sky.homeInitAngleRad || 0.0) + (2.0 * Math.PI * totalDays) / homeP;
+  const hx = homeR * Math.cos(thHome);
+  const hy = homeR * Math.sin(thHome);
+
+  const pPeriod = Math.max(1.0, planet.periodDays || 365.0);
+  const pR = Math.max(0.02, planet.orbitAu || 1.5);
+  const thP = (planet.initAngleRad || 0.0) + (2.0 * Math.PI * totalDays) / pPeriod;
+  const incRad = ((planet.inclinationDeg || 1.8) * Math.PI) / 180.0;
+  const px = pR * Math.cos(thP);
+  const py = pR * Math.sin(thP) * Math.cos(incRad);
+  const pz = pR * Math.sin(thP) * Math.sin(incRad);
+
+  const dx = px - hx;
+  const dy = py - hy;
+  const dz = pz;
+  const dist = Math.hypot(dx, dy, dz) || 1.0;
+  const lam = Math.atan2(dy, dx);
+  const beta = Math.asin(Math.max(-1.0, Math.min(1.0, dz / dist)));
+  return eclipticToEquatorial(lam, beta, epsRad);
+}
+
+function drawDiurnalArc(ctx, sampleEqFn, siderealMidday, latRad, cx, cy, radius, strokeStyle, lineWidth, dashed) {
+  const steps = 48;
+  ctx.save();
+  ctx.strokeStyle = strokeStyle;
+  ctx.lineWidth = lineWidth;
+  if (dashed) {
+    ctx.setLineDash([4, 3]);
+  }
+  ctx.beginPath();
+  let penDown = false;
+  for (let i = 0; i <= steps; i++) {
+    const tau = i / steps;
+    const sid = siderealMidday + 2.0 * Math.PI * (tau - 0.5);
+    const eq = sampleEqFn(tau);
+    const horiz = equatorialToHorizontal(eq, sid, latRad);
+    if (horiz[2] >= -0.015) {
+      const pt = projectHorizontalToDome(horiz, cx, cy, radius);
+      if (!penDown) {
+        ctx.moveTo(pt.x, pt.y);
+        penDown = true;
+      } else {
+        ctx.lineTo(pt.x, pt.y);
+      }
+    } else {
+      penDown = false;
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function paintTileSkyCanvas(view) {
+  const canvas = document.getElementById("tile-sky-canvas");
+  if (!canvas || !view || !view.tileSky) return;
+  const sky = view.tileSky;
+
+  const rect = canvas.getBoundingClientRect();
+  const cssW = Math.max(230, Math.round(rect.width || 275));
+  const cssH = Math.max(195, Math.round(rect.height || 230));
+  const dpr = window.devicePixelRatio || 1;
+  const targetW = Math.round(cssW * dpr);
+  const targetH = Math.round(cssH * dpr);
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.scale(dpr, dpr);
+
+  ctx.fillStyle = "#040814";
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  const cx = cssW * 0.5;
+  const cy = cssH * 0.51;
+  const radius = Math.min(cssW, cssH) * 0.425;
+
+  const latRad = ((sky.latDeg || 0.0) * Math.PI) / 180.0;
+  const epsRad = ((sky.tiltDeg || 23.5) * Math.PI) / 180.0;
+  const daysPerYear = Math.max(1, sky.daysPerYear || 365);
+  const year = Math.max(0, view.tileSkyYear || 0);
+  const day = Math.max(0, Math.min(daysPerYear - 1, view.tileSkyDay || 0));
+  const tau = typeof view.tileSkyHourFrac === "number" ? view.tileSkyHourFrac : 0.42;
+
+  const baseDays = year * daysPerYear + day;
+  const totalDays = baseDays + tau;
+
+  // Determine solar noon RA on this day so tau=0.5 is local solar noon
+  const sunNoonEq = sunEquatorialAtDays(sky, baseDays + 0.5, epsRad);
+  const raNoon = Math.atan2(sunNoonEq[1], sunNoonEq[0]);
+  const siderealNow = raNoon + 2.0 * Math.PI * (tau - 0.5);
+
+  const sunEqNow = sunEquatorialAtDays(sky, totalDays, epsRad);
+  const sunHorizNow = equatorialToHorizontal(sunEqNow, siderealNow, latRad);
+  const sunAltDeg = (Math.asin(Math.max(-1.0, Math.min(1.0, sunHorizNow[2]))) * 180.0) / Math.PI;
+  const sunDecDeg = (Math.asin(Math.max(-1.0, Math.min(1.0, sunEqNow[2]))) * 180.0) / Math.PI;
+
+  // Update live time & solar declination readout
+  const timeEl = document.getElementById("tile-sky-time-label");
+  if (timeEl) {
+    const totalHours = tau * 24.0;
+    const hh = String(Math.floor(totalHours) % 24).padStart(2, "0");
+    const mm = String(Math.floor((totalHours % 1.0) * 60.0)).padStart(2, "0");
+    const signDec = sunDecDeg >= 0 ? "+" : "";
+    timeEl.textContent = `${hh}:${mm} | Sun Dec ${signDec}${sunDecDeg.toFixed(1)}°`;
+  }
+
+  // Dynamic sky dome color based on sun altitude and PlanetaryOptics
+  const dayFactor = Math.max(0.0, Math.min(1.0, (sunAltDeg + 6.0) / 24.0));
+  const twiFactor = Math.max(0.0, Math.min(1.0, 1.0 - Math.abs(sunAltDeg + 3.0) / 11.0));
+  const zRgb = sky.skyZenithRgb || [0.16, 0.38, 0.82];
+  const hRgb = sky.skyHorizonRgb || [0.48, 0.72, 0.96];
+  const sRgb = sky.sunsetRgb || [0.95, 0.45, 0.22];
+  const tRgb = sky.twilightRgb || [0.18, 0.22, 0.45];
+
+  const mixChannel = (nightV, dayV, twiV) =>
+    Math.round(
+      Math.max(
+        0,
+        Math.min(
+          255,
+          (nightV * (1.0 - dayFactor) + dayV * dayFactor * 0.85 + twiV * twiFactor * 0.45) * 255.0
+        )
+      )
+    );
+
+  const zenColor = `rgb(${mixChannel(0.02, zRgb[0], tRgb[0])}, ${mixChannel(0.04, zRgb[1], tRgb[1])}, ${mixChannel(0.11, zRgb[2], tRgb[2])})`;
+  const horColor = `rgb(${mixChannel(0.05, hRgb[0], sRgb[0])}, ${mixChannel(0.08, hRgb[1], sRgb[1])}, ${mixChannel(0.17, hRgb[2], sRgb[2])})`;
+
+  // Clip inside the local sky dome
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.clip();
+
+  const grad = ctx.createRadialGradient(cx, cy, radius * 0.05, cx, cy, radius);
+  grad.addColorStop(0.0, zenColor);
+  grad.addColorStop(1.0, horColor);
+  ctx.fillStyle = grad;
+  ctx.fillRect(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
+
+  // Altitude rings (30° and 60°) and N-S / E-W crosshairs
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.22)";
+  ctx.lineWidth = 0.8;
+  for (const frac of [1.0 / 3.0, 2.0 / 3.0]) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * frac, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.moveTo(cx - radius, cy);
+  ctx.lineTo(cx + radius, cy);
+  ctx.moveTo(cx, cy - radius);
+  ctx.lineTo(cx, cy + radius);
+  ctx.stroke();
+
+  // 1. Background stars & Constellation asterisms + diurnal star paths
+  const starAlpha = Math.max(0.28, 1.0 - dayFactor * 0.65);
+  if (sky.constellations) {
+    for (const c of sky.constellations) {
+      // Subtle diurnal path of constellation center
+      const cCenterEq = raDecDegToEquatorial(c.raDeg, c.decDeg);
+      drawDiurnalArc(
+        ctx,
+        () => cCenterEq,
+        raNoon,
+        latRad,
+        cx,
+        cy,
+        radius,
+        `rgba(56, 189, 248, ${(0.16 * starAlpha).toFixed(3)})`,
+        0.75,
+        true
+      );
+
+      // Project constellation stars at current sidereal angle
+      const projStars = (c.stars || []).map((st) => {
+        const eq = raDecDegToEquatorial(st[0], st[1]);
+        const horiz = equatorialToHorizontal(eq, siderealNow, latRad);
+        return { ...projectHorizontalToDome(horiz, cx, cy, radius), mag: st[2] || 1.8 };
+      });
+
+      // Constellation stick-figure edges
+      ctx.strokeStyle = `rgba(56, 189, 248, ${(0.62 * starAlpha).toFixed(3)})`;
+      ctx.lineWidth = 1.1;
+      for (const edge of c.edges || []) {
+        const a = projStars[edge[0]];
+        const b = projStars[edge[1]];
+        if (a && b && (a.up >= -0.02 || b.up >= -0.02)) {
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
+
+      // Constellation stars
+      for (const ps of projStars) {
+        if (ps.up < -0.01) continue;
+        const rStar = Math.max(1.2, 2.7 - 0.45 * ps.mag);
+        ctx.fillStyle = `rgba(241, 245, 249, ${(0.95 * starAlpha).toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(ps.x, ps.y, rStar, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Constellation label at its brightest star if above horizon
+      if (projStars.length > 0 && projStars[0].up > 0.08) {
+        ctx.fillStyle = `rgba(125, 211, 252, ${(0.82 * starAlpha).toFixed(3)})`;
+        ctx.font = "9px sans-serif";
+        ctx.fillText(c.name || c.shapeLabel || "", projStars[0].x + 4, projStars[0].y - 3);
+      }
+    }
+  }
+
+  // 2. Planets: diurnal paths + animated positions
+  if (sky.planets) {
+    for (const p of sky.planets) {
+      const pCss = rgbFloatToCss(p.rgb, 240, 190, 110);
+      drawDiurnalArc(
+        ctx,
+        (tFrac) => planetEquatorialAtDays(p, sky, baseDays + tFrac, epsRad),
+        raNoon,
+        latRad,
+        cx,
+        cy,
+        radius,
+        pCss,
+        1.1,
+        true
+      );
+
+      const pEq = planetEquatorialAtDays(p, sky, totalDays, epsRad);
+      const pHoriz = equatorialToHorizontal(pEq, siderealNow, latRad);
+      if (pHoriz[2] >= 0.0) {
+        const pt = projectHorizontalToDome(pHoriz, cx, cy, radius);
+        if (p.hasRings) {
+          ctx.strokeStyle = "rgba(253, 230, 138, 0.85)";
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          ctx.ellipse(pt.x, pt.y, 6.2, 2.4, -0.35, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.fillStyle = pCss;
+        ctx.strokeStyle = "#0f172a";
+        ctx.lineWidth = 1.0;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 3.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#fde68a";
+        ctx.font = "9.5px sans-serif";
+        ctx.fillText(p.name, pt.x + 5, pt.y + 3);
+      }
+    }
+  }
+
+  // 3. Moons: diurnal paths + animated phase discs
+  if (sky.moons) {
+    for (const m of sky.moons) {
+      drawDiurnalArc(
+        ctx,
+        (tFrac) => moonEquatorialAtDays(m, baseDays + tFrac, epsRad),
+        raNoon,
+        latRad,
+        cx,
+        cy,
+        radius,
+        "rgba(203, 213, 225, 0.72)",
+        1.25,
+        true
+      );
+
+      const mEq = moonEquatorialAtDays(m, totalDays, epsRad);
+      const mHoriz = equatorialToHorizontal(mEq, siderealNow, latRad);
+      if (mHoriz[2] >= 0.0) {
+        const pt = projectHorizontalToDome(mHoriz, cx, cy, radius);
+        const rMoon = Math.max(3.8, 5.4 - m.index * 0.5);
+        // Illumination fraction from 1 - dot(mEq, sunEqNow)
+        const cosElong =
+          mEq[0] * sunEqNow[0] + mEq[1] * sunEqNow[1] + mEq[2] * sunEqNow[2];
+        const illum = 0.5 * (1.0 - cosElong);
+
+        // Dark limb
+        ctx.fillStyle = "#1e293b";
+        ctx.strokeStyle = "#94a3b8";
+        ctx.lineWidth = 1.0;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, rMoon, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Lit crescent/gibbous portion
+        ctx.fillStyle = "#f1f5f9";
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, rMoon * Math.max(0.2, illum), 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "9.5px sans-serif";
+        ctx.fillText(m.name, pt.x + rMoon + 3, pt.y - 2);
+      }
+    }
+  }
+
+  // 4. Sun: diurnal path arc + animated glowing Sun disc
+  const sunCss = rgbFloatToCss(sky.sunRgb, 255, 228, 132);
+  drawDiurnalArc(
+    ctx,
+    (tFrac) => sunEquatorialAtDays(sky, baseDays + tFrac, epsRad),
+    raNoon,
+    latRad,
+    cx,
+    cy,
+    radius,
+    "rgba(250, 204, 21, 0.92)",
+    1.85,
+    false
+  );
+
+  if (sunHorizNow[2] >= -0.02) {
+    const ptSun = projectHorizontalToDome(sunHorizNow, cx, cy, radius);
+    const sunGlow = ctx.createRadialGradient(ptSun.x, ptSun.y, 1.5, ptSun.x, ptSun.y, 14.0);
+    sunGlow.addColorStop(0.0, "#ffffff");
+    sunGlow.addColorStop(0.35, sunCss);
+    sunGlow.addColorStop(1.0, "rgba(250, 204, 21, 0.0)");
+    ctx.fillStyle = sunGlow;
+    ctx.beginPath();
+    ctx.arc(ptSun.x, ptSun.y, 14.0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = sunCss;
+    ctx.strokeStyle = "#fef08a";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(ptSun.x, ptSun.y, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = "#fef08a";
+    ctx.font = "bold 10px sans-serif";
+    ctx.fillText(sky.sunName || "Sun", ptSun.x + 8, ptSun.y - 4);
+  }
+
+  ctx.restore(); // End sky dome clip
+
+  // Outer horizon ring & N / E / S / W cardinal labels
+  ctx.strokeStyle = "#64748b";
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "#cbd5e1";
+  ctx.font = "bold 10px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("N", cx, cy - radius - 8);
+  ctx.fillText("S", cx, cy + radius + 9);
+  ctx.fillText("E", cx + radius + 9, cy);
+  ctx.fillText("W", cx - radius - 10, cy);
+
+  ctx.restore();
+}
+
+function ensureTileSkyLoop(view) {
+  if (!view || typeof window === "undefined") return;
+  if (view.tileSkyRafId) return;
+  let lastTs = performance.now();
+  const stepSky = (now) => {
+    if (activeView !== view || !view.tileSky) {
+      view.tileSkyRafId = null;
+      return;
+    }
+    const dt = Math.min(0.1, Math.max(0.0, (now - lastTs) * 0.001));
+    lastTs = now;
+    if (view.tileSkyAnimated !== false) {
+      const daysPerYear = Math.max(1, view.tileSky.daysPerYear || 365);
+      view.tileSkyHourFrac = (view.tileSkyHourFrac || 0.0) + dt * 0.22;
+      if (view.tileSkyHourFrac >= 1.0) {
+        const addDays = Math.floor(view.tileSkyHourFrac);
+        view.tileSkyHourFrac -= addDays;
+        let nextDay = (view.tileSkyDay || 0) + addDays;
+        if (nextDay >= daysPerYear) {
+          const addYears = Math.floor(nextDay / daysPerYear);
+          nextDay = nextDay % daysPerYear;
+          view.tileSkyYear = Math.max(0, (view.tileSkyYear || 0) + addYears);
+          const yearInput = document.getElementById("tile-sky-year-input");
+          if (yearInput && document.activeElement !== yearInput) {
+            yearInput.value = String(view.tileSkyYear);
+          }
+        }
+        view.tileSkyDay = nextDay;
+        const daySlider = document.getElementById("tile-sky-day-slider");
+        if (daySlider) {
+          daySlider.value = String(view.tileSkyDay);
+        }
+        const dayLabel = document.getElementById("tile-sky-day-label");
+        if (dayLabel) {
+          dayLabel.textContent = `Day in Year: Day ${view.tileSkyDay} / ${Math.max(1, daysPerYear - 1)}`;
+        }
+      }
+    }
+    paintTileSkyCanvas(view);
+    view.tileSkyRafId = window.requestAnimationFrame(stepSky);
+  };
+  view.tileSkyRafId = window.requestAnimationFrame(stepSky);
 }
 
 function paintStateZoomCanvas(view) {
@@ -3335,6 +3820,7 @@ function buildHistoryInspectorBundle(view) {
 
   if (!canInspectHistory) {
     view.stateMapPolygons = [];
+    view.tileSky = null;
     return { stateView, tileView, languageDetail, nationDetail };
   }
 
@@ -3342,6 +3828,22 @@ function buildHistoryInspectorBundle(view) {
     try {
       const parsedTile = JSON.parse(s.inspect_tile_structured_json(view.selectedTileIdx));
       if (parsedTile && parsedTile.hasTile) {
+        const sky = parsedTile.sky || null;
+        view.tileSky = sky;
+        if (view.tileSkyYear === undefined) view.tileSkyYear = 0;
+        if (view.tileSkyDay === undefined) view.tileSkyDay = 0;
+        if (view.tileSkyHourFrac === undefined) view.tileSkyHourFrac = 0.35;
+        if (view.tileSkyAnimated === undefined) view.tileSkyAnimated = true;
+
+        const daysPerYear = sky && sky.daysPerYear ? sky.daysPerYear : 365;
+        if (view.tileSkyDay >= daysPerYear) {
+          view.tileSkyDay = view.tileSkyDay % Math.max(1, daysPerYear);
+        }
+        const latVal = sky && typeof sky.latDeg === "number" ? sky.latDeg : 0.0;
+        const lonVal = sky && typeof sky.lonDeg === "number" ? sky.lonDeg : 0.0;
+        const latStr = `${Math.abs(latVal).toFixed(1)}°${latVal >= 0 ? "N" : "S"}`;
+        const lonStr = `${Math.abs(lonVal).toFixed(1)}°${lonVal >= 0 ? "E" : "W"}`;
+
         tileView = {
           hasTile: true,
           displayIdx: parsedTile.displayIdx ?? view.selectedTileIdx,
@@ -3354,12 +3856,23 @@ function buildHistoryInspectorBundle(view) {
           languages: parsedTile.languages || [],
           flora: parsedTile.flora || [],
           fauna: parsedTile.fauna || [],
+          skyYear: view.tileSkyYear,
+          skyDay: view.tileSkyDay,
+          skyDaysPerYear: daysPerYear,
+          skyLatLonSummary: `${latStr}, ${lonStr}`,
+          skyAnimated: view.tileSkyAnimated !== false,
         };
         if (parsedTile.stateId !== undefined && parsedTile.stateId >= 0) {
           view.selectedStateId = parsedTile.stateId;
         }
+      } else {
+        view.tileSky = null;
       }
-    } catch (_) {}
+    } catch (_) {
+      view.tileSky = null;
+    }
+  } else {
+    view.tileSky = null;
   }
 
   if (view.selectedStateId !== undefined && view.selectedStateId >= 0) {
@@ -3442,9 +3955,41 @@ function buildHistoryInspectorBundle(view) {
     window.requestAnimationFrame(() => paintStateZoomCanvas(view));
     setTimeout(() => paintStateZoomCanvas(view), 45);
   }
+  if (tileView.hasTile && view.tileSky && typeof window !== "undefined") {
+    window.requestAnimationFrame(() => {
+      paintTileSkyCanvas(view);
+      ensureTileSkyLoop(view);
+    });
+    setTimeout(() => {
+      paintTileSkyCanvas(view);
+      ensureTileSkyLoop(view);
+    }, 45);
+  }
 
   return { stateView, tileView, languageDetail, nationDetail };
 }
+
+export const setTileSkyYear = (year) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.tileSkyYear = Math.max(0, year | 0);
+  refreshActiveInspectorView(activeView);
+};
+
+export const setTileSkyDay = (day) => () => {
+  if (!activeView || !activeView.session) return;
+  const maxDay =
+    activeView.tileSky && activeView.tileSky.daysPerYear
+      ? Math.max(0, activeView.tileSky.daysPerYear - 1)
+      : 364;
+  activeView.tileSkyDay = Math.max(0, Math.min(maxDay, day | 0));
+  refreshActiveInspectorView(activeView);
+};
+
+export const toggleTileSkyAnimation = () => {
+  if (!activeView || !activeView.session) return;
+  activeView.tileSkyAnimated = activeView.tileSkyAnimated === false;
+  refreshActiveInspectorView(activeView);
+};
 
 export const selectInspectorLanguage = (langId) => () => {
   if (!activeView || !activeView.session) return;
