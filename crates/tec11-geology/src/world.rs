@@ -666,6 +666,54 @@ impl WorldSimulation {
         }
     }
 
+    pub fn inspect_state_for_tile(
+        &self,
+        tile_idx: usize,
+    ) -> Option<crate::history::StateInspectionView> {
+        match &self.stage {
+            WorldStageState::History(hist) => hist.inspect_state_for_tile(tile_idx),
+            _ => None,
+        }
+    }
+
+    pub fn inspect_state(
+        &self,
+        state_id: u32,
+        selected_fine_idx: Option<usize>,
+    ) -> Option<crate::history::StateInspectionView> {
+        match &self.stage {
+            WorldStageState::History(hist) => hist.inspect_state(state_id, selected_fine_idx),
+            _ => None,
+        }
+    }
+
+    pub fn inspect_tile_structured(
+        &self,
+        tile_idx: usize,
+    ) -> Option<crate::history::TileInspectionView> {
+        match &self.stage {
+            WorldStageState::History(hist) => hist.inspect_tile_structured(tile_idx),
+            _ => None,
+        }
+    }
+
+    pub fn inspect_language(
+        &self,
+        lang_id: u32,
+    ) -> Option<crate::history::LanguageDetailView> {
+        match &self.stage {
+            WorldStageState::History(hist) => hist.inspect_language(lang_id),
+            _ => None,
+        }
+    }
+
+    pub fn inspect_nation(&self, nat_id: u32) -> Option<crate::history::NationDetailView> {
+        match &self.stage {
+            WorldStageState::History(hist) => hist.inspect_nation(nat_id),
+            _ => None,
+        }
+    }
+
     fn format_geology_and_climate_tree(
         tile_idx: usize,
         tile: &TileGeology,

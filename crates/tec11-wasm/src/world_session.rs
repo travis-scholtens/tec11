@@ -243,6 +243,42 @@ impl WasmWorldSession {
         self.sim.inspect_tile(tile_idx)
     }
 
+    pub fn inspect_state_for_tile_json(&self, tile_idx: usize) -> String {
+        self.sim
+            .inspect_state_for_tile(tile_idx)
+            .map(|v| v.to_json())
+            .unwrap_or_else(|| "{\"hasState\":false}".to_string())
+    }
+
+    pub fn inspect_state_json(&self, state_id: u32, selected_tile: i32) -> String {
+        let sel = (selected_tile >= 0).then_some(selected_tile as usize);
+        self.sim
+            .inspect_state(state_id, sel)
+            .map(|v| v.to_json())
+            .unwrap_or_else(|| "{\"hasState\":false}".to_string())
+    }
+
+    pub fn inspect_tile_structured_json(&self, tile_idx: usize) -> String {
+        self.sim
+            .inspect_tile_structured(tile_idx)
+            .map(|v| v.to_json())
+            .unwrap_or_else(|| "{\"hasTile\":false}".to_string())
+    }
+
+    pub fn inspect_language_json(&self, lang_id: u32) -> String {
+        self.sim
+            .inspect_language(lang_id)
+            .map(|v| v.to_json())
+            .unwrap_or_else(|| "{\"hasLanguage\":false}".to_string())
+    }
+
+    pub fn inspect_nation_json(&self, nat_id: u32) -> String {
+        self.sim
+            .inspect_nation(nat_id)
+            .map(|v| v.to_json())
+            .unwrap_or_else(|| "{\"hasNation\":false}".to_string())
+    }
+
     pub fn tile_colors_rgb(&self, aspect: &str, selected_tile: i32) -> Vec<f32> {
         self.sim.tile_colors_rgb(
             aspect,

@@ -3081,6 +3081,395 @@ function updateHistoryDataBuffers(view, rebuildGeometry = false) {
   view.paint();
 }
 
+function emptyStateView() {
+  return {
+    hasState: false,
+    stateId: -1,
+    stateName: "",
+    colorCss: "rgb(148, 163, 184)",
+    continents: "",
+    technology: "",
+    populationText: "",
+    capacityText: "",
+    tileCount: 0,
+    asabiyaText: "",
+    nationalities: [],
+    languages: [],
+    exports: [],
+    imports: [],
+    tradePartners: [],
+    conflicts: [],
+    waterRoutes: [],
+  };
+}
+
+function emptyTileView() {
+  return {
+    hasTile: false,
+    displayIdx: -1,
+    stateId: -1,
+    title: "",
+    locationSummary: "",
+    populationSummary: "",
+    technology: "",
+    nationalities: [],
+    languages: [],
+    flora: [],
+    fauna: [],
+  };
+}
+
+function emptyLanguageDetail() {
+  return {
+    hasLanguage: false,
+    langId: -1,
+    name: "",
+    totalSpeakersText: "",
+    phonemeSummary: "",
+    speakersByLocation: [],
+    speakersByNation: [],
+    lexicon: [],
+  };
+}
+
+function emptyNationDetail() {
+  return {
+    hasNation: false,
+    natId: -1,
+    name: "",
+    totalPopText: "",
+    originSummary: "",
+    heritageSummary: "",
+    currentLocations: [],
+    spokenLanguages: [],
+  };
+}
+
+function pointInPolygon2D(u, v, pts) {
+  if (!pts || pts.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i][0];
+    const yi = pts[i][1];
+    const xj = pts[j][0];
+    const yj = pts[j][1];
+    const intersect =
+      yi > v !== yj > v && u < ((xj - xi) * (v - yi)) / (yj - yi + 1e-12) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function refreshActiveInspectorView(view) {
+  if (!view || !view.session) return;
+  if (view.inspectorMode === "history" && view.setHistoryInfo) {
+    updateHistoryDataBuffers(view, false);
+    view.setHistoryInfo(buildHistoryInfo(view))();
+  } else if (view.inspectorMode === "travel" && view.setTravelInfo) {
+    updateTravelDataBuffers(view, false);
+    view.setTravelInfo(buildTravelInfo(view))();
+  } else if (view.inspectorMode === "world" && view.setWorldInfo) {
+    updateWorldDataBuffers(view, false);
+    view.setWorldInfo(buildWorldInfo(view))();
+  }
+}
+
+function paintStateZoomCanvas(view) {
+  const canvas = document.getElementById("state-zoom-canvas");
+  if (!canvas || !view || !view.stateMapPolygons || view.stateMapPolygons.length === 0) {
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const cssW = Math.max(220, Math.round(rect.width || 270));
+  const cssH = Math.max(170, Math.round(rect.height || 195));
+  const dpr = window.devicePixelRatio || 1;
+  const targetW = Math.round(cssW * dpr);
+  const targetH = Math.round(cssH * dpr);
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.scale(dpr, dpr);
+
+  ctx.fillStyle = "#081224";
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  const size = Math.min(cssW, cssH);
+  const offsetX = (cssW - size) * 0.5;
+  const offsetY = (cssH - size) * 0.5;
+
+  const tracePoly = (pts) => {
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const px = offsetX + pts[i][0] * size;
+      const py = offsetY + pts[i][1] * size;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  };
+
+  // Pass 1: Context tiles (coastal water, unclaimed land, neighboring states)
+  for (const poly of view.stateMapPolygons) {
+    if (poly.isInSelectedState || !poly.points || poly.points.length < 3) continue;
+    tracePoly(poly.points);
+    ctx.fillStyle = rgbFloatToCss(poly.rgb, 40, 60, 50);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(15, 23, 42, 0.7)";
+    ctx.lineWidth = 0.75;
+    ctx.stroke();
+  }
+
+  // Pass 2: Selected state's tiles
+  for (const poly of view.stateMapPolygons) {
+    if (!poly.isInSelectedState || !poly.points || poly.points.length < 3) continue;
+    tracePoly(poly.points);
+    ctx.fillStyle = rgbFloatToCss(poly.rgb, 60, 180, 90);
+    ctx.fill();
+    ctx.strokeStyle = poly.isRiver ? "rgba(56, 189, 248, 0.9)" : "rgba(226, 232, 240, 0.85)";
+    ctx.lineWidth = 1.15;
+    ctx.stroke();
+  }
+
+  // Pass 3: Selected tile highlight & capital star
+  for (const poly of view.stateMapPolygons) {
+    if (!poly.points || poly.points.length < 3) continue;
+    if (poly.isSelectedTile) {
+      tracePoly(poly.points);
+      ctx.strokeStyle = "#facc15";
+      ctx.lineWidth = 2.6;
+      ctx.stroke();
+    }
+    if (poly.isCapital) {
+      let cx = 0;
+      let cy = 0;
+      for (const pt of poly.points) {
+        cx += pt[0];
+        cy += pt[1];
+      }
+      cx = offsetX + (cx / poly.points.length) * size;
+      cy = offsetY + (cy / poly.points.length) * size;
+      ctx.fillStyle = "#fef08a";
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 4.0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+
+  canvas.onclick = (ev) => {
+    if (!view || !view.stateMapPolygons) return;
+    const r = canvas.getBoundingClientRect();
+    const clickX = ev.clientX - r.left;
+    const clickY = ev.clientY - r.top;
+    const w = Math.max(1, r.width);
+    const h = Math.max(1, r.height);
+    const s = Math.min(w, h);
+    const ox = (w - s) * 0.5;
+    const oy = (h - s) * 0.5;
+    const u = (clickX - ox) / s;
+    const v = (clickY - oy) / s;
+
+    let hit = null;
+    for (const poly of view.stateMapPolygons) {
+      if (poly.isInSelectedState && pointInPolygon2D(u, v, poly.points)) {
+        hit = poly;
+        break;
+      }
+    }
+    if (!hit) {
+      for (const poly of view.stateMapPolygons) {
+        if (pointInPolygon2D(u, v, poly.points)) {
+          hit = poly;
+          break;
+        }
+      }
+    }
+    if (!hit) {
+      let bestDist2 = 0.004;
+      for (const poly of view.stateMapPolygons) {
+        if (!poly.points || poly.points.length === 0) continue;
+        let cx = 0;
+        let cy = 0;
+        for (const pt of poly.points) {
+          cx += pt[0];
+          cy += pt[1];
+        }
+        cx /= poly.points.length;
+        cy /= poly.points.length;
+        const d2 = (u - cx) * (u - cx) + (v - cy) * (v - cy);
+        if (d2 < bestDist2) {
+          bestDist2 = d2;
+          hit = poly;
+        }
+      }
+    }
+    if (hit) {
+      view.selectedTileIdx = hit.displayIdx;
+      if (hit.stateId >= 0) {
+        view.selectedStateId = hit.stateId;
+      }
+      refreshActiveInspectorView(view);
+    }
+  };
+}
+
+function buildHistoryInspectorBundle(view) {
+  const s = view.session;
+  let stateView = emptyStateView();
+  let tileView = emptyTileView();
+  let languageDetail = emptyLanguageDetail();
+  let nationDetail = emptyNationDetail();
+
+  const canInspectHistory =
+    typeof s.inspect_tile_structured_json === "function" &&
+    (typeof s.stage_index !== "function" || s.stage_index() === 2);
+
+  if (!canInspectHistory) {
+    view.stateMapPolygons = [];
+    return { stateView, tileView, languageDetail, nationDetail };
+  }
+
+  if (view.selectedTileIdx >= 0) {
+    try {
+      const parsedTile = JSON.parse(s.inspect_tile_structured_json(view.selectedTileIdx));
+      if (parsedTile && parsedTile.hasTile) {
+        tileView = {
+          hasTile: true,
+          displayIdx: parsedTile.displayIdx ?? view.selectedTileIdx,
+          stateId: parsedTile.stateId ?? -1,
+          title: parsedTile.title || "",
+          locationSummary: parsedTile.locationSummary || "",
+          populationSummary: parsedTile.populationSummary || "",
+          technology: parsedTile.technology || "",
+          nationalities: parsedTile.nationalities || [],
+          languages: parsedTile.languages || [],
+          flora: parsedTile.flora || [],
+          fauna: parsedTile.fauna || [],
+        };
+        if (parsedTile.stateId !== undefined && parsedTile.stateId >= 0) {
+          view.selectedStateId = parsedTile.stateId;
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (view.selectedStateId !== undefined && view.selectedStateId >= 0) {
+    try {
+      let parsedState = JSON.parse(
+        s.inspect_state_json(view.selectedStateId, view.selectedTileIdx)
+      );
+      if ((!parsedState || !parsedState.hasState) && view.selectedTileIdx >= 0) {
+        parsedState = JSON.parse(s.inspect_state_for_tile_json(view.selectedTileIdx));
+      }
+      if (parsedState && parsedState.hasState) {
+        view.selectedStateId = parsedState.stateId;
+        view.stateMapPolygons = parsedState.mapPolygons || [];
+        stateView = {
+          hasState: true,
+          stateId: parsedState.stateId,
+          stateName: parsedState.stateName || "",
+          colorCss: parsedState.colorCss || "rgb(38, 242, 89)",
+          continents: parsedState.continents || "",
+          technology: parsedState.technology || "",
+          populationText: parsedState.populationText || "",
+          capacityText: parsedState.capacityText || "",
+          tileCount: parsedState.tileCount || 0,
+          asabiyaText: parsedState.asabiyaText || "",
+          nationalities: parsedState.nationalities || [],
+          languages: parsedState.languages || [],
+          exports: parsedState.exports || [],
+          imports: parsedState.imports || [],
+          tradePartners: parsedState.tradePartners || [],
+          conflicts: parsedState.conflicts || [],
+          waterRoutes: parsedState.waterRoutes || [],
+        };
+      } else {
+        view.stateMapPolygons = [];
+      }
+    } catch (_) {
+      view.stateMapPolygons = [];
+    }
+  } else {
+    view.stateMapPolygons = [];
+  }
+
+  if (view.selectedLangId !== undefined && view.selectedLangId >= 0) {
+    try {
+      const parsedLang = JSON.parse(s.inspect_language_json(view.selectedLangId));
+      if (parsedLang && parsedLang.hasLanguage) {
+        languageDetail = {
+          hasLanguage: true,
+          langId: parsedLang.langId,
+          name: parsedLang.name || "",
+          totalSpeakersText: parsedLang.totalSpeakersText || "",
+          phonemeSummary: parsedLang.phonemeSummary || "",
+          speakersByLocation: parsedLang.speakersByLocation || [],
+          speakersByNation: parsedLang.speakersByNation || [],
+          lexicon: parsedLang.lexicon || [],
+        };
+      }
+    } catch (_) {}
+  }
+
+  if (view.selectedNationId !== undefined && view.selectedNationId >= 0) {
+    try {
+      const parsedNat = JSON.parse(s.inspect_nation_json(view.selectedNationId));
+      if (parsedNat && parsedNat.hasNation) {
+        nationDetail = {
+          hasNation: true,
+          natId: parsedNat.natId,
+          name: parsedNat.name || "",
+          totalPopText: parsedNat.totalPopText || "",
+          originSummary: parsedNat.originSummary || "",
+          heritageSummary: parsedNat.heritageSummary || "",
+          currentLocations: parsedNat.currentLocations || [],
+          spokenLanguages: parsedNat.spokenLanguages || [],
+        };
+      }
+    } catch (_) {}
+  }
+
+  if (stateView.hasState && typeof window !== "undefined") {
+    window.requestAnimationFrame(() => paintStateZoomCanvas(view));
+    setTimeout(() => paintStateZoomCanvas(view), 45);
+  }
+
+  return { stateView, tileView, languageDetail, nationDetail };
+}
+
+export const selectInspectorLanguage = (langId) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.selectedLangId = activeView.selectedLangId === langId ? -1 : langId;
+  refreshActiveInspectorView(activeView);
+};
+
+export const selectInspectorNation = (natId) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.selectedNationId = activeView.selectedNationId === natId ? -1 : natId;
+  refreshActiveInspectorView(activeView);
+};
+
+export const closeInspectorLanguage = () => {
+  if (!activeView || !activeView.session) return;
+  activeView.selectedLangId = -1;
+  refreshActiveInspectorView(activeView);
+};
+
+export const closeInspectorNation = () => {
+  if (!activeView || !activeView.session) return;
+  activeView.selectedNationId = -1;
+  refreshActiveInspectorView(activeView);
+};
+
 function buildHistoryInfo(view) {
   const s = view.session;
   const planetName = s.is_custom_planet()
@@ -3089,7 +3478,8 @@ function buildHistoryInfo(view) {
   const selectedReport =
     view.selectedTileIdx >= 0
       ? s.inspect_tile(view.selectedTileIdx)
-      : "Click any state on the globe to highlight it (green), its trade partners (yellow), and its conflict rivals (red), and inspect its demographics and lexicon.";
+      : "Click any state on the globe to open its zoomed-in State Map, demographics, imports & exports, and diplomacy, or click any tile in the state to inspect its local population and native flora & fauna.";
+  const bundle = buildHistoryInspectorBundle(view);
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -3100,6 +3490,10 @@ function buildHistoryInfo(view) {
     isRunning: Boolean(view.isRunning),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
     selectedReport,
+    stateView: bundle.stateView,
+    tileView: bundle.tileView,
+    languageDetail: bundle.languageDetail,
+    nationDetail: bundle.nationDetail,
   };
 }
 
@@ -3135,9 +3529,14 @@ export const mountHistoryView =
 
     const view = createBaseSphereView(canvas, false);
     view.session = new WasmHistorySession();
+    view.inspectorMode = "history";
     view.aspect = aspect;
     view.showRivers = showRivers;
     view.selectedTileIdx = -1;
+    view.selectedStateId = -1;
+    view.selectedLangId = -1;
+    view.selectedNationId = -1;
+    view.stateMapPolygons = [];
     view.isRunning = false;
     view.timerId = null;
     view.setHistoryInfo = setHistoryInfo;
@@ -3162,6 +3561,7 @@ export const mountHistoryView =
       const hits = raycaster.intersectObject(view.mesh, false);
       if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
         view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        view.selectedStateId = -1;
         updateHistoryDataBuffers(view, false);
         view.setHistoryInfo(buildHistoryInfo(view))();
       }
@@ -3208,6 +3608,9 @@ export const resetHistory = (setHistoryInfo) => () => {
   stopHistoryLoop(activeView);
   activeView.session.reset();
   activeView.selectedTileIdx = -1;
+  activeView.selectedStateId = -1;
+  activeView.selectedLangId = -1;
+  activeView.selectedNationId = -1;
   updateHistoryDataBuffers(activeView, false);
   setHistoryInfo(buildHistoryInfo(activeView))();
 };
@@ -3241,6 +3644,9 @@ export const loadEarthIntoHistory = (setHistoryInfo) => () => {
   activeClimateSnapshotBytes = null;
   activeView.session.load_earth();
   activeView.selectedTileIdx = -1;
+  activeView.selectedStateId = -1;
+  activeView.selectedLangId = -1;
+  activeView.selectedNationId = -1;
   updateHistoryDataBuffers(activeView, true);
   setHistoryInfo(buildHistoryInfo(activeView))();
 };
@@ -3253,6 +3659,9 @@ export const loadSavedPlanetIntoHistory = (setHistoryInfo) => () => {
   if (activeView.session.load_snapshot_bytes(saved)) {
     activeClimateSnapshotBytes = saved;
     activeView.selectedTileIdx = -1;
+    activeView.selectedStateId = -1;
+    activeView.selectedLangId = -1;
+    activeView.selectedNationId = -1;
     updateHistoryDataBuffers(activeView, true);
     setHistoryInfo(buildHistoryInfo(activeView))();
   }
@@ -3267,6 +3676,9 @@ export const loadFilePlanetIntoHistory = (setHistoryInfo) => () => {
       storeSavedSnapshotBytes(bytes);
       activeClimateSnapshotBytes = bytes;
       activeView.selectedTileIdx = -1;
+      activeView.selectedStateId = -1;
+      activeView.selectedLangId = -1;
+      activeView.selectedNationId = -1;
       updateHistoryDataBuffers(activeView, true);
       setHistoryInfo(buildHistoryInfo(activeView))();
     }
@@ -3314,6 +3726,7 @@ function buildTravelInfo(view) {
     view.selectedTileIdx >= 0
       ? s.inspect_travel_tile(view.selectedTileIdx)
       : "Click any coastal port, ocean tile, or river corridor on the globe to inspect prevailing wind & current vectors and travel routes (yellow = active trade, red = naval conflict, cyan/emerald = connected sea/river lane, violet = hypothetical/unconnected drift).";
+  const bundle = buildHistoryInspectorBundle(view);
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -3329,6 +3742,10 @@ function buildTravelInfo(view) {
     isRunning: Boolean(view.isRunning),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
     selectedReport,
+    stateView: bundle.stateView,
+    tileView: bundle.tileView,
+    languageDetail: bundle.languageDetail,
+    nationDetail: bundle.nationDetail,
   };
 }
 
@@ -3361,11 +3778,16 @@ export const mountTravelView =
 
     const view = createBaseSphereView(canvas, false);
     view.session = new WasmHistorySession();
+    view.inspectorMode = "travel";
     view.aspect = aspect;
     view.showPotential = showPotential;
     view.showWindsCurrents = showWindsCurrents;
     view.showRivers = showRivers;
     view.selectedTileIdx = -1;
+    view.selectedStateId = -1;
+    view.selectedLangId = -1;
+    view.selectedNationId = -1;
+    view.stateMapPolygons = [];
     view.isRunning = false;
     view.timerId = null;
     view.setTravelInfo = setTravelInfo;
@@ -3390,6 +3812,7 @@ export const mountTravelView =
       const hits = raycaster.intersectObject(view.mesh, false);
       if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
         view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        view.selectedStateId = -1;
         updateTravelDataBuffers(view, false);
         view.setTravelInfo(buildTravelInfo(view))();
       }
@@ -3436,6 +3859,9 @@ export const resetTravel = (setTravelInfo) => () => {
   stopHistoryLoop(activeView);
   activeView.session.reset();
   activeView.selectedTileIdx = -1;
+  activeView.selectedStateId = -1;
+  activeView.selectedLangId = -1;
+  activeView.selectedNationId = -1;
   updateTravelDataBuffers(activeView, false);
   setTravelInfo(buildTravelInfo(activeView))();
 };
@@ -3467,6 +3893,9 @@ export const loadEarthIntoTravel = (setTravelInfo) => () => {
   activeClimateSnapshotBytes = null;
   activeView.session.load_earth();
   activeView.selectedTileIdx = -1;
+  activeView.selectedStateId = -1;
+  activeView.selectedLangId = -1;
+  activeView.selectedNationId = -1;
   updateTravelDataBuffers(activeView, true);
   setTravelInfo(buildTravelInfo(activeView))();
 };
@@ -3479,6 +3908,9 @@ export const loadSavedPlanetIntoTravel = (setTravelInfo) => () => {
   if (activeView.session.load_snapshot_bytes(saved)) {
     activeClimateSnapshotBytes = saved;
     activeView.selectedTileIdx = -1;
+    activeView.selectedStateId = -1;
+    activeView.selectedLangId = -1;
+    activeView.selectedNationId = -1;
     updateTravelDataBuffers(activeView, true);
     setTravelInfo(buildTravelInfo(activeView))();
   }
@@ -3493,6 +3925,9 @@ export const loadFilePlanetIntoTravel = (setTravelInfo) => () => {
       storeSavedSnapshotBytes(bytes);
       activeClimateSnapshotBytes = bytes;
       activeView.selectedTileIdx = -1;
+      activeView.selectedStateId = -1;
+      activeView.selectedLangId = -1;
+      activeView.selectedNationId = -1;
       updateTravelDataBuffers(activeView, true);
       setTravelInfo(buildTravelInfo(activeView))();
     }
@@ -3569,6 +4004,7 @@ function buildWorldInfo(view) {
     moonCount === 0
       ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`
       : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`;
+  const bundle = buildHistoryInspectorBundle(view);
   return {
     stageIndex: s.stage_index(),
     stageName: s.stage_name(),
@@ -3602,6 +4038,10 @@ function buildWorldInfo(view) {
     isRunning: Boolean(view.isRunning),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
     selectedReport,
+    stateView: bundle.stateView,
+    tileView: bundle.tileView,
+    languageDetail: bundle.languageDetail,
+    nationDetail: bundle.nationDetail,
   };
 }
 
@@ -3662,8 +4102,13 @@ export const mountWorldView =
       moonDistRadii,
       meteorFreqTenths / 10.0
     );
+    view.inspectorMode = "world";
     view.aspect = aspect;
     view.selectedTileIdx = -1;
+    view.selectedStateId = -1;
+    view.selectedLangId = -1;
+    view.selectedNationId = -1;
+    view.stateMapPolygons = [];
     view.isRunning = false;
     view.timerId = null;
     view.setWorldInfo = setWorldInfo;
@@ -3684,6 +4129,7 @@ export const mountWorldView =
       const hits = raycaster.intersectObject(view.mesh, false);
       if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
         view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        view.selectedStateId = -1;
         updateWorldDataBuffers(view, false);
         view.setWorldInfo(buildWorldInfo(view))();
       }
@@ -3738,6 +4184,9 @@ export const createWorld =
       randomize
     );
     activeView.selectedTileIdx = -1;
+    activeView.selectedStateId = -1;
+    activeView.selectedLangId = -1;
+    activeView.selectedNationId = -1;
     updateWorldDataBuffers(activeView, true);
     setWorldInfo(buildWorldInfo(activeView))();
   };
@@ -3752,6 +4201,10 @@ export const stepWorld = (setWorldInfo) => () => {
 export const advanceWorldStage = (setWorldInfo) => () => {
   if (!activeView || !activeView.session) return;
   activeView.session.advance_stage();
+  activeView.selectedTileIdx = -1;
+  activeView.selectedStateId = -1;
+  activeView.selectedLangId = -1;
+  activeView.selectedNationId = -1;
   updateWorldDataBuffers(activeView, false);
   setWorldInfo(buildWorldInfo(activeView))();
 };
@@ -3803,6 +4256,9 @@ export const loadSavedPlanetIntoWorld = (setWorldInfo) => () => {
   if (activeView.session.load_snapshot_bytes(saved)) {
     activeClimateSnapshotBytes = saved;
     activeView.selectedTileIdx = -1;
+    activeView.selectedStateId = -1;
+    activeView.selectedLangId = -1;
+    activeView.selectedNationId = -1;
     updateWorldDataBuffers(activeView, true);
     setWorldInfo(buildWorldInfo(activeView))();
   }
@@ -3817,6 +4273,9 @@ export const loadFilePlanetIntoWorld = (setWorldInfo) => () => {
       storeSavedSnapshotBytes(bytes);
       activeClimateSnapshotBytes = bytes;
       activeView.selectedTileIdx = -1;
+      activeView.selectedStateId = -1;
+      activeView.selectedLangId = -1;
+      activeView.selectedNationId = -1;
       updateWorldDataBuffers(activeView, true);
       setWorldInfo(buildWorldInfo(activeView))();
     }

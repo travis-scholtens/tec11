@@ -4,6 +4,7 @@ module Tec11.App
 
 import Prelude
 
+import Data.Array as Array
 import Data.Int as Int
 import Data.Maybe (Maybe(..))
 import Data.Tuple.Nested ((/\))
@@ -11,7 +12,7 @@ import Effect (Effect)
 import React.Basic.DOM as R
 import React.Basic.DOM.Events (capture_, targetValue)
 import React.Basic.Events (handler)
-import React.Basic.Hooks (Component, component, useEffect, useEffectOnce, useState')
+import React.Basic.Hooks (Component, JSX, component, useEffect, useEffectOnce, useState')
 import React.Basic.Hooks as React
 
 data Screen
@@ -173,6 +174,137 @@ type TerrainInfo =
   , selectedReport :: String
   }
 
+type DemographicShareItem =
+  { id :: Int
+  , name :: String
+  , popText :: String
+  , percentText :: String
+  }
+
+type StateViewInfo =
+  { hasState :: Boolean
+  , stateId :: Int
+  , stateName :: String
+  , colorCss :: String
+  , continents :: String
+  , technology :: String
+  , populationText :: String
+  , capacityText :: String
+  , tileCount :: Int
+  , asabiyaText :: String
+  , nationalities :: Array DemographicShareItem
+  , languages :: Array DemographicShareItem
+  , exports :: Array String
+  , imports :: Array String
+  , tradePartners :: Array String
+  , conflicts :: Array String
+  , waterRoutes :: Array String
+  }
+
+type TileViewInfo =
+  { hasTile :: Boolean
+  , displayIdx :: Int
+  , stateId :: Int
+  , title :: String
+  , locationSummary :: String
+  , populationSummary :: String
+  , technology :: String
+  , nationalities :: Array DemographicShareItem
+  , languages :: Array DemographicShareItem
+  , flora :: Array String
+  , fauna :: Array String
+  }
+
+type LexiconEntryItem =
+  { category :: String
+  , gloss :: String
+  , orthography :: String
+  , ipa :: String
+  , etymology :: String
+  }
+
+type LanguageDetailInfo =
+  { hasLanguage :: Boolean
+  , langId :: Int
+  , name :: String
+  , totalSpeakersText :: String
+  , phonemeSummary :: String
+  , speakersByLocation :: Array String
+  , speakersByNation :: Array DemographicShareItem
+  , lexicon :: Array LexiconEntryItem
+  }
+
+type NationDetailInfo =
+  { hasNation :: Boolean
+  , natId :: Int
+  , name :: String
+  , totalPopText :: String
+  , originSummary :: String
+  , heritageSummary :: String
+  , currentLocations :: Array String
+  , spokenLanguages :: Array DemographicShareItem
+  }
+
+defaultStateViewInfo :: StateViewInfo
+defaultStateViewInfo =
+  { hasState: false
+  , stateId: -1
+  , stateName: ""
+  , colorCss: "rgb(148, 163, 184)"
+  , continents: ""
+  , technology: ""
+  , populationText: ""
+  , capacityText: ""
+  , tileCount: 0
+  , asabiyaText: ""
+  , nationalities: []
+  , languages: []
+  , exports: []
+  , imports: []
+  , tradePartners: []
+  , conflicts: []
+  , waterRoutes: []
+  }
+
+defaultTileViewInfo :: TileViewInfo
+defaultTileViewInfo =
+  { hasTile: false
+  , displayIdx: -1
+  , stateId: -1
+  , title: ""
+  , locationSummary: ""
+  , populationSummary: ""
+  , technology: ""
+  , nationalities: []
+  , languages: []
+  , flora: []
+  , fauna: []
+  }
+
+defaultLanguageDetailInfo :: LanguageDetailInfo
+defaultLanguageDetailInfo =
+  { hasLanguage: false
+  , langId: -1
+  , name: ""
+  , totalSpeakersText: ""
+  , phonemeSummary: ""
+  , speakersByLocation: []
+  , speakersByNation: []
+  , lexicon: []
+  }
+
+defaultNationDetailInfo :: NationDetailInfo
+defaultNationDetailInfo =
+  { hasNation: false
+  , natId: -1
+  , name: ""
+  , totalPopText: ""
+  , originSummary: ""
+  , heritageSummary: ""
+  , currentLocations: []
+  , spokenLanguages: []
+  }
+
 type HistoryInfo =
   { planetName :: String
   , tileCount :: Int
@@ -183,6 +315,10 @@ type HistoryInfo =
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
   , selectedReport :: String
+  , stateView :: StateViewInfo
+  , tileView :: TileViewInfo
+  , languageDetail :: LanguageDetailInfo
+  , nationDetail :: NationDetailInfo
   }
 
 type TravelInfo =
@@ -200,6 +336,10 @@ type TravelInfo =
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
   , selectedReport :: String
+  , stateView :: StateViewInfo
+  , tileView :: TileViewInfo
+  , languageDetail :: LanguageDetailInfo
+  , nationDetail :: NationDetailInfo
   }
 
 type WorldInfo =
@@ -235,6 +375,10 @@ type WorldInfo =
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
   , selectedReport :: String
+  , stateView :: StateViewInfo
+  , tileView :: TileViewInfo
+  , languageDetail :: LanguageDetailInfo
+  , nationDetail :: NationDetailInfo
   }
 
 type MoonInfo =
@@ -468,8 +612,432 @@ foreign import loadHipparcosIntoSun :: (SunInfo -> Effect Unit) -> Effect Unit
 foreign import setSunAtmosphere :: Int -> (SunInfo -> Effect Unit) -> Effect Unit
 foreign import setSunDisplayOptions :: String -> Boolean -> Boolean -> Effect Unit
 
--- Shared viewport rotation FFI
+-- Shared viewport rotation & two-level State/Tile/Language/Nation inspector FFI
 foreign import rotateGrid :: Number -> Effect Unit
+foreign import selectInspectorLanguage :: Int -> Effect Unit
+foreign import selectInspectorNation :: Int -> Effect Unit
+foreign import closeInspectorLanguage :: Effect Unit
+foreign import closeInspectorNation :: Effect Unit
+
+renderDemographicPills :: Array DemographicShareItem -> Int -> (Int -> Effect Unit) -> String -> JSX
+renderDemographicPills items activeId onSelect emptyText =
+  if Array.null items then
+    R.span
+      { style: R.css { color: "#94a3b8", fontSize: "0.78rem" }
+      , children: [ R.text emptyText ]
+      }
+  else
+    R.div
+      { style: R.css { display: "flex", flexWrap: "wrap", gap: "4px", marginTop: "3px" }
+      , children:
+          map
+            ( \item ->
+                let
+                  isSelected = item.id == activeId
+                in
+                  R.button
+                    { className: if isSelected then "action-btn" else "action-btn secondary"
+                    , style:
+                        R.css
+                          { padding: "2px 7px"
+                          , fontSize: "0.75rem"
+                          , lineHeight: "1.25"
+                          , borderRadius: "999px"
+                          , border: if isSelected then "1px solid #38bdf8" else "1px solid #334155"
+                          }
+                    , onClick: capture_ (onSelect item.id)
+                    , children:
+                        [ R.text (item.name <> " (" <> item.percentText <> ")") ]
+                    }
+            )
+            items
+      }
+
+renderStringBulletList :: Array String -> String -> JSX
+renderStringBulletList items emptyText =
+  if Array.null items then
+    R.div
+      { style: R.css { color: "#94a3b8", fontSize: "0.77rem" }
+      , children: [ R.text emptyText ]
+      }
+  else
+    R.div
+      { style: R.css { display: "flex", flexDirection: "column", gap: "2px", fontSize: "0.77rem", color: "#e2e8f0" }
+      , children:
+          map
+            (\line -> R.div { children: [ R.text ("• " <> line) ] })
+            items
+      }
+
+renderLanguageDetailCard :: LanguageDetailInfo -> Int -> JSX
+renderLanguageDetailCard lang activeNationId =
+  if not lang.hasLanguage then
+    React.empty
+  else
+    R.div
+      { id: "inspector-language-card"
+      , className: "tile-details-box"
+      , style:
+          R.css
+            { border: "1px solid #38bdf8"
+            , backgroundColor: "rgba(15, 23, 42, 0.92)"
+            , padding: "8px 10px"
+            , marginTop: "6px"
+            , maxHeight: "310px"
+            , overflowY: "auto"
+            }
+      , children:
+          [ R.div
+              { style: R.css { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }
+              , children:
+                  [ R.div
+                      { style: R.css { fontWeight: "700", color: "#7dd3fc", fontSize: "0.86rem" }
+                      , children: [ R.text ("Language: " <> lang.name) ]
+                      }
+                  , R.button
+                      { className: "action-btn secondary"
+                      , style: R.css { padding: "1px 7px", fontSize: "0.72rem" }
+                      , onClick: capture_ closeInspectorLanguage
+                      , children: [ R.text "Close ×" ]
+                      }
+                  ]
+              }
+          , R.div
+              { style: R.css { fontSize: "0.76rem", color: "#cbd5e1", marginBottom: "5px" }
+              , children: [ R.text ("Speakers: " <> lang.totalSpeakersText <> " | Phonology: " <> lang.phonemeSummary) ]
+              }
+          , R.div
+              { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#93c5fd", marginTop: "4px" }
+              , children: [ R.text "Where It Is Spoken (States & Continents):" ]
+              }
+          , renderStringBulletList lang.speakersByLocation "No active speakers"
+          , R.div
+              { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#93c5fd", marginTop: "6px" }
+              , children: [ R.text "Who Speaks It (click nationality for details):" ]
+              }
+          , renderDemographicPills lang.speakersByNation activeNationId selectInspectorNation "None"
+          , R.div
+              { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#93c5fd", marginTop: "7px", marginBottom: "3px" }
+              , children: [ R.text ("Full Lexicon (" <> show (Array.length lang.lexicon) <> " words):") ]
+              }
+          , R.div
+              { style:
+                  R.css
+                    { maxHeight: "155px"
+                    , overflowY: "auto"
+                    , borderTop: "1px solid #1e293b"
+                    , paddingTop: "4px"
+                    , display: "flex"
+                    , flexDirection: "column"
+                    , gap: "2px"
+                    }
+              , children:
+                  map
+                    ( \entry ->
+                        R.div
+                          { style: R.css { fontSize: "0.74rem", lineHeight: "1.3", color: "#e2e8f0" }
+                          , children:
+                              [ R.span
+                                  { style: R.css { color: "#94a3b8", marginRight: "4px" }
+                                  , children: [ R.text ("[" <> entry.category <> "] " <> entry.gloss <> ":") ]
+                                  }
+                              , R.span
+                                  { style: R.css { fontWeight: "600", color: "#f8fafc", marginRight: "4px" }
+                                  , children: [ R.text entry.orthography ]
+                                  }
+                              , R.span
+                                  { style: R.css { color: "#38bdf8", marginRight: "4px" }
+                                  , children: [ R.text ("[" <> entry.ipa <> "]") ]
+                                  }
+                              , R.span
+                                  { style: R.css { color: "#94a3b8", fontSize: "0.71rem" }
+                                  , children: [ R.text ("(" <> entry.etymology <> ")") ]
+                                  }
+                              ]
+                          }
+                    )
+                    lang.lexicon
+              }
+          ]
+      }
+
+renderNationDetailCard :: NationDetailInfo -> Int -> JSX
+renderNationDetailCard nat activeLangId =
+  if not nat.hasNation then
+    React.empty
+  else
+    R.div
+      { id: "inspector-nation-card"
+      , className: "tile-details-box"
+      , style:
+          R.css
+            { border: "1px solid #f59e0b"
+            , backgroundColor: "rgba(15, 23, 42, 0.92)"
+            , padding: "8px 10px"
+            , marginTop: "6px"
+            , maxHeight: "280px"
+            , overflowY: "auto"
+            }
+      , children:
+          [ R.div
+              { style: R.css { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }
+              , children:
+                  [ R.div
+                      { style: R.css { fontWeight: "700", color: "#fcd34d", fontSize: "0.86rem" }
+                      , children: [ R.text ("Nationality: " <> nat.name) ]
+                      }
+                  , R.button
+                      { className: "action-btn secondary"
+                      , style: R.css { padding: "1px 7px", fontSize: "0.72rem" }
+                      , onClick: capture_ closeInspectorNation
+                      , children: [ R.text "Close ×" ]
+                      }
+                  ]
+              }
+          , R.div
+              { style: R.css { fontSize: "0.76rem", color: "#cbd5e1", marginBottom: "4px" }
+              , children: [ R.text ("Total Population: " <> nat.totalPopText) ]
+              }
+          , R.div
+              { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#fde68a", marginTop: "4px" }
+              , children: [ R.text "Origin & Ancestral Homeland:" ]
+              }
+          , R.div
+              { style: R.css { fontSize: "0.76rem", color: "#e2e8f0" }
+              , children: [ R.text nat.originSummary ]
+              }
+          , R.div
+              { style: R.css { fontSize: "0.74rem", color: "#94a3b8", marginTop: "2px" }
+              , children: [ R.text nat.heritageSummary ]
+              }
+          , R.div
+              { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#fde68a", marginTop: "6px" }
+              , children: [ R.text "Where They Currently Live (States & Continents):" ]
+              }
+          , renderStringBulletList nat.currentLocations "Extinct / no active settlements"
+          , R.div
+              { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#fde68a", marginTop: "6px" }
+              , children: [ R.text "Languages Spoken (click language for lexicon):" ]
+              }
+          , renderDemographicPills nat.spokenLanguages activeLangId selectInspectorLanguage "None"
+          ]
+      }
+
+renderHistoryTwoLevelInspector
+  :: StateViewInfo
+  -> TileViewInfo
+  -> LanguageDetailInfo
+  -> NationDetailInfo
+  -> String
+  -> JSX
+renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
+  R.div
+    { id: "history-two-level-inspector"
+    , style: R.css { display: "flex", flexDirection: "column", gap: "6px" }
+    , children:
+        [ if not st.hasState && not tile.hasTile then
+            R.div
+              { id: "history-details-box"
+              , className: "tile-details-box"
+              , children: [ R.text fallbackPrompt ]
+              }
+          else
+            React.empty
+        , if st.hasState then
+            R.div
+              { id: "history-state-box"
+              , className: "tile-details-box"
+              , style:
+                  R.css
+                    { padding: "8px 10px"
+                    , maxHeight: "none"
+                    , overflowY: "visible"
+                    }
+              , children:
+                  [ R.div
+                      { style: R.css { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", marginBottom: "4px" }
+                      , children:
+                          [ R.div
+                              { style: R.css { display: "flex", alignItems: "center", gap: "6px" }
+                              , children:
+                                  [ R.span
+                                      { style:
+                                          R.css
+                                            { display: "inline-block"
+                                            , width: "12px"
+                                            , height: "12px"
+                                            , borderRadius: "3px"
+                                            , backgroundColor: st.colorCss
+                                            , border: "1px solid #f8fafc"
+                                            }
+                                      , children: []
+                                      }
+                                  , R.span
+                                      { style: R.css { fontWeight: "700", fontSize: "0.88rem", color: "#f8fafc" }
+                                      , children: [ R.text ("State: " <> st.stateName) ]
+                                      }
+                                  ]
+                              }
+                          , R.span
+                              { style: R.css { fontSize: "0.74rem", color: "#94a3b8" }
+                              , children: [ R.text (show st.tileCount <> " tiles | Pop " <> st.populationText <> " / " <> st.capacityText) ]
+                              }
+                          ]
+                      }
+                  , R.div
+                      { style: R.css { fontSize: "0.76rem", color: "#cbd5e1", marginBottom: "2px" }
+                      , children: [ R.text ("Continent: " <> st.continents <> " | Solidarity: " <> st.asabiyaText) ]
+                      }
+                  , R.div
+                      { style: R.css { fontSize: "0.76rem", color: "#86efac", marginBottom: "6px" }
+                      , children: [ R.text ("Technology: " <> st.technology) ]
+                      }
+                  , R.div
+                      { style: R.css { marginBottom: "6px" }
+                      , children:
+                          [ R.div
+                              { style: R.css { fontSize: "0.72rem", color: "#94a3b8", marginBottom: "3px" }
+                              , children: [ R.text "Zoomed State Map (centered projection — click any tile to inspect):" ]
+                              }
+                          , R.canvas
+                              { id: "state-zoom-canvas"
+                              , style:
+                                  R.css
+                                    { width: "100%"
+                                    , height: "190px"
+                                    , borderRadius: "6px"
+                                    , border: "1px solid #334155"
+                                    , cursor: "pointer"
+                                    , display: "block"
+                                    }
+                              }
+                          ]
+                      }
+                  , R.div
+                      { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#cbd5e1", marginTop: "4px" }
+                      , children: [ R.text "Nationalities in State (click for origin & diaspora):" ]
+                      }
+                  , renderDemographicPills st.nationalities (if nat.hasNation then nat.natId else -1) selectInspectorNation "None"
+                  , R.div
+                      { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#cbd5e1", marginTop: "6px" }
+                      , children: [ R.text "Languages in State (click for lexicon & speakers):" ]
+                      }
+                  , renderDemographicPills st.languages (if lang.hasLanguage then lang.langId else -1) selectInspectorLanguage "None"
+                  , R.div
+                      { style: R.css { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginTop: "6px" }
+                      , children:
+                          [ R.div
+                              { children:
+                                  [ R.div
+                                      { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#fde047" }
+                                      , children: [ R.text ("Trading Partners (" <> show (Array.length st.tradePartners) <> "):") ]
+                                      }
+                                  , renderStringBulletList st.tradePartners "None"
+                                  ]
+                              }
+                          , R.div
+                              { children:
+                                  [ R.div
+                                      { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#f87171" }
+                                      , children: [ R.text ("Current Conflicts (" <> show (Array.length st.conflicts) <> "):") ]
+                                      }
+                                  , renderStringBulletList st.conflicts "At Peace"
+                                  ]
+                              }
+                          ]
+                      }
+                  , R.div
+                      { style: R.css { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginTop: "6px" }
+                      , children:
+                          [ R.div
+                              { children:
+                                  [ R.div
+                                      { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#6ee7b7" }
+                                      , children: [ R.text ("Exports (" <> show (Array.length st.exports) <> "):") ]
+                                      }
+                                  , renderStringBulletList (Array.take 6 st.exports) "None"
+                                  ]
+                              }
+                          , R.div
+                              { children:
+                                  [ R.div
+                                      { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#93c5fd" }
+                                      , children: [ R.text ("Imports (" <> show (Array.length st.imports) <> "):") ]
+                                      }
+                                  , renderStringBulletList (Array.take 6 st.imports) "None"
+                                  ]
+                              }
+                          ]
+                      }
+                  ]
+              }
+          else
+            React.empty
+        , if tile.hasTile then
+            R.div
+              { id: "history-tile-box"
+              , className: "tile-details-box"
+              , style:
+                  R.css
+                    { padding: "8px 10px"
+                    , borderLeft: "3px solid #facc15"
+                    , maxHeight: "none"
+                    , overflowY: "visible"
+                    }
+              , children:
+                  [ R.div
+                      { style: R.css { fontWeight: "700", fontSize: "0.84rem", color: "#fef08a", marginBottom: "2px" }
+                      , children: [ R.text tile.title ]
+                      }
+                  , R.div
+                      { style: R.css { fontSize: "0.75rem", color: "#cbd5e1" }
+                      , children: [ R.text tile.locationSummary ]
+                      }
+                  , R.div
+                      { style: R.css { fontSize: "0.75rem", color: "#cbd5e1", marginBottom: "4px" }
+                      , children: [ R.text (tile.populationSummary <> " | Tech: " <> tile.technology) ]
+                      }
+                  , R.div
+                      { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#cbd5e1", marginTop: "4px" }
+                      , children: [ R.text "Tile Nationalities:" ]
+                      }
+                  , renderDemographicPills tile.nationalities (if nat.hasNation then nat.natId else -1) selectInspectorNation "Uninhabited"
+                  , R.div
+                      { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#cbd5e1", marginTop: "5px" }
+                      , children: [ R.text "Tile Languages:" ]
+                      }
+                  , renderDemographicPills tile.languages (if lang.hasLanguage then lang.langId else -1) selectInspectorLanguage "Uninhabited"
+                  , R.div
+                      { style: R.css { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginTop: "6px" }
+                      , children:
+                          [ R.div
+                              { children:
+                                  [ R.div
+                                      { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#86efac" }
+                                      , children: [ R.text ("Native Flora (" <> show (Array.length tile.flora) <> "):") ]
+                                      }
+                                  , renderStringBulletList tile.flora "None settled"
+                                  ]
+                              }
+                          , R.div
+                              { children:
+                                  [ R.div
+                                      { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#fdba74" }
+                                      , children: [ R.text ("Native Fauna (" <> show (Array.length tile.fauna) <> "):") ]
+                                      }
+                                  , renderStringBulletList tile.fauna "None settled"
+                                  ]
+                              }
+                          ]
+                      }
+                  ]
+              }
+          else
+            React.empty
+        , renderLanguageDetailCard lang (if nat.hasNation then nat.natId else -1)
+        , renderNationDetailCard nat (if lang.hasLanguage then lang.langId else -1)
+        ]
+    }
 
 mkApp :: Component Unit
 mkApp = do
@@ -642,7 +1210,11 @@ mkApp = do
       , populationText: "0"
       , isRunning: false
       , hasSavedPlanet: false
-      , selectedReport: "Click any state on the globe to inspect its demographics, diplomacy, and language lexicon."
+      , selectedReport: "Click any state on the globe to inspect its zoomed-in State Map, demographics, imports & exports, and diplomacy, or click any tile in the state to inspect its local population and native flora & fauna."
+      , stateView: defaultStateViewInfo
+      , tileView: defaultTileViewInfo
+      , languageDetail: defaultLanguageDetailInfo
+      , nationDetail: defaultNationDetailInfo
       }
 
     -- Travel mode state
@@ -669,6 +1241,10 @@ mkApp = do
       , isRunning: false
       , hasSavedPlanet: false
       , selectedReport: "Click any port, ocean current, or coastal state on the globe to inspect wind & current vectors, maritime sea lanes, and riverine corridors."
+      , stateView: defaultStateViewInfo
+      , tileView: defaultTileViewInfo
+      , languageDetail: defaultLanguageDetailInfo
+      , nationDetail: defaultNationDetailInfo
       }
 
     -- Complete World Simulation state (`world.py`, `worldpresenter.py`)
@@ -720,6 +1296,10 @@ mkApp = do
       , isRunning: false
       , hasSavedPlanet: false
       , selectedReport: "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree."
+      , stateView: defaultStateViewInfo
+      , tileView: defaultTileViewInfo
+      , languageDetail: defaultLanguageDetailInfo
+      , nationDetail: defaultNationDetailInfo
       }
 
     -- Moons & Tidal Erosion Sandbox state (`MoonScreen`)
@@ -3936,6 +4516,15 @@ mkApp = do
                                   , className: "tile-details-box"
                                   , children: [ R.text travelInfo.selectedReport ]
                                   }
+                              , if travelInfo.stateView.hasState || travelInfo.tileView.hasTile then
+                                  renderHistoryTwoLevelInspector
+                                    travelInfo.stateView
+                                    travelInfo.tileView
+                                    travelInfo.languageDetail
+                                    travelInfo.nationDetail
+                                    ""
+                                else
+                                  React.empty
                               ]
                           }
                       , R.div
@@ -4127,13 +4716,14 @@ mkApp = do
                           , children:
                               [ R.label
                                   { className: "control-label"
-                                  , children: [ R.text "State, Diplomacy & Lexicon (click globe)" ]
+                                  , children: [ R.text "State & Tile Inspector (click globe or zoomed state map)" ]
                                   }
-                              , R.div
-                                  { id: "history-details-box"
-                                  , className: "tile-details-box"
-                                  , children: [ R.text historyInfo.selectedReport ]
-                                  }
+                              , renderHistoryTwoLevelInspector
+                                  historyInfo.stateView
+                                  historyInfo.tileView
+                                  historyInfo.languageDetail
+                                  historyInfo.nationDetail
+                                  historyInfo.selectedReport
                               ]
                           }
                       , R.div
@@ -4270,13 +4860,28 @@ mkApp = do
                           , children:
                               [ R.label
                                   { className: "control-label"
-                                  , children: [ R.text "Tile Details (Layers, Climate, Population & Ancestry)" ]
+                                  , children:
+                                      [ R.text
+                                          ( if worldInfo.stageIndex == 2 then
+                                              "State & Tile Inspector (click globe or zoomed state map)"
+                                            else
+                                              "Tile Details (Layers, Climate, Population & Ancestry)"
+                                          )
+                                      ]
                                   }
-                              , R.div
-                                  { id: "world-details-box"
-                                  , className: "tile-details-box"
-                                  , children: [ R.text worldInfo.selectedReport ]
-                                  }
+                              , if worldInfo.stageIndex == 2 then
+                                  renderHistoryTwoLevelInspector
+                                    worldInfo.stateView
+                                    worldInfo.tileView
+                                    worldInfo.languageDetail
+                                    worldInfo.nationDetail
+                                    worldInfo.selectedReport
+                                else
+                                  R.div
+                                    { id: "world-details-box"
+                                    , className: "tile-details-box"
+                                    , children: [ R.text worldInfo.selectedReport ]
+                                    }
                               ]
                           }
                       ]

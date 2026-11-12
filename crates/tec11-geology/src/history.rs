@@ -151,6 +151,286 @@ impl Community {
     }
 }
 
+pub fn format_thousands_compact(thousands: f32) -> String {
+    if thousands >= 1000.0 {
+        format!("{:.2}M", thousands / 1000.0)
+    } else if thousands >= 10.0 {
+        format!("{:.1}K", thousands)
+    } else if thousands > 1e-4 {
+        format!("{:.2}K", thousands)
+    } else {
+        "0".to_string()
+    }
+}
+
+pub fn format_share_percent(thousands: f32, total: f32) -> String {
+    if thousands <= 1e-4 || total <= 1e-4 {
+        return "0%".to_string();
+    }
+    let pct = (thousands * 100.0 / total).clamp(0.0, 100.0);
+    if pct >= 1.0 {
+        format!("{:.0}%", pct)
+    } else if pct >= 0.1 {
+        format!("{:.1}%", pct)
+    } else {
+        "<0.1%".to_string()
+    }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_str_array(items: &[String]) -> String {
+    let inner: Vec<String> = items.iter().map(|s| json_escape(s)).collect();
+    format!("[{}]", inner.join(","))
+}
+
+/// Clickable demographic share item (nationality or language) with population and percentage share.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DemographicShareItem {
+    pub id: u32,
+    pub name: String,
+    pub thousands: f32,
+    pub percent_text: String,
+}
+
+impl DemographicShareItem {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"id\":{},\"name\":{},\"popText\":{},\"percentText\":{}}}",
+            self.id,
+            json_escape(&self.name),
+            json_escape(&format_thousands_compact(self.thousands)),
+            json_escape(&self.percent_text)
+        )
+    }
+}
+
+/// Projected 2D polygon for the zoomed-in, centered map of a state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZoomedMapPolygon {
+    pub display_idx: usize,
+    pub fine_idx: usize,
+    pub state_id: Option<u32>,
+    pub points_xy: Vec<[f32; 2]>,
+    pub rgb: [f32; 3],
+    pub is_in_selected_state: bool,
+    pub is_selected_tile: bool,
+    pub is_capital: bool,
+    pub is_river: bool,
+}
+
+impl ZoomedMapPolygon {
+    pub fn to_json(&self) -> String {
+        let pts: Vec<String> = self
+            .points_xy
+            .iter()
+            .map(|&[x, y]| format!("[{x:.4},{y:.4}]"))
+            .collect();
+        let sid_val = self.state_id.map(|s| s as i32).unwrap_or(-1);
+        format!(
+            "{{\"displayIdx\":{},\"fineIdx\":{},\"stateId\":{},\"points\":[{}],\"rgb\":[{:.3},{:.3},{:.3}],\"isInSelectedState\":{},\"isSelectedTile\":{},\"isCapital\":{},\"isRiver\":{}}}",
+            self.display_idx,
+            self.fine_idx,
+            sid_val,
+            pts.join(","),
+            self.rgb[0],
+            self.rgb[1],
+            self.rgb[2],
+            self.is_in_selected_state,
+            self.is_selected_tile,
+            self.is_capital,
+            self.is_river
+        )
+    }
+}
+
+/// Level-1 State inspection view (zoomed-in centered state map + state demographics, economy & diplomacy).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StateInspectionView {
+    pub state_id: u32,
+    pub state_name: String,
+    pub color_rgb: [f32; 3],
+    pub continents: String,
+    pub technology: String,
+    pub population_text: String,
+    pub capacity_text: String,
+    pub tile_count: usize,
+    pub asabiya_text: String,
+    pub nationalities: Vec<DemographicShareItem>,
+    pub languages: Vec<DemographicShareItem>,
+    pub exports: Vec<String>,
+    pub imports: Vec<String>,
+    pub trade_partners: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub water_routes: Vec<String>,
+    pub map_polygons: Vec<ZoomedMapPolygon>,
+}
+
+impl StateInspectionView {
+    pub fn to_json(&self) -> String {
+        let nats: Vec<String> = self.nationalities.iter().map(|n| n.to_json()).collect();
+        let langs: Vec<String> = self.languages.iter().map(|l| l.to_json()).collect();
+        let polys: Vec<String> = self.map_polygons.iter().map(|p| p.to_json()).collect();
+        let r255 = (self.color_rgb[0] * 255.0).round().clamp(0.0, 255.0) as u8;
+        let g255 = (self.color_rgb[1] * 255.0).round().clamp(0.0, 255.0) as u8;
+        let b255 = (self.color_rgb[2] * 255.0).round().clamp(0.0, 255.0) as u8;
+        let color_css = format!("rgb({r255}, {g255}, {b255})");
+        format!(
+            "{{\"hasState\":true,\"stateId\":{},\"stateName\":{},\"colorCss\":{},\"continents\":{},\"technology\":{},\"populationText\":{},\"capacityText\":{},\"tileCount\":{},\"asabiyaText\":{},\"nationalities\":[{}],\"languages\":[{}],\"exports\":{},\"imports\":{},\"tradePartners\":{},\"conflicts\":{},\"waterRoutes\":{},\"mapPolygons\":[{}]}}",
+            self.state_id,
+            json_escape(&self.state_name),
+            json_escape(&color_css),
+            json_escape(&self.continents),
+            json_escape(&self.technology),
+            json_escape(&self.population_text),
+            json_escape(&self.capacity_text),
+            self.tile_count,
+            json_escape(&self.asabiya_text),
+            nats.join(","),
+            langs.join(","),
+            json_str_array(&self.exports),
+            json_str_array(&self.imports),
+            json_str_array(&self.trade_partners),
+            json_str_array(&self.conflicts),
+            json_str_array(&self.water_routes),
+            polys.join(",")
+        )
+    }
+}
+
+/// Level-2 Tile inspection view (individual tile's nationalities, languages, and native flora & fauna).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileInspectionView {
+    pub display_idx: usize,
+    pub fine_idx: Option<usize>,
+    pub state_id: Option<u32>,
+    pub state_name: Option<String>,
+    pub title: String,
+    pub location_summary: String,
+    pub population_summary: String,
+    pub technology: String,
+    pub nationalities: Vec<DemographicShareItem>,
+    pub languages: Vec<DemographicShareItem>,
+    pub flora: Vec<String>,
+    pub fauna: Vec<String>,
+}
+
+impl TileInspectionView {
+    pub fn to_json(&self) -> String {
+        let nats: Vec<String> = self.nationalities.iter().map(|n| n.to_json()).collect();
+        let langs: Vec<String> = self.languages.iter().map(|l| l.to_json()).collect();
+        format!(
+            "{{\"hasTile\":true,\"displayIdx\":{},\"stateId\":{},\"title\":{},\"locationSummary\":{},\"populationSummary\":{},\"technology\":{},\"nationalities\":[{}],\"languages\":[{}],\"flora\":{},\"fauna\":{}}}",
+            self.display_idx,
+            self.state_id.map(|s| s as i32).unwrap_or(-1),
+            json_escape(&self.title),
+            json_escape(&self.location_summary),
+            json_escape(&self.population_summary),
+            json_escape(&self.technology),
+            nats.join(","),
+            langs.join(","),
+            json_str_array(&self.flora),
+            json_str_array(&self.fauna)
+        )
+    }
+}
+
+/// Single lexicon word entry for a language inspection view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LexiconEntryView {
+    pub category: String,
+    pub gloss: String,
+    pub orthography: String,
+    pub ipa: String,
+    pub etymology: String,
+}
+
+impl LexiconEntryView {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"category\":{},\"gloss\":{},\"orthography\":{},\"ipa\":{},\"etymology\":{}}}",
+            json_escape(&self.category),
+            json_escape(&self.gloss),
+            json_escape(&self.orthography),
+            json_escape(&self.ipa),
+            json_escape(&self.etymology)
+        )
+    }
+}
+
+/// Detailed Language inspection view (full lexicon, who speaks it, and where).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LanguageDetailView {
+    pub lang_id: u32,
+    pub name: String,
+    pub total_speakers_text: String,
+    pub phoneme_summary: String,
+    pub speakers_by_location: Vec<String>,
+    pub speakers_by_nation: Vec<DemographicShareItem>,
+    pub lexicon: Vec<LexiconEntryView>,
+}
+
+impl LanguageDetailView {
+    pub fn to_json(&self) -> String {
+        let nats: Vec<String> = self.speakers_by_nation.iter().map(|n| n.to_json()).collect();
+        let lex: Vec<String> = self.lexicon.iter().map(|e| e.to_json()).collect();
+        format!(
+            "{{\"hasLanguage\":true,\"langId\":{},\"name\":{},\"totalSpeakersText\":{},\"phonemeSummary\":{},\"speakersByLocation\":{},\"speakersByNation\":[{}],\"lexicon\":[{}]}}",
+            self.lang_id,
+            json_escape(&self.name),
+            json_escape(&self.total_speakers_text),
+            json_escape(&self.phoneme_summary),
+            json_str_array(&self.speakers_by_location),
+            nats.join(","),
+            lex.join(",")
+        )
+    }
+}
+
+/// Detailed Nationality inspection view (where they originate, where they currently live, and what they speak).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NationDetailView {
+    pub nat_id: u32,
+    pub name: String,
+    pub total_pop_text: String,
+    pub origin_summary: String,
+    pub heritage_summary: String,
+    pub current_locations: Vec<String>,
+    pub spoken_languages: Vec<DemographicShareItem>,
+}
+
+impl NationDetailView {
+    pub fn to_json(&self) -> String {
+        let langs: Vec<String> = self.spoken_languages.iter().map(|l| l.to_json()).collect();
+        format!(
+            "{{\"hasNation\":true,\"natId\":{},\"name\":{},\"totalPopText\":{},\"originSummary\":{},\"heritageSummary\":{},\"currentLocations\":{},\"spokenLanguages\":[{}]}}",
+            self.nat_id,
+            json_escape(&self.name),
+            json_escape(&self.total_pop_text),
+            json_escape(&self.origin_summary),
+            json_escape(&self.heritage_summary),
+            json_str_array(&self.current_locations),
+            langs.join(",")
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LanguageRecord {
     pub id: u32,
@@ -3748,59 +4028,7 @@ impl HistorySimulation {
             if let Some(lang) = self.languages.get(&lid) {
                 lines.push(format!("--- {} Lexicon ---", lang.name()));
                 for (&ck, orig) in lang.lexicon.iter().take(28) {
-                    let gloss = match ck {
-                        ConceptKey::Sun(0) => "sun (host star)".to_string(),
-                        ConceptKey::Sun(id) => format!("sun #{}", id + 1),
-                        ConceptKey::Moon(m) => {
-                            if self.moon_count <= 1 && m == 0 {
-                                "moon".to_string()
-                            } else {
-                                match m {
-                                    0 => "moon #1 (inner M1)".to_string(),
-                                    1 => "moon #2 (2:1 M2)".to_string(),
-                                    2 => "moon #3 (4:1 M3)".to_string(),
-                                    3 => "moon #4 (8:1 M4)".to_string(),
-                                    _ => format!("moon #{}", m + 1),
-                                }
-                            }
-                        }
-                        ConceptKey::Planet(p) => self
-                            .solar_system
-                            .get(p as usize)
-                            .map(|pl| pl.lexicon_gloss())
-                            .unwrap_or_else(|| format!("planet #{}", p + 1)),
-                        ConceptKey::Constellation(c) => self
-                            .constellations
-                            .get(c as usize)
-                            .map(|con| con.lexicon_gloss())
-                            .unwrap_or_else(|| format!("constellation #{}", c + 1)),
-                        ConceptKey::Continent(cid) => self
-                            .geography
-                            .continents
-                            .get(cid as usize)
-                            .map(|c| format!("continent ({})", c.name))
-                            .unwrap_or_else(|| format!("continent #{}", cid + 1)),
-                        ConceptKey::Ocean(oid) => self
-                            .geography
-                            .oceans
-                            .get(oid as usize)
-                            .map(|o| format!("ocean ({})", o.name))
-                            .unwrap_or_else(|| format!("ocean #{}", oid + 1)),
-                        ConceptKey::Species(sp_id) => self
-                            .settled_species
-                            .get(sp_id as usize)
-                            .map(|s| {
-                                let k = match s.kind {
-                                    SpeciesKind::Animal => "animal",
-                                    SpeciesKind::Plant => "plant",
-                                };
-                                format!("{} ({k})", s.name)
-                            })
-                            .unwrap_or_else(|| format!("species_{sp_id}")),
-                        ConceptKey::State(id) => format!("state #{}", id + 1),
-                        ConceptKey::Nation(id) => format!("nation #{}", id + 1),
-                        ConceptKey::Language(id) => format!("language #{}", id + 1),
-                    };
+                    let gloss = self.format_concept_gloss(ck);
                     lines.push(format!(
                         "{}: {} [{}] ({})",
                         gloss,
@@ -3813,6 +4041,964 @@ impl HistorySimulation {
         }
 
         lines.join("\n")
+    }
+
+    /// Format a human-readable gloss for any [`ConceptKey`].
+    pub fn format_concept_gloss(&self, ck: ConceptKey) -> String {
+        match ck {
+            ConceptKey::Sun(0) => "sun (host star)".to_string(),
+            ConceptKey::Sun(id) => format!("sun #{}", id + 1),
+            ConceptKey::Moon(m) => {
+                if self.moon_count <= 1 && m == 0 {
+                    "moon".to_string()
+                } else {
+                    match m {
+                        0 => "moon #1 (inner M1)".to_string(),
+                        1 => "moon #2 (2:1 M2)".to_string(),
+                        2 => "moon #3 (4:1 M3)".to_string(),
+                        3 => "moon #4 (8:1 M4)".to_string(),
+                        _ => format!("moon #{}", m + 1),
+                    }
+                }
+            }
+            ConceptKey::Planet(p) => self
+                .solar_system
+                .get(p as usize)
+                .map(|pl| pl.lexicon_gloss())
+                .unwrap_or_else(|| format!("planet #{}", p + 1)),
+            ConceptKey::Constellation(c) => self
+                .constellations
+                .get(c as usize)
+                .map(|con| con.lexicon_gloss())
+                .unwrap_or_else(|| format!("constellation #{}", c + 1)),
+            ConceptKey::Continent(cid) => self
+                .geography
+                .continents
+                .get(cid as usize)
+                .map(|c| format!("continent ({})", c.name))
+                .unwrap_or_else(|| format!("continent #{}", cid + 1)),
+            ConceptKey::Ocean(oid) => self
+                .geography
+                .oceans
+                .get(oid as usize)
+                .map(|o| format!("ocean ({})", o.name))
+                .unwrap_or_else(|| format!("ocean #{}", oid + 1)),
+            ConceptKey::Species(sp_id) => self
+                .settled_species
+                .get(sp_id as usize)
+                .map(|s| {
+                    let k = match s.kind {
+                        SpeciesKind::Animal => "animal",
+                        SpeciesKind::Plant => "plant",
+                    };
+                    format!("{} ({k})", s.name)
+                })
+                .unwrap_or_else(|| format!("species_{sp_id}")),
+            ConceptKey::State(id) => {
+                let sname = self.state_name(id);
+                format!("state #{} ({sname})", id + 1)
+            }
+            ConceptKey::Nation(id) => {
+                let nname = self.nation_name(id, None);
+                format!("nation #{} ({nname})", id + 1)
+            }
+            ConceptKey::Language(id) => {
+                let lname = self
+                    .languages
+                    .get(&id)
+                    .map(|l| l.name())
+                    .unwrap_or_else(|| format!("Lang_{}", id + 1));
+                format!("language #{} ({lname})", id + 1)
+            }
+        }
+    }
+
+    /// Category label for a [`ConceptKey`] in lexicon tables.
+    pub fn concept_category_label(ck: ConceptKey) -> &'static str {
+        match ck {
+            ConceptKey::Sun(_) | ConceptKey::Moon(_) | ConceptKey::Planet(_) | ConceptKey::Constellation(_) => "Sky",
+            ConceptKey::Continent(_) | ConceptKey::Ocean(_) => "Geo",
+            ConceptKey::Species(_) => "Bio",
+            ConceptKey::State(_) | ConceptKey::Nation(_) | ConceptKey::Language(_) => "Polity",
+        }
+    }
+
+    /// Build a tangent-plane zoomed-in 2D map projection centered on `state_id`'s tiles (plus a 2-hop context ring),
+    /// immune to polar distortion near the North or South Pole.
+    pub fn build_state_zoomed_map(
+        &self,
+        state_id: u32,
+        selected_fine_idx: Option<usize>,
+    ) -> Vec<ZoomedMapPolygon> {
+        let state_tiles: BTreeSet<usize> = self
+            .tile_states
+            .iter()
+            .filter_map(|(&f, &sid)| (sid == state_id).then_some(f))
+            .collect();
+        if state_tiles.is_empty() {
+            return Vec::new();
+        }
+
+        // Collect 1-hop and 2-hop surrounding context rings for borders and coastlines
+        let fine_adj = &self.terrain.terrain_adj;
+        let mut ring1: BTreeSet<usize> = state_tiles.clone();
+        for &f in &state_tiles {
+            if let Some(nbs) = fine_adj.get(f) {
+                for &nb in nbs {
+                    ring1.insert(nb);
+                }
+            }
+        }
+        let mut all_faces: BTreeSet<usize> = ring1.clone();
+        for &f in &ring1 {
+            if let Some(nbs) = fine_adj.get(f) {
+                for &nb in nbs {
+                    all_faces.insert(nb);
+                }
+            }
+        }
+
+        // Compute normalized 3D unit centroid of the state's tiles
+        let mut sum = [0.0f64; 3];
+        for &f in &state_tiles {
+            if let Some((c, _)) = self.terrain.terrain_grid.faces.get(f) {
+                sum[0] += c[0];
+                sum[1] += c[1];
+                sum[2] += c[2];
+            }
+        }
+        let center = normal(sum);
+
+        // Construct an orthonormal tangent basis (east, north, center) immune to polar gimbal lock
+        let ref_up = if center[2].abs() < 0.95 {
+            [0.0, 0.0, 1.0]
+        } else {
+            [1.0, 0.0, 0.0]
+        };
+        let cross = |a: Vec3, b: Vec3| -> Vec3 {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let dot = |a: Vec3, b: Vec3| -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] };
+        let east = normal(cross(ref_up, center));
+        let north = normal(cross(center, east));
+
+        let project_pt = |v: Vec3| -> [f32; 2] {
+            let x = dot(v, east) as f32;
+            let y = -dot(v, north) as f32;
+            [x, y]
+        };
+
+        // Compute bounding box over state_tiles + 1-hop neighbors so the state fills the viewport cleanly
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for &f in &ring1 {
+            let Some((fc, verts)) = self.terrain.terrain_grid.faces.get(f) else {
+                continue;
+            };
+            if dot(*fc, center) <= 0.15 {
+                continue;
+            }
+            for &v in verts {
+                let [x, y] = project_pt(v);
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+        if !min_x.is_finite() || !max_x.is_finite() {
+            return Vec::new();
+        }
+
+        let span_x = (max_x - min_x).max(1e-4);
+        let span_y = (max_y - min_y).max(1e-4);
+        let span = span_x.max(span_y) * 1.12;
+        let mid_x = 0.5 * (min_x + max_x);
+        let mid_y = 0.5 * (min_y + max_y);
+
+        let capital_tile = self.states.get(&state_id).map(|s| s.capital_tile);
+        let state_color_idx = self
+            .states
+            .get(&state_id)
+            .map(|s| s.color_idx)
+            .unwrap_or((state_id as usize) % NATION_PALETTE.len());
+        let base_state_rgb = NATION_PALETTE[state_color_idx];
+
+        let mut polygons = Vec::with_capacity(all_faces.len());
+        for &f in &all_faces {
+            let Some((fc, verts)) = self.terrain.terrain_grid.faces.get(f) else {
+                continue;
+            };
+            if dot(*fc, center) <= 0.15 {
+                continue;
+            }
+            let points_xy: Vec<[f32; 2]> = verts
+                .iter()
+                .map(|&v| {
+                    let [x, y] = project_pt(v);
+                    [
+                        0.5 + (x - mid_x) / span,
+                        0.5 + (y - mid_y) / span,
+                    ]
+                })
+                .collect();
+
+            let elev = self.terrain.fine_elevations.get(f).copied().unwrap_or(0.0);
+            let is_river = self.river_tiles.get(f).copied().unwrap_or(false);
+            let f_state = self.tile_states.get(&f).copied();
+            let is_in_selected_state = f_state == Some(state_id);
+            let is_selected_tile = selected_fine_idx == Some(f);
+            let is_capital = capital_tile == Some(f);
+
+            let shade = (0.82 + (elev / 8.0).clamp(0.0, 0.30)).clamp(0.75, 1.12);
+            let rgb = if elev <= 0.0 {
+                [0.07, 0.20, 0.44]
+            } else if is_in_selected_state {
+                if is_river {
+                    [
+                        (base_state_rgb[0] * 0.55 + 0.20).clamp(0.0, 1.0),
+                        (base_state_rgb[1] * 0.55 + 0.40).clamp(0.0, 1.0),
+                        (base_state_rgb[2] * 0.55 + 0.44).clamp(0.0, 1.0),
+                    ]
+                } else {
+                    [
+                        (base_state_rgb[0] * shade).clamp(0.0, 1.0),
+                        (base_state_rgb[1] * shade).clamp(0.0, 1.0),
+                        (base_state_rgb[2] * shade).clamp(0.0, 1.0),
+                    ]
+                }
+            } else if let Some(other_sid) = f_state {
+                let oc_idx = self
+                    .states
+                    .get(&other_sid)
+                    .map(|s| s.color_idx)
+                    .unwrap_or((other_sid as usize) % NATION_PALETTE.len());
+                let oc = NATION_PALETTE[oc_idx];
+                [oc[0] * 0.52, oc[1] * 0.52, oc[2] * 0.52]
+            } else if is_river {
+                [0.18, 0.48, 0.54]
+            } else {
+                [0.20 * shade, 0.29 * shade, 0.19 * shade]
+            };
+
+            polygons.push(ZoomedMapPolygon {
+                display_idx: f,
+                fine_idx: f,
+                state_id: f_state,
+                points_xy,
+                rgb,
+                is_in_selected_state,
+                is_selected_tile,
+                is_capital,
+                is_river,
+            });
+        }
+        polygons
+    }
+
+    /// Inspect the state ruling `display_idx` (if `display_idx` is a fine face belonging to a state).
+    pub fn inspect_state_for_tile(&self, display_idx: usize) -> Option<StateInspectionView> {
+        let face = self.terrain.display_faces.get(display_idx)?;
+        let DisplayFaceSource::Fine(fine_idx) = face.source else {
+            return None;
+        };
+        let &state_id = self.tile_states.get(&fine_idx)?;
+        self.inspect_state(state_id, Some(fine_idx))
+    }
+
+    /// Structured inspection report + zoomed-in map for `state_id`.
+    pub fn inspect_state(
+        &self,
+        state_id: u32,
+        selected_fine_idx: Option<usize>,
+    ) -> Option<StateInspectionView> {
+        let fine_adj = &self.terrain.terrain_adj;
+        let StateTopology {
+            extents,
+            species: state_species,
+            ..
+        } = self.state_topology(fine_adj);
+        let tiles = extents.get(&state_id)?;
+        if tiles.is_empty() {
+            return None;
+        }
+
+        let st_name = self.state_name(state_id);
+        let cidx = self
+            .states
+            .get(&state_id)
+            .map(|st| st.color_idx)
+            .unwrap_or((state_id as usize) % NATION_PALETTE.len());
+        let color_rgb = NATION_PALETTE[cidx];
+
+        let coarse_elevs = self.prehistory.tile_elevations();
+        let mut cont_counts: BTreeMap<String, usize> = BTreeMap::new();
+        for &f in tiles {
+            let c = self.terrain.primary_coarse_tile(f, &coarse_elevs);
+            let cname = self
+                .geography
+                .continent_name(c)
+                .unwrap_or("Mainland")
+                .to_string();
+            *cont_counts.entry(cname).or_insert(0) += 1;
+        }
+        let mut sorted_conts: Vec<(String, usize)> = cont_counts.into_iter().collect();
+        sorted_conts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let continents = sorted_conts
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut nat_totals: BTreeMap<u32, f32> = BTreeMap::new();
+        let mut lang_totals: BTreeMap<u32, f32> = BTreeMap::new();
+        let mut st_pop = 0.0f32;
+        let mut agri_pop = 0.0f32;
+        for &t in tiles {
+            if let Some(comms) = self.tile_communities.get(&t) {
+                for c in comms {
+                    if c.thousands > 1e-4 {
+                        st_pop += c.thousands;
+                        if c.agriculture {
+                            agri_pop += c.thousands;
+                        }
+                        *nat_totals.entry(c.nationality_id).or_insert(0.0) += c.thousands;
+                        *lang_totals.entry(c.language_id).or_insert(0.0) += c.thousands;
+                    }
+                }
+            }
+        }
+        let st_cap = self.state_carrying_capacity(tiles);
+        let dom_lang = self.primary_language_for_state(state_id);
+
+        let native_sp = state_species.get(&state_id).cloned().unwrap_or_default();
+        let direct_partners = self.lookup_trade_partners(state_id);
+        let net_partners = self.recursive_trade_partners(state_id);
+        let mut avail_sp: BTreeSet<usize> = native_sp.clone();
+        for &p in &net_partners {
+            if let Some(psp) = state_species.get(&p) {
+                avail_sp.extend(psp.iter().copied());
+            }
+        }
+        let technology = if agri_pop > 0.0 {
+            let pct = (agri_pop * 100.0 / st_pop.max(1e-4)).clamp(0.0, 100.0);
+            format!(
+                "Agricultural ({:.0}% farming, {} domesticates)",
+                pct,
+                avail_sp.len()
+            )
+        } else {
+            "Pre-Agricultural / Foraging (0% farming)".to_string()
+        };
+
+        let st_asabiya = self.state_asabiya(state_id);
+        let frontier_label = if st_asabiya >= 0.70 {
+            "Marcher Frontier"
+        } else if st_asabiya <= 0.35 {
+            "Imperial Core"
+        } else {
+            "Cohesive"
+        };
+        let asabiya_text = format!("{:.0}% ({frontier_label})", st_asabiya * 100.0);
+
+        let mut nationalities: Vec<DemographicShareItem> = nat_totals
+            .into_iter()
+            .filter(|&(_, p)| p > 1e-4)
+            .map(|(nid, p)| DemographicShareItem {
+                id: nid,
+                name: self.nation_name(nid, dom_lang),
+                thousands: p,
+                percent_text: format_share_percent(p, st_pop),
+            })
+            .collect();
+        nationalities.sort_by(|a, b| {
+            b.thousands
+                .partial_cmp(&a.thousands)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut languages: Vec<DemographicShareItem> = lang_totals
+            .into_iter()
+            .filter(|&(_, p)| p > 1e-4)
+            .map(|(lid, p)| {
+                let lname = self
+                    .languages
+                    .get(&lid)
+                    .map(|l| l.name())
+                    .unwrap_or_else(|| format!("Lang_{}", lid + 1));
+                DemographicShareItem {
+                    id: lid,
+                    name: lname,
+                    thousands: p,
+                    percent_text: format_share_percent(p, st_pop),
+                }
+            })
+            .collect();
+        languages.sort_by(|a, b| {
+            b.thousands
+                .partial_cmp(&a.thousands)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Exports: native domesticates of this state demanded by trading partners (or available for export)
+        let mut exports = Vec::new();
+        for &sp_idx in &native_sp {
+            let Some(sp) = self.settled_species.get(sp_idx) else {
+                continue;
+            };
+            let kind_str = match sp.kind {
+                SpeciesKind::Animal => "fauna",
+                SpeciesKind::Plant => "flora",
+            };
+            let buyers: Vec<String> = direct_partners
+                .iter()
+                .chain(net_partners.iter().filter(|p| !direct_partners.contains(p)))
+                .filter(|&&p| {
+                    state_species
+                        .get(&p)
+                        .is_none_or(|psp| !psp.contains(&sp_idx))
+                })
+                .take(3)
+                .map(|&p| self.state_name(p))
+                .collect();
+            if !buyers.is_empty() {
+                exports.push(format!("{} ({kind_str}) → {}", sp.name, buyers.join(", ")));
+            } else {
+                exports.push(format!("{} ({kind_str}, domestic surplus)", sp.name));
+            }
+        }
+
+        // Imports: foreign domesticates acquired via trade partners
+        let mut imports = Vec::new();
+        for &sp_idx in avail_sp.difference(&native_sp) {
+            let Some(sp) = self.settled_species.get(sp_idx) else {
+                continue;
+            };
+            let kind_str = match sp.kind {
+                SpeciesKind::Animal => "fauna",
+                SpeciesKind::Plant => "flora",
+            };
+            let sellers: Vec<String> = direct_partners
+                .iter()
+                .chain(net_partners.iter().filter(|p| !direct_partners.contains(p)))
+                .filter(|&&p| {
+                    state_species
+                        .get(&p)
+                        .is_some_and(|psp| psp.contains(&sp_idx))
+                })
+                .take(2)
+                .map(|&p| self.state_name(p))
+                .collect();
+            if !sellers.is_empty() {
+                imports.push(format!("{} ({kind_str}) ← {}", sp.name, sellers.join(", ")));
+            } else {
+                imports.push(format!("{} ({kind_str})", sp.name));
+            }
+        }
+
+        let trade_partners: Vec<String> = direct_partners
+            .iter()
+            .map(|&p| self.state_name(p))
+            .collect();
+        let conflicts: Vec<String> = self
+            .lookup_opponents(state_id)
+            .into_iter()
+            .map(|r| self.state_name(r))
+            .collect();
+
+        let mut water_routes: Vec<String> = self
+            .travel_routes
+            .iter()
+            .filter_map(|r| {
+                let s_from = self.tile_states.get(&r.from_fine_face).copied();
+                let s_to = self.tile_states.get(&r.to_fine_face).copied();
+                if s_from == Some(state_id) {
+                    let dst_label = s_to
+                        .map(|s| self.state_name(s))
+                        .unwrap_or_else(|| format!("Coast #{}", r.to_coarse_tile));
+                    Some(format!("→ {dst_label} ({})", r.kind_name()))
+                } else if s_to == Some(state_id) {
+                    let src_label = s_from
+                        .map(|s| self.state_name(s))
+                        .unwrap_or_else(|| format!("Coast #{}", r.from_coarse_tile));
+                    Some(format!("← {src_label} ({})", r.kind_name()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        water_routes.dedup();
+
+        let map_polygons = self.build_state_zoomed_map(state_id, selected_fine_idx);
+
+        Some(StateInspectionView {
+            state_id,
+            state_name: st_name,
+            color_rgb,
+            continents,
+            technology,
+            population_text: format_thousands_compact(st_pop),
+            capacity_text: format_thousands_compact(st_cap),
+            tile_count: tiles.len(),
+            asabiya_text,
+            nationalities,
+            languages,
+            exports,
+            imports,
+            trade_partners,
+            conflicts,
+            water_routes,
+            map_polygons,
+        })
+    }
+
+    /// Structured inspection report for a single clicked tile (`display_idx`), including tile-level
+    /// nationalities, languages, and native flora & fauna.
+    pub fn inspect_tile_structured(&self, display_idx: usize) -> Option<TileInspectionView> {
+        let face = self.terrain.display_faces.get(display_idx)?;
+        let fine_idx = match face.source {
+            DisplayFaceSource::OceanCoarse(c_idx) => {
+                let ocean_label = self.geography.ocean_name(c_idx).unwrap_or("World Ocean");
+                let elev = self
+                    .prehistory
+                    .tiles()
+                    .get(c_idx)
+                    .map(|t| t.elevation())
+                    .unwrap_or(-4.0);
+                return Some(TileInspectionView {
+                    display_idx,
+                    fine_idx: None,
+                    state_id: None,
+                    state_name: None,
+                    title: format!("Ocean Tile #{c_idx}"),
+                    location_summary: format!("{ocean_label} | Bathymetry: {elev:.2} km"),
+                    population_summary: "Uninhabited Marine Basin".to_string(),
+                    technology: "Marine".to_string(),
+                    nationalities: Vec::new(),
+                    languages: Vec::new(),
+                    flora: Vec::new(),
+                    fauna: Vec::new(),
+                });
+            }
+            DisplayFaceSource::Fine(f) => f,
+        };
+
+        let fine_elev = self.terrain.fine_elevations[fine_idx];
+        let coarse_elevs = self.prehistory.tile_elevations();
+        let primary_c = self.terrain.primary_coarse_tile(fine_idx, &coarse_elevs);
+        if fine_elev <= 0.0 {
+            let ocean_label = self
+                .geography
+                .ocean_name(primary_c)
+                .unwrap_or("Coastal Sea");
+            return Some(TileInspectionView {
+                display_idx,
+                fine_idx: Some(fine_idx),
+                state_id: None,
+                state_name: None,
+                title: format!("Coastal Sea Face #{fine_idx}"),
+                location_summary: format!("{ocean_label} | Depth: {fine_elev:.2} km"),
+                population_summary: "Coastal Waters".to_string(),
+                technology: "Maritime".to_string(),
+                nationalities: Vec::new(),
+                languages: Vec::new(),
+                flora: Vec::new(),
+                fauna: Vec::new(),
+            });
+        }
+
+        let cont_name = self
+            .geography
+            .continent_name(primary_c)
+            .unwrap_or("Mainland");
+        let koeppen_code = self
+            .prehistory
+            .tile_koeppen_ids()
+            .get(primary_c)
+            .copied()
+            .unwrap_or(0);
+        let climate_str = crate::world::koeppen_climate_name(koeppen_code);
+        let is_river = self.river_tiles.get(fine_idx).copied().unwrap_or(false);
+
+        let state_id = self.tile_states.get(&fine_idx).copied();
+        let state_name = state_id.map(|sid| self.state_name(sid));
+        let is_capital = state_id
+            .and_then(|sid| self.states.get(&sid))
+            .is_some_and(|st| st.capital_tile == fine_idx);
+        let dom_lang = state_id.and_then(|sid| self.primary_language_for_state(sid));
+
+        let mut nat_totals: BTreeMap<u32, f32> = BTreeMap::new();
+        let mut lang_totals: BTreeMap<u32, f32> = BTreeMap::new();
+        let mut tile_pop = 0.0f32;
+        let mut agri_pop = 0.0f32;
+        if let Some(comms) = self.tile_communities.get(&fine_idx) {
+            for c in comms {
+                if c.thousands > 1e-4 {
+                    tile_pop += c.thousands;
+                    if c.agriculture {
+                        agri_pop += c.thousands;
+                    }
+                    *nat_totals.entry(c.nationality_id).or_insert(0.0) += c.thousands;
+                    *lang_totals.entry(c.language_id).or_insert(0.0) += c.thousands;
+                }
+            }
+        }
+        let cap = self.capacities[fine_idx];
+
+        let technology = if tile_pop <= 1e-4 {
+            "Uninhabited".to_string()
+        } else if agri_pop > 0.0 {
+            let pct = (agri_pop * 100.0 / tile_pop.max(1e-4)).clamp(0.0, 100.0);
+            format!("Agricultural ({:.0}% farming)", pct)
+        } else {
+            "Pre-Agricultural / Foraging".to_string()
+        };
+
+        let mut nationalities: Vec<DemographicShareItem> = nat_totals
+            .into_iter()
+            .filter(|&(_, p)| p > 1e-4)
+            .map(|(nid, p)| DemographicShareItem {
+                id: nid,
+                name: self.nation_name(nid, dom_lang),
+                thousands: p,
+                percent_text: format_share_percent(p, tile_pop),
+            })
+            .collect();
+        nationalities.sort_by(|a, b| {
+            b.thousands
+                .partial_cmp(&a.thousands)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut languages: Vec<DemographicShareItem> = lang_totals
+            .into_iter()
+            .filter(|&(_, p)| p > 1e-4)
+            .map(|(lid, p)| {
+                let lname = self
+                    .languages
+                    .get(&lid)
+                    .map(|l| l.name())
+                    .unwrap_or_else(|| format!("Lang_{}", lid + 1));
+                DemographicShareItem {
+                    id: lid,
+                    name: lname,
+                    thousands: p,
+                    percent_text: format_share_percent(p, tile_pop),
+                }
+            })
+            .collect();
+        languages.sort_by(|a, b| {
+            b.thousands
+                .partial_cmp(&a.thousands)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut flora = Vec::new();
+        let mut fauna = Vec::new();
+        for &sp_idx in &self.tile_species[fine_idx] {
+            if let Some(sp) = self.settled_species.get(sp_idx) {
+                match sp.kind {
+                    SpeciesKind::Plant => flora.push(sp.name.clone()),
+                    SpeciesKind::Animal => fauna.push(sp.name.clone()),
+                }
+            }
+        }
+
+        let title = match (&state_name, is_capital) {
+            (Some(sname), true) => format!("Tile #{fine_idx} — ★ {sname} Capital"),
+            (Some(sname), false) => format!("Tile #{fine_idx} ({sname})"),
+            (None, _) => format!("Tile #{fine_idx} (Unclaimed Land)"),
+        };
+        let location_summary = format!(
+            "Continent: {cont_name} | Elev: {fine_elev:.2} km | {climate_str}{}",
+            if is_river { " | River Corridor" } else { "" }
+        );
+        let population_summary = format!(
+            "Pop: {} / Carrying Cap: {}",
+            format_thousands_compact(tile_pop),
+            format_thousands_compact(cap)
+        );
+
+        Some(TileInspectionView {
+            display_idx,
+            fine_idx: Some(fine_idx),
+            state_id,
+            state_name,
+            title,
+            location_summary,
+            population_summary,
+            technology,
+            nationalities,
+            languages,
+            flora,
+            fauna,
+        })
+    }
+
+    /// Detailed inspection of a single language (`lang_id`): full lexicon, who speaks it, and where.
+    pub fn inspect_language(&self, lang_id: u32) -> Option<LanguageDetailView> {
+        let lang = self.languages.get(&lang_id)?;
+        let coarse_elevs = self.prehistory.tile_elevations();
+
+        let mut total_thousands = 0.0f32;
+        let mut total_tiles = 0usize;
+        let mut by_location: BTreeMap<(Option<u32>, String), (f32, usize)> = BTreeMap::new();
+        let mut by_nation: BTreeMap<u32, f32> = BTreeMap::new();
+
+        for (&f_idx, comms) in &self.tile_communities {
+            let mut tile_lang_pop = 0.0f32;
+            for c in comms {
+                if c.language_id == lang_id && c.thousands > 1e-4 {
+                    tile_lang_pop += c.thousands;
+                    *by_nation.entry(c.nationality_id).or_insert(0.0) += c.thousands;
+                }
+            }
+            if tile_lang_pop > 1e-4 {
+                total_thousands += tile_lang_pop;
+                total_tiles += 1;
+                let sid_opt = self.tile_states.get(&f_idx).copied();
+                let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                let cont = self
+                    .geography
+                    .continent_name(c_idx)
+                    .unwrap_or("Mainland")
+                    .to_string();
+                let entry = by_location.entry((sid_opt, cont)).or_insert((0.0, 0));
+                entry.0 += tile_lang_pop;
+                entry.1 += 1;
+            }
+        }
+
+        let mut loc_vec: Vec<((Option<u32>, String), (f32, usize))> =
+            by_location.into_iter().collect();
+        loc_vec.sort_by(|a, b| {
+            b.1 .0
+                .partial_cmp(&a.1 .0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let speakers_by_location: Vec<String> = loc_vec
+            .into_iter()
+            .map(|((sid_opt, cont), (pop, tcount))| {
+                let polity = sid_opt
+                    .map(|s| self.state_name(s))
+                    .unwrap_or_else(|| "Unclaimed Land".to_string());
+                format!(
+                    "{polity} ({cont}, {tcount} {}): {} ({})",
+                    if tcount == 1 { "tile" } else { "tiles" },
+                    format_thousands_compact(pop),
+                    format_share_percent(pop, total_thousands)
+                )
+            })
+            .collect();
+
+        let mut speakers_by_nation: Vec<DemographicShareItem> = by_nation
+            .into_iter()
+            .filter(|&(_, p)| p > 1e-4)
+            .map(|(nid, p)| DemographicShareItem {
+                id: nid,
+                name: self.nation_name(nid, Some(lang_id)),
+                thousands: p,
+                percent_text: format_share_percent(p, total_thousands),
+            })
+            .collect();
+        speakers_by_nation.sort_by(|a, b| {
+            b.thousands
+                .partial_cmp(&a.thousands)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let phoneme_summary = format!(
+            "{} consonants, {} vowels",
+            lang.phonology.consonants.len(),
+            lang.phonology.vowels.len()
+        );
+
+        let lexicon: Vec<LexiconEntryView> = lang
+            .lexicon
+            .iter()
+            .map(|(&ck, orig)| LexiconEntryView {
+                category: Self::concept_category_label(ck).to_string(),
+                gloss: self.format_concept_gloss(ck),
+                orthography: orig.word.write(false),
+                ipa: orig.word.pronounce(),
+                etymology: orig.format_etymology(),
+            })
+            .collect();
+
+        Some(LanguageDetailView {
+            lang_id,
+            name: lang.name(),
+            total_speakers_text: format!(
+                "{} across {} {}",
+                format_thousands_compact(total_thousands),
+                total_tiles,
+                if total_tiles == 1 { "tile" } else { "tiles" }
+            ),
+            phoneme_summary,
+            speakers_by_location,
+            speakers_by_nation,
+            lexicon,
+        })
+    }
+
+    /// Detailed inspection of a single nationality (`nat_id`): where they originate, where they currently live,
+    /// and what languages they speak.
+    pub fn inspect_nation(&self, nat_id: u32) -> Option<NationDetailView> {
+        if !self.nationalities.contains(&nat_id) && !self.states.contains_key(&nat_id) {
+            return None;
+        }
+        let coarse_elevs = self.prehistory.tile_elevations();
+
+        let mut total_thousands = 0.0f32;
+        let mut total_tiles = 0usize;
+        let mut by_location: BTreeMap<(Option<u32>, String), (f32, usize)> = BTreeMap::new();
+        let mut by_lang: BTreeMap<u32, f32> = BTreeMap::new();
+        let mut heritage_weights: BTreeMap<u32, f32> = BTreeMap::new();
+
+        for (&f_idx, comms) in &self.tile_communities {
+            let mut tile_nat_pop = 0.0f32;
+            for c in comms {
+                if c.nationality_id == nat_id && c.thousands > 1e-4 {
+                    tile_nat_pop += c.thousands;
+                    *by_lang.entry(c.language_id).or_insert(0.0) += c.thousands;
+                    for (&hid, &w) in &c.racial_mix {
+                        *heritage_weights.entry(hid).or_insert(0.0) += c.thousands * w;
+                    }
+                }
+            }
+            if tile_nat_pop > 1e-4 {
+                total_thousands += tile_nat_pop;
+                total_tiles += 1;
+                let sid_opt = self.tile_states.get(&f_idx).copied();
+                let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                let cont = self
+                    .geography
+                    .continent_name(c_idx)
+                    .unwrap_or("Mainland")
+                    .to_string();
+                let entry = by_location.entry((sid_opt, cont)).or_insert((0.0, 0));
+                entry.0 += tile_nat_pop;
+                entry.1 += 1;
+            }
+        }
+
+        let mut spoken_languages: Vec<DemographicShareItem> = by_lang
+            .into_iter()
+            .filter(|&(_, p)| p > 1e-4)
+            .map(|(lid, p)| {
+                let lname = self
+                    .languages
+                    .get(&lid)
+                    .map(|l| l.name())
+                    .unwrap_or_else(|| format!("Lang_{}", lid + 1));
+                DemographicShareItem {
+                    id: lid,
+                    name: lname,
+                    thousands: p,
+                    percent_text: format_share_percent(p, total_thousands),
+                }
+            })
+            .collect();
+        spoken_languages.sort_by(|a, b| {
+            b.thousands
+                .partial_cmp(&a.thousands)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let dom_lang = spoken_languages.first().map(|l| l.id).or(Some(nat_id));
+        let name = self.nation_name(nat_id, dom_lang);
+
+        let origin_summary = if let Some(founding_state) = self.states.get(&nat_id) {
+            let cap_f = founding_state.capital_tile;
+            let c_idx = self.terrain.primary_coarse_tile(cap_f, &coarse_elevs);
+            let cont = self.geography.continent_name(c_idx).unwrap_or("Mainland");
+            let lat_deg = self.fine_face_latitude_deg(cap_f);
+            let lat_label = if lat_deg >= 0.0 {
+                format!("{:.0}°N", lat_deg)
+            } else {
+                format!("{:.0}°S", -lat_deg)
+            };
+            let current_ruler = self
+                .tile_states
+                .get(&cap_f)
+                .copied()
+                .map(|sid| self.state_name(sid))
+                .unwrap_or_else(|| "Unclaimed".to_string());
+            let ancestral_lang = self
+                .languages
+                .get(&nat_id)
+                .map(|l| l.name())
+                .unwrap_or_else(|| format!("Lang_{}", nat_id + 1));
+            format!(
+                "Founded at City Tile #{cap_f} in {cont} ({lat_label}); ancestral tongue {ancestral_lang}; homeland now ruled by {current_ruler}"
+            )
+        } else {
+            format!("Indigenous lineage #{}", nat_id + 1)
+        };
+
+        let mut sorted_heritages: Vec<(u32, f32)> = heritage_weights.into_iter().collect();
+        sorted_heritages.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let heritage_summary = if sorted_heritages.is_empty() {
+            "Prehistoric ancestry unrecorded".to_string()
+        } else {
+            let parts: Vec<String> = sorted_heritages
+                .into_iter()
+                .take(4)
+                .map(|(hid, w)| {
+                    let hname = self
+                        .prehistory
+                        .heritages()
+                        .get(&hid)
+                        .map(|h| h.name.clone())
+                        .unwrap_or_else(|| format!("people_{}", hid + 1));
+                    format!("{hname} ({})", format_share_percent(w, total_thousands))
+                })
+                .collect();
+            format!("Prehistoric Heritage: {}", parts.join(", "))
+        };
+
+        let mut loc_vec: Vec<((Option<u32>, String), (f32, usize))> =
+            by_location.into_iter().collect();
+        loc_vec.sort_by(|a, b| {
+            b.1 .0
+                .partial_cmp(&a.1 .0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let current_locations: Vec<String> = loc_vec
+            .into_iter()
+            .map(|((sid_opt, cont), (pop, tcount))| {
+                let polity = sid_opt
+                    .map(|s| self.state_name(s))
+                    .unwrap_or_else(|| "Unclaimed Land".to_string());
+                format!(
+                    "{polity} ({cont}, {tcount} {}): {} ({})",
+                    if tcount == 1 { "tile" } else { "tiles" },
+                    format_thousands_compact(pop),
+                    format_share_percent(pop, total_thousands)
+                )
+            })
+            .collect();
+
+        Some(NationDetailView {
+            nat_id,
+            name,
+            total_pop_text: format!(
+                "{} across {} {}",
+                format_thousands_compact(total_thousands),
+                total_tiles,
+                if total_tiles == 1 { "tile" } else { "tiles" }
+            ),
+            origin_summary,
+            heritage_summary,
+            current_locations,
+            spoken_languages,
+        })
     }
 
     /// Compute per-display-face RGB colors `[r0, g0, b0, ...]` for the given `aspect`
@@ -4342,5 +5528,64 @@ mod tests {
 
         sim.step();
         assert!(sim.active_travel_route_count() > 0);
+    }
+
+    #[test]
+    fn test_two_level_state_tile_language_and_nation_inspection() {
+        let mut sim = HistorySimulation::new_earth(42);
+        sim.step();
+
+        let (&sample_fine, &sample_sid) = sim
+            .tile_states
+            .iter()
+            .next()
+            .expect("Expected at least one state tile");
+
+        let state_view = sim
+            .inspect_state_for_tile(sample_fine)
+            .expect("Expected StateInspectionView for claimed fine tile");
+        assert_eq!(state_view.state_id, sample_sid);
+        assert!(!state_view.state_name.is_empty());
+        assert!(!state_view.continents.is_empty());
+        assert!(state_view.technology.contains("Agricultural"));
+        assert!(!state_view.nationalities.is_empty());
+        assert!(!state_view.languages.is_empty());
+        assert!(!state_view.map_polygons.is_empty());
+        assert!(
+            state_view
+                .map_polygons
+                .iter()
+                .any(|p| p.is_selected_tile && p.fine_idx == sample_fine),
+            "Zoomed state map should mark the clicked tile as selected"
+        );
+        assert!(state_view.to_json().contains("\"hasState\":true"));
+
+        let tile_view = sim
+            .inspect_tile_structured(sample_fine)
+            .expect("Expected TileInspectionView for fine tile");
+        assert_eq!(tile_view.state_id, Some(sample_sid));
+        assert!(!tile_view.nationalities.is_empty());
+        assert!(!tile_view.languages.is_empty());
+        assert!(tile_view.to_json().contains("\"hasTile\":true"));
+
+        let lang_id = state_view.languages[0].id;
+        let lang_view = sim
+            .inspect_language(lang_id)
+            .expect("Expected LanguageDetailView");
+        assert_eq!(lang_view.lang_id, lang_id);
+        assert!(!lang_view.speakers_by_location.is_empty());
+        assert!(!lang_view.speakers_by_nation.is_empty());
+        assert!(!lang_view.lexicon.is_empty());
+        assert!(lang_view.to_json().contains("\"hasLanguage\":true"));
+
+        let nat_id = state_view.nationalities[0].id;
+        let nat_view = sim
+            .inspect_nation(nat_id)
+            .expect("Expected NationDetailView");
+        assert_eq!(nat_view.nat_id, nat_id);
+        assert!(nat_view.origin_summary.contains("Founded at City Tile"));
+        assert!(!nat_view.current_locations.is_empty());
+        assert!(!nat_view.spoken_languages.is_empty());
+        assert!(nat_view.to_json().contains("\"hasNation\":true"));
     }
 }
