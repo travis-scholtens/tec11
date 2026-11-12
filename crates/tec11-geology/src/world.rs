@@ -177,6 +177,7 @@ impl WorldSimulation {
     }
 
     pub fn new(params: WorldCreateParams, seed: u64) -> Self {
+        let _span_init = crate::profile::span(crate::profile::ProfilePhase::StageWorldInit);
         let mut tec = TectonicsSimulation::new_with_full_params(
             params.grid_size,
             params.day_hours as f64,
@@ -391,6 +392,7 @@ impl WorldSimulation {
 
         let transition = match &mut self.stage {
             WorldStageState::Tectonics(tec) => {
+                let _span = crate::profile::span(crate::profile::ProfilePhase::StageTectonics);
                 tec.step();
                 self.tectonics_ticks = tec.geoticks();
                 if tec.has_life() {
@@ -405,6 +407,7 @@ impl WorldSimulation {
                 }
             }
             WorldStageState::Prehistory(pre) => {
+                let _span = crate::profile::span(crate::profile::ProfilePhase::StagePrehistory);
                 pre.step();
                 self.prehistory_ticks = pre.prehistory_ticks();
                 let has_civilization_tech = pre.active_agricultural_race_count() > 0
@@ -417,6 +420,7 @@ impl WorldSimulation {
                 }
             }
             WorldStageState::History(hist) => {
+                let _span = crate::profile::span(crate::profile::ProfilePhase::StageHistory);
                 hist.step();
                 self.history_ticks = hist.history_ticks();
                 StageTransition::None
@@ -440,6 +444,7 @@ impl WorldSimulation {
     }
 
     fn enter_prehistory_stage(&mut self) {
+        let _span = crate::profile::span(crate::profile::ProfilePhase::StageToPrehistory);
         if let WorldStageState::Tectonics(tec) = &self.stage {
             let snap = tec.to_snapshot();
             let sub_seed = self.rng.next_u64();
@@ -452,10 +457,15 @@ impl WorldSimulation {
     }
 
     fn enter_history_stage(&mut self) {
+        let _span = crate::profile::span(crate::profile::ProfilePhase::StageToHistory);
         if let WorldStageState::Prehistory(pre) = &self.stage {
-            let snap = pre.to_snapshot();
             let sub_seed = self.rng.next_u64();
-            if let Some(pre_copy) = PrehistorySimulation::from_snapshot(&snap, sub_seed) {
+            let pre_copy_opt = {
+                let _span_copy = crate::profile::span(crate::profile::ProfilePhase::HistInitPrehistoryCopy);
+                let snap = pre.to_snapshot();
+                PrehistorySimulation::from_snapshot(&snap, sub_seed)
+            };
+            if let Some(pre_copy) = pre_copy_opt {
                 let mut hist = HistorySimulation::from_prehistory_with_system(
                     pre_copy,
                     self.params.moon_count,
@@ -1103,6 +1113,7 @@ impl WorldSimulation {
     }
 
     pub fn encode_snapshot(&self) -> Vec<u8> {
+        let _span = crate::profile::span(crate::profile::ProfilePhase::StageSnapshotEncode);
         match &self.stage {
             WorldStageState::Tectonics(tec) => tec.encode_snapshot(),
             WorldStageState::Prehistory(pre) => pre.encode_snapshot(),

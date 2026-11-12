@@ -1,12 +1,93 @@
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use tec11_geology::profile::{
+    self, ProfilePhase, ALLOC_CALLS, DEALLOC_CALLS, LIVE_BYTES, PEAK_LIVE_BYTES, REALLOC_CALLS,
+    TOTAL_ALLOC_BYTES, TOTAL_DEALLOC_BYTES,
+};
 use tec11_geology::world::{
     format_with_commas, WorldCreateParams, WorldSimulation, WorldStageState,
 };
+
+/// Custom global allocator wrapping `std::alloc::System` to track exact heap allocation counts,
+/// cumulative allocation churn, live heap bytes, and peak live heap bytes across simulation stages.
+pub struct ProfiledAllocator;
+
+unsafe impl GlobalAlloc for ProfiledAllocator {
+    #[inline]
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            let size = layout.size();
+            ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            TOTAL_ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+            let prev = LIVE_BYTES.fetch_add(size, Ordering::Relaxed);
+            PEAK_LIVE_BYTES.fetch_max(prev + size, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    #[inline]
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let size = layout.size();
+        DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        TOTAL_DEALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+        LIVE_BYTES.fetch_sub(size, Ordering::Relaxed);
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    #[inline]
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        if !new_ptr.is_null() {
+            let old_size = layout.size();
+            REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            if new_size >= old_size {
+                let diff = new_size - old_size;
+                ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+                TOTAL_ALLOC_BYTES.fetch_add(diff as u64, Ordering::Relaxed);
+                let prev = LIVE_BYTES.fetch_add(diff, Ordering::Relaxed);
+                PEAK_LIVE_BYTES.fetch_max(prev + diff, Ordering::Relaxed);
+            } else {
+                let diff = old_size - new_size;
+                TOTAL_DEALLOC_BYTES.fetch_add(diff as u64, Ordering::Relaxed);
+                LIVE_BYTES.fetch_sub(diff, Ordering::Relaxed);
+            }
+        }
+        new_ptr
+    }
+}
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: ProfiledAllocator = ProfiledAllocator;
+
+/// Read OS-level `VmRSS` and `VmPeak` (in KiB) from `/proc/self/status` on Linux.
+fn read_linux_proc_memory_kib() -> (Option<u64>, Option<u64>) {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else {
+        return (None, None);
+    };
+    let mut vm_rss_kib = None;
+    let mut vm_peak_kib = None;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            vm_rss_kib = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u64>().ok());
+        } else if let Some(rest) = line.strip_prefix("VmPeak:") {
+            vm_peak_kib = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u64>().ok());
+        }
+    }
+    (vm_rss_kib, vm_peak_kib)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetStage {
@@ -51,6 +132,7 @@ pub struct CliConfig {
     pub prehistory_ticks: u32,
     pub history_ticks: u32,
     pub exact_steps: Option<u32>,
+    pub profile: bool,
     pub quiet: bool,
     pub show_help: bool,
 }
@@ -79,6 +161,7 @@ impl Default for CliConfig {
             prehistory_ticks: 32,
             history_ticks: 10,
             exact_steps: None,
+            profile: false,
             quiet: false,
             show_help: false,
         }
@@ -128,6 +211,7 @@ SIMULATION STEPPING OPTIONS:
         --prehistory-ticks <N>   4,000-year ticks to run in Prehistory [default: 32]
         --history-ticks <N>      200-year ticks to run in History [default: 10]
         --steps <N>              Run an exact number of world.step() calls instead of stage targets
+        --profile                Enable detailed CPU & heap memory profiling across all stages and subroutines
     -q, --quiet                  Suppress progress output
     -h, --help                   Print this help message"
     );
@@ -308,6 +392,9 @@ where
                 let v = next_val(arg)?;
                 cfg.exact_steps = Some(parse_u32_flag(arg, &v, 0, 100_000)?);
             }
+            "--profile" => {
+                cfg.profile = true;
+            }
             other => {
                 return Err(format!("Unknown argument '{other}'. Run with --help for usage."));
             }
@@ -433,7 +520,131 @@ pub fn resolve_world_params(
     (world, resolved)
 }
 
+pub fn print_profile_report(total_wall: Duration) {
+    let total_ns = total_wall.as_nanos() as f64;
+    let total_ms = total_ns / 1_000_000.0;
+    let heap = profile::global_heap_stats();
+    let (vm_rss_kib, vm_peak_kib) = read_linux_proc_memory_kib();
+
+    println!("\n==========================================================================================================");
+    println!("                           TEC11-CLI CPU & HEAP MEMORY PROFILING REPORT                                  ");
+    println!("==========================================================================================================");
+    println!(
+        "  Total Wall-Clock Time : {:>10.2} ms ({:.3} s)",
+        total_ms,
+        total_wall.as_secs_f64()
+    );
+    println!(
+        "  Peak Live Rust Heap   : {:>10.2} MiB ({} bytes)",
+        (heap.peak_live_bytes as f64) / (1024.0 * 1024.0),
+        format_with_commas(heap.peak_live_bytes as u64)
+    );
+    println!(
+        "  Final Live Rust Heap  : {:>10.2} MiB ({} bytes)",
+        (heap.live_bytes as f64) / (1024.0 * 1024.0),
+        format_with_commas(heap.live_bytes as u64)
+    );
+    if let (Some(rss), Some(peak)) = (vm_rss_kib, vm_peak_kib) {
+        println!(
+            "  Linux OS Process Mem  : VmRSS = {:.2} MiB | VmPeak = {:.2} MiB",
+            (rss as f64) / 1024.0,
+            (peak as f64) / 1024.0
+        );
+    }
+    println!(
+        "  Total Heap Churn      : {:>10.2} MiB allocated across {} allocs ({} reallocs, {} deallocs)",
+        (heap.total_alloc_bytes as f64) / (1024.0 * 1024.0),
+        format_with_commas(heap.alloc_calls),
+        format_with_commas(heap.realloc_calls),
+        format_with_commas(heap.dealloc_calls),
+    );
+
+    println!("\n----------------------------------------------------------------------------------------------------------");
+    println!(" 1. STAGE-LEVEL CPU & MEMORY BREAKDOWN");
+    println!("----------------------------------------------------------------------------------------------------------");
+    println!(
+        " {:<38} | {:>6} | {:>10} | {:>6} | {:>9} | {:>11} | {:>10} | {:>9}",
+        "Simulation Stage", "Calls", "Time (ms)", "% Time", "Mean (ms)", "Alloc Calls", "Churn (MiB)", "Peak (MiB)"
+    );
+    println!("----------------------------------------+--------+------------+--------+-----------+-------------+------------+----------");
+    for &phase in &ProfilePhase::ALL {
+        if !phase.is_top_level_stage() {
+            continue;
+        }
+        let st = profile::phase_stats(phase);
+        if st.calls == 0 {
+            continue;
+        }
+        let ms = (st.total_nanos as f64) / 1_000_000.0;
+        let pct = if total_ns > 0.0 {
+            100.0 * (st.total_nanos as f64) / total_ns
+        } else {
+            0.0
+        };
+        let mean_ms = ms / (st.calls as f64);
+        let churn_mib = (st.alloc_bytes as f64) / (1024.0 * 1024.0);
+        let peak_mib = (st.peak_live_bytes as f64) / (1024.0 * 1024.0);
+        println!(
+            " {:<38} | {:>6} | {:>10.2} | {:>5.1}% | {:>9.3} | {:>11} | {:>10.2} | {:>9.2}",
+            phase.label(),
+            st.calls,
+            ms,
+            pct,
+            mean_ms,
+            format_with_commas(st.alloc_calls),
+            churn_mib,
+            peak_mib
+        );
+    }
+
+    println!("\n----------------------------------------------------------------------------------------------------------");
+    println!(" 2. SUBROUTINE HOTSPOTS (\"WIDEST BARS\" SORTED BY SELF CPU TIME)");
+    println!("----------------------------------------------------------------------------------------------------------");
+    println!(
+        " {:<42} | {:>6} | {:>10} | {:>6} | {:>9} | {:>11} | {:>10}",
+        "Subroutine / Flamegraph Bar", "Calls", "Time (ms)", "% Total", "Mean (ms)", "Alloc Calls", "Churn (MiB)"
+    );
+    println!("--------------------------------------------+--------+------------+--------+-----------+-------------+-----------");
+
+    let mut sub_phases: Vec<(ProfilePhase, profile::PhaseStats)> = ProfilePhase::ALL
+        .iter()
+        .copied()
+        .filter(|p| !p.is_top_level_stage())
+        .map(|p| (p, profile::phase_stats(p)))
+        .filter(|(_, st)| st.calls > 0)
+        .collect();
+    sub_phases.sort_by(|a, b| b.1.total_nanos.cmp(&a.1.total_nanos));
+
+    for (phase, st) in &sub_phases {
+        let ms = (st.total_nanos as f64) / 1_000_000.0;
+        let pct = if total_ns > 0.0 {
+            100.0 * (st.total_nanos as f64) / total_ns
+        } else {
+            0.0
+        };
+        let mean_ms = ms / (st.calls as f64);
+        let churn_mib = (st.alloc_bytes as f64) / (1024.0 * 1024.0);
+        println!(
+            " {:<42} | {:>6} | {:>10.2} | {:>5.1}% | {:>9.3} | {:>11} | {:>10.2}",
+            phase.label(),
+            st.calls,
+            ms,
+            pct,
+            mean_ms,
+            format_with_commas(st.alloc_calls),
+            churn_mib
+        );
+    }
+    println!("==========================================================================================================\n");
+}
+
 pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
+    if cfg.profile {
+        profile::reset_stats();
+        profile::set_enabled(true);
+    } else {
+        profile::set_enabled(false);
+    }
     let start_time = Instant::now();
     let seed = cfg.seed.unwrap_or_else(|| {
         SystemTime::now()
@@ -623,15 +834,20 @@ pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
         )
     })?;
 
+    let total_wall = start_time.elapsed();
     if !cfg.quiet {
         println!(
             "Wrote {} bytes to '{}' in {:.2}s (Stage: {}, Total Elapsed: {} years).",
             format_with_commas(bytes.len() as u64),
             cfg.output.display(),
-            start_time.elapsed().as_secs_f64(),
+            total_wall.as_secs_f64(),
             world.stage_name(),
             world.years_formatted()
         );
+    }
+    if cfg.profile {
+        print_profile_report(total_wall);
+        profile::set_enabled(false);
     }
 
     Ok(bytes)
@@ -743,6 +959,7 @@ mod tests {
             prehistory_ticks: 4,
             history_ticks: 2,
             exact_steps: None,
+            profile: true,
             quiet: true,
             show_help: false,
         };

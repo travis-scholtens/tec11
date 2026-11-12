@@ -9,6 +9,7 @@ pub mod movement;
 pub mod pangea;
 pub mod population;
 pub mod prehistory;
+pub mod profile;
 pub mod racination;
 pub mod rivers;
 pub mod rock;

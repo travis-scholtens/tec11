@@ -564,6 +564,7 @@ impl TectonicsSimulation {
     /// in `planetsimulation.py:211-381` + full ocean-floor bathymetry from Section 5.4).
     pub fn step(&mut self) {
         let n = self.tiles.len();
+        let _span_adv = crate::profile::span(crate::profile::ProfilePhase::TecPlateAdvectionAndSubduction);
 
         // 0. Clear previous tick's transient subduction & intrusion markers, and weather impact scars
         //    on the crustal columns themselves (so scars move with continental drift).
@@ -791,6 +792,9 @@ impl TectonicsSimulation {
             }
         }
 
+        drop(_span_adv);
+        let _span_ridge = crate::profile::span(crate::profile::ProfilePhase::TecRidgeAndOceanBathymetry);
+
         // 3. Mid-ocean spreading ridge advection, retirement, and dynamic ocean floor bathymetry:
         //    - Advect active spreading ridges by their parent drift velocity and retire overridden ones.
         //    - Compute Parsons & Sclater thermal subsidence (-2.5 km ridge axis -> -5.5 km abyssal plain
@@ -909,6 +913,8 @@ impl TectonicsSimulation {
             }
         }
 
+        drop(_span_ridge);
+
         // 4. Record each continent's pre-erosion total above-sea height (`planetsimulation.py:273`).
         let pre_erosion_heights: Vec<f32> = self
             .groups
@@ -924,7 +930,11 @@ impl TectonicsSimulation {
         // 5. Simulate coupled climate and erosion if the atmosphere has formed (`planetsimulation.py:275-315`).
         if self.has_atmosphere() {
             let has_life = self.has_life() && self.impact_winter_ticks == 0;
-            self.refresh_climate_fields();
+            {
+                let _span_clim = crate::profile::span(crate::profile::ProfilePhase::TecClimateAndOceanCirculation);
+                self.refresh_climate_fields();
+            }
+            let _span_erode = crate::profile::span(crate::profile::ProfilePhase::TecErosionAndDeposition);
             if self.impact_winter_ticks > 0 {
                 for l in &mut self.tile_life {
                     *l *= 0.25;
@@ -1142,6 +1152,7 @@ impl TectonicsSimulation {
             }
         }
 
+        let _span_meta = crate::profile::span(crate::profile::ProfilePhase::TecMetamorphismAndRifting);
         // 7. Random plutonic intrusions and contact metamorphism (`planetsimulation.py:325-329`).
         for t in 0..n {
             if self.tiles[t].subduction > 0.0 && self.rng.next_f64() < 0.1 {

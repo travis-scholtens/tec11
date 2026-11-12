@@ -15,6 +15,7 @@ rust_library(
         "src/pangea.rs",
         "src/population.rs",
         "src/prehistory.rs",
+        "src/profile.rs",
         "src/racination.rs",
         "src/rivers.rs",
         "src/rock.rs",

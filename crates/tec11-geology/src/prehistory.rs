@@ -240,6 +240,7 @@ impl PrehistorySimulation {
     /// Advance the prehistory simulation by 1 tick (`4,000` years, matching `PrehistorySimulation.update`
     /// in `prehistorysimulation.py:103-146`).
     pub fn step(&mut self) {
+        let _span_glac = crate::profile::span(crate::profile::ProfilePhase::PreGlaciationClimate);
         // 1. Count initial glacial tiles (`EF = 12`, `ET = 13`) per continent group (`prehistorysimulation.py:104-106`).
         let old_glaciers: Vec<usize> = self
             .groups
@@ -287,6 +288,8 @@ impl PrehistorySimulation {
         self.glaciation_tick += 1;
         self.prehistory_ticks += 1;
 
+        drop(_span_glac);
+        let _span_riv = crate::profile::span(crate::profile::ProfilePhase::PreRiversAndTechSparks);
         // 6. Seed Eden if currently unpopulated (`prehistorysimulation.py:126-127`).
         let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
         if self.populated.is_empty() {
@@ -355,6 +358,8 @@ impl PrehistorySimulation {
             }
         }
 
+        drop(_span_riv);
+        let _span_exp = crate::profile::span(crate::profile::ProfilePhase::PrePopulationExpansion);
         // 9. Run up to `PREHISTORY_ANTHROGLACIAL_STEPS` (6) migration steps (`prehistorysimulation.py:140-143`).
         let mut popcache: BTreeMap<(usize, bool), bool> = BTreeMap::new();
         for _ in 0..PREHISTORY_ANTHROGLACIAL_STEPS {
@@ -375,6 +380,8 @@ impl PrehistorySimulation {
             }
         }
 
+        drop(_span_exp);
+        let _span_rac = crate::profile::span(crate::profile::ProfilePhase::PreRacination);
         // 10. Speciate / racinate isolated or admixed populations (`prehistorysimulation.py:146`).
         let mut next_id = self.next_heritage_id;
         racinate_with_technologies(

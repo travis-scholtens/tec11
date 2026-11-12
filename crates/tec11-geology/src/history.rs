@@ -1279,6 +1279,7 @@ impl HistorySimulation {
             }
         }
 
+        let _span_subdiv = crate::profile::span(crate::profile::ProfilePhase::HistInitSubdivideAndKdTree);
         let coarse_elevs: Vec<f32> = prehistory.tiles().iter().map(|t| t.elevation()).collect();
         let coarse_mounts: Vec<f32> = prehistory.tiles().iter().map(|t| t.mountainosity).collect();
         let terrain =
@@ -1292,6 +1293,7 @@ impl HistorySimulation {
             .map(|(i, face)| (face.center, i))
             .collect();
         let tree = PointTree::new(&indexed_pts);
+        drop(_span_subdiv);
 
         let home_star = HomeStar::sol();
         let optics = PlanetaryOptics::compute(&home_star, AtmosphereType::EarthLikeN2O2);
@@ -1355,6 +1357,7 @@ impl HistorySimulation {
 
         // 1. Identify continents and ocean basins, settle plants & animals on the planet's coarse climate,
         //    then map culturally/economically salient flora & fauna onto subdivided fine faces (`historysimulation.py:facespecies`).
+        let _span_bio = crate::profile::span(crate::profile::ProfilePhase::HistInitBiosphereAndSpecies);
         let biosphere = settle_species_on_climate(&coarse_elevs, self.prehistory.climate_model());
         self.geography = biosphere.geography;
         let coarse_species = biosphere.tile_all_species;
@@ -1402,8 +1405,10 @@ impl HistorySimulation {
             };
             self.tile_species.push(sp_vec);
         }
+        drop(_span_bio);
 
         // 2. Trace coarse rivers (`hmin = 2.0`, `pmin = 0.25`) and route them on the subdivided terrain grid (`routerivers`).
+        let _span_riv_cap = crate::profile::span(crate::profile::ProfilePhase::HistInitRiversAndCapacities);
         self.rivers = trace_coarse_rivers(
             &coarse_elevs,
             &precip,
@@ -1505,6 +1510,8 @@ impl HistorySimulation {
             })
             .collect();
 
+        drop(_span_riv_cap);
+        let _span_seed = crate::profile::span(crate::profile::ProfilePhase::HistInitSeedStatesAndLexicons);
         // 4. Seed cities & initial states across farmable, riverine, or coastal fine faces (`historysimulation.py:stateboundaries`)
         self.tile_communities.clear();
         self.tile_states.clear();
@@ -1745,11 +1752,17 @@ impl HistorySimulation {
             self.tile_communities.insert(f_idx, vec![comm]);
         }
 
-        // 5. Apply fishing carrying capacity bonuses from rivergoing/seafaring and activate water travel routes.
-        self.refresh_fishing_capacities();
-        self.compute_potential_travel_routes(&ocean, &coarse_elevs, &koeppen, &coarse_adj, &fine_adj, &fine_elevs);
-        self.update_travel_routes();
+        drop(_span_seed);
 
+        // 5. Apply fishing carrying capacity bonuses from rivergoing/seafaring and activate water travel routes.
+        {
+            let _span_routes = crate::profile::span(crate::profile::ProfilePhase::HistInitTravelRoutes);
+            self.refresh_fishing_capacities();
+            self.compute_potential_travel_routes(&ocean, &coarse_elevs, &koeppen, &coarse_adj, &fine_adj, &fine_elevs);
+            self.update_travel_routes();
+        }
+
+        let _span_init_dip = crate::profile::span(crate::profile::ProfilePhase::HistInitDiplomacyAndTrade);
         self.recolor_states(&fine_adj);
         self.update_diplomacy_and_trade(&fine_adj);
     }
@@ -2556,6 +2569,9 @@ impl HistorySimulation {
     /// 2. Polachek commercial peace (active war blocks trade; trade raises war threshold by peace dividend $\tau_{\text{trade}}$),
     /// 3. Collins resource + territorial carrying-capacity + demographic tension with Boulding distance decay (`e^{-0.5 d}`).
     fn update_diplomacy_and_trade(&mut self, adjacency: &[Vec<usize>]) {
+        let _span_trade = (self.history_ticks > 0)
+            .then(|| crate::profile::span(crate::profile::ProfilePhase::HistStepTradeAndConflicts))
+            .flatten();
         self.update_travel_routes();
         let StateTopology {
             extents,
@@ -2694,8 +2710,12 @@ impl HistorySimulation {
         }
         self.trade_partners = partner_set.into_iter().collect();
         self.conflicts = conflict_set.into_iter().collect();
+        drop(_span_trade);
 
         // 3. Accumulate concepts and borrow missing words (`historysimulation.py:664-705`)
+        let _span_lex = (self.history_ticks > 0)
+            .then(|| crate::profile::span(crate::profile::ProfilePhase::HistStepLexiconConcepts))
+            .flatten();
         self.accumulate_and_borrow_concepts(&extents, &state_species);
     }
 
@@ -3565,27 +3585,36 @@ impl HistorySimulation {
     /// Advance the History simulation by 1 tick (`200` years, matching `HistorySimulation.update`
     /// in `historysimulation.py:504-706`).
     pub fn step(&mut self) {
-        let fine_adj = self.terrain.terrain_adj.clone();
-        let fine_elevs = self.terrain.fine_elevations.clone();
-        let coarse_elevs = self.prehistory.tile_elevations();
-        let koeppen = self.prehistory.tile_koeppen_ids().to_vec();
+        let (fine_adj, fine_elevs, coarse_elevs, koeppen) = {
+            let _span_clones = crate::profile::span(crate::profile::ProfilePhase::HistStepGridClones);
+            (
+                self.terrain.terrain_adj.clone(),
+                self.terrain.fine_elevations.clone(),
+                self.prehistory.tile_elevations(),
+                self.prehistory.tile_koeppen_ids().to_vec(),
+            )
+        };
 
         // 1. Language sound changes (`historysimulation.py:511-515`: 2-4 cascaded per-language sound changes per 200-year tick)
-        let active_langs: BTreeSet<u32> = self
-            .tile_communities
-            .values()
-            .flat_map(|cs| cs.iter())
-            .filter(|c| c.thousands > 0.0)
-            .map(|c| c.language_id)
-            .collect();
-        for lid in active_langs {
-            let mut temp_rng = self.rng.clone();
-            if let Some(lang) = self.languages.get_mut(&lid) {
-                lang.mutate_tick(&mut temp_rng);
+        {
+            let _span_lang = crate::profile::span(crate::profile::ProfilePhase::HistStepLanguageSoundChanges);
+            let active_langs: BTreeSet<u32> = self
+                .tile_communities
+                .values()
+                .flat_map(|cs| cs.iter())
+                .filter(|c| c.thousands > 0.0)
+                .map(|c| c.language_id)
+                .collect();
+            for lid in active_langs {
+                let mut temp_rng = self.rng.clone();
+                if let Some(lang) = self.languages.get_mut(&lid) {
+                    lang.mutate_tick(&mut temp_rng);
+                }
+                self.rng = temp_rng;
             }
-            self.rng = temp_rng;
         }
 
+        let _span_growth = crate::profile::span(crate::profile::ProfilePhase::HistStepGrowthSpilloverAndTech);
         // 2. Verhulst logistic growth and neighborhood spillover (`historysimulation.py:168-220`)
         let tile_pops: BTreeMap<usize, f32> = self
             .tile_communities
@@ -3790,7 +3819,9 @@ impl HistorySimulation {
         }
         self.refresh_fishing_capacities();
         self.update_travel_routes();
+        drop(_span_growth);
 
+        let _span_assim = crate::profile::span(crate::profile::ProfilePhase::HistStepAssimilationAndDialects);
         // 3. Intermingle and assimilate (`people/community.py:16-92`), modulated by Turchin asabiya
         let tile_asabiya: BTreeMap<usize, f32> = self
             .tile_states
@@ -3869,7 +3900,9 @@ impl HistorySimulation {
 
         // 4. Branch dialects for geographically disconnected language communities (`historysimulation.py:247-280`)
         self.branch_disconnected_dialects(&fine_adj);
+        drop(_span_assim);
 
+        let _span_war = crate::profile::span(crate::profile::ProfilePhase::HistStepWarfareConquestAndSplits);
         // 5. Update Turchin metaethnic frontier asabiya & resolve conflicts via Collins-Turchin multi-front force allocation & Boulding distance decay
         let StateTopology { extents, .. } = self.state_topology(&fine_adj);
         self.update_state_asabiya(&extents, &fine_adj);
@@ -4209,11 +4242,15 @@ impl HistorySimulation {
             }
             self.trade_partners.retain(|pair| !pair.contains(n));
         }
+        drop(_span_war);
 
         // 8. Update trade, conflicts, concept accumulation, and recolor nations
-        self.recolor_states(&fine_adj);
-        self.update_diplomacy_and_trade(&fine_adj);
         self.history_ticks += 1;
+        {
+            let _span_recolor = crate::profile::span(crate::profile::ProfilePhase::HistStepLexiconConcepts);
+            self.recolor_states(&fine_adj);
+        }
+        self.update_diplomacy_and_trade(&fine_adj);
     }
 
     pub fn grid(&self) -> &SphericalGrid {
