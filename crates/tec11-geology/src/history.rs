@@ -860,8 +860,8 @@ impl LanguageRecord {
         if self.lexicon.is_empty() {
             return;
         }
-        let words: Vec<Word> = self.lexicon.values().map(|o| o.word.clone()).collect();
-        self.phonology.refresh_from_lexicon(&words);
+        self.phonology
+            .refresh_from_word_iter(self.lexicon.values().map(|o| &o.word));
     }
 
     pub fn coin_concept(&mut self, key: ConceptKey, rng: &mut Pcg64Mcg) -> WordOrigin {
@@ -963,14 +963,17 @@ impl LanguageRecord {
             let my_name = self.name();
 
             for origin in self.lexicon.values_mut() {
-                let candidate = change.apply(&origin.word);
-                if candidate != origin.word && !self.used_words.contains(&candidate) {
-                    self.used_words.remove(&origin.word);
-                    self.used_wordkeys.insert(candidate.wordkey());
-                    self.used_words.insert(candidate);
-                    let mut next = origin.mutate(change);
-                    next.lang_name = my_name.clone();
-                    *origin = next;
+                if let Some(candidate) = change.apply_opt(&origin.word) {
+                    if !self.used_words.contains(&candidate) {
+                        self.used_words.remove(&origin.word);
+                        self.used_wordkeys.insert(candidate.wordkey());
+                        self.used_words.insert(candidate.clone());
+                        let prev_origin = std::mem::replace(
+                            origin,
+                            WordOrigin::with_arc_parent(candidate, my_name.clone(), None),
+                        );
+                        origin.parent = Some(std::sync::Arc::new(prev_origin));
+                    }
                 }
             }
         }
@@ -1200,6 +1203,8 @@ pub struct HistorySimulation {
     river_tiles: Vec<bool>,
     fine_face_rivers: Vec<Vec<u32>>,
     is_coastal_fine: Vec<bool>,
+    fine_primary_coarse: Vec<usize>,
+    fine_lat_deg: Vec<f64>,
     base_capacities: Vec<f32>,
     capacities: Vec<f32>,
     /// Representative coastal or river fine face (`Some(f_idx)`) for each coarse tile `c` with water access.
@@ -1315,6 +1320,8 @@ impl HistorySimulation {
             river_tiles: vec![false; num_fine],
             fine_face_rivers: vec![Vec::new(); num_fine],
             is_coastal_fine: vec![false; num_fine],
+            fine_primary_coarse: vec![0; num_fine],
+            fine_lat_deg: vec![0.0; num_fine],
             base_capacities: vec![0.0; num_fine],
             capacities: vec![0.0; num_fine],
             coarse_port_fine_face: Vec::new(),
@@ -1354,6 +1361,16 @@ impl HistorySimulation {
         let num_fine = self.terrain.terrain_grid.faces.len();
         let fine_adj = self.terrain.terrain_adj.clone();
         let fine_elevs = self.terrain.fine_elevations.clone();
+        self.fine_primary_coarse = (0..num_fine)
+            .map(|f_idx| self.terrain.primary_coarse_tile(f_idx, &coarse_elevs))
+            .collect();
+        self.fine_lat_deg = self
+            .terrain
+            .terrain_grid
+            .faces
+            .iter()
+            .map(|&(c, _)| c[2].clamp(-1.0, 1.0).asin() * 180.0 / std::f64::consts::PI)
+            .collect();
 
         // 1. Identify continents and ocean basins, settle plants & animals on the planet's coarse climate,
         //    then map culturally/economically salient flora & fauna onto subdivided fine faces (`historysimulation.py:facespecies`).
@@ -2720,16 +2737,27 @@ impl HistorySimulation {
     }
 
     /// Geographic latitude in degrees `[-90.0, 90.0]` of fine face `f_idx`.
+    #[inline]
     pub fn fine_face_latitude_deg(&self, f_idx: usize) -> f64 {
-        let z = self
-            .terrain
-            .terrain_grid
-            .faces
+        self.fine_lat_deg.get(f_idx).copied().unwrap_or_else(|| {
+            let z = self
+                .terrain
+                .terrain_grid
+                .faces
+                .get(f_idx)
+                .map(|(c, _)| c[2])
+                .unwrap_or(0.0)
+                .clamp(-1.0, 1.0);
+            z.asin() * 180.0 / std::f64::consts::PI
+        })
+    }
+
+    #[inline]
+    fn cached_primary_coarse(&self, f_idx: usize, coarse_elevs: &[f32]) -> usize {
+        self.fine_primary_coarse
             .get(f_idx)
-            .map(|(c, _)| c[2])
-            .unwrap_or(0.0)
-            .clamp(-1.0, 1.0);
-        z.asin() * 180.0 / std::f64::consts::PI
+            .copied()
+            .unwrap_or_else(|| self.terrain.primary_coarse_tile(f_idx, coarse_elevs))
     }
 
     /// Set of constellation indices `c.index` visible at some point in the year from any of `tiles`.
@@ -2783,7 +2811,7 @@ impl HistorySimulation {
                     rivers.insert(rid);
                 }
             }
-            let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+            let c = self.cached_primary_coarse(f_idx, coarse_elevs);
             if let Some(cid) = self.geography.tile_continent.get(c).copied().flatten() {
                 conts.insert(cid as u32);
             }
@@ -2828,7 +2856,7 @@ impl HistorySimulation {
             if f_idx >= self.terrain.parentage.len() {
                 continue;
             }
-            let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+            let c = self.cached_primary_coarse(f_idx, coarse_elevs);
             let k = koeppen.get(c).copied().unwrap_or(0);
             let lat_abs = self.fine_face_latitude_deg(f_idx).abs();
 
@@ -2875,7 +2903,7 @@ impl HistorySimulation {
             if f_idx >= self.terrain.parentage.len() {
                 continue;
             }
-            let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+            let c = self.cached_primary_coarse(f_idx, coarse_elevs);
             let k = koeppen.get(c).copied().unwrap_or(0);
             let fine_elev = self
                 .terrain
@@ -2939,6 +2967,9 @@ impl HistorySimulation {
         let mut state_rivers: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_mountains: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_tech: BTreeMap<u32, (bool, bool, bool)> = BTreeMap::new();
+        let mut state_rec_partners: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_direct_partners: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_rivals: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         for (&sid, tiles) in extents {
             state_langs.insert(sid, self.primary_language_for_state(sid));
             state_visible_constellations.insert(sid, self.visible_constellations_for_tiles(tiles));
@@ -2949,6 +2980,9 @@ impl HistorySimulation {
             state_seas.insert(sid, seas);
             state_rivers.insert(sid, rivers);
             state_mountains.insert(sid, mountains);
+            state_rec_partners.insert(sid, self.recursive_trade_partners(sid));
+            state_direct_partners.insert(sid, self.lookup_trade_partners(sid));
+            state_rivals.insert(sid, self.lookup_opponents(sid));
 
             let mut has_ag = false;
             let mut has_riv = false;
@@ -3068,15 +3102,22 @@ impl HistorySimulation {
             }
             lang_visible_constellations.insert(lang_id, all_vis_for_lang.clone());
 
+            let empty_usize_set = BTreeSet::new();
+            let empty_u32_set = BTreeSet::new();
             for &state_id in states_for_lang {
-                let native = state_species.get(&state_id).cloned().unwrap_or_default();
+                let native = state_species.get(&state_id).unwrap_or(&empty_usize_set);
                 let vis_here = state_visible_constellations
                     .get(&state_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let rec_partners = self.recursive_trade_partners(state_id);
-                let direct_partners = self.lookup_trade_partners(state_id);
-                let rivals = self.lookup_opponents(state_id);
+                    .unwrap_or(&empty_u32_set);
+                let rec_partners = state_rec_partners
+                    .get(&state_id)
+                    .unwrap_or(&empty_u32_set);
+                let direct_partners = state_direct_partners
+                    .get(&state_id)
+                    .unwrap_or(&empty_u32_set);
+                let rivals = state_rivals
+                    .get(&state_id)
+                    .unwrap_or(&empty_u32_set);
                 let s_lang = state_langs.get(&state_id).copied().flatten();
 
                 // Exposure to trading / commerce when state participates in trade routes
@@ -3119,7 +3160,7 @@ impl HistorySimulation {
                 let mut related_states = BTreeSet::new();
                 related_states.insert(state_id);
                 related_states.extend(direct_partners.iter().copied());
-                related_states.extend(rivals);
+                related_states.extend(rivals.iter().copied());
                 related_states.extend(rec_partners.iter().copied());
 
                 for s in &related_states {
@@ -3157,7 +3198,7 @@ impl HistorySimulation {
                 }
 
                 // Borrow names from trade partners (direct and recursive) for constellations this language cannot see:
-                let mut trade_network = direct_partners;
+                let mut trade_network = direct_partners.clone();
                 trade_network.extend(rec_partners.iter().copied());
                 for partner in &trade_network {
                     let p_lang = state_langs.get(partner).copied().flatten();
@@ -3188,40 +3229,40 @@ impl HistorySimulation {
                 }
 
                 // Imported species and foreign geographic features from recursive trade network (`imports`)
-                let home_conts = state_continents.get(&state_id).cloned().unwrap_or_default();
-                let home_oceans = state_oceans.get(&state_id).cloned().unwrap_or_default();
-                let home_seas = state_seas.get(&state_id).cloned().unwrap_or_default();
-                let home_rivers = state_rivers.get(&state_id).cloned().unwrap_or_default();
-                let home_mountains = state_mountains.get(&state_id).cloned().unwrap_or_default();
-                for partner in rec_partners {
+                let home_conts = state_continents.get(&state_id).unwrap_or(&empty_u32_set);
+                let home_oceans = state_oceans.get(&state_id).unwrap_or(&empty_u32_set);
+                let home_seas = state_seas.get(&state_id).unwrap_or(&empty_u32_set);
+                let home_rivers = state_rivers.get(&state_id).unwrap_or(&empty_u32_set);
+                let home_mountains = state_mountains.get(&state_id).unwrap_or(&empty_u32_set);
+                for &partner in rec_partners {
                     let p_lang = state_langs.get(&partner).copied().flatten();
                     if let Some(psp) = state_species.get(&partner) {
-                        for &sp in psp.difference(&native).take(6) {
+                        for &sp in psp.difference(native).take(6) {
                             concepts.insert(ConceptKey::Species(sp as u32), p_lang);
                         }
                     }
                     if let Some(pconts) = state_continents.get(&partner) {
-                        for &cid in pconts.difference(&home_conts) {
+                        for &cid in pconts.difference(home_conts) {
                             concepts.entry(ConceptKey::Continent(cid)).or_insert(p_lang);
                         }
                     }
                     if let Some(poceans) = state_oceans.get(&partner) {
-                        for &oid in poceans.difference(&home_oceans) {
+                        for &oid in poceans.difference(home_oceans) {
                             concepts.entry(ConceptKey::Ocean(oid)).or_insert(p_lang);
                         }
                     }
                     if let Some(pseas) = state_seas.get(&partner) {
-                        for &sea_id in pseas.difference(&home_seas) {
+                        for &sea_id in pseas.difference(home_seas) {
                             concepts.entry(ConceptKey::Sea(sea_id)).or_insert(p_lang);
                         }
                     }
                     if let Some(privers) = state_rivers.get(&partner) {
-                        for &rid in privers.difference(&home_rivers).take(4) {
+                        for &rid in privers.difference(home_rivers).take(4) {
                             concepts.entry(ConceptKey::River(rid)).or_insert(p_lang);
                         }
                     }
                     if let Some(pmountains) = state_mountains.get(&partner) {
-                        for &mid in pmountains.difference(&home_mountains).take(4) {
+                        for &mid in pmountains.difference(home_mountains).take(4) {
                             concepts
                                 .entry(ConceptKey::MountainRange(mid))
                                 .or_insert(p_lang);
@@ -3231,22 +3272,22 @@ impl HistorySimulation {
 
                 // Native species, local geographic features (continents, oceans, seas, rivers, mountain ranges),
                 // visible constellations (`vis_here`), and core celestial concepts (`Sun`, `Moons`, `Planets`) in `state_id`
-                for &cid in &home_conts {
+                for &cid in home_conts {
                     concepts.insert(ConceptKey::Continent(cid), s_lang);
                 }
-                for &oid in &home_oceans {
+                for &oid in home_oceans {
                     concepts.insert(ConceptKey::Ocean(oid), s_lang);
                 }
-                for &sea_id in &home_seas {
+                for &sea_id in home_seas {
                     concepts.insert(ConceptKey::Sea(sea_id), s_lang);
                 }
-                for &rid in &home_rivers {
+                for &rid in home_rivers {
                     concepts.insert(ConceptKey::River(rid), s_lang);
                 }
-                for &mid in &home_mountains {
+                for &mid in home_mountains {
                     concepts.insert(ConceptKey::MountainRange(mid), s_lang);
                 }
-                for &c_idx in &vis_here {
+                for &c_idx in vis_here {
                     concepts.insert(ConceptKey::Constellation(c_idx), s_lang);
                 }
                 concepts.entry(ConceptKey::Sun(0)).or_insert(s_lang);
@@ -3260,25 +3301,21 @@ impl HistorySimulation {
                             .or_insert(s_lang);
                     }
                 }
-                for &sp in &native {
+                for &sp in native {
                     concepts.insert(ConceptKey::Species(sp as u32), s_lang);
                 }
             }
         }
 
-        let lang_ids: Vec<u32> = lang_concepts.keys().copied().collect();
+        let empty_vis = BTreeSet::new();
 
         // Pass 1: Coin native concepts (including all constellations visible at some point in the year)
         // so that donor languages have their visible constellations coined before trade partners borrow them.
-        for &lang_id in &lang_ids {
-            let Some(concepts) = lang_concepts.get(&lang_id).cloned() else {
-                continue;
-            };
+        for (&lang_id, concepts) in &lang_concepts {
             let vis_set = lang_visible_constellations
                 .get(&lang_id)
-                .cloned()
-                .unwrap_or_default();
-            for (concept, src_lang_opt) in concepts {
+                .unwrap_or(&empty_vis);
+            for (&concept, &src_lang_opt) in concepts {
                 if src_lang_opt != Some(lang_id) && src_lang_opt.is_some() {
                     continue;
                 }
@@ -3303,14 +3340,10 @@ impl HistorySimulation {
         }
 
         // Pass 2: Borrow concepts from donor languages (including invisible constellations from trade partners).
-        for lang_id in lang_ids {
-            let Some(concepts) = lang_concepts.get(&lang_id).cloned() else {
-                continue;
-            };
+        for (lang_id, concepts) in lang_concepts {
             let vis_set = lang_visible_constellations
                 .get(&lang_id)
-                .cloned()
-                .unwrap_or_default();
+                .unwrap_or(&empty_vis);
             for (concept, src_lang_opt) in concepts {
                 let already = self
                     .languages
@@ -3369,7 +3402,7 @@ impl HistorySimulation {
         koeppen: &[u8],
         fine_adj: &[Vec<usize>],
     ) -> f64 {
-        let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+        let c = self.cached_primary_coarse(f_idx, coarse_elevs);
         let k = koeppen[c];
         if k == 11 || k == 12 {
             // ET (tundra) or EF (ice cap)
@@ -3515,32 +3548,52 @@ impl HistorySimulation {
 
     /// Branch dialects when a language's speakers become geographically disconnected (`historysimulation.py:247-280`).
     fn branch_disconnected_dialects(&mut self, fine_adj: &[Vec<usize>]) {
-        let mut lang_locs: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
+        let mut lang_locs: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (&f, comms) in &self.tile_communities {
             for c in comms {
                 if c.thousands > 0.0 {
-                    lang_locs.entry(c.language_id).or_default().insert(f);
+                    let vec = lang_locs.entry(c.language_id).or_default();
+                    if vec.last().copied() != Some(f) {
+                        vec.push(f);
+                    }
                 }
             }
         }
+
+        let num_fine = fine_adj.len();
+        let mut tile_stamp = vec![0u32; num_fine];
+        let mut stamp_counter = 0u32;
+        let mut q = VecDeque::new();
 
         for (lang_id, locs) in lang_locs {
             if locs.len() <= 1 {
                 continue;
             }
-            let mut visited = BTreeSet::new();
+            stamp_counter = stamp_counter.wrapping_add(2);
+            if stamp_counter == 0 {
+                tile_stamp.fill(0);
+                stamp_counter = 2;
+            }
+            let present_stamp = stamp_counter - 1;
+            let visited_stamp = stamp_counter;
+            for &f in &locs {
+                tile_stamp[f] = present_stamp;
+            }
+
             let mut components: Vec<Vec<usize>> = Vec::new();
             for &start in &locs {
-                if !visited.insert(start) {
+                if tile_stamp[start] == visited_stamp {
                     continue;
                 }
+                tile_stamp[start] = visited_stamp;
                 let mut comp = Vec::new();
-                let mut q = VecDeque::new();
+                q.clear();
                 q.push_back(start);
                 while let Some(curr) = q.pop_front() {
                     comp.push(curr);
                     for &nb in &fine_adj[curr] {
-                        if locs.contains(&nb) && visited.insert(nb) {
+                        if tile_stamp[nb] == present_stamp {
+                            tile_stamp[nb] = visited_stamp;
                             q.push_back(nb);
                         }
                     }
@@ -3639,7 +3692,7 @@ impl HistorySimulation {
             if new_total > cap * 0.85 && !comms.is_empty() {
                 let state_id = self.tile_states.get(&t).copied().unwrap_or(0);
                 if let Some(&nb) = fine_adj[t].iter().find(|&&nb| {
-                    let c = self.terrain.primary_coarse_tile(nb, &coarse_elevs);
+                    let c = self.fine_primary_coarse[nb];
                     let nb_pop = tile_pops.get(&nb).copied().unwrap_or(0.0);
                     fine_elevs[nb] > 0.0
                         && is_passable(fine_elevs[nb], koeppen[c], true)
@@ -3692,7 +3745,7 @@ impl HistorySimulation {
                             }
                         }
                 })?;
-                let c_dst = self.terrain.primary_coarse_tile(dst, &coarse_elevs);
+                let c_dst = self.cached_primary_coarse(dst, &coarse_elevs);
                 if fine_elevs[dst] <= 0.0
                     || !is_passable(fine_elevs[dst], koeppen[c_dst], true)
                     || self.capacities[dst] <= 0.1
@@ -3762,7 +3815,7 @@ impl HistorySimulation {
         for t in populated_keys {
             let is_riv_tile = self.river_tiles.get(t).copied().unwrap_or(false);
             let is_coast_tile = self.is_coastal_fine.get(t).copied().unwrap_or(false);
-            let c_coarse = self.terrain.primary_coarse_tile(t, &coarse_elevs);
+            let c_coarse = self.cached_primary_coarse(t, &coarse_elevs);
             let farmable_tile = is_farmable(fine_elevs[t], koeppen[c_coarse]);
             let adj_has_ag = fine_adj[t].iter().any(|nb| ag_tiles.contains(nb));
             let adj_has_riv = fine_adj[t].iter().any(|nb| riv_tiles.contains(nb))

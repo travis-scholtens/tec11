@@ -1,6 +1,16 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use tec11_math_grid::Pcg64Mcg;
+
+pub const ALL_VOWEL_INDICES: [usize; 27] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26,
+];
+
+pub const ALL_CONSONANT_INDICES: [usize; 26] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VowelDef {
@@ -198,23 +208,21 @@ impl PhonotacticConstraint {
         let mut out: Vec<Option<usize>> = cluster.iter().copied().map(Some).collect();
         match self {
             Self::VoicedAfterNasal => {
-                let all_c: Vec<usize> = (0..CONSONANTS.len()).collect();
                 for i in 0..out.len().saturating_sub(1) {
                     if let (Some(c0), Some(c1)) = (out[i], out[i + 1]) {
                         if CONSONANTS[c0].manner == 3 && CONSONANTS[c1].voice == 0 {
                             let cd = &CONSONANTS[c1];
-                            out[i + 1] = Some(nearest_consonant_to_pos((cd.manner, cd.place, 1), &all_c));
+                            out[i + 1] = Some(nearest_consonant_to_pos((cd.manner, cd.place, 1), &ALL_CONSONANT_INDICES));
                         }
                     }
                 }
             }
             Self::MatchPlosiveVoice => {
-                let all_c: Vec<usize> = (0..CONSONANTS.len()).collect();
                 for i in 0..out.len().saturating_sub(1) {
                     if let (Some(c0), Some(c1)) = (out[i], out[i + 1]) {
                         if CONSONANTS[c0].manner == 0 && CONSONANTS[c1].manner == 0 && CONSONANTS[c0].voice != CONSONANTS[c1].voice {
                             let cd = &CONSONANTS[c1];
-                            out[i + 1] = Some(nearest_consonant_to_pos((cd.manner, cd.place, CONSONANTS[c0].voice), &all_c));
+                            out[i + 1] = Some(nearest_consonant_to_pos((cd.manner, cd.place, CONSONANTS[c0].voice), &ALL_CONSONANT_INDICES));
                         }
                     }
                 }
@@ -340,7 +348,7 @@ impl Word {
     /// Phonemic uniqueness key (`language/lexicon.py:7-8`):
     /// maps vowels to `(true, VOWELS[v].height)` and consonants to `(false, c as i32)`.
     pub fn wordkey(&self) -> Vec<(bool, i32)> {
-        let mut key = Vec::new();
+        let mut key = Vec::with_capacity(self.syllables.len() * 3);
         for s in &self.syllables {
             for &c in &s.onset {
                 key.push((false, c as i32));
@@ -367,7 +375,7 @@ impl Word {
     pub fn pronounce(&self) -> String {
         let stressed_idx = self.stressed_index();
         let multi = self.syllables.len() > 1;
-        let mut out = String::new();
+        let mut out = String::with_capacity(self.syllables.len() * 4);
 
         for (idx, syl) in self.syllables.iter().enumerate() {
             if multi && idx == stressed_idx {
@@ -397,33 +405,40 @@ impl Word {
     pub fn write(&self, capitalize: bool) -> String {
         let stressed_idx = self.stressed_index();
         let mark_stress = self.stress != 1 && self.syllables.len() > 1;
-        let mut raw = String::new();
+        let mut out = String::with_capacity(self.syllables.len() * 4);
+        let mut need_cap = capitalize;
+
+        let mut push_segment = |seg: &str| {
+            if need_cap && !seg.is_empty() {
+                let mut chars = seg.chars();
+                if let Some(first) = chars.next() {
+                    for ch in first.to_uppercase() {
+                        out.push(ch);
+                    }
+                    out.push_str(chars.as_str());
+                    need_cap = false;
+                    return;
+                }
+            }
+            out.push_str(seg);
+        };
 
         for (idx, syl) in self.syllables.iter().enumerate() {
             for &c in &syl.onset {
-                raw.push_str(CONSONANTS[c].orth);
+                push_segment(CONSONANTS[c].orth);
             }
             for (v_pos, &v) in syl.nucleus.iter().enumerate() {
                 if mark_stress && idx == stressed_idx && v_pos == 0 {
-                    raw.push_str(VOWELS[v].orth_acute);
+                    push_segment(VOWELS[v].orth_acute);
                 } else {
-                    raw.push_str(VOWELS[v].orth);
+                    push_segment(VOWELS[v].orth);
                 }
             }
             for &c in &syl.coda {
-                raw.push_str(CONSONANTS[c].orth);
+                push_segment(CONSONANTS[c].orth);
             }
         }
-
-        if capitalize {
-            let mut chars = raw.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => raw,
-            }
-        } else {
-            raw
-        }
+        out
     }
 }
 
@@ -481,27 +496,30 @@ impl Language {
     /// Recompute emergent phoneme inventory, syllable onset/coda probabilities, and attested
     /// onset/coda cluster constraints from the living lexicon (`language/stats.py:3-33`, `phonotactics.py:9-15`).
     pub fn refresh_from_lexicon(&mut self, words: &[Word]) {
-        if words.is_empty() {
-            return;
-        }
-        let mut vs = BTreeSet::new();
-        let mut cs = BTreeSet::new();
+        self.refresh_from_word_iter(words.iter());
+    }
+
+    pub fn refresh_from_word_iter<'a>(&mut self, words: impl Iterator<Item = &'a Word>) {
+        let mut vs = [false; VOWELS.len()];
+        let mut cs = [false; CONSONANTS.len()];
         let mut onsets = BTreeSet::new();
         let mut codae = BTreeSet::new();
         let mut num_syllables = 0usize;
         let mut num_onsets = 0usize;
         let mut num_codas = 0usize;
+        let mut any_word = false;
 
         for w in words {
+            any_word = true;
             for s in &w.syllables {
                 for &c in &s.onset {
-                    cs.insert(c);
+                    cs[c] = true;
                 }
                 for &v in &s.nucleus {
-                    vs.insert(v);
+                    vs[v] = true;
                 }
                 for &c in &s.coda {
-                    cs.insert(c);
+                    cs[c] = true;
                 }
                 if !s.onset.is_empty() {
                     num_onsets += 1;
@@ -510,24 +528,49 @@ impl Language {
                     num_codas += 1;
                 }
                 num_syllables += 1;
-                onsets.insert(s.onset.clone());
-                codae.insert(s.coda.clone());
+                if !onsets.contains(&s.onset) {
+                    onsets.insert(s.onset.clone());
+                }
+                if !codae.contains(&s.coda) {
+                    codae.insert(s.coda.clone());
+                }
             }
+        }
+        if !any_word {
+            return;
         }
         onsets.insert(Vec::new());
         codae.insert(Vec::new());
 
-        if !vs.is_empty() {
-            self.vowels = vs.into_iter().collect();
+        if vs.iter().any(|&b| b) {
+            self.vowels.clear();
+            for (idx, &present) in vs.iter().enumerate() {
+                if present {
+                    self.vowels.push(idx);
+                }
+            }
         }
-        if !cs.is_empty() {
-            self.consonants = cs.into_iter().collect();
+        if cs.iter().any(|&b| b) {
+            self.consonants.clear();
+            for (idx, &present) in cs.iter().enumerate() {
+                if present {
+                    self.consonants.push(idx);
+                }
+            }
         }
         if num_syllables > 0 {
             let op = (num_onsets as f64 / num_syllables as f64).clamp(0.1, 0.95);
             let cp = (num_codas as f64 / num_syllables as f64).clamp(0.05, 0.90);
-            self.onsetp = vec![op];
-            self.codap = vec![cp];
+            if self.onsetp.len() == 1 {
+                self.onsetp[0] = op;
+            } else {
+                self.onsetp = vec![op];
+            }
+            if self.codap.len() == 1 {
+                self.codap[0] = cp;
+            } else {
+                self.codap = vec![cp];
+            }
         }
         self.attested_onsets = onsets;
         self.attested_codae = codae;
@@ -1025,33 +1068,43 @@ impl SoundChangeKind {
     }
 
     pub fn apply(self, word: &Word) -> Word {
+        self.apply_opt(word).unwrap_or_else(|| word.clone())
+    }
+
+    /// Apply sound change to `word`, returning `Some(mutated_word)` only if `word` actually
+    /// changed and `None` (with zero heap allocations) if `word` is unaffected.
+    pub fn apply_opt(self, word: &Word) -> Option<Word> {
         match self {
-            Self::AMutate => a_mutate(word),
-            Self::IMutate => i_mutate(word),
-            Self::BreakVowels => break_vowels(word),
-            Self::OpenConsonants => open_consonants(word),
-            Self::SonorizeConsonants => sonorize_consonants(word),
-            Self::VocalizeConsonants => vocalize_consonants(word),
-            Self::Apheresize => apheresize(word),
-            Self::Syncopate => syncopate(word),
-            Self::Apocopate => apocopate(word),
+            Self::AMutate => a_mutate_opt(word),
+            Self::IMutate => i_mutate_opt(word),
+            Self::BreakVowels => break_vowels_opt(word),
+            Self::OpenConsonants => open_consonants_opt(word),
+            Self::SonorizeConsonants => sonorize_consonants_opt(word),
+            Self::VocalizeConsonants => vocalize_consonants_opt(word),
+            Self::Apheresize => apheresize_opt(word),
+            Self::Syncopate => syncopate_opt(word),
+            Self::Apocopate => apocopate_opt(word),
         }
     }
 }
 
 /// Height metaphony (`metaphony.py:21-22`).
 pub fn a_mutate(word: &Word) -> Word {
+    a_mutate_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn a_mutate_opt(word: &Word) -> Option<Word> {
     if word.syllables.len() < 2 {
-        return word.clone();
+        return None;
     }
     let si = word.stressed_index();
     if si + 1 >= word.syllables.len() {
-        return word.clone();
+        return None;
     }
     let s_curr = &word.syllables[si];
     let s_next = &word.syllables[si + 1];
     if s_curr.nucleus.len() > 1 || s_curr.nucleus.is_empty() || s_next.nucleus.is_empty() {
-        return word.clone();
+        return None;
     }
     let v0 = s_curr.nucleus[0];
     let v1 = s_next.nucleus[0];
@@ -1059,74 +1112,88 @@ pub fn a_mutate(word: &Word) -> Word {
     let (h1, _, _) = vowel_pos(v1);
     let dh = (h1 - h0).signum();
     if dh == 0 {
-        return word.clone();
+        return None;
     }
-    let all_v: Vec<usize> = (0..VOWELS.len()).collect();
-    let nv = nearest_vowel_to_pos((h0 + dh, b0, r0), &all_v);
+    let nv = nearest_vowel_to_pos((h0 + dh, b0, r0), &ALL_VOWEL_INDICES);
+    if nv == v0 {
+        return None;
+    }
     let mut out = word.clone();
-    out.syllables[si].nucleus = vec![nv];
-    out
+    out.syllables[si].nucleus[0] = nv;
+    Some(out)
 }
 
 /// Backness/roundedness umlaut (`metaphony.py:25-26`).
 pub fn i_mutate(word: &Word) -> Word {
+    i_mutate_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn i_mutate_opt(word: &Word) -> Option<Word> {
     if word.syllables.len() < 2 {
-        return word.clone();
+        return None;
     }
     let si = word.stressed_index();
     if si + 1 >= word.syllables.len() {
-        return word.clone();
+        return None;
     }
     let s_curr = &word.syllables[si];
     let s_next = &word.syllables[si + 1];
     if s_curr.nucleus.len() > 1 || s_curr.nucleus.is_empty() || s_next.nucleus.is_empty() {
-        return word.clone();
+        return None;
     }
     let v0 = s_curr.nucleus[0];
     let v1 = s_next.nucleus[0];
     let (h0, b0, _) = vowel_pos(v0);
     let (_, b1, r1) = vowel_pos(v1);
     let db = (b1 - b0).signum();
-    let all_v: Vec<usize> = (0..VOWELS.len()).collect();
-    let nv = nearest_vowel_to_pos((h0, b0 + db, r1), &all_v);
+    let nv = nearest_vowel_to_pos((h0, b0 + db, r1), &ALL_VOWEL_INDICES);
+    if nv == v0 {
+        return None;
+    }
     let mut out = word.clone();
-    out.syllables[si].nucleus = vec![nv];
-    out
+    out.syllables[si].nucleus[0] = nv;
+    Some(out)
 }
 
 /// Vowel breaking of stressed monophthongs (`breaking.py:5-19`).
 pub fn break_vowels(word: &Word) -> Word {
+    break_vowels_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn break_vowels_opt(word: &Word) -> Option<Word> {
     if word.syllables.is_empty() {
-        return word.clone();
+        return None;
     }
     let si = word.stressed_index();
     let s = &word.syllables[si];
     if s.nucleus.len() != 1 {
-        return word.clone();
+        return None;
     }
     let v = s.nucleus[0];
     let (h, b, r) = vowel_pos(v);
-    let all_v: Vec<usize> = (0..VOWELS.len()).collect();
     let pair = if h == 0 {
-        let onglide = nearest_vowel_to_pos((2, 2, r), &all_v);
+        let onglide = nearest_vowel_to_pos((2, 2, r), &ALL_VOWEL_INDICES);
         vec![onglide, v]
     } else {
         let target_b = if b < 2 { 0 } else if b > 2 { 4 } else { 2 };
-        let onglide = nearest_vowel_to_pos((0, target_b, r), &all_v);
+        let onglide = nearest_vowel_to_pos((0, target_b, r), &ALL_VOWEL_INDICES);
         vec![onglide, v]
     };
     let mut out = word.clone();
     out.syllables[si].nucleus = pair;
-    out
+    Some(out)
 }
 
 /// Spirantization: intervocalic plosive -> fricative (`lenition.py:41-52`).
 pub fn open_consonants(word: &Word) -> Word {
-    lenite_intervocalic(word, |c| {
+    open_consonants_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn open_consonants_opt(word: &Word) -> Option<Word> {
+    lenite_intervocalic_opt(word, |c| {
         let cd = &CONSONANTS[c];
         if cd.manner == 0 {
-            let all_c: Vec<usize> = (0..CONSONANTS.len()).collect();
-            nearest_consonant_to_pos((2, cd.place, cd.voice), &all_c)
+            nearest_consonant_to_pos((2, cd.place, cd.voice), &ALL_CONSONANT_INDICES)
         } else {
             c
         }
@@ -1135,108 +1202,153 @@ pub fn open_consonants(word: &Word) -> Word {
 
 /// Intervocalic voicing: unvoiced -> voiced (`lenition.py:55-64`).
 pub fn sonorize_consonants(word: &Word) -> Word {
-    lenite_intervocalic(word, |c| {
+    sonorize_consonants_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn sonorize_consonants_opt(word: &Word) -> Option<Word> {
+    lenite_intervocalic_opt(word, |c| {
         let cd = &CONSONANTS[c];
         if cd.voice == 0 {
-            let all_c: Vec<usize> = (0..CONSONANTS.len()).collect();
-            nearest_consonant_to_pos((cd.manner, cd.place, 1), &all_c)
+            nearest_consonant_to_pos((cd.manner, cd.place, 1), &ALL_CONSONANT_INDICES)
         } else {
             c
         }
     })
 }
 
-fn lenite_intervocalic<F: Fn(usize) -> usize>(word: &Word, f: F) -> Word {
-    let mut out = word.clone();
-    let n = out.syllables.len();
+fn lenite_intervocalic_opt<F: Fn(usize) -> usize>(word: &Word, f: F) -> Option<Word> {
+    let mut out_opt: Option<Word> = None;
+    let n = word.syllables.len();
     for i in 0..n {
-        // Single onset consonant preceded by a vowel-final previous syllable (`coda.is_empty()`)
-        if i > 0
-            && out.syllables[i - 1].coda.is_empty()
-            && out.syllables[i].onset.len() == 1
-        {
-            let c = out.syllables[i].onset[0];
-            out.syllables[i].onset[0] = f(c);
+        let prev_coda_empty = i > 0
+            && out_opt
+                .as_ref()
+                .map_or(&word.syllables[i - 1], |w| &w.syllables[i - 1])
+                .coda
+                .is_empty();
+        let curr_onset_len = out_opt
+            .as_ref()
+            .map_or(&word.syllables[i], |w| &w.syllables[i])
+            .onset
+            .len();
+        if prev_coda_empty && curr_onset_len == 1 {
+            let c = out_opt
+                .as_ref()
+                .map_or(word.syllables[i].onset[0], |w| w.syllables[i].onset[0]);
+            let nc = f(c);
+            if nc != c {
+                let out = out_opt.get_or_insert_with(|| word.clone());
+                out.syllables[i].onset[0] = nc;
+            }
         }
-        // Single coda consonant followed by a vowel-initial next syllable (`onset.is_empty()`)
-        if i + 1 < n
-            && out.syllables[i + 1].onset.is_empty()
-            && out.syllables[i].coda.len() == 1
-        {
-            let c = out.syllables[i].coda[0];
-            out.syllables[i].coda[0] = f(c);
+        let next_onset_empty = i + 1 < n
+            && out_opt
+                .as_ref()
+                .map_or(&word.syllables[i + 1], |w| &w.syllables[i + 1])
+                .onset
+                .is_empty();
+        let curr_coda_len = out_opt
+            .as_ref()
+            .map_or(&word.syllables[i], |w| &w.syllables[i])
+            .coda
+            .len();
+        if next_onset_empty && curr_coda_len == 1 {
+            let c = out_opt
+                .as_ref()
+                .map_or(word.syllables[i].coda[0], |w| w.syllables[i].coda[0]);
+            let nc = f(c);
+            if nc != c {
+                let out = out_opt.get_or_insert_with(|| word.clone());
+                out.syllables[i].coda[0] = nc;
+            }
         }
     }
-    out
+    out_opt
 }
 
 /// Vocalization of coda consonant before another consonant into semivowel `j`/`w` (`lenition.py:67-76`).
 pub fn vocalize_consonants(word: &Word) -> Word {
-    let mut out = word.clone();
-    let all_c: Vec<usize> = (0..CONSONANTS.len()).collect();
-    let n = out.syllables.len();
+    vocalize_consonants_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn vocalize_consonants_opt(word: &Word) -> Option<Word> {
+    let mut out_opt: Option<Word> = None;
+    let n = word.syllables.len();
     for i in 0..n {
-        let has_following_c = out.syllables[i].coda.len() > 1
-            || (i + 1 < n && !out.syllables[i + 1].onset.is_empty());
-        if has_following_c && !out.syllables[i].coda.is_empty() {
-            let c = out.syllables[i].coda[0];
+        let has_following_c = word.syllables[i].coda.len() > 1
+            || (i + 1 < n && !word.syllables[i + 1].onset.is_empty());
+        if has_following_c && !word.syllables[i].coda.is_empty() {
+            let c = word.syllables[i].coda[0];
             let cd = &CONSONANTS[c];
-            let sv = nearest_consonant_to_pos((5, cd.place, 1), &all_c);
-            out.syllables[i].coda[0] = sv;
+            let sv = nearest_consonant_to_pos((5, cd.place, 1), &ALL_CONSONANT_INDICES);
+            if sv != c {
+                let out = out_opt.get_or_insert_with(|| word.clone());
+                out.syllables[i].coda[0] = sv;
+            }
         }
     }
-    out
+    out_opt
 }
 
 /// Drop initial unstressed vowel (`elision.py:16-24`).
 pub fn apheresize(word: &Word) -> Word {
+    apheresize_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn apheresize_opt(word: &Word) -> Option<Word> {
     if word.syllables.len() < 2 || word.stressed_index() == 0 {
-        return word.clone();
+        return None;
     }
     if !word.syllables[0].onset.is_empty() {
-        return word.clone();
+        return None;
     }
     let mut out = word.clone();
     let s0 = out.syllables.remove(0);
     let mut prefix = s0.coda;
     prefix.extend(out.syllables[0].onset.iter().copied());
     out.syllables[0].onset = prefix;
-    out
+    Some(out)
 }
 
 /// Drop medial unstressed vowel (`elision.py:27-37`).
 pub fn syncopate(word: &Word) -> Word {
+    syncopate_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn syncopate_opt(word: &Word) -> Option<Word> {
     if word.syllables.len() < 3 {
-        return word.clone();
+        return None;
     }
     let si = word.stressed_index();
     let target = (1..word.syllables.len() - 1).find(|&idx| idx != si);
-    let Some(idx) = target else {
-        return word.clone();
-    };
+    let idx = target?;
     let mut out = word.clone();
     let removed = out.syllables.remove(idx);
     out.syllables[idx - 1].coda.extend(removed.onset);
     let mut next_onset = removed.coda;
     next_onset.extend(out.syllables[idx].onset.iter().copied());
     out.syllables[idx].onset = next_onset;
-    out
+    Some(out)
 }
 
 /// Drop final unstressed vowel (`elision.py:40-48`).
 pub fn apocopate(word: &Word) -> Word {
+    apocopate_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn apocopate_opt(word: &Word) -> Option<Word> {
     if word.syllables.len() < 2 {
-        return word.clone();
+        return None;
     }
     let last_idx = word.syllables.len() - 1;
     if word.stressed_index() == last_idx || !word.syllables[last_idx].coda.is_empty() {
-        return word.clone();
+        return None;
     }
     let mut out = word.clone();
     let last = out.syllables.pop().unwrap();
     let prev_last = out.syllables.len() - 1;
     out.syllables[prev_last].coda.extend(last.onset);
-    out
+    Some(out)
 }
 
 /// Etymology chain for a word (`language/dictionary.py:Origin`).
@@ -1244,7 +1356,7 @@ pub fn apocopate(word: &Word) -> Word {
 pub struct WordOrigin {
     pub word: Word,
     pub lang_name: String,
-    pub parent: Option<Box<WordOrigin>>,
+    pub parent: Option<Arc<WordOrigin>>,
 }
 
 impl WordOrigin {
@@ -1252,16 +1364,27 @@ impl WordOrigin {
         Self {
             word,
             lang_name,
-            parent: parent.map(Box::new),
+            parent: parent.map(Arc::new),
+        }
+    }
+
+    pub fn with_arc_parent(
+        word: Word,
+        lang_name: String,
+        parent: Option<Arc<WordOrigin>>,
+    ) -> Self {
+        Self {
+            word,
+            lang_name,
+            parent,
         }
     }
 
     pub fn mutate(&self, change: SoundChangeKind) -> Self {
-        let mutated = change.apply(&self.word);
-        if mutated == self.word {
-            self.clone()
-        } else {
+        if let Some(mutated) = change.apply_opt(&self.word) {
             Self::new(mutated, self.lang_name.clone(), Some(self.clone()))
+        } else {
+            self.clone()
         }
     }
 
