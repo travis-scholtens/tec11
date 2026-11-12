@@ -119,7 +119,7 @@ function triggerBinaryDownload(filename, bytes) {
 function pickBinarySnapshotFile(onBytesLoaded) {
   const input = document.createElement("input");
   input.type = "file";
-  input.accept = ".tec11,.json";
+  input.accept = ".tec11";
   input.style.display = "none";
   input.addEventListener("change", () => {
     const file = input.files && input.files[0];
