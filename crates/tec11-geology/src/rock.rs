@@ -362,7 +362,7 @@ fn apply_facies(mut layer: RockLayer, op: FaciesOp) -> RockLayer {
 
 fn transform_by_facies(layers: &[RockLayer], facies: &[(f32, FaciesOp)]) -> Vec<RockLayer> {
     let mut f = 0usize;
-    let mut new_layers: Vec<RockLayer> = Vec::new();
+    let mut new_layers: Vec<RockLayer> = Vec::with_capacity(layers.len() + 2);
     let mut t = 0.0f32;
     let mut stack: Vec<RockLayer> = layers.to_vec();
 
@@ -391,6 +391,43 @@ fn transform_by_facies(layers: &[RockLayer], facies: &[(f32, FaciesOp)]) -> Vec<
     new_layers
 }
 
+fn transform_by_facies_in_place(layers: &mut Vec<RockLayer>, facies: &[(f32, FaciesOp)]) {
+    if layers.is_empty() {
+        return;
+    }
+    // Fast check: if total depth is <= the first Identity boundary, nothing splits or changes!
+    if facies.first().map(|&(d, op)| op == FaciesOp::Identity && layers.iter().map(|l| l.thickness).sum::<f32>() <= d + 1e-6).unwrap_or(false) {
+        return;
+    }
+    let mut f = 0usize;
+    let mut new_layers: Vec<RockLayer> = Vec::with_capacity(layers.len() + 2);
+    let mut t = 0.0f32;
+
+    while let Some(mut l) = layers.pop() {
+        let dt = t + l.thickness - facies[f].0;
+        if dt > 1e-6 {
+            layers.push(RockLayer {
+                rock: l.rock.clone(),
+                thickness: dt,
+            });
+            l.thickness -= dt;
+        }
+
+        if facies[f].1 != FaciesOp::Identity {
+            l = apply_facies(l, facies[f].1);
+        }
+
+        t += l.thickness;
+        new_layers.push(l);
+        if dt > 1e-6 && f + 1 < facies.len() {
+            f += 1;
+        }
+    }
+
+    new_layers.reverse();
+    *layers = new_layers;
+}
+
 /// Regional depth-facies metamorphism (`rock/metamorphic.py:regional`).
 pub fn metamorphic_regional(layers: &[RockLayer], subduction: bool) -> Vec<RockLayer> {
     const NORMAL_FACIES: [(f32, FaciesOp); 5] = [
@@ -411,6 +448,29 @@ pub fn metamorphic_regional(layers: &[RockLayer], subduction: bool) -> Vec<RockL
         transform_by_facies(layers, &SUBDUCTION_FACIES)
     } else {
         transform_by_facies(layers, &NORMAL_FACIES)
+    }
+}
+
+/// In-place regional depth-facies metamorphism (`rock/metamorphic.py:regional`).
+pub fn metamorphic_regional_in_place(layers: &mut Vec<RockLayer>, subduction: bool) {
+    const NORMAL_FACIES: [(f32, FaciesOp); 5] = [
+        (5.0, FaciesOp::Identity),
+        (15.0, FaciesOp::Zeolite),
+        (30.0, FaciesOp::Greenschist),
+        (70.0, FaciesOp::Amphibolite),
+        (f32::INFINITY, FaciesOp::Eclogite),
+    ];
+    const SUBDUCTION_FACIES: [(f32, FaciesOp); 4] = [
+        (10.0, FaciesOp::Identity),
+        (20.0, FaciesOp::Zeolite),
+        (60.0, FaciesOp::Blueschist),
+        (f32::INFINITY, FaciesOp::Eclogite),
+    ];
+
+    if subduction {
+        transform_by_facies_in_place(layers, &SUBDUCTION_FACIES);
+    } else {
+        transform_by_facies_in_place(layers, &NORMAL_FACIES);
     }
 }
 

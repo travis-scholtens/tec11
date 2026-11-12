@@ -299,38 +299,75 @@ impl TileGeology {
     /// Average each group's contributing tiles with `merge_layers`, then stack colliding groups
     /// (`Tile.mergesources` in `tile.py:185-194`), carrying any continental `impact_scar` with the moving plate.
     pub fn merge_sources(&mut self, groups: &[Vec<TileSourceColumn>]) {
-        let mut merged_groups = Vec::with_capacity(groups.len());
-        for g in groups {
-            let n_src = g.len().max(1) as f32;
-            let avg_b = g.iter().map(|s| s.bottom).sum::<f32>() / n_src;
-            let avg_scar = g.iter().map(|s| s.impact_scar).sum::<f32>() / n_src;
-            let avg_t = g
-                .iter()
-                .map(|s| s.layers.iter().map(|l| l.thickness).sum::<f32>())
-                .sum::<f32>()
-                / n_src;
-            let converted: Vec<(f32, f32, Vec<(Rock, f32)>)> = g
-                .iter()
-                .map(|s| {
-                    (
-                        s.bottom,
-                        s.mountainosity,
-                        s.layers
-                            .iter()
-                            .map(|l| (l.rock.clone(), l.thickness))
-                            .collect(),
-                    )
-                })
-                .collect();
-            let (_, mountainosity, mut layers) = Self::merge_layers(&converted);
-            let raw_t: f32 = layers.iter().map(|l| l.1).sum();
-            if g.len() > 1 && raw_t > 1e-6 {
-                let scale = avg_t / raw_t;
-                for l in &mut layers {
-                    l.1 *= scale;
+        self.merge_sources_owned(groups.to_vec());
+    }
+
+    /// Owned variant of `merge_sources` that moves single-source `RockLayer` vectors directly
+    /// without allocating intermediate `converted` / `merge_layers` buffers.
+    pub fn merge_sources_owned(&mut self, mut groups: Vec<Vec<TileSourceColumn>>) {
+        if groups.len() == 1 && groups[0].len() == 1 {
+            let s = groups[0].pop().unwrap();
+            self.bottom = s.bottom;
+            self.mountainosity = s.mountainosity;
+            self.impact_scar = s.impact_scar;
+            self.layers = s.layers;
+            self.compact();
+            self.limit();
+            self.compact();
+            return;
+        }
+
+        let mut merged_groups: Vec<(f32, f32, f32, Vec<RockLayer>)> =
+            Vec::with_capacity(groups.len());
+        for mut g in groups {
+            if g.len() == 1 {
+                let s = g.pop().unwrap();
+                let mut tmp = TileGeology {
+                    bottom: s.bottom,
+                    mountainosity: s.mountainosity,
+                    subduction: 0.0,
+                    intrusion: None,
+                    impact_scar: s.impact_scar,
+                    layers: s.layers,
+                };
+                tmp.compact();
+                merged_groups.push((tmp.bottom, tmp.mountainosity, tmp.impact_scar, tmp.layers));
+            } else {
+                let n_src = g.len().max(1) as f32;
+                let avg_b = g.iter().map(|s| s.bottom).sum::<f32>() / n_src;
+                let avg_scar = g.iter().map(|s| s.impact_scar).sum::<f32>() / n_src;
+                let avg_t = g
+                    .iter()
+                    .map(|s| s.layers.iter().map(|l| l.thickness).sum::<f32>())
+                    .sum::<f32>()
+                    / n_src;
+                let converted: Vec<(f32, f32, Vec<(Rock, f32)>)> = g
+                    .into_iter()
+                    .map(|s| {
+                        (
+                            s.bottom,
+                            s.mountainosity,
+                            s.layers
+                                .into_iter()
+                                .map(|l| (l.rock, l.thickness))
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                let (_, mountainosity, mut layers) = Self::merge_layers(&converted);
+                let raw_t: f32 = layers.iter().map(|l| l.1).sum();
+                if raw_t > 1e-6 {
+                    let scale = avg_t / raw_t;
+                    for l in &mut layers {
+                        l.1 *= scale;
+                    }
                 }
+                let rock_layers: Vec<RockLayer> = layers
+                    .into_iter()
+                    .map(|(rock, thickness)| RockLayer { rock, thickness })
+                    .collect();
+                merged_groups.push((avg_b, mountainosity, avg_scar, rock_layers));
             }
-            merged_groups.push((avg_b, mountainosity, avg_scar, layers));
         }
 
         if merged_groups.len() == 1 {
@@ -338,16 +375,13 @@ impl TileGeology {
             self.bottom = b;
             self.mountainosity = m;
             self.impact_scar = scar;
-            self.layers = ls
-                .into_iter()
-                .map(|(rock, thickness)| RockLayer { rock, thickness })
-                .collect();
+            self.layers = ls;
             self.limit();
             self.compact();
         } else {
             let max_elev = merged_groups
                 .iter()
-                .map(|(b, _, _, ls)| *b + ls.iter().map(|l| l.1).sum::<f32>())
+                .map(|(b, _, _, ls)| *b + ls.iter().map(|l| l.thickness).sum::<f32>())
                 .fold(0.5f32, f32::max);
             let mut target_elev = max_elev;
             for _ in 1..merged_groups.len() {
@@ -360,13 +394,7 @@ impl TileGeology {
             let mean_scar = merged_groups.iter().map(|g| g.2).sum::<f32>()
                 / (merged_groups.len().max(1) as f32);
             self.impact_scar = mean_scar * 0.55;
-            self.layers = merged_groups
-                .into_iter()
-                .flat_map(|g| {
-                    g.3.into_iter()
-                        .map(|(rock, thickness)| RockLayer { rock, thickness })
-                })
-                .collect();
+            self.layers = merged_groups.into_iter().flat_map(|g| g.3).collect();
             self.bottom = target_elev - self.thickness();
             self.limit();
             self.compact();

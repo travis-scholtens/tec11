@@ -10,7 +10,7 @@ use tec11_proto::{MetamorphicFaciesExt, PlanetSnapshotExt};
 use crate::movement::{center_tile, farthest_tile, move_group, split_group};
 use crate::pangea::PangeaWorld;
 use crate::rock::{
-    deposit_sedimentary, metamorphic_contact, metamorphic_regional, DepositClimate,
+    deposit_sedimentary, metamorphic_contact, metamorphic_regional_in_place, DepositClimate,
     ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
 use crate::tile::{TileGeology, TileSourceColumn};
@@ -793,7 +793,7 @@ impl TectonicsSimulation {
         //    sediment scraping.
         let mut collisions: BTreeMap<(usize, usize), usize> = BTreeMap::new();
 
-        for (&dest, movements) in &new_movements {
+        for (dest, movements) in new_movements {
             let is_leading_edge = !old_continental[dest];
             let avg_speed: f64 =
                 movements.iter().map(|m| m.speed).sum::<f64>() / (movements.len() as f64);
@@ -838,8 +838,8 @@ impl TectonicsSimulation {
             }
 
             let group_sources: Vec<Vec<TileSourceColumn>> =
-                movements.iter().map(|m| m.sources.clone()).collect();
-            self.tiles[dest].merge_sources(&group_sources);
+                movements.into_iter().map(|m| m.sources).collect();
+            self.tiles[dest].merge_sources_owned(group_sources);
 
             for sed in scraped_sediments {
                 self.tiles[dest].deposit(sed);
@@ -1093,7 +1093,9 @@ impl TectonicsSimulation {
                     // - On land neighbors, 35% is deposited locally in terrestrial basins while 65%
                     //   is exported to the sea as dissolved/suspended fluvial load.
                     // - On coastal ocean neighbors, the full share enters the coastal sea.
-                    for &(dest_u, deg_u) in &outgoing_dests[v] {
+                    let dest_len = outgoing_dests[v].len();
+                    let mut stripped_opt = Some(stripped_layers);
+                    for (idx, &(dest_u, deg_u)) in outgoing_dests[v].iter().enumerate() {
                         let share = total_eroded * (deg_u / total_degree);
                         let retention = if !overlapping[dest_u].is_empty() {
                             0.35
@@ -1101,10 +1103,15 @@ impl TectonicsSimulation {
                             1.0
                         };
                         let amount_u = share * retention;
+                        let substance = if idx + 1 == dest_len {
+                            stripped_opt.take().unwrap()
+                        } else {
+                            stripped_opt.as_ref().unwrap().clone()
+                        };
                         incoming_batches[dest_u].push(ErodedMaterialBatch {
                             amount: amount_u,
                             total: total_eroded,
-                            substance: stripped_layers.clone(),
+                            substance,
                         });
                     }
                 }
@@ -1241,8 +1248,8 @@ impl TectonicsSimulation {
         // 8. Regional metamorphism (`planetsimulation.py:333-335`).
         for t in 0..n {
             let sub = self.tiles[t].subduction > 0.0;
-            let transformed = metamorphic_regional(&self.tiles[t].layers, sub);
-            self.tiles[t].transform(transformed);
+            metamorphic_regional_in_place(&mut self.tiles[t].layers, sub);
+            self.tiles[t].compact();
         }
 
         // 9. Merge overlapping continent shapes (`planetsimulation.py:342-370`).
