@@ -320,29 +320,39 @@ fn apply_facies(mut layer: RockLayer, op: FaciesOp) -> RockLayer {
             }
         }
         FaciesOp::Blueschist => {
-            layer.rock.kind = RockKind::Metamorphic;
-            layer.rock.name = "blueschist";
-            layer.rock.toughness = layer.rock.toughness.max(0.75);
+            if layer.rock.toughness <= 0.75 {
+                layer.rock.kind = RockKind::Metamorphic;
+                layer.rock.name = "blueschist";
+                layer.rock.toughness = layer.rock.toughness.max(0.75);
+            }
         }
         FaciesOp::Greenschist => {
-            layer.rock.kind = RockKind::Metamorphic;
-            layer.rock.name = "greenschist";
-            layer.rock.toughness = layer.rock.toughness.max(0.75);
+            if layer.rock.toughness <= 0.75 && layer.rock.name != "blueschist" {
+                layer.rock.kind = RockKind::Metamorphic;
+                layer.rock.name = "greenschist";
+                layer.rock.toughness = layer.rock.toughness.max(0.75);
+            }
         }
         FaciesOp::Amphibolite => {
-            layer.rock.kind = RockKind::Metamorphic;
-            layer.rock.name = "amphibolite";
-            layer.rock.toughness = layer.rock.toughness.max(0.80);
+            if layer.rock.toughness <= 0.80 {
+                layer.rock.kind = RockKind::Metamorphic;
+                layer.rock.name = "amphibolite";
+                layer.rock.toughness = layer.rock.toughness.max(0.80);
+            }
         }
         FaciesOp::Eclogite => {
-            layer.rock.kind = RockKind::Metamorphic;
-            layer.rock.name = "eclogite";
-            layer.rock.toughness = layer.rock.toughness.max(0.85);
+            if layer.rock.toughness <= 0.85 {
+                layer.rock.kind = RockKind::Metamorphic;
+                layer.rock.name = "eclogite";
+                layer.rock.toughness = layer.rock.toughness.max(0.85);
+            }
         }
         FaciesOp::Hornfels => {
-            layer.rock.kind = RockKind::Metamorphic;
-            layer.rock.name = "hornfels";
-            layer.rock.toughness = 1.0;
+            if layer.rock.name != "granulite" {
+                layer.rock.kind = RockKind::Metamorphic;
+                layer.rock.name = "hornfels";
+                layer.rock.toughness = 1.0;
+            }
         }
         FaciesOp::Granulite => {
             layer.rock.kind = RockKind::Metamorphic;
@@ -594,6 +604,18 @@ mod tests {
         assert_eq!(norm[norm.len() - 3].rock.name, "greenschist");
         assert_eq!(norm[norm.len() - 4].rock.name, "amphibolite");
         assert_eq!(norm[norm.len() - 5].rock.name, "eclogite");
+
+        // Prograde irreversibility: blueschist formed during subduction must not be overwritten
+        // by greenschist when subduction ceases at the same depth (15..30 km), nor should
+        // higher-grade eclogite/amphibolite/hornfels/granulite retrograde when exhumed shallower.
+        let sub_layers = metamorphic_regional(&[dummy_layer(30.0)], true);
+        assert_eq!(sub_layers[0].rock.name, "blueschist");
+        let after_subduction_stops = metamorphic_regional(&sub_layers, false);
+        assert_eq!(
+            after_subduction_stops[0].rock.name,
+            "blueschist",
+            "Blueschist at 20..30 km must not be overwritten by greenschist after subduction stops"
+        );
     }
 
     #[test]
