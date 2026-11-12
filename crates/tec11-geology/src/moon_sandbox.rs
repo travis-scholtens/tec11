@@ -501,18 +501,10 @@ impl MoonSandbox {
         for t in 0..n {
             self.tile_tidal_deposition[t] = incoming_tidal_amount[t];
             if apply_to_strata && !incoming_batches[t].is_empty() {
-                let koeppen_group = match self.tile_koeppen[t] {
-                    1..=3 => 'A',
-                    4..=5 => 'B',
-                    6..=8 => 'C',
-                    9..=11 => 'D',
-                    12..=13 => 'E',
-                    _ => ' ',
-                };
                 let dep_climate = DepositClimate {
-                    koeppen_group,
                     temperature_c: self.tile_temp_c[t],
                     precipitation_norm: self.tile_precip_norm[t],
+                    life: self.tile_life[t],
                 };
                 let is_sea = self.tiles[t].elevation() <= 0.0;
                 let layer =

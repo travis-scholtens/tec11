@@ -130,13 +130,13 @@ impl ErosionSandbox {
             .collect();
         self.climate_model.update_for_tectonics(&land_elevs, true);
 
-        let mut koeppen_ids = vec![0u8; n];
+        let mut tile_life = vec![0.0f32; n];
         let mut tile_temp_norm = vec![0.5f32; n];
         let mut tile_temp_c = vec![15.0f32; n];
         let mut tile_precip_norm = vec![0.5f32; n];
 
         for (v, c) in self.climate_model.classifications().iter().enumerate() {
-            koeppen_ids[v] = c.koeppen as u8;
+            tile_life[v] = if c.life { 1.0 } else { 0.0 };
             let tn = c.mean_temperature as f32;
             tile_temp_norm[v] = tn;
             tile_temp_c[v] = tn * 75.0 - 20.0;
@@ -210,18 +210,10 @@ impl ErosionSandbox {
             // `erosiondisplay.py:69`: `t = sum([m.amount for m in tile.eroding.materials])`
             self.tile_gained[t] = total_gained;
 
-            let koeppen_group = match koeppen_ids[t] {
-                1..=3 => 'A',
-                4..=5 => 'B',
-                6..=8 => 'C',
-                9..=11 => 'D',
-                12..=13 => 'E',
-                _ => ' ',
-            };
             let dep_climate = DepositClimate {
-                koeppen_group,
                 temperature_c: tile_temp_c[t],
                 precipitation_norm: tile_precip_norm[t],
+                life: tile_life[t],
             };
             let is_sea = self.tiles[t].elevation() <= 0.0;
             let layer = deposit_sedimentary(&incoming_batches[t], true, is_sea, Some(dep_climate));
