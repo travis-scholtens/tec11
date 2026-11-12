@@ -119,23 +119,29 @@ function triggerBinaryDownload(filename, bytes) {
 function pickBinarySnapshotFile(onBytesLoaded) {
   const input = document.createElement("input");
   input.type = "file";
-  input.accept = ".tec11";
+  input.accept = ".tec11,.json";
   input.style.display = "none";
   input.addEventListener("change", () => {
     const file = input.files && input.files[0];
     if (!file) {
-      document.body.removeChild(input);
+      if (input.parentNode) {
+        input.parentNode.removeChild(input);
+      }
       return;
     }
     const reader = new FileReader();
     reader.onload = () => {
       if (reader.result instanceof ArrayBuffer) {
-        onBytesLoaded(new Uint8Array(reader.result));
+        onBytesLoaded(new Uint8Array(reader.result), file.name);
       }
-      document.body.removeChild(input);
+      if (input.parentNode) {
+        input.parentNode.removeChild(input);
+      }
     };
     reader.onerror = () => {
-      document.body.removeChild(input);
+      if (input.parentNode) {
+        input.parentNode.removeChild(input);
+      }
     };
     reader.readAsArrayBuffer(file);
   });
@@ -1143,8 +1149,9 @@ function rebuildClimateViewGeometryAndData(view) {
 
 function buildClimateInfo(view) {
   const s = view.session;
+  const labelPrefix = view.loadedFileName ? view.loadedFileName : "Tectonics";
   const planetName = s.is_custom_planet()
-    ? `Tectonics (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    ? `${labelPrefix} (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
     : "Earth (ETOPO2)";
   return {
     planetName,
@@ -1165,6 +1172,7 @@ export const mountClimateView =
     view.attribute = attribute;
     view.seasonSlider = seasonSlider;
     view.setClimateInfo = setClimateInfo;
+    view.loadedFileName = null;
 
     if (activeClimateSnapshotBytes) {
       const ok = view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
@@ -1208,6 +1216,7 @@ export const setClimateParams = (cells) => (glaciationPct) => () => {
 export const loadEarthIntoClimate = (setClimateInfo) => () => {
   if (!activeView || !activeView.session) return;
   activeClimateSnapshotBytes = null;
+  activeView.loadedFileName = null;
   activeView.session.load_earth();
   rebuildClimateViewGeometryAndData(activeView);
   setClimateInfo(buildClimateInfo(activeView))();
@@ -1220,6 +1229,7 @@ export const loadSavedPlanetIntoClimate = (setClimateInfo) => () => {
   const ok = activeView.session.load_snapshot_bytes(saved);
   if (ok) {
     activeClimateSnapshotBytes = saved;
+    activeView.loadedFileName = null;
     rebuildClimateViewGeometryAndData(activeView);
     setClimateInfo(buildClimateInfo(activeView))();
   }
@@ -1227,12 +1237,13 @@ export const loadSavedPlanetIntoClimate = (setClimateInfo) => () => {
 
 export const loadFilePlanetIntoClimate = (setClimateInfo) => () => {
   if (!activeView || !activeView.session) return;
-  pickBinarySnapshotFile((bytes) => {
+  pickBinarySnapshotFile((bytes, filename) => {
     if (!activeView || !activeView.session) return;
     const ok = activeView.session.load_snapshot_bytes(bytes);
     if (ok) {
       storeSavedSnapshotBytes(bytes);
       activeClimateSnapshotBytes = bytes;
+      activeView.loadedFileName = filename || null;
       rebuildClimateViewGeometryAndData(activeView);
       setClimateInfo(buildClimateInfo(activeView))();
     }
@@ -1253,6 +1264,12 @@ export const mountTectonicsView = (gridSize) => (landPct) => (aspect) => (setTec
   view.selectedTileIdx = -1;
   view.timerId = null;
   view.setTectonicsInfo = setTectonicsInfo;
+
+  if (activeClimateSnapshotBytes) {
+    if (view.session.load_snapshot_bytes(activeClimateSnapshotBytes)) {
+      view.currentGridSize = view.session.grid_size();
+    }
+  }
 
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
@@ -1343,11 +1360,11 @@ export const toggleTectonicsRunning = (setTectonicsInfo) => () => {
 export const resetTectonics = (gridSize) => (landPct) => (setTectonicsInfo) => () => {
   if (!activeView || !activeView.session) return;
   stopTectonicsLoop(activeView);
-  const sizeChanged = activeView.currentGridSize !== gridSize;
+  activeClimateSnapshotBytes = null;
   activeView.session.reset(gridSize, landPct);
   activeView.currentGridSize = gridSize;
   activeView.selectedTileIdx = -1;
-  updateTectonicsViewBuffers(activeView, sizeChanged);
+  updateTectonicsViewBuffers(activeView, true);
   setTectonicsInfo(buildTectonicsInfo(activeView))();
 };
 
@@ -1366,6 +1383,7 @@ export const saveTectonicsPlanet = (setTectonicsInfo) => () => {
   const landPercent = s.land_percent_actual();
   const bytes = s.export_snapshot_bytes();
   storeSavedSnapshotBytes(bytes);
+  activeClimateSnapshotBytes = bytes;
   const filename = `planet-${geoticks * 5}Myr.tec11`;
   triggerBinaryDownload(filename, bytes);
   const info = buildTectonicsInfo(activeView);
@@ -1376,18 +1394,20 @@ export const saveTectonicsPlanet = (setTectonicsInfo) => () => {
 export const loadTectonicsPlanetFromFile = (setTectonicsSize) => (setTectonicsInfo) => () => {
   if (!activeView || !activeView.session) return;
   stopTectonicsLoop(activeView);
-  pickBinarySnapshotFile((bytes) => {
+  pickBinarySnapshotFile((bytes, filename) => {
     if (!activeView || !activeView.session) return;
     const ok = activeView.session.load_snapshot_bytes(bytes);
     if (ok) {
       storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
       const newSize = activeView.session.grid_size();
-      const sizeChanged = activeView.currentGridSize !== newSize;
       activeView.currentGridSize = newSize;
       activeView.selectedTileIdx = -1;
-      updateTectonicsViewBuffers(activeView, sizeChanged);
+      updateTectonicsViewBuffers(activeView, true);
       setTectonicsSize(newSize)();
-      setTectonicsInfo(buildTectonicsInfo(activeView))();
+      const info = buildTectonicsInfo(activeView);
+      info.selectedTileReport = `Loaded ${filename || "snapshot"} (${info.geoticks * 5} Myr, ${info.actualLandPercent}% land, ${info.tileCount} tiles).\nClick any tile on the globe to inspect its rock layers.`;
+      setTectonicsInfo(info)();
     }
   });
 };
@@ -1731,8 +1751,9 @@ function updateErosionViewBuffers(view, rebuildGeometry) {
 
 function buildErosionInfo(view) {
   const s = view.session;
+  const labelPrefix = view.loadedFileName ? view.loadedFileName : "Tectonics";
   const planetName = s.is_custom_planet()
-    ? `Tectonics (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    ? `${labelPrefix} (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
     : "Earth (ETOPO2)";
   const selectedTileReport =
     view.selectedTileIdx >= 0
@@ -1759,6 +1780,7 @@ export const mountErosionView = (showLost) => (showGained) => (setErosionInfo) =
   view.showGained = showGained;
   view.selectedTileIdx = -1;
   view.setErosionInfo = setErosionInfo;
+  view.loadedFileName = null;
 
   if (activeClimateSnapshotBytes) {
     view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
@@ -1822,6 +1844,7 @@ export const setErosionOverlays = (showLost) => (showGained) => () => {
 export const loadEarthIntoErosion = (setErosionInfo) => () => {
   if (!activeView || !activeView.session) return;
   activeClimateSnapshotBytes = null;
+  activeView.loadedFileName = null;
   activeView.session.load_earth();
   activeView.selectedTileIdx = -1;
   updateErosionViewBuffers(activeView, true);
@@ -1834,6 +1857,7 @@ export const loadSavedPlanetIntoErosion = (setErosionInfo) => () => {
   if (!saved) return;
   if (activeView.session.load_snapshot_bytes(saved)) {
     activeClimateSnapshotBytes = saved;
+    activeView.loadedFileName = null;
     activeView.selectedTileIdx = -1;
     updateErosionViewBuffers(activeView, true);
     setErosionInfo(buildErosionInfo(activeView))();
@@ -1842,14 +1866,17 @@ export const loadSavedPlanetIntoErosion = (setErosionInfo) => () => {
 
 export const loadFilePlanetIntoErosion = (setErosionInfo) => () => {
   if (!activeView || !activeView.session) return;
-  pickBinarySnapshotFile((bytes) => {
+  pickBinarySnapshotFile((bytes, filename) => {
     if (!activeView || !activeView.session) return;
     if (activeView.session.load_snapshot_bytes(bytes)) {
       storeSavedSnapshotBytes(bytes);
       activeClimateSnapshotBytes = bytes;
+      activeView.loadedFileName = filename || null;
       activeView.selectedTileIdx = -1;
       updateErosionViewBuffers(activeView, true);
-      setErosionInfo(buildErosionInfo(activeView))();
+      const info = buildErosionInfo(activeView);
+      info.selectedTileReport = `Loaded ${filename || "snapshot"} (${activeView.session.loaded_geoticks() * 5} Myr, ${activeView.session.loaded_land_percent()}% land).\nClick any tile on the globe to inspect elevation, erosion, and deposition.`;
+      setErosionInfo(info)();
     }
   });
 };
@@ -1933,8 +1960,9 @@ function updateRiversViewBuffers(view, rebuildGeometry) {
 
 function buildRiversInfo(view) {
   const s = view.session;
+  const labelPrefix = view.loadedFileName ? view.loadedFileName : "Tectonics";
   const planetName = s.is_custom_planet()
-    ? `Tectonics (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
+    ? `${labelPrefix} (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
     : "Earth (ETOPO2)";
   return {
     planetName,
@@ -1954,6 +1982,7 @@ export const mountRiversView = (hminSlider) => (pminSlider) => (setRiversInfo) =
   const hmin = hminSlider / 10.0;
   const pmin = (3.0 * pminSlider) / 100.0;
   view.session = new WasmRiversSession(hmin, pmin);
+  view.loadedFileName = null;
 
   if (activeClimateSnapshotBytes) {
     view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
@@ -1984,6 +2013,7 @@ export const setRiversParams = (hminSlider) => (pminSlider) => (setRiversInfo) =
 export const loadEarthIntoRivers = (setRiversInfo) => () => {
   if (!activeView || !activeView.session) return;
   activeClimateSnapshotBytes = null;
+  activeView.loadedFileName = null;
   activeView.session.load_earth();
   updateRiversViewBuffers(activeView, true);
   setRiversInfo(buildRiversInfo(activeView))();
@@ -1995,6 +2025,7 @@ export const loadSavedPlanetIntoRivers = (setRiversInfo) => () => {
   if (!saved) return;
   if (activeView.session.load_snapshot_bytes(saved)) {
     activeClimateSnapshotBytes = saved;
+    activeView.loadedFileName = null;
     updateRiversViewBuffers(activeView, true);
     setRiversInfo(buildRiversInfo(activeView))();
   }
@@ -2002,11 +2033,12 @@ export const loadSavedPlanetIntoRivers = (setRiversInfo) => () => {
 
 export const loadFilePlanetIntoRivers = (setRiversInfo) => () => {
   if (!activeView || !activeView.session) return;
-  pickBinarySnapshotFile((bytes) => {
+  pickBinarySnapshotFile((bytes, filename) => {
     if (!activeView || !activeView.session) return;
     if (activeView.session.load_snapshot_bytes(bytes)) {
       storeSavedSnapshotBytes(bytes);
       activeClimateSnapshotBytes = bytes;
+      activeView.loadedFileName = filename || null;
       updateRiversViewBuffers(activeView, true);
       setRiversInfo(buildRiversInfo(activeView))();
     }

@@ -36,7 +36,7 @@ impl WasmClimateSession {
             return false;
         };
         let grid_size = snap.grid_size;
-        if !(4..=7).contains(&grid_size) {
+        if !(2..=7).contains(&grid_size) {
             return false;
         }
         let Some(geo_tiles) = snap.geological_tiles() else {
@@ -46,7 +46,10 @@ impl WasmClimateSession {
         if geo_tiles.len() != grid.faces.len() {
             return false;
         }
-        let elevations: Vec<f32> = geo_tiles.into_iter().map(|t| t.elevation()).collect();
+        let elevations: Vec<f32> = geo_tiles
+            .into_iter()
+            .map(|t| t.elevation().max(0.0))
+            .collect();
         let land_tiles = elevations.iter().filter(|&&e| e > 0.0).count();
         let land_pct =
             ((100.0 * (land_tiles as f64) / (elevations.len().max(1) as f64)) + 0.5) as u32;

@@ -467,7 +467,7 @@ impl PrehistorySimulation {
 
     pub fn from_snapshot(snap: &tec11_proto::PlanetSnapshot, fallback_seed: u64) -> Option<Self> {
         let grid_size = snap.grid_size;
-        if !(4..=7).contains(&grid_size) {
+        if !(2..=7).contains(&grid_size) {
             return None;
         }
         let grid = SphericalGrid::with_size(grid_size);

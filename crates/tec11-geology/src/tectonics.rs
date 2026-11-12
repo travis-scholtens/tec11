@@ -1587,19 +1587,176 @@ impl TectonicsSimulation {
     /// Reconstruct a `TectonicsSimulation` from a `tec11_proto::PlanetSnapshot`.
     pub fn from_snapshot(snap: &tec11_proto::PlanetSnapshot, fallback_seed: u64) -> Option<Self> {
         let grid_size = snap.grid_size;
-        if !(4..=7).contains(&grid_size) {
+        if !(2..=7).contains(&grid_size) {
             return None;
         }
-        let tec11_proto::PlanetStageOneof::Tectonics(ref tec) = snap.stage.as_ref()? else {
-            return None;
-        };
-
         let grid = SphericalGrid::with_size(grid_size);
         let n = grid.faces.len();
-        if tec.tiles.len() != n {
-            return None;
-        }
         let adjacency = grid.adjacency();
+
+        let (
+            tiles,
+            mut groups,
+            ridges,
+            geoticks,
+            atmosphere_ticks_remaining,
+            life_ticks_remaining,
+            total_target_ticks,
+        ) = match snap.stage.as_ref()? {
+            tec11_proto::PlanetStageOneof::Tectonics(tec) => {
+                if tec.tiles.len() != n {
+                    return None;
+                }
+                let tiles: Vec<TileGeology> = tec
+                    .tiles
+                    .iter()
+                    .map(TileGeology::from_proto_geological_tile)
+                    .collect::<Option<Vec<_>>>()?;
+                let groups: Vec<LithosphericGroup> = tec
+                    .groups
+                    .iter()
+                    .map(|pg| {
+                        let v = pg.velocity.unwrap_or_default();
+                        LithosphericGroup {
+                            tiles: pg
+                                .tile_ids
+                                .iter()
+                                .map(|&id| id as usize)
+                                .filter(|&id| id < n)
+                                .collect(),
+                            velocity: [v.x as f64, v.y as f64, v.z as f64],
+                        }
+                    })
+                    .collect();
+                let ridges: Vec<SpreadingRidgeArc> = tec
+                    .ridges
+                    .iter()
+                    .map(|pr| {
+                        let s = pr.start.unwrap_or_default();
+                        let e = pr.end.unwrap_or_default();
+                        let v = pr.velocity.unwrap_or_default();
+                        SpreadingRidgeArc {
+                            start: [s.x as f64, s.y as f64, s.z as f64],
+                            end: [e.x as f64, e.y as f64, e.z as f64],
+                            velocity: [v.x as f64, v.y as f64, v.z as f64],
+                            age_ticks: pr.age_ticks,
+                        }
+                    })
+                    .collect();
+                let total_target = if tec.people_ticks_remaining > 0 {
+                    tec.people_ticks_remaining
+                } else {
+                    tec.tectonics_ticks.max(75)
+                };
+                (
+                    tiles,
+                    groups,
+                    ridges,
+                    tec.tectonics_ticks,
+                    tec.atmosphere_ticks_remaining,
+                    tec.life_ticks_remaining,
+                    total_target,
+                )
+            }
+            tec11_proto::PlanetStageOneof::Prehistory(pre) => {
+                if pre.tiles.len() != n {
+                    return None;
+                }
+                let tiles: Vec<TileGeology> = pre
+                    .tiles
+                    .iter()
+                    .map(|pt| TileGeology::from_proto_geological_tile(pt.geology.as_ref()?))
+                    .collect::<Option<Vec<_>>>()?;
+                let groups: Vec<LithosphericGroup> = pre
+                    .groups
+                    .iter()
+                    .map(|pg| {
+                        let v = pg.velocity.unwrap_or_default();
+                        LithosphericGroup {
+                            tiles: pg
+                                .tile_ids
+                                .iter()
+                                .map(|&id| id as usize)
+                                .filter(|&id| id < n)
+                                .collect(),
+                            velocity: [v.x as f64, v.y as f64, v.z as f64],
+                        }
+                    })
+                    .collect();
+                (
+                    tiles,
+                    groups,
+                    Vec::new(),
+                    pre.tectonics_ticks,
+                    0,
+                    0,
+                    pre.tectonics_ticks.max(75),
+                )
+            }
+            tec11_proto::PlanetStageOneof::History(hist) => {
+                let pre = hist.prehistory_base.as_ref()?;
+                if pre.tiles.len() != n {
+                    return None;
+                }
+                let tiles: Vec<TileGeology> = pre
+                    .tiles
+                    .iter()
+                    .map(|pt| TileGeology::from_proto_geological_tile(pt.geology.as_ref()?))
+                    .collect::<Option<Vec<_>>>()?;
+                let groups: Vec<LithosphericGroup> = pre
+                    .groups
+                    .iter()
+                    .map(|pg| {
+                        let v = pg.velocity.unwrap_or_default();
+                        LithosphericGroup {
+                            tiles: pg
+                                .tile_ids
+                                .iter()
+                                .map(|&id| id as usize)
+                                .filter(|&id| id < n)
+                                .collect(),
+                            velocity: [v.x as f64, v.y as f64, v.z as f64],
+                        }
+                    })
+                    .collect();
+                (
+                    tiles,
+                    groups,
+                    Vec::new(),
+                    pre.tectonics_ticks,
+                    0,
+                    0,
+                    pre.tectonics_ticks.max(75),
+                )
+            }
+        };
+
+        if groups.is_empty() {
+            let mut visited = vec![false; n];
+            for start in 0..n {
+                if visited[start] || tiles[start].elevation() <= 0.0 {
+                    continue;
+                }
+                let mut comp = Vec::new();
+                let mut queue = std::collections::VecDeque::new();
+                visited[start] = true;
+                queue.push_back(start);
+                while let Some(u) = queue.pop_front() {
+                    comp.push(u);
+                    for &nb in &adjacency[u] {
+                        if !visited[nb] && tiles[nb].elevation() > 0.0 {
+                            visited[nb] = true;
+                            queue.push_back(nb);
+                        }
+                    }
+                }
+                groups.push(LithosphericGroup {
+                    tiles: comp,
+                    velocity: [0.0, 0.0, 0.0],
+                });
+            }
+        }
+
         let indexed_pts: Vec<(Vec3, usize)> = grid
             .faces
             .iter()
@@ -1632,57 +1789,13 @@ impl TectonicsSimulation {
         let earth_area_km2 = 4.0 * PI * 6400.0 * 6400.0;
         let splitnum = (25.0e6 / earth_area_km2) * (n as f64);
 
-        let tiles: Vec<TileGeology> = tec
-            .tiles
-            .iter()
-            .map(TileGeology::from_proto_geological_tile)
-            .collect::<Option<Vec<_>>>()?;
-
-        let groups: Vec<LithosphericGroup> = tec
-            .groups
-            .iter()
-            .map(|pg| {
-                let v = pg.velocity.unwrap_or_default();
-                LithosphericGroup {
-                    tiles: pg
-                        .tile_ids
-                        .iter()
-                        .map(|&id| id as usize)
-                        .filter(|&id| id < n)
-                        .collect(),
-                    velocity: [v.x as f64, v.y as f64, v.z as f64],
-                }
-            })
-            .collect();
-
-        let ridges: Vec<SpreadingRidgeArc> = tec
-            .ridges
-            .iter()
-            .map(|pr| {
-                let s = pr.start.unwrap_or_default();
-                let e = pr.end.unwrap_or_default();
-                let v = pr.velocity.unwrap_or_default();
-                SpreadingRidgeArc {
-                    start: [s.x as f64, s.y as f64, s.z as f64],
-                    end: [e.x as f64, e.y as f64, e.z as f64],
-                    velocity: [v.x as f64, v.y as f64, v.z as f64],
-                    age_ticks: pr.age_ticks,
-                }
-            })
-            .collect();
-
         let rng = if let Ok(bytes_16) = <[u8; 16]>::try_from(snap.rng_state_16b.as_slice()) {
             Pcg64Mcg::from_bytes(bytes_16)
         } else {
-            Pcg64Mcg::from_seed_u64(fallback_seed.wrapping_add(tec.tectonics_ticks as u64))
+            Pcg64Mcg::from_seed_u64(fallback_seed.wrapping_add(geoticks as u64))
         };
 
         let climate_model = ClimateModel::new_for_tectonics(grid.clone(), cells, spin, tilt_deg);
-        let total_target_ticks = if tec.people_ticks_remaining > 0 {
-            tec.people_ticks_remaining
-        } else {
-            75
-        };
 
         let mut sim = Self {
             grid,
@@ -1693,10 +1806,10 @@ impl TectonicsSimulation {
             build_rate,
             erode_rate,
             splitnum,
-            atmosphere_ticks_remaining: tec.atmosphere_ticks_remaining,
-            life_ticks_remaining: tec.life_ticks_remaining,
+            atmosphere_ticks_remaining,
+            life_ticks_remaining,
             total_target_ticks,
-            geoticks: tec.tectonics_ticks,
+            geoticks,
             target_day_hours,
             base_tilt_deg: tilt_deg,
             moon_count: 1,

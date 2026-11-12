@@ -308,4 +308,52 @@ mod tests {
         e.erode();
         assert_eq!(e.steps(), 2);
     }
+
+    #[test]
+    fn test_tectonics_erosion_rivers_load_all_snapshot_stages() {
+        use crate::history::HistorySimulation;
+        use crate::prehistory::PrehistorySimulation;
+        use crate::rivers::RiversSandbox;
+
+        let mut tec = TectonicsSimulation::new(4, 29.0, 42);
+        tec.step();
+        let tec_bytes = tec.encode_snapshot();
+
+        let pre = PrehistorySimulation::from_snapshot(&tec.to_snapshot(), 42)
+            .expect("PrehistorySimulation should decode tectonics snapshot");
+        let pre_bytes = pre.encode_snapshot();
+
+        let mut hist = HistorySimulation::new_earth(42);
+        assert!(hist.load_snapshot_bytes(&pre_bytes));
+        let hist_bytes = hist.encode_snapshot();
+
+        for (label, bytes) in [
+            ("tectonics", &tec_bytes),
+            ("prehistory", &pre_bytes),
+            ("history", &hist_bytes),
+        ] {
+            let loaded_tec = TectonicsSimulation::decode_snapshot(bytes, 99)
+                .unwrap_or_else(|| panic!("TectonicsSimulation should load {label} snapshot"));
+            assert_eq!(loaded_tec.grid().size, 4);
+            assert_eq!(loaded_tec.geoticks(), 1);
+
+            let mut erosion = ErosionSandbox::new_earth();
+            assert!(
+                erosion.load_snapshot_bytes(bytes),
+                "ErosionSandbox should load {label} snapshot"
+            );
+            assert!(erosion.is_custom_planet());
+            assert_eq!(erosion.loaded_geoticks(), 1);
+            assert_eq!(erosion.tile_count(), 812);
+
+            let mut rivers = RiversSandbox::new_earth(3.0, 0.5);
+            assert!(
+                rivers.load_snapshot_bytes(bytes),
+                "RiversSandbox should load {label} snapshot"
+            );
+            assert!(rivers.is_custom_planet());
+            assert_eq!(rivers.loaded_geoticks(), 1);
+            assert_eq!(rivers.tile_count(), 812);
+        }
+    }
 }
