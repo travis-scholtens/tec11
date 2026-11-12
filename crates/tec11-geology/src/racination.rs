@@ -3,7 +3,7 @@ use std::f64::consts::PI;
 
 use tec11_math_grid::{normal, rotate, Pcg64Mcg, SphericalGrid, SphericalPolygon, Vec3};
 
-use crate::population::{is_passable, within_steps, DisjointSet};
+use crate::population::{is_passable, DisjointSet};
 
 /// A distinct population heritage (`race.py:1-10`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,22 +67,66 @@ pub fn racinate_with_technologies<F>(
     let n = elevations.len();
     let mut dsu = DisjointSet::new(n);
 
-    let pop_entries: Vec<(usize, u32)> = populated.iter().map(|(&t, &h)| (t, h)).collect();
+    let mut is_pop = vec![false; n];
+    let mut pop_entries: Vec<(usize, u32)> = Vec::with_capacity(populated.len());
+    for (&t, &h) in populated.iter() {
+        if t < n {
+            is_pop[t] = true;
+        }
+        pop_entries.push((t, h));
+    }
+
+    let mut visited_stamp = vec![0u32; n];
+    let mut stamp = 0u32;
+    let mut curr_frontier: Vec<usize> = Vec::with_capacity(64);
+    let mut next_frontier: Vec<usize> = Vec::with_capacity(64);
+
     for &(t, h) in &pop_entries {
         let is_ag = agricultural_heritages.contains(&h);
         let is_sea = seafaring_heritages.contains(&h);
         let eff_range = if is_sea { travel_range + 1 } else { travel_range };
-        let reachable = within_steps(t, adjacency, eff_range, |u| {
-            if is_sea && elevations[u] <= 0.0 {
-                true
-            } else {
-                is_passable(elevations[u], koeppen_ids[u], is_ag)
+        let passable_t = if is_sea && elevations[t] <= 0.0 {
+            true
+        } else {
+            is_passable(elevations[t], koeppen_ids[t], is_ag)
+        };
+        if !passable_t || eff_range == 0 {
+            continue;
+        }
+
+        stamp = stamp.wrapping_add(1);
+        if stamp == 0 {
+            visited_stamp.fill(0);
+            stamp = 1;
+        }
+        visited_stamp[t] = stamp;
+        curr_frontier.clear();
+        curr_frontier.push(t);
+
+        for _step in 0..eff_range {
+            next_frontier.clear();
+            for &u in &curr_frontier {
+                for &nb in &adjacency[u] {
+                    if visited_stamp[nb] != stamp {
+                        let ok = if is_sea && elevations[nb] <= 0.0 {
+                            true
+                        } else {
+                            is_passable(elevations[nb], koeppen_ids[nb], is_ag)
+                        };
+                        if ok {
+                            visited_stamp[nb] = stamp;
+                            if is_pop[nb] {
+                                dsu.union(t, nb);
+                            }
+                            next_frontier.push(nb);
+                        }
+                    }
+                }
             }
-        });
-        for nb in reachable {
-            if populated.contains_key(&nb) {
-                dsu.union(t, nb);
+            if next_frontier.is_empty() {
+                break;
             }
+            std::mem::swap(&mut curr_frontier, &mut next_frontier);
         }
     }
 

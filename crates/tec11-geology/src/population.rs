@@ -700,13 +700,44 @@ pub fn near_coast(
     adjacency: &[Vec<usize>],
     d: usize,
 ) -> bool {
-    if elevations[t] <= 0.0 {
+    if elevations[t] <= 0.0 || d == 0 {
         return false;
     }
-    let reachable = within_steps(t, adjacency, d, |u| {
-        is_hoppable(elevations[u], koeppen_ids[u], false)
-    });
-    reachable.into_iter().any(|n| elevations[n] <= 0.0)
+    if !is_hoppable(elevations[t], koeppen_ids[t], false) {
+        return false;
+    }
+    // Fast allocation-free bounded BFS for small coastal_proximity (typically d = 2 or 3)
+    let mut visited = [usize::MAX; 64];
+    let mut v_len = 1usize;
+    visited[0] = t;
+    let mut curr_start = 0usize;
+    let mut curr_end = 1usize;
+
+    for _step in 0..d {
+        let next_start = v_len;
+        for idx in curr_start..curr_end {
+            let u = visited[idx];
+            for &nb in &adjacency[u] {
+                if elevations[nb] <= 0.0 {
+                    return true;
+                }
+                if is_hoppable(elevations[nb], koeppen_ids[nb], false)
+                    && !visited[..v_len].contains(&nb)
+                {
+                    if v_len < visited.len() {
+                        visited[v_len] = nb;
+                        v_len += 1;
+                    }
+                }
+            }
+        }
+        if v_len == next_start {
+            break;
+        }
+        curr_start = next_start;
+        curr_end = v_len;
+    }
+    false
 }
 
 /// Habitable by pre-agricultural people (`Aw` or temperate `C*` / cold `D*`),
@@ -838,6 +869,33 @@ pub fn expand_population_with_technologies(
     coastal_proximity: usize,
     cmemo: &mut BTreeMap<(usize, bool), bool>,
 ) -> bool {
+    if populated.is_empty() {
+        return false;
+    }
+    let _ = cmemo;
+    let num_tiles = elevations.len();
+
+    // Flat O(1) lookup table for currently populated tiles
+    let mut is_pop = vec![false; num_tiles];
+    for &t in populated.keys() {
+        if t < num_tiles {
+            is_pop[t] = true;
+        }
+    }
+
+    // Lazily memoized candidate suitability per tile for the 3 technology modes:
+    //   0 = uncomputed, 1 = false, 2 = true
+    let mut farm_memo = vec![0u8; num_tiles];
+    let mut sea_memo = vec![0u8; num_tiles];
+    let mut paleo_memo = vec![0u8; num_tiles];
+    let eff_sea_coast_prox = coastal_proximity + 1;
+
+    // Reusable BFS buffers and visited generation stamps to avoid all per-tile BTreeSet allocations
+    let mut visited_stamp = vec![0u32; num_tiles];
+    let mut stamp = 0u32;
+    let mut curr_frontier: Vec<usize> = Vec::with_capacity(64);
+    let mut next_frontier: Vec<usize> = Vec::with_capacity(64);
+
     let mut frontier: BTreeMap<usize, u32> = BTreeMap::new();
 
     for (&t, &heritage_id) in populated.iter() {
@@ -847,42 +905,68 @@ pub fn expand_population_with_technologies(
         let eff_range = travel_range
             + usize::from(rivers_tech && river_tiles.get(t).copied().unwrap_or(false))
             + usize::from(seas_tech);
-        let eff_coast_prox = if seas_tech {
-            coastal_proximity + 1
-        } else {
-            coastal_proximity
-        };
-        let mut distance = 0usize;
-        let mut adjs: Vec<usize> = adjacency[t].clone();
 
-        while distance < eff_range {
+        stamp = stamp.wrapping_add(1);
+        if stamp == 0 {
+            visited_stamp.fill(0);
+            stamp = 1;
+        }
+        visited_stamp[t] = stamp;
+
+        curr_frontier.clear();
+        for &nb in &adjacency[t] {
+            if visited_stamp[nb] != stamp {
+                visited_stamp[nb] = stamp;
+                curr_frontier.push(nb);
+            }
+        }
+
+        let mut distance = 0usize;
+        while distance < eff_range && !curr_frontier.is_empty() {
             let mut added = false;
-            for &n in &adjs {
-                if !populated.contains_key(&n) {
+            for &n in &curr_frontier {
+                if !is_pop[n] {
                     let cand = if farms {
-                        *cmemo
-                            .entry((n, true))
-                            .or_insert_with(|| is_farmable(elevations[n], koeppen_ids[n]))
+                        let cached = farm_memo[n];
+                        if cached != 0 {
+                            cached == 2
+                        } else {
+                            let val = is_farmable(elevations[n], koeppen_ids[n]);
+                            farm_memo[n] = if val { 2 } else { 1 };
+                            val
+                        }
                     } else if seas_tech {
-                        is_squattable(
-                            n,
-                            elevations,
-                            koeppen_ids,
-                            adjacency,
-                            eff_coast_prox,
-                            river_tiles,
-                        )
+                        let cached = sea_memo[n];
+                        if cached != 0 {
+                            cached == 2
+                        } else {
+                            let val = is_squattable(
+                                n,
+                                elevations,
+                                koeppen_ids,
+                                adjacency,
+                                eff_sea_coast_prox,
+                                river_tiles,
+                            );
+                            sea_memo[n] = if val { 2 } else { 1 };
+                            val
+                        }
                     } else {
-                        *cmemo.entry((n, false)).or_insert_with(|| {
-                            is_squattable(
+                        let cached = paleo_memo[n];
+                        if cached != 0 {
+                            cached == 2
+                        } else {
+                            let val = is_squattable(
                                 n,
                                 elevations,
                                 koeppen_ids,
                                 adjacency,
                                 coastal_proximity,
                                 river_tiles,
-                            )
-                        })
+                            );
+                            paleo_memo[n] = if val { 2 } else { 1 };
+                            val
+                        }
                     };
                     if cand {
                         frontier.insert(n, heritage_id);
@@ -890,16 +974,29 @@ pub fn expand_population_with_technologies(
                     }
                 }
             }
-            if added {
+            if added || distance + 1 >= eff_range {
                 break;
             }
-            let curr_set: BTreeSet<usize> = adjs.into_iter().collect();
-            let next_set = expand_within(&curr_set, adjacency, |u| {
-                (rivers_tech && river_tiles.get(u).copied().unwrap_or(false))
-                    || (seas_tech && elevations[u] <= 0.0)
-                    || is_hoppable(elevations[u], koeppen_ids[u], farms)
-            });
-            adjs = next_set.into_iter().collect();
+
+            next_frontier.clear();
+            for &u in &curr_frontier {
+                let u_ok = (rivers_tech && river_tiles.get(u).copied().unwrap_or(false))
+                    || is_hoppable(elevations[u], koeppen_ids[u], farms);
+                if u_ok {
+                    for &a in &adjacency[u] {
+                        if visited_stamp[a] != stamp {
+                            let a_ok = (rivers_tech
+                                && river_tiles.get(a).copied().unwrap_or(false))
+                                || is_hoppable(elevations[a], koeppen_ids[a], farms);
+                            if a_ok {
+                                visited_stamp[a] = stamp;
+                                next_frontier.push(a);
+                            }
+                        }
+                    }
+                }
+            }
+            std::mem::swap(&mut curr_frontier, &mut next_frontier);
             distance += 1;
         }
     }
