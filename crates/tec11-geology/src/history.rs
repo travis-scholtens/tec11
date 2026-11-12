@@ -35,14 +35,98 @@ pub const NATION_PALETTE: [[f32; 3]; 6] = [
     [0.72, 0.38, 0.86], // Amethyst
 ];
 
+pub const BASIC_WORD_GLOSSES: [&str; 16] = [
+    "mother",
+    "father",
+    "child",
+    "person",
+    "water",
+    "fire",
+    "earth / soil",
+    "stone",
+    "sky",
+    "night",
+    "day",
+    "hand",
+    "eye",
+    "heart",
+    "blood",
+    "name",
+];
+
+pub const CULTURE_FORAGING: u32 = 0;
+pub const CULTURE_FARMING: u32 = 1;
+pub const CULTURE_RIVER_FISHING: u32 = 2;
+pub const CULTURE_SEA_FISHING: u32 = 3;
+pub const CULTURE_TRADING: u32 = 4;
+pub const CULTURE_WARFARE: u32 = 5;
+pub const CULTURE_CITY: u32 = 6;
+
+pub const CULTURE_CONCEPT_GLOSSES: [&str; 7] = [
+    "foraging / gathering",
+    "farming / agriculture",
+    "river fishing / boating",
+    "sea fishing / seafaring",
+    "trading / commerce",
+    "warfare / battle",
+    "city / citadel",
+];
+
+pub const SEASON_SUMMER: u32 = 0;
+pub const SEASON_WINTER: u32 = 1;
+pub const SEASON_SPRING: u32 = 2;
+pub const SEASON_AUTUMN: u32 = 3;
+pub const SEASON_MONSOON: u32 = 4;
+pub const SEASON_WET: u32 = 5;
+pub const SEASON_DRY: u32 = 6;
+
+pub const SEASON_CONCEPT_GLOSSES: [&str; 7] = [
+    "summer (warm season)",
+    "winter (cold season)",
+    "spring (growing season)",
+    "autumn (harvest season)",
+    "monsoon (rainy season)",
+    "wet season (savanna rains)",
+    "dry season",
+];
+
+pub const WEATHER_WIND: u32 = 0;
+pub const WEATHER_CLOUD: u32 = 1;
+pub const WEATHER_RAIN: u32 = 2;
+pub const WEATHER_THUNDERSTORM: u32 = 3;
+pub const WEATHER_DROUGHT: u32 = 4;
+pub const WEATHER_SANDSTORM: u32 = 5;
+pub const WEATHER_FROST: u32 = 6;
+pub const WEATHER_SNOW: u32 = 7;
+pub const WEATHER_ICE: u32 = 8;
+
+pub const WEATHER_CONCEPT_GLOSSES: [&str; 9] = [
+    "wind",
+    "cloud / mist",
+    "rain",
+    "thunderstorm",
+    "drought / parched heat",
+    "sandstorm / dust wind",
+    "frost",
+    "snow",
+    "ice / glacier",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConceptKey {
+    BasicWord(u32),
+    Culture(u32),
+    Season(u32),
+    Weather(u32),
     Sun(u32),
     Moon(u32),
     Planet(u32),
     Constellation(u32),
     Continent(u32),
     Ocean(u32),
+    Sea(u32),
+    River(u32),
+    MountainRange(u32),
     Species(u32),
     Nation(u32),
     State(u32),
@@ -52,6 +136,22 @@ pub enum ConceptKey {
 impl ConceptKey {
     pub fn to_proto(self) -> tec11_proto::Concept {
         match self {
+            Self::BasicWord(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::BasicWord as i32,
+                id,
+            },
+            Self::Culture(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Culture as i32,
+                id,
+            },
+            Self::Season(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Season as i32,
+                id,
+            },
+            Self::Weather(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Weather as i32,
+                id,
+            },
             Self::Sun(id) => tec11_proto::Concept {
                 kind: tec11_proto::ConceptKind::Sun as i32,
                 id,
@@ -74,6 +174,18 @@ impl ConceptKey {
             },
             Self::Ocean(id) => tec11_proto::Concept {
                 kind: tec11_proto::ConceptKind::Ocean as i32,
+                id,
+            },
+            Self::Sea(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Sea as i32,
+                id,
+            },
+            Self::River(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::River as i32,
+                id,
+            },
+            Self::MountainRange(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::MountainRange as i32,
                 id,
             },
             Self::Species(id) => tec11_proto::Concept {
@@ -99,12 +211,19 @@ impl ConceptKey {
         match tec11_proto::ConceptKind::try_from(c.kind)
             .unwrap_or(tec11_proto::ConceptKind::Species)
         {
+            tec11_proto::ConceptKind::BasicWord => Self::BasicWord(c.id),
+            tec11_proto::ConceptKind::Culture => Self::Culture(c.id),
+            tec11_proto::ConceptKind::Season => Self::Season(c.id),
+            tec11_proto::ConceptKind::Weather => Self::Weather(c.id),
             tec11_proto::ConceptKind::Sun => Self::Sun(c.id),
             tec11_proto::ConceptKind::Moon => Self::Moon(c.id),
             tec11_proto::ConceptKind::Planet => Self::Planet(c.id),
             tec11_proto::ConceptKind::Constellation => Self::Constellation(c.id),
             tec11_proto::ConceptKind::Continent => Self::Continent(c.id),
             tec11_proto::ConceptKind::Ocean => Self::Ocean(c.id),
+            tec11_proto::ConceptKind::Sea => Self::Sea(c.id),
+            tec11_proto::ConceptKind::River => Self::River(c.id),
+            tec11_proto::ConceptKind::MountainRange => Self::MountainRange(c.id),
             tec11_proto::ConceptKind::Species => Self::Species(c.id),
             tec11_proto::ConceptKind::Nation => Self::Nation(c.id),
             tec11_proto::ConceptKind::State => Self::State(c.id),
@@ -710,6 +829,13 @@ impl LanguageRecord {
                 }
             }
         }
+        // Universal basic vocabulary present in every language (mother, father, water, fire, etc.)
+        for bw_id in 0..(BASIC_WORD_GLOSSES.len() as u32) {
+            rec.coin_concept(ConceptKey::BasicWord(bw_id), rng);
+        }
+        // Baseline cultural concepts present at city founding
+        rec.coin_concept(ConceptKey::Culture(CULTURE_FORAGING), rng);
+        rec.coin_concept(ConceptKey::Culture(CULTURE_CITY), rng);
         for &sp_idx in species_indices {
             rec.coin_concept(ConceptKey::Species(sp_idx as u32), rng);
         }
@@ -1072,6 +1198,7 @@ pub struct HistorySimulation {
     rivers: Vec<Vec<usize>>,
     river_routes: Vec<Vec<usize>>,
     river_tiles: Vec<bool>,
+    fine_face_rivers: Vec<Vec<u32>>,
     is_coastal_fine: Vec<bool>,
     base_capacities: Vec<f32>,
     capacities: Vec<f32>,
@@ -1184,6 +1311,7 @@ impl HistorySimulation {
             rivers: Vec::new(),
             river_routes: Vec::new(),
             river_tiles: vec![false; num_fine],
+            fine_face_rivers: vec![Vec::new(); num_fine],
             is_coastal_fine: vec![false; num_fine],
             base_capacities: vec![0.0; num_fine],
             capacities: vec![0.0; num_fine],
@@ -1286,10 +1414,20 @@ impl HistorySimulation {
         );
         self.river_routes = self.terrain.route_rivers(&grid, &self.rivers);
         self.river_tiles = vec![false; num_fine];
-        for route in &self.river_routes {
+        self.fine_face_rivers = vec![Vec::new(); num_fine];
+        for (rid, route) in self.river_routes.iter().enumerate() {
+            let rid_u32 = rid as u32;
             for &f_idx in route {
                 if f_idx < num_fine {
                     self.river_tiles[f_idx] = true;
+                    if !self.fine_face_rivers[f_idx].contains(&rid_u32) {
+                        self.fine_face_rivers[f_idx].push(rid_u32);
+                    }
+                    for &nb in &fine_adj[f_idx] {
+                        if nb < num_fine && !self.fine_face_rivers[nb].contains(&rid_u32) {
+                            self.fine_face_rivers[nb].push(rid_u32);
+                        }
+                    }
                 }
             }
         }
@@ -1492,7 +1630,7 @@ impl HistorySimulation {
                 {
                     self.tile_states.insert(nb, sid);
                     if let Some(lang) = self.languages.get_mut(&sid) {
-                        if lang.lexicon.len() < 28 {
+                        if lang.lexicon.len() < 48 {
                             for &sp_idx in &self.tile_species[nb] {
                                 lang.coin_concept(ConceptKey::Species(sp_idx as u32), &mut self.rng);
                             }
@@ -1503,21 +1641,53 @@ impl HistorySimulation {
             }
         }
 
-        // Coin all constellations visible at some point in the year and home continents/oceans from each state's territory:
+        // Coin all constellations visible at some point in the year, local geographic features (continents, oceans,
+        // seas, rivers, mountain ranges), experienced seasons & weather, and initial cultural concepts:
         let mut init_extents: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (&f_idx, &sid) in &self.tile_states {
             init_extents.entry(sid).or_default().push(f_idx);
         }
         for (sid, tiles) in &init_extents {
             let vis = self.visible_constellations_for_tiles(tiles);
-            let (conts, oceans) = self.continents_and_oceans_for_tiles(tiles, &coarse_elevs);
+            let (conts, oceans, seas, rivers, mountains) =
+                self.geographic_features_for_tiles(tiles, &coarse_elevs);
+            let seasons = self.seasons_for_tiles(tiles, &coarse_elevs, &koeppen);
+            let weathers = self.weather_for_tiles(tiles, &coarse_elevs, &koeppen);
+            let (has_ag, has_riv, has_sea) = state_init_tech
+                .get(sid)
+                .copied()
+                .unwrap_or((false, false, false));
             let mut temp_rng = self.rng.clone();
             if let Some(lang) = self.languages.get_mut(sid) {
+                if has_ag {
+                    lang.coin_concept(ConceptKey::Culture(CULTURE_FARMING), &mut temp_rng);
+                }
+                if has_riv {
+                    lang.coin_concept(ConceptKey::Culture(CULTURE_RIVER_FISHING), &mut temp_rng);
+                }
+                if has_sea {
+                    lang.coin_concept(ConceptKey::Culture(CULTURE_SEA_FISHING), &mut temp_rng);
+                }
+                for s_id in seasons {
+                    lang.coin_concept(ConceptKey::Season(s_id), &mut temp_rng);
+                }
+                for w_id in weathers {
+                    lang.coin_concept(ConceptKey::Weather(w_id), &mut temp_rng);
+                }
                 for cid in conts {
                     lang.coin_concept(ConceptKey::Continent(cid), &mut temp_rng);
                 }
                 for oid in oceans {
                     lang.coin_concept(ConceptKey::Ocean(oid), &mut temp_rng);
+                }
+                for sea_id in seas {
+                    lang.coin_concept(ConceptKey::Sea(sea_id), &mut temp_rng);
+                }
+                for rid in rivers {
+                    lang.coin_concept(ConceptKey::River(rid), &mut temp_rng);
+                }
+                for mid in mountains {
+                    lang.coin_concept(ConceptKey::MountainRange(mid), &mut temp_rng);
                 }
                 for c_idx in vis {
                     lang.coin_concept(ConceptKey::Constellation(c_idx), &mut temp_rng);
@@ -2561,12 +2731,37 @@ impl HistorySimulation {
         tiles: &[usize],
         coarse_elevs: &[f32],
     ) -> (BTreeSet<u32>, BTreeSet<u32>) {
+        let (conts, oceans, _, _, _) = self.geographic_features_for_tiles(tiles, coarse_elevs);
+        (conts, oceans)
+    }
+
+    /// Set of local geographic features (`continents`, `oceans`, `seas`, `rivers`, `mountain_ranges`)
+    /// located on or immediately adjacent to `tiles` (fine face indices).
+    pub fn geographic_features_for_tiles(
+        &self,
+        tiles: &[usize],
+        coarse_elevs: &[f32],
+    ) -> (
+        BTreeSet<u32>,
+        BTreeSet<u32>,
+        BTreeSet<u32>,
+        BTreeSet<u32>,
+        BTreeSet<u32>,
+    ) {
         let coarse_adj = self.prehistory.adjacency();
         let mut conts = BTreeSet::new();
         let mut oceans = BTreeSet::new();
+        let mut seas = BTreeSet::new();
+        let mut rivers = BTreeSet::new();
+        let mut mountains = BTreeSet::new();
         for &f_idx in tiles {
             if f_idx >= self.terrain.parentage.len() {
                 continue;
+            }
+            if let Some(rids) = self.fine_face_rivers.get(f_idx) {
+                for &rid in rids {
+                    rivers.insert(rid);
+                }
             }
             let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
             if let Some(cid) = self.geography.tile_continent.get(c).copied().flatten() {
@@ -2575,15 +2770,132 @@ impl HistorySimulation {
             if let Some(oid) = self.geography.tile_ocean.get(c).copied().flatten() {
                 oceans.insert(oid as u32);
             }
+            if let Some(sid) = self.geography.tile_sea.get(c).copied().flatten() {
+                seas.insert(sid as u32);
+            }
+            if let Some(mid) = self.geography.tile_mountain_range.get(c).copied().flatten() {
+                mountains.insert(mid as u32);
+            }
             if let Some(nbs) = coarse_adj.get(c) {
                 for &nb in nbs {
                     if let Some(oid) = self.geography.tile_ocean.get(nb).copied().flatten() {
                         oceans.insert(oid as u32);
                     }
+                    if let Some(sid) = self.geography.tile_sea.get(nb).copied().flatten() {
+                        seas.insert(sid as u32);
+                    }
+                    if let Some(mid) = self.geography.tile_mountain_range.get(nb).copied().flatten()
+                    {
+                        mountains.insert(mid as u32);
+                    }
                 }
             }
         }
-        (conts, oceans)
+        (conts, oceans, seas, rivers, mountains)
+    }
+
+    /// Location-dependent seasons experienced on `tiles` based on Köppen climate zone, latitude, and axial tilt.
+    /// Not every climate has a monsoon season, savanna wet/dry cycle, or thermal winter/spring/autumn!
+    pub fn seasons_for_tiles(
+        &self,
+        tiles: &[usize],
+        coarse_elevs: &[f32],
+        koeppen: &[u8],
+    ) -> BTreeSet<u32> {
+        let has_axial_tilt = self.prehistory.tilt_deg().abs() >= 5.0;
+        let mut out = BTreeSet::new();
+        for &f_idx in tiles {
+            if f_idx >= self.terrain.parentage.len() {
+                continue;
+            }
+            let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+            let k = koeppen.get(c).copied().unwrap_or(0);
+            let lat_abs = self.fine_face_latitude_deg(f_idx).abs();
+
+            // Thermal summer & winter (temperate, continental, tundra, or mid/high-latitude with axial tilt)
+            if matches!(k, 6..=11 | 13) || (has_axial_tilt && lat_abs >= 18.0 && k != 12) {
+                out.insert(SEASON_SUMMER);
+            }
+            if matches!(k, 6..=13) || (has_axial_tilt && lat_abs >= 23.0) {
+                out.insert(SEASON_WINTER);
+            }
+            // Four-season temperate/continental spring & autumn transitions
+            if matches!(k, 6..=11)
+                || (has_axial_tilt && (20.0..=66.0).contains(&lat_abs) && !matches!(k, 1..=5 | 12))
+            {
+                out.insert(SEASON_SPRING);
+                out.insert(SEASON_AUTUMN);
+            }
+            // Monsoon season: strictly Am (2), Cw (7), or Dw (9) monsoon/winter-dry regimes
+            if matches!(k, 2 | 7 | 9) {
+                out.insert(SEASON_MONSOON);
+            }
+            // Tropical wet season: Am (2) or Aw (3)
+            if matches!(k, 2 | 3) {
+                out.insert(SEASON_WET);
+            }
+            // Distinct dry season: Aw (3), BS (4), Cs (6), Cw (7), Dw (9), Ds (11)
+            if matches!(k, 3 | 4 | 6 | 7 | 9 | 11) {
+                out.insert(SEASON_DRY);
+            }
+        }
+        out
+    }
+
+    /// Location-dependent weather phenomena experienced on `tiles` based on Köppen climate zone, latitude, and elevation.
+    /// Warm tropical/subtropical lowlands never experience snow or ice, while humid/polar regions never experience sandstorms.
+    pub fn weather_for_tiles(
+        &self,
+        tiles: &[usize],
+        coarse_elevs: &[f32],
+        koeppen: &[u8],
+    ) -> BTreeSet<u32> {
+        let mut out = BTreeSet::new();
+        for &f_idx in tiles {
+            if f_idx >= self.terrain.parentage.len() {
+                continue;
+            }
+            let c = self.terrain.primary_coarse_tile(f_idx, coarse_elevs);
+            let k = koeppen.get(c).copied().unwrap_or(0);
+            let fine_elev = self
+                .terrain
+                .fine_elevations
+                .get(f_idx)
+                .copied()
+                .unwrap_or(0.0);
+            let lat_abs = self.fine_face_latitude_deg(f_idx).abs();
+
+            out.insert(WEATHER_WIND);
+            if k != 5 {
+                out.insert(WEATHER_CLOUD);
+            }
+            if k != 12 {
+                out.insert(WEATHER_RAIN);
+            }
+            if matches!(k, 1..=3 | 7 | 8 | 10) {
+                out.insert(WEATHER_THUNDERSTORM);
+            }
+            if matches!(k, 3..=6) {
+                out.insert(WEATHER_DROUGHT);
+            }
+            // Sandstorms / dust winds: strictly arid/semi-arid BS (4) and BW (5)
+            if matches!(k, 4 | 5) {
+                out.insert(WEATHER_SANDSTORM);
+            }
+            // Frost: temperate/continental/polar climates or highlands >= 2.0 km
+            if matches!(k, 6..=13) || fine_elev >= 2.0 {
+                out.insert(WEATHER_FROST);
+            }
+            // Snow: continental/polar/tundra (9..=13), poleward Cfb (k == 8 && |lat| >= 42°), or mountains >= 2.5 km
+            if matches!(k, 9..=13) || (k == 8 && lat_abs >= 42.0) || fine_elev >= 2.5 {
+                out.insert(WEATHER_SNOW);
+            }
+            // Ice / glacier: freezing continental/polar climates (9..=13) or high alpine peaks >= 3.0 km
+            if matches!(k, 9..=13) || fine_elev >= 3.0 {
+                out.insert(WEATHER_ICE);
+            }
+        }
+        out
     }
 
     pub fn geography(&self) -> &PlanetaryGeography {
@@ -2598,42 +2910,133 @@ impl HistorySimulation {
         state_species: &BTreeMap<u32, BTreeSet<usize>>,
     ) {
         let coarse_elevs = self.prehistory.tile_elevations();
+        let koeppen = self.prehistory.tile_koeppen_ids().to_vec();
         let mut state_langs: BTreeMap<u32, Option<u32>> = BTreeMap::new();
         let mut state_visible_constellations: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_continents: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_oceans: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_seas: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_rivers: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_mountains: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_tech: BTreeMap<u32, (bool, bool, bool)> = BTreeMap::new();
         for (&sid, tiles) in extents {
             state_langs.insert(sid, self.primary_language_for_state(sid));
             state_visible_constellations.insert(sid, self.visible_constellations_for_tiles(tiles));
-            let (conts, oceans) = self.continents_and_oceans_for_tiles(tiles, &coarse_elevs);
+            let (conts, oceans, seas, rivers, mountains) =
+                self.geographic_features_for_tiles(tiles, &coarse_elevs);
             state_continents.insert(sid, conts);
             state_oceans.insert(sid, oceans);
+            state_seas.insert(sid, seas);
+            state_rivers.insert(sid, rivers);
+            state_mountains.insert(sid, mountains);
+
+            let mut has_ag = false;
+            let mut has_riv = false;
+            let mut has_sea = false;
+            for &t in tiles {
+                if let Some(comms) = self.tile_communities.get(&t) {
+                    for c in comms {
+                        if c.thousands > 0.0 {
+                            has_ag |= c.agriculture;
+                            has_riv |= c.rivergoing;
+                            has_sea |= c.seafaring;
+                        }
+                    }
+                }
+            }
+            state_tech.insert(sid, (has_ag, has_riv, has_sea));
         }
 
         let mut lang_concepts: BTreeMap<u32, BTreeMap<ConceptKey, Option<u32>>> = BTreeMap::new();
         let mut state_sources: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut lang_visible_constellations: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut lang_tiles: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        let mut lang_own_tech: BTreeMap<u32, (bool, bool, bool)> = BTreeMap::new();
 
         for (&f, comms) in &self.tile_communities {
             let Some(&sid) = self.tile_states.get(&f) else {
                 continue;
             };
-            let nats_langs: Vec<(u32, u32)> = comms
-                .iter()
-                .filter(|c| c.thousands > 0.0)
-                .map(|c| (c.nationality_id, c.language_id))
-                .collect();
-            for &(_, lang) in &nats_langs {
+            let active_comms: Vec<&Community> =
+                comms.iter().filter(|c| c.thousands > 0.0).collect();
+            for c1 in &active_comms {
+                let lang = c1.language_id;
+                lang_tiles.entry(lang).or_default().push(f);
+                let tech_entry = lang_own_tech
+                    .entry(lang)
+                    .or_insert((false, false, false));
+                tech_entry.0 |= c1.agriculture;
+                tech_entry.1 |= c1.rivergoing;
+                tech_entry.2 |= c1.seafaring;
+
                 let entry = lang_concepts.entry(lang).or_default();
-                for &(n, l) in &nats_langs {
+                for c2 in &active_comms {
+                    let n = c2.nationality_id;
+                    let l = c2.language_id;
                     entry.insert(ConceptKey::Language(l), Some(l));
                     entry.insert(ConceptKey::Nation(n), Some(l));
+                    // Co-resident exposure to farming, river fishing, and sea fishing:
+                    if c2.agriculture {
+                        entry
+                            .entry(ConceptKey::Culture(CULTURE_FARMING))
+                            .or_insert(Some(l));
+                    }
+                    if c2.rivergoing {
+                        entry
+                            .entry(ConceptKey::Culture(CULTURE_RIVER_FISHING))
+                            .or_insert(Some(l));
+                    }
+                    if c2.seafaring {
+                        entry
+                            .entry(ConceptKey::Culture(CULTURE_SEA_FISHING))
+                            .or_insert(Some(l));
+                    }
                 }
                 state_sources.entry(lang).or_default().insert(sid);
             }
         }
 
         for (&lang_id, concepts) in lang_concepts.iter_mut() {
+            // Ensure universal basic vocabulary and baseline foraging/city concepts are present
+            for bw_id in 0..(BASIC_WORD_GLOSSES.len() as u32) {
+                concepts
+                    .entry(ConceptKey::BasicWord(bw_id))
+                    .or_insert(Some(lang_id));
+            }
+            concepts
+                .entry(ConceptKey::Culture(CULTURE_FORAGING))
+                .or_insert(Some(lang_id));
+            concepts
+                .entry(ConceptKey::Culture(CULTURE_CITY))
+                .or_insert(Some(lang_id));
+
+            // Own technological practices coin/retain words for farming, river fishing, and sea fishing
+            if let Some(&(own_ag, own_riv, own_sea)) = lang_own_tech.get(&lang_id) {
+                if own_ag {
+                    concepts.insert(ConceptKey::Culture(CULTURE_FARMING), Some(lang_id));
+                }
+                if own_riv {
+                    concepts.insert(ConceptKey::Culture(CULTURE_RIVER_FISHING), Some(lang_id));
+                }
+                if own_sea {
+                    concepts.insert(ConceptKey::Culture(CULTURE_SEA_FISHING), Some(lang_id));
+                }
+            }
+
+            // Location-dependent seasons & weather experienced on the tiles where `lang_id` is actually spoken
+            if let Some(ltiles) = lang_tiles.get(&lang_id) {
+                for s_id in self.seasons_for_tiles(ltiles, &coarse_elevs, &koeppen) {
+                    concepts
+                        .entry(ConceptKey::Season(s_id))
+                        .or_insert(Some(lang_id));
+                }
+                for w_id in self.weather_for_tiles(ltiles, &coarse_elevs, &koeppen) {
+                    concepts
+                        .entry(ConceptKey::Weather(w_id))
+                        .or_insert(Some(lang_id));
+                }
+            }
+
             let Some(states_for_lang) = state_sources.get(&lang_id) else {
                 continue;
             };
@@ -2654,6 +3057,44 @@ impl HistorySimulation {
                 let rec_partners = self.recursive_trade_partners(state_id);
                 let direct_partners = self.lookup_trade_partners(state_id);
                 let rivals = self.lookup_opponents(state_id);
+                let s_lang = state_langs.get(&state_id).copied().flatten();
+
+                // Exposure to trading / commerce when state participates in trade routes
+                if !direct_partners.is_empty() || !rec_partners.is_empty() {
+                    let donor_trade_lang = direct_partners
+                        .iter()
+                        .chain(rec_partners.iter())
+                        .find_map(|p| {
+                            let plid = state_langs.get(p).copied().flatten()?;
+                            self.languages
+                                .get(&plid)?
+                                .describes(ConceptKey::Culture(CULTURE_TRADING))
+                                .then_some(plid)
+                        })
+                        .or(s_lang)
+                        .or(Some(lang_id));
+                    concepts
+                        .entry(ConceptKey::Culture(CULTURE_TRADING))
+                        .or_insert(donor_trade_lang);
+                }
+
+                // Exposure to warfare / battle when state is engaged in conflict
+                if !rivals.is_empty() {
+                    let donor_war_lang = rivals
+                        .iter()
+                        .find_map(|r| {
+                            let rlid = state_langs.get(r).copied().flatten()?;
+                            self.languages
+                                .get(&rlid)?
+                                .describes(ConceptKey::Culture(CULTURE_WARFARE))
+                                .then_some(rlid)
+                        })
+                        .or(s_lang)
+                        .or(Some(lang_id));
+                    concepts
+                        .entry(ConceptKey::Culture(CULTURE_WARFARE))
+                        .or_insert(donor_war_lang);
+                }
 
                 let mut related_states = BTreeSet::new();
                 related_states.insert(state_id);
@@ -2662,10 +3103,28 @@ impl HistorySimulation {
                 related_states.extend(rec_partners.iter().copied());
 
                 for s in &related_states {
-                    let s_lang = state_langs.get(s).copied().flatten();
-                    concepts.insert(ConceptKey::State(*s), s_lang);
+                    let rel_lang = state_langs.get(s).copied().flatten();
+                    concepts.insert(ConceptKey::State(*s), rel_lang);
+                    // Exposure to farming, river fishing, and sea fishing from neighbors, rivals, or trading partners:
+                    if let Some(&(s_ag, s_riv, s_sea)) = state_tech.get(s) {
+                        if s_ag {
+                            concepts
+                                .entry(ConceptKey::Culture(CULTURE_FARMING))
+                                .or_insert(rel_lang);
+                        }
+                        if s_riv {
+                            concepts
+                                .entry(ConceptKey::Culture(CULTURE_RIVER_FISHING))
+                                .or_insert(rel_lang);
+                        }
+                        if s_sea {
+                            concepts
+                                .entry(ConceptKey::Culture(CULTURE_SEA_FISHING))
+                                .or_insert(rel_lang);
+                        }
+                    }
                     // Share astronomical knowledge of all planets in `self.solar_system` across trading partners & neighbors:
-                    if let Some(slid) = s_lang {
+                    if let Some(slid) = rel_lang {
                         if let Some(slang) = self.languages.get(&slid) {
                             for p in &self.solar_system {
                                 let pk = ConceptKey::Planet(p.index);
@@ -2708,9 +3167,12 @@ impl HistorySimulation {
                     }
                 }
 
-                // Imported species and foreign continents/oceans from recursive trade network (`imports`)
+                // Imported species and foreign geographic features from recursive trade network (`imports`)
                 let home_conts = state_continents.get(&state_id).cloned().unwrap_or_default();
                 let home_oceans = state_oceans.get(&state_id).cloned().unwrap_or_default();
+                let home_seas = state_seas.get(&state_id).cloned().unwrap_or_default();
+                let home_rivers = state_rivers.get(&state_id).cloned().unwrap_or_default();
+                let home_mountains = state_mountains.get(&state_id).cloned().unwrap_or_default();
                 for partner in rec_partners {
                     let p_lang = state_langs.get(&partner).copied().flatten();
                     if let Some(psp) = state_species.get(&partner) {
@@ -2728,15 +3190,41 @@ impl HistorySimulation {
                             concepts.entry(ConceptKey::Ocean(oid)).or_insert(p_lang);
                         }
                     }
+                    if let Some(pseas) = state_seas.get(&partner) {
+                        for &sea_id in pseas.difference(&home_seas) {
+                            concepts.entry(ConceptKey::Sea(sea_id)).or_insert(p_lang);
+                        }
+                    }
+                    if let Some(privers) = state_rivers.get(&partner) {
+                        for &rid in privers.difference(&home_rivers).take(4) {
+                            concepts.entry(ConceptKey::River(rid)).or_insert(p_lang);
+                        }
+                    }
+                    if let Some(pmountains) = state_mountains.get(&partner) {
+                        for &mid in pmountains.difference(&home_mountains).take(4) {
+                            concepts
+                                .entry(ConceptKey::MountainRange(mid))
+                                .or_insert(p_lang);
+                        }
+                    }
                 }
 
-                // Native species, continents, oceans, visible constellations (`vis_here`), and core celestial concepts (`Sun`, `Moons`, `Planets`) in `state_id`
-                let s_lang = state_langs.get(&state_id).copied().flatten();
+                // Native species, local geographic features (continents, oceans, seas, rivers, mountain ranges),
+                // visible constellations (`vis_here`), and core celestial concepts (`Sun`, `Moons`, `Planets`) in `state_id`
                 for &cid in &home_conts {
                     concepts.insert(ConceptKey::Continent(cid), s_lang);
                 }
                 for &oid in &home_oceans {
                     concepts.insert(ConceptKey::Ocean(oid), s_lang);
+                }
+                for &sea_id in &home_seas {
+                    concepts.insert(ConceptKey::Sea(sea_id), s_lang);
+                }
+                for &rid in &home_rivers {
+                    concepts.insert(ConceptKey::River(rid), s_lang);
+                }
+                for &mid in &home_mountains {
+                    concepts.insert(ConceptKey::MountainRange(mid), s_lang);
                 }
                 for &c_idx in &vis_here {
                     concepts.insert(ConceptKey::Constellation(c_idx), s_lang);
@@ -4491,9 +4979,129 @@ impl HistorySimulation {
         lines.join("\n")
     }
 
+    /// Look up the capitalized word for `ck` in `preferred_lang`, or fall back to the first language in the simulation
+    /// that has coined or borrowed a word for `ck`.
+    pub fn concept_word_in_language(
+        &self,
+        ck: ConceptKey,
+        preferred_lang: Option<u32>,
+    ) -> Option<String> {
+        preferred_lang
+            .and_then(|lid| self.languages.get(&lid))
+            .and_then(|l| l.lexicon.get(&ck))
+            .or_else(|| self.languages.values().find_map(|l| l.lexicon.get(&ck)))
+            .map(|orig| orig.word.write(true))
+    }
+
+    /// Human-readable gloss for river `rid`.
+    pub fn river_gloss(&self, rid: usize) -> String {
+        let cont = self
+            .rivers
+            .get(rid)
+            .and_then(|r| r.first())
+            .and_then(|&c| self.geography.continent_name(c))
+            .unwrap_or("Mainland");
+        let len = self
+            .river_routes
+            .get(rid)
+            .map(|r| r.len())
+            .or_else(|| self.rivers.get(rid).map(|r| r.len()))
+            .unwrap_or(0);
+        format!("river #{} ({cont}, {len} tiles)", rid + 1)
+    }
+
+    /// Format a continent name using the simulation language word (if named) plus its geographic region.
+    pub fn continent_label_for_tile(
+        &self,
+        coarse_idx: usize,
+        preferred_lang: Option<u32>,
+    ) -> String {
+        let Some(cid) = self.geography.tile_continent.get(coarse_idx).copied().flatten() else {
+            return "Mainland".to_string();
+        };
+        let desc = self
+            .geography
+            .continents
+            .get(cid)
+            .map(|c| c.name.as_str())
+            .unwrap_or("Mainland");
+        if let Some(w) = self.concept_word_in_language(ConceptKey::Continent(cid as u32), preferred_lang)
+        {
+            format!("{w} ({desc})")
+        } else {
+            desc.to_string()
+        }
+    }
+
+    /// Format an ocean (and coastal sea, if applicable) name using the simulation's languages.
+    pub fn ocean_and_sea_label_for_tile(
+        &self,
+        coarse_idx: usize,
+        preferred_lang: Option<u32>,
+    ) -> String {
+        let ocean_part = if let Some(oid) =
+            self.geography.tile_ocean.get(coarse_idx).copied().flatten()
+        {
+            let desc = self
+                .geography
+                .oceans
+                .get(oid)
+                .map(|o| o.name.as_str())
+                .unwrap_or("World Ocean");
+            if let Some(w) =
+                self.concept_word_in_language(ConceptKey::Ocean(oid as u32), preferred_lang)
+            {
+                format!("{w} ({desc})")
+            } else {
+                desc.to_string()
+            }
+        } else {
+            "World Ocean".to_string()
+        };
+
+        if let Some(sid) = self.geography.tile_sea.get(coarse_idx).copied().flatten() {
+            let sdesc = self
+                .geography
+                .seas
+                .get(sid)
+                .map(|s| s.name.as_str())
+                .unwrap_or("Coastal Sea");
+            let sea_str = if let Some(w) =
+                self.concept_word_in_language(ConceptKey::Sea(sid as u32), preferred_lang)
+            {
+                format!("{w} ({sdesc})")
+            } else {
+                sdesc.to_string()
+            };
+            format!("Sea: {sea_str} | Ocean: {ocean_part}")
+        } else {
+            ocean_part
+        }
+    }
+
     /// Format a human-readable gloss for any [`ConceptKey`].
     pub fn format_concept_gloss(&self, ck: ConceptKey) -> String {
         match ck {
+            ConceptKey::BasicWord(id) => BASIC_WORD_GLOSSES
+                .get(id as usize)
+                .copied()
+                .unwrap_or("basic word")
+                .to_string(),
+            ConceptKey::Culture(id) => CULTURE_CONCEPT_GLOSSES
+                .get(id as usize)
+                .copied()
+                .unwrap_or("cultural concept")
+                .to_string(),
+            ConceptKey::Season(id) => SEASON_CONCEPT_GLOSSES
+                .get(id as usize)
+                .copied()
+                .unwrap_or("season")
+                .to_string(),
+            ConceptKey::Weather(id) => WEATHER_CONCEPT_GLOSSES
+                .get(id as usize)
+                .copied()
+                .unwrap_or("weather")
+                .to_string(),
             ConceptKey::Sun(0) => "sun (host star)".to_string(),
             ConceptKey::Sun(id) => format!("sun #{}", id + 1),
             ConceptKey::Moon(m) => {
@@ -4531,6 +5139,19 @@ impl HistorySimulation {
                 .get(oid as usize)
                 .map(|o| format!("ocean ({})", o.name))
                 .unwrap_or_else(|| format!("ocean #{}", oid + 1)),
+            ConceptKey::Sea(sid) => self
+                .geography
+                .seas
+                .get(sid as usize)
+                .map(|s| format!("sea ({})", s.name))
+                .unwrap_or_else(|| format!("sea #{}", sid + 1)),
+            ConceptKey::River(rid) => self.river_gloss(rid as usize),
+            ConceptKey::MountainRange(mid) => self
+                .geography
+                .mountain_ranges
+                .get(mid as usize)
+                .map(|m| format!("mountain range ({}, {:.1} km)", m.name, m.max_elevation_km))
+                .unwrap_or_else(|| format!("mountain range #{}", mid + 1)),
             ConceptKey::Species(sp_id) => self
                 .settled_species
                 .get(sp_id as usize)
@@ -4564,8 +5185,19 @@ impl HistorySimulation {
     /// Category label for a [`ConceptKey`] in lexicon tables.
     pub fn concept_category_label(ck: ConceptKey) -> &'static str {
         match ck {
-            ConceptKey::Sun(_) | ConceptKey::Moon(_) | ConceptKey::Planet(_) | ConceptKey::Constellation(_) => "Sky",
-            ConceptKey::Continent(_) | ConceptKey::Ocean(_) => "Geo",
+            ConceptKey::BasicWord(_) => "Core",
+            ConceptKey::Culture(_) => "Culture",
+            ConceptKey::Season(_) => "Season",
+            ConceptKey::Weather(_) => "Weather",
+            ConceptKey::Sun(_)
+            | ConceptKey::Moon(_)
+            | ConceptKey::Planet(_)
+            | ConceptKey::Constellation(_) => "Sky",
+            ConceptKey::Continent(_)
+            | ConceptKey::Ocean(_)
+            | ConceptKey::Sea(_)
+            | ConceptKey::River(_)
+            | ConceptKey::MountainRange(_) => "Geo",
             ConceptKey::Species(_) => "Bio",
             ConceptKey::State(_) | ConceptKey::Nation(_) | ConceptKey::Language(_) => "Polity",
         }
@@ -4786,14 +5418,11 @@ impl HistorySimulation {
         let color_rgb = NATION_PALETTE[cidx];
 
         let coarse_elevs = self.prehistory.tile_elevations();
+        let dom_lang = self.primary_language_for_state(state_id);
         let mut cont_counts: BTreeMap<String, usize> = BTreeMap::new();
         for &f in tiles {
             let c = self.terrain.primary_coarse_tile(f, &coarse_elevs);
-            let cname = self
-                .geography
-                .continent_name(c)
-                .unwrap_or("Mainland")
-                .to_string();
+            let cname = self.continent_label_for_tile(c, dom_lang);
             *cont_counts.entry(cname).or_insert(0) += 1;
         }
         let mut sorted_conts: Vec<(String, usize)> = cont_counts.into_iter().collect();
@@ -4831,7 +5460,6 @@ impl HistorySimulation {
             }
         }
         let st_cap = self.state_carrying_capacity(tiles);
-        let dom_lang = self.primary_language_for_state(state_id);
 
         let native_sp = state_species.get(&state_id).cloned().unwrap_or_default();
         let direct_partners = self.lookup_trade_partners(state_id);
@@ -5207,7 +5835,7 @@ impl HistorySimulation {
         let face = self.terrain.display_faces.get(display_idx)?;
         let fine_idx = match face.source {
             DisplayFaceSource::OceanCoarse(c_idx) => {
-                let ocean_label = self.geography.ocean_name(c_idx).unwrap_or("World Ocean");
+                let ocean_label = self.ocean_and_sea_label_for_tile(c_idx, None);
                 let elev = self
                     .prehistory
                     .tiles()
@@ -5238,10 +5866,7 @@ impl HistorySimulation {
         let coarse_elevs = self.prehistory.tile_elevations();
         let primary_c = self.terrain.primary_coarse_tile(fine_idx, &coarse_elevs);
         if fine_elev <= 0.0 {
-            let ocean_label = self
-                .geography
-                .ocean_name(primary_c)
-                .unwrap_or("Coastal Sea");
+            let ocean_label = self.ocean_and_sea_label_for_tile(primary_c, None);
             let sky = self.build_tile_sky_view(display_idx, None);
             return Some(TileInspectionView {
                 display_idx,
@@ -5260,10 +5885,6 @@ impl HistorySimulation {
             });
         }
 
-        let cont_name = self
-            .geography
-            .continent_name(primary_c)
-            .unwrap_or("Mainland");
         let koeppen_code = self
             .prehistory
             .tile_koeppen_ids()
@@ -5387,22 +6008,94 @@ impl HistorySimulation {
             }
         }
 
+        let primary_tile_lang = languages.first().map(|l| l.id).or(dom_lang);
+        let cont_name = self.continent_label_for_tile(primary_c, primary_tile_lang);
+
+        let mut geo_extras = Vec::new();
+        if let Some(&rid) = self
+            .fine_face_rivers
+            .get(fine_idx)
+            .and_then(|v| v.first())
+        {
+            if let Some(rw) =
+                self.concept_word_in_language(ConceptKey::River(rid), primary_tile_lang)
+            {
+                geo_extras.push(format!("River: {rw}"));
+            } else if is_river {
+                geo_extras.push(format!("River #{}", rid + 1));
+            }
+        } else if is_river {
+            geo_extras.push("River Corridor".to_string());
+        }
+        if let Some(mid) = self
+            .geography
+            .tile_mountain_range
+            .get(primary_c)
+            .copied()
+            .flatten()
+        {
+            let mdesc = self
+                .geography
+                .mountain_ranges
+                .get(mid)
+                .map(|m| m.name.as_str())
+                .unwrap_or("Mountains");
+            if let Some(mw) = self
+                .concept_word_in_language(ConceptKey::MountainRange(mid as u32), primary_tile_lang)
+            {
+                geo_extras.push(format!("Mountains: {mw} ({mdesc})"));
+            } else {
+                geo_extras.push(format!("Mountains: {mdesc}"));
+            }
+        }
+        if is_coast {
+            let coarse_adj = self.prehistory.adjacency();
+            let adj_sea_id = self
+                .geography
+                .tile_sea
+                .get(primary_c)
+                .copied()
+                .flatten()
+                .or_else(|| {
+                    coarse_adj.get(primary_c)?.iter().find_map(|&nb| {
+                        self.geography.tile_sea.get(nb).copied().flatten()
+                    })
+                });
+            if let Some(sea_id) = adj_sea_id {
+                let sdesc = self
+                    .geography
+                    .seas
+                    .get(sea_id)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("Coastal Sea");
+                if let Some(sw) = self
+                    .concept_word_in_language(ConceptKey::Sea(sea_id as u32), primary_tile_lang)
+                {
+                    geo_extras.push(format!("Sea: {sw} ({sdesc})"));
+                } else {
+                    geo_extras.push(format!("Sea: {sdesc}"));
+                }
+            }
+        }
+
         let title = match (&state_name, is_capital) {
             (Some(sname), true) => format!("Tile #{fine_idx} — ★ {sname} Capital"),
             (Some(sname), false) => format!("Tile #{fine_idx} ({sname})"),
             (None, _) => format!("Tile #{fine_idx} (Unclaimed Land)"),
         };
-        let location_summary = format!(
-            "Continent: {cont_name} | Elev: {fine_elev:.2} km | {climate_str}{}",
-            if is_river { " | River Corridor" } else { "" }
-        );
+        let extra_suffix = if geo_extras.is_empty() {
+            String::new()
+        } else {
+            format!(" | {}", geo_extras.join(" | "))
+        };
+        let location_summary =
+            format!("Continent: {cont_name} | Elev: {fine_elev:.2} km | {climate_str}{extra_suffix}");
         let population_summary = format!(
             "Pop: {} / Carrying Cap: {}",
             format_thousands_compact(tile_pop),
             format_thousands_compact(cap)
         );
 
-        let primary_tile_lang = languages.first().map(|l| l.id).or(dom_lang);
         let sky = self.build_tile_sky_view(display_idx, primary_tile_lang);
 
         Some(TileInspectionView {
@@ -6435,5 +7128,169 @@ mod tests {
             .values()
             .flatten()
             .any(|c| c.seafaring));
+    }
+
+    #[test]
+    fn test_lexicon_basic_words_culture_seasons_weather_and_geographic_features() {
+        let mut sim = HistorySimulation::new_earth(42);
+        sim.step();
+
+        // 1. Every language has all 16 universal basic words (mother, father, water, fire, etc.)
+        assert!(!sim.languages.is_empty());
+        for lang in sim.languages.values() {
+            for bw_id in 0..(BASIC_WORD_GLOSSES.len() as u32) {
+                assert!(
+                    lang.describes(ConceptKey::BasicWord(bw_id)),
+                    "Language {} should have basic word '{}' (#{})",
+                    lang.name(),
+                    BASIC_WORD_GLOSSES[bw_id as usize],
+                    bw_id
+                );
+            }
+            assert!(lang.describes(ConceptKey::Culture(CULTURE_FORAGING)));
+            assert!(lang.describes(ConceptKey::Culture(CULTURE_CITY)));
+        }
+
+        // 2. Verify cultural words (farming, river fishing, sea fishing, trading, warfare) are coined/borrowed
+        let any_farming = sim
+            .languages
+            .values()
+            .any(|l| l.describes(ConceptKey::Culture(CULTURE_FARMING)));
+        let any_river_fishing = sim
+            .languages
+            .values()
+            .any(|l| l.describes(ConceptKey::Culture(CULTURE_RIVER_FISHING)));
+        let any_sea_fishing = sim
+            .languages
+            .values()
+            .any(|l| l.describes(ConceptKey::Culture(CULTURE_SEA_FISHING)));
+        assert!(any_farming, "Expected languages exposed to farming to have CULTURE_FARMING");
+        assert!(
+            any_river_fishing,
+            "Expected languages exposed to rivergoing to have CULTURE_RIVER_FISHING"
+        );
+        assert!(
+            any_sea_fishing,
+            "Expected languages exposed to seafaring to have CULTURE_SEA_FISHING"
+        );
+
+        // Link two states in trade and conflict and verify trading & warfare words are coined/borrowed
+        let sids: Vec<u32> = sim.states.keys().copied().take(3).collect();
+        if sids.len() >= 2 {
+            sim.trade_partners.push(StatePair::new(sids[0], sids[1]));
+            if sids.len() >= 3 {
+                sim.conflicts.push(StatePair::new(sids[0], sids[2]));
+            }
+            let fine_adj = sim.terrain.terrain_adj.clone();
+            let topo = sim.state_topology(&fine_adj);
+            sim.accumulate_and_borrow_concepts(&topo.extents, &topo.species);
+            if let Some(lid0) = sim.primary_language_for_state(sids[0]) {
+                let l0 = &sim.languages[&lid0];
+                assert!(
+                    l0.describes(ConceptKey::Culture(CULTURE_TRADING)),
+                    "Trading state language should coin or borrow word for trading / commerce"
+                );
+                if sids.len() >= 3 {
+                    assert!(
+                        l0.describes(ConceptKey::Culture(CULTURE_WARFARE)),
+                        "Warring state language should coin or borrow word for warfare / battle"
+                    );
+                }
+            }
+        }
+
+        // 3. Verify location-dependent seasons & weather:
+        //    - Tropical rainforest / savanna lowland tile (Af=1 or Aw=3, low elevation, low latitude)
+        //      has no snow/ice and (for Aw=3) has wet/dry season but no monsoon (unless Am=2/Cw=7/Dw=9).
+        let coarse_elevs = sim.prehistory.tile_elevations();
+        let koeppen = sim.prehistory.tile_koeppen_ids().to_vec();
+        let tropical_lowland_tile = (0..sim.fine_face_count()).find(|&f| {
+            let c = sim.terrain.primary_coarse_tile(f, &coarse_elevs);
+            let k = koeppen[c];
+            let elev = sim.terrain.fine_elevations[f];
+            let lat_abs = sim.fine_face_latitude_deg(f).abs();
+            elev > 0.0 && elev < 1.2 && lat_abs < 15.0 && (k == 1 || k == 3)
+        });
+        if let Some(tf) = tropical_lowland_tile {
+            let t_seasons = sim.seasons_for_tiles(&[tf], &coarse_elevs, &koeppen);
+            let t_weather = sim.weather_for_tiles(&[tf], &coarse_elevs, &koeppen);
+            assert!(
+                !t_seasons.contains(&SEASON_MONSOON),
+                "Non-monsoon tropical Af/Aw tile should not experience monsoon season"
+            );
+            assert!(
+                !t_seasons.contains(&SEASON_WINTER),
+                "Equatorial lowland tile should not experience thermal winter"
+            );
+            assert!(
+                !t_weather.contains(&WEATHER_SNOW) && !t_weather.contains(&WEATHER_ICE),
+                "Equatorial lowland tile should not experience snow or ice"
+            );
+        }
+
+        let cold_or_high_tile = (0..sim.fine_face_count()).find(|&f| {
+            let c = sim.terrain.primary_coarse_tile(f, &coarse_elevs);
+            let k = koeppen[c];
+            let elev = sim.terrain.fine_elevations[f];
+            elev > 0.0 && matches!(k, 9..=13)
+        });
+        if let Some(cf) = cold_or_high_tile {
+            let c_seasons = sim.seasons_for_tiles(&[cf], &coarse_elevs, &koeppen);
+            let c_weather = sim.weather_for_tiles(&[cf], &coarse_elevs, &koeppen);
+            assert!(c_seasons.contains(&SEASON_WINTER));
+            assert!(c_weather.contains(&WEATHER_SNOW));
+            assert!(c_weather.contains(&WEATHER_ICE));
+            assert!(!c_weather.contains(&WEATHER_SANDSTORM));
+        }
+
+        // 4. Verify local geographic features (continents, oceans, seas, rivers, mountain ranges) exist and get named
+        assert!(!sim.geography().continents.is_empty());
+        assert!(!sim.geography().oceans.is_empty());
+        assert!(!sim.geography().seas.is_empty(), "Expected coastal seas to be identified");
+        assert!(
+            !sim.geography().mountain_ranges.is_empty(),
+            "Expected mountain ranges to be identified"
+        );
+        assert!(!sim.river_routes.is_empty(), "Expected river routes to be traced");
+
+        let any_continent_named = sim
+            .languages
+            .values()
+            .any(|l| l.lexicon.keys().any(|k| matches!(k, ConceptKey::Continent(_))));
+        let any_ocean_named = sim
+            .languages
+            .values()
+            .any(|l| l.lexicon.keys().any(|k| matches!(k, ConceptKey::Ocean(_))));
+        let any_sea_named = sim
+            .languages
+            .values()
+            .any(|l| l.lexicon.keys().any(|k| matches!(k, ConceptKey::Sea(_))));
+        let any_river_named = sim
+            .languages
+            .values()
+            .any(|l| l.lexicon.keys().any(|k| matches!(k, ConceptKey::River(_))));
+        let any_mountain_named = sim
+            .languages
+            .values()
+            .any(|l| l.lexicon.keys().any(|k| matches!(k, ConceptKey::MountainRange(_))));
+        assert!(any_continent_named);
+        assert!(any_ocean_named);
+        assert!(any_sea_named);
+        assert!(any_river_named);
+        assert!(any_mountain_named);
+
+        // 5. Proto roundtrip for all new ConceptKey variants
+        for ck in [
+            ConceptKey::BasicWord(0),
+            ConceptKey::Culture(CULTURE_FARMING),
+            ConceptKey::Season(SEASON_MONSOON),
+            ConceptKey::Weather(WEATHER_SNOW),
+            ConceptKey::Sea(0),
+            ConceptKey::River(0),
+            ConceptKey::MountainRange(0),
+        ] {
+            let p = ck.to_proto();
+            assert_eq!(ConceptKey::from_proto(&p), ck);
+        }
     }
 }

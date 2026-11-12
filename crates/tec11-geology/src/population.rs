@@ -102,15 +102,40 @@ pub struct OceanBasinInfo {
     pub centroid: Vec3,
 }
 
-/// Partition of a planet's surface into named continents/island realms and ocean basins.
+/// Metadata for a regional coastal sea, marginal bay, or enclosed inland sea.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeaInfo {
+    pub id: usize,
+    pub name: String,
+    pub tile_count: usize,
+    pub centroid: Vec3,
+}
+
+/// Metadata for a contiguous mountain range / cordillera on land.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MountainRangeInfo {
+    pub id: usize,
+    pub name: String,
+    pub tile_count: usize,
+    pub max_elevation_km: f32,
+    pub centroid: Vec3,
+}
+
+/// Partition of a planet's surface into named continents/island realms, ocean basins, coastal seas, and mountain ranges.
 #[derive(Clone, Debug, Default)]
 pub struct PlanetaryGeography {
     pub continents: Vec<ContinentInfo>,
     pub oceans: Vec<OceanBasinInfo>,
+    pub seas: Vec<SeaInfo>,
+    pub mountain_ranges: Vec<MountainRangeInfo>,
     /// Per-tile continent index (`Some(id)` for land tiles `elevation > 0.0`, `None` for sea tiles).
     pub tile_continent: Vec<Option<usize>>,
     /// Per-tile ocean basin index (`Some(id)` for sea tiles `elevation <= 0.0`, `None` for land tiles).
     pub tile_ocean: Vec<Option<usize>>,
+    /// Per-tile regional coastal/enclosed sea index (`Some(id)` for near-shore or enclosed sea tiles).
+    pub tile_sea: Vec<Option<usize>>,
+    /// Per-tile mountain range index (`Some(id)` for highland/mountain land tiles).
+    pub tile_mountain_range: Vec<Option<usize>>,
 }
 
 impl PlanetaryGeography {
@@ -130,6 +155,24 @@ impl PlanetaryGeography {
             .flatten()
             .and_then(|oid| self.oceans.get(oid))
             .map(|o| o.name.as_str())
+    }
+
+    pub fn sea_name(&self, tile: usize) -> Option<&str> {
+        self.tile_sea
+            .get(tile)
+            .copied()
+            .flatten()
+            .and_then(|sid| self.seas.get(sid))
+            .map(|s| s.name.as_str())
+    }
+
+    pub fn mountain_range_name(&self, tile: usize) -> Option<&str> {
+        self.tile_mountain_range
+            .get(tile)
+            .copied()
+            .flatten()
+            .and_then(|mid| self.mountain_ranges.get(mid))
+            .map(|m| m.name.as_str())
     }
 }
 
@@ -438,11 +481,116 @@ pub fn identify_continents_and_oceans(
         })
         .collect();
 
+    // --- 3. Regional Coastal & Enclosed Seas (`coast_dist <= 2`) ---
+    let mut coastal_sea_tiles: Vec<usize> = (0..n)
+        .filter(|&t| elevations[t] <= 0.0 && coast_dist[t] <= 2)
+        .collect();
+    coastal_sea_tiles.sort_unstable();
+    let mut sea_seeds: Vec<usize> = Vec::new();
+    for &cand in &coastal_sea_tiles {
+        if sea_seeds
+            .iter()
+            .all(|&s| dot(grid.faces[cand].0, grid.faces[s].0) < 0.88)
+        {
+            sea_seeds.push(cand);
+            if sea_seeds.len() >= 18 {
+                break;
+            }
+        }
+    }
+    let mut tile_sea = vec![None; n];
+    let mut sea_groups: Vec<Vec<usize>> = vec![Vec::new(); sea_seeds.len()];
+    if !sea_seeds.is_empty() {
+        for &t in &coastal_sea_tiles {
+            let best_s = sea_seeds
+                .iter()
+                .enumerate()
+                .max_by(|&(_, &sa), &(_, &sb)| {
+                    dot(grid.faces[t].0, grid.faces[sa].0)
+                        .partial_cmp(&dot(grid.faces[t].0, grid.faces[sb].0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            sea_groups[best_s].push(t);
+        }
+    }
+    sea_groups.retain(|g| !g.is_empty());
+    sea_groups.sort_by_key(|tiles| (Reverse(tiles.len()), tiles.iter().copied().min().unwrap_or(0)));
+    let seas: Vec<SeaInfo> = sea_groups
+        .into_iter()
+        .enumerate()
+        .map(|(sid, tiles)| {
+            for &t in &tiles {
+                tile_sea[t] = Some(sid);
+            }
+            let centroid = compute_tile_set_centroid(&tiles, grid);
+            let name = generate_geographic_name(0x5345_4153, sid, centroid, &mut used_names);
+            SeaInfo {
+                id: sid,
+                name,
+                tile_count: tiles.len(),
+                centroid,
+            }
+        })
+        .collect();
+
+    // --- 4. Mountain Ranges (`elevations[t] >= 1.65 km`) ---
+    let mut mtn_dsu = DisjointSet::new(n);
+    for t in 0..n {
+        if elevations[t] >= 1.65 {
+            for &nb in &adj[t] {
+                if nb < n && elevations[nb] >= 1.65 {
+                    mtn_dsu.union(t, nb);
+                }
+            }
+        }
+    }
+    let mut mtn_bodies: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for t in 0..n {
+        if elevations[t] >= 1.65 {
+            mtn_bodies.entry(mtn_dsu.find(t)).or_default().push(t);
+        }
+    }
+    let mut sorted_mtns: Vec<Vec<usize>> = mtn_bodies
+        .into_values()
+        .filter(|tiles| tiles.len() >= 2)
+        .collect();
+    sorted_mtns.sort_by_key(|tiles| (Reverse(tiles.len()), tiles.iter().copied().min().unwrap_or(0)));
+    sorted_mtns.truncate(24);
+    let mut tile_mountain_range = vec![None; n];
+    let mountain_ranges: Vec<MountainRangeInfo> = sorted_mtns
+        .into_iter()
+        .enumerate()
+        .map(|(mid, tiles)| {
+            let mut max_elev = 0.0f32;
+            for &t in &tiles {
+                tile_mountain_range[t] = Some(mid);
+                if elevations[t] > max_elev {
+                    max_elev = elevations[t];
+                }
+            }
+            let centroid = compute_tile_set_centroid(&tiles, grid);
+            let name = generate_geographic_name(0x4D54_4E53, mid, centroid, &mut used_names);
+            MountainRangeInfo {
+                id: mid,
+                name,
+                tile_count: tiles.len(),
+                max_elevation_km: max_elev,
+                centroid,
+            }
+        })
+        .collect();
+
     PlanetaryGeography {
         continents,
         oceans,
+        seas,
+        mountain_ranges,
         tile_continent,
         tile_ocean,
+        tile_sea,
+        tile_mountain_range,
     }
 }
 

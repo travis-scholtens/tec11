@@ -149,6 +149,13 @@ message Concept {
     KIND_CONSTELLATION = 7;
     KIND_CONTINENT = 8;
     KIND_OCEAN = 9;
+    KIND_SEA = 10;
+    KIND_RIVER = 11;
+    KIND_MOUNTAIN_RANGE = 12;
+    KIND_BASIC_WORD = 13;
+    KIND_CULTURE = 14;
+    KIND_SEASON = 15;
+    KIND_WEATHER = 16;
   }
   Kind kind = 1;
   uint32 id = 2;
