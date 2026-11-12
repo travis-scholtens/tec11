@@ -6671,34 +6671,88 @@ impl HistorySimulation {
             return false;
         };
         let mut sim = Self::from_prehistory(pre, 42);
+        if let Ok(arr) = <[u8; 16]>::try_from(snap.rng_state_16b.as_slice()) {
+            sim.rng = Pcg64Mcg::from_bytes(arr);
+        }
         if let Some(tec11_proto::PlanetStageOneof::History(hist)) = &snap.stage {
             sim.history_ticks = hist.history_ticks;
             if !hist.populated_faces.is_empty() {
                 sim.tile_states.clear();
                 sim.tile_communities.clear();
                 let num_fine = sim.fine_face_count();
+                let mut active_sids = BTreeSet::new();
                 for pf in &hist.populated_faces {
                     let fid = pf.fine_face_id as usize;
                     if fid < num_fine {
                         sim.tile_states.insert(fid, pf.state_id);
-                        let comms = pf
+                        active_sids.insert(pf.state_id);
+                        sim.next_state_id = sim.next_state_id.max(pf.state_id + 1);
+                        if !sim.states.contains_key(&pf.state_id) {
+                            sim.states.insert(
+                                pf.state_id,
+                                StateRecord {
+                                    id: pf.state_id,
+                                    capital_tile: fid,
+                                    color_idx: (pf.state_id as usize) % NATION_PALETTE.len(),
+                                    active: true,
+                                    asabiya: 0.5,
+                                },
+                            );
+                        }
+                        let comms: Vec<Community> = pf
                             .communities
                             .iter()
-                            .map(|pc| Community {
-                                thousands: pc.thousands,
-                                nationality_id: pc.nationality_id,
-                                language_id: pc.language_id,
-                                agriculture: pc.agriculture,
-                                rivergoing: pc.rivergoing,
-                                seafaring: pc.seafaring,
-                                racial_mix: pc
-                                    .racial_mix
-                                    .iter()
-                                    .map(|rc| (rc.heritage_id, rc.fraction))
-                                    .collect(),
+                            .map(|pc| {
+                                sim.nationalities.insert(pc.nationality_id);
+                                sim.next_state_id = sim.next_state_id.max(pc.nationality_id + 1);
+                                sim.next_language_id =
+                                    sim.next_language_id.max(pc.language_id + 1);
+                                Community {
+                                    thousands: pc.thousands,
+                                    nationality_id: pc.nationality_id,
+                                    language_id: pc.language_id,
+                                    agriculture: pc.agriculture,
+                                    rivergoing: pc.rivergoing,
+                                    seafaring: pc.seafaring,
+                                    racial_mix: pc
+                                        .racial_mix
+                                        .iter()
+                                        .map(|rc| (rc.heritage_id, rc.fraction))
+                                        .collect(),
+                                }
                             })
                             .collect();
                         sim.tile_communities.insert(fid, comms);
+                    }
+                }
+                for st in sim.states.values_mut() {
+                    st.active = active_sids.contains(&st.id);
+                }
+                for (lid_usize, proto_lang) in hist.languages.iter().enumerate() {
+                    let lid = lid_usize as u32;
+                    sim.next_language_id = sim.next_language_id.max(lid + 1);
+                    if !sim.languages.contains_key(&lid) {
+                        let mut lrec = LanguageRecord::new_for_state_with_system(
+                            lid,
+                            lid,
+                            &[],
+                            sim.moon_count,
+                            &sim.solar_system,
+                            &mut sim.rng,
+                        );
+                        for pc in &proto_lang.concepts {
+                            lrec.coin_concept(ConceptKey::from_proto(pc), &mut sim.rng);
+                        }
+                        lrec.refresh_phonology();
+                        sim.languages.insert(lid, lrec);
+                    } else if let Some(lrec) = sim.languages.get_mut(&lid) {
+                        for pc in &proto_lang.concepts {
+                            let ck = ConceptKey::from_proto(pc);
+                            if !lrec.describes(ck) {
+                                lrec.coin_concept(ck, &mut sim.rng);
+                            }
+                        }
+                        lrec.refresh_phonology();
                     }
                 }
                 sim.trade_partners = hist
@@ -6709,6 +6763,9 @@ impl HistorySimulation {
                 sim.conflicts = hist.conflicts.iter().map(StatePair::from_proto).collect();
                 sim.refresh_fishing_capacities();
                 sim.update_travel_routes();
+                let fine_adj = sim.terrain.terrain_adj.clone();
+                let topo = sim.state_topology(&fine_adj);
+                sim.accumulate_and_borrow_concepts(&topo.extents, &topo.species);
             }
         }
         *self = sim;

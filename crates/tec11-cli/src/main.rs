@@ -45,6 +45,8 @@ pub struct CliConfig {
     pub moon_mass: Option<f32>,
     pub moon_dist_radii: Option<u32>,
     pub meteor_freq: Option<f32>,
+    pub star_filter: Option<u32>,
+    pub atmosphere_id: Option<u32>,
     pub target_stage: TargetStage,
     pub prehistory_ticks: u32,
     pub history_ticks: u32,
@@ -71,6 +73,8 @@ impl Default for CliConfig {
             moon_mass: None,
             moon_dist_radii: None,
             meteor_freq: None,
+            star_filter: None,
+            atmosphere_id: None,
             target_stage: TargetStage::History,
             prehistory_ticks: 32,
             history_ticks: 10,
@@ -114,6 +118,10 @@ PLANET CREATION PARAMETERS (matching the World Simulation GUI):
         --moon-mass <MASS>       Primary moon mass in Earth Lunar masses (0.1..=3.0) [default: 1.0]
         --moon-dist <RADII>      Target innermost moon distance at Prehistory start in R_p [default: 60]
         --meteor-freq <MULT>     Meteor / bolide impact frequency multiplier (0.0..=5.0) [default: 1.0]
+        --star-class <CLASS>     Host star spectral class: 0|random, 1|F (yellow-white), 2|G (Sol),
+                                 3|K (orange), 4|M (red dwarf), 5|A (blue-white), 6|subgiant [default: 2]
+        --atmosphere <ATM>       Planetary atmosphere: 0|n2-o2, 1|methane, 2|co2, 3|tholin,
+                                 4|thin-co2, 5|hycean [default: 0]
 
 SIMULATION STEPPING OPTIONS:
         --target-stage <STAGE>   Stage to run through: tectonics | prehistory | history [default: history]
@@ -147,6 +155,35 @@ fn parse_f32_flag(flag: &str, val: &str, min: f32, max: f32) -> Result<f32, Stri
         ));
     }
     Ok(parsed)
+}
+
+fn parse_star_class(val: &str) -> Result<u32, String> {
+    match val.trim().to_ascii_lowercase().as_str() {
+        "0" | "random" | "any" => Ok(0),
+        "1" | "f" | "yellow-white" => Ok(1),
+        "2" | "g" | "sol" | "yellow" => Ok(2),
+        "3" | "k" | "orange" => Ok(3),
+        "4" | "m" | "red" | "red-dwarf" => Ok(4),
+        "5" | "a" | "blue-white" => Ok(5),
+        "6" | "iv" | "subgiant" => Ok(6),
+        other => Err(format!(
+            "Invalid --star-class '{other}' (expected 0..=6 or random|F|G|K|M|A|subgiant)"
+        )),
+    }
+}
+
+fn parse_atmosphere(val: &str) -> Result<u32, String> {
+    match val.trim().to_ascii_lowercase().as_str() {
+        "0" | "n2-o2" | "earth" => Ok(0),
+        "1" | "methane" | "ch4" => Ok(1),
+        "2" | "co2" | "dense-co2" => Ok(2),
+        "3" | "tholin" | "haze" | "titan" => Ok(3),
+        "4" | "thin-co2" | "dusty-co2" | "mars" => Ok(4),
+        "5" | "hycean" | "h2" | "hydrogen" => Ok(5),
+        other => Err(format!(
+            "Invalid --atmosphere '{other}' (expected 0..=5 or n2-o2|methane|co2|tholin|thin-co2|hycean)"
+        )),
+    }
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<CliConfig, String>
@@ -247,6 +284,14 @@ where
                 let v = next_val(arg)?;
                 cfg.meteor_freq = Some(parse_f32_flag(arg, &v, 0.0, 10.0)?);
             }
+            "--star-class" | "--star" | "--sun" => {
+                let v = next_val(arg)?;
+                cfg.star_filter = Some(parse_star_class(&v)?);
+            }
+            "--atmosphere" | "--atm" => {
+                let v = next_val(arg)?;
+                cfg.atmosphere_id = Some(parse_atmosphere(&v)?);
+            }
             "--target-stage" | "--stage" => {
                 let v = next_val(arg)?;
                 cfg.target_stage = TargetStage::parse(&v)?;
@@ -316,13 +361,21 @@ pub fn resolve_world_params(
     }
 
     if !cfg.randomize {
-        let world = WorldSimulation::new(base_params, seed);
+        let mut world = WorldSimulation::new(base_params, seed);
+        if cfg.star_filter.is_some() || cfg.atmosphere_id.is_some() {
+            world.set_sun_and_atmosphere(
+                cfg.star_filter.unwrap_or(2),
+                cfg.atmosphere_id.unwrap_or(0),
+            );
+        }
         return (world, base_params);
     }
 
     // Generate randomized parameters using WorldSimulation::create(..., true), then apply any explicit CLI overrides
     let mut world = WorldSimulation::new(base_params, seed);
     let mut resolved = world.create(base_params, true);
+    let rand_star = world.star_filter();
+    let rand_atm = world.atmosphere_id();
     let has_override = cfg.day_hours.is_some()
         || cfg.tilt_deg.is_some()
         || cfg.land_pct.is_some()
@@ -372,6 +425,10 @@ pub fn resolve_world_params(
         }
         world = WorldSimulation::new(resolved, seed);
     }
+    world.set_sun_and_atmosphere(
+        cfg.star_filter.unwrap_or(rand_star),
+        cfg.atmosphere_id.unwrap_or(rand_atm),
+    );
 
     (world, resolved)
 }
@@ -415,7 +472,8 @@ pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
                 "Initialized World Simulation (seed={seed}, randomize={}):\n  \
                  grid_size={} ({} coarse tiles), target_day={}h (Hadean={:.1}h), tilt={}°, land={}%, \
                  moons={} (mass={:.1}x, target_dist={} Rp, Hadean_dist={:.1} Rp, tides={:.1}x), \
-                 meteors={:.1}x, atm_dt={} Myr, life_dt={} Myr, people_dt={} Myr",
+                 meteors={:.1}x, atm_dt={} Myr, life_dt={} Myr, people_dt={} Myr\n  \
+                 host_star='{}' ({:.0} K), atmosphere='{}', solar_system_planets={}",
                 cfg.randomize,
                 params.grid_size,
                 w.tile_count(),
@@ -431,7 +489,11 @@ pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
                 params.meteor_freq,
                 params.atm_dt_myr,
                 params.life_dt_myr,
-                params.people_dt_myr
+                params.people_dt_myr,
+                w.home_star().spectral_type,
+                w.home_star().temp_k,
+                w.atmosphere().name(),
+                w.solar_system().len()
             );
         }
         w
@@ -490,15 +552,28 @@ pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
             while world.stage_index() == 1 && world.prehistory_ticks() < cfg.prehistory_ticks {
                 world.step();
             }
+            if !cfg.quiet {
+                if let WorldStageState::Prehistory(pre) = world.stage() {
+                    println!(
+                        "Completed Prehistory after {} ticks ({} years): {} populated tiles, {} heritages ({} agricultural, {} rivergoing, {} seafaring).",
+                        world.prehistory_ticks(),
+                        format_with_commas((world.prehistory_ticks() as u64) * 4_000),
+                        pre.populated_count(),
+                        pre.active_race_count(),
+                        pre.active_agricultural_race_count(),
+                        pre.active_rivergoing_race_count(),
+                        pre.active_seafaring_race_count()
+                    );
+                } else {
+                    println!(
+                        "Completed Prehistory after {} ticks ({} years).",
+                        world.prehistory_ticks(),
+                        format_with_commas((world.prehistory_ticks() as u64) * 4_000)
+                    );
+                }
+            }
             if cfg.target_stage == TargetStage::History && world.stage_index() == 1 {
                 world.advance_stage();
-            }
-            if !cfg.quiet {
-                println!(
-                    "Completed Prehistory after {} ticks ({} years).",
-                    world.prehistory_ticks(),
-                    format_with_commas((world.prehistory_ticks() as u64) * 4_000)
-                );
             }
         }
 
@@ -512,12 +587,18 @@ pub fn run_cli(cfg: &CliConfig) -> Result<Vec<u8>, String> {
             }
             if !cfg.quiet {
                 if let WorldStageState::History(hist) = world.stage() {
+                    let geo = hist.geography();
                     println!(
-                        "Completed History after {} ticks ({} years): {} active states, {:.1}K total population.",
+                        "Completed History after {} ticks ({} years): {} active states, {:.1}K total population, {} active water routes, {} continents, {} oceans, {} seas, {} mountain ranges.",
                         hist.history_ticks(),
                         format_with_commas(hist.years() as u64),
                         hist.active_state_count(),
-                        hist.total_population_thousands()
+                        hist.total_population_thousands(),
+                        hist.active_travel_route_count(),
+                        geo.continents.len(),
+                        geo.oceans.len(),
+                        geo.seas.len(),
+                        geo.mountain_ranges.len()
                     );
                 }
             }
@@ -608,6 +689,10 @@ mod tests {
             "55",
             "--meteor-freq",
             "2.5",
+            "--star-class",
+            "K",
+            "--atmosphere",
+            "methane",
             "--history-ticks",
             "3",
             "-o",
@@ -627,6 +712,8 @@ mod tests {
         assert_eq!(cfg.moon_mass, Some(1.5));
         assert_eq!(cfg.moon_dist_radii, Some(55));
         assert_eq!(cfg.meteor_freq, Some(2.5));
+        assert_eq!(cfg.star_filter, Some(3));
+        assert_eq!(cfg.atmosphere_id, Some(1));
         assert_eq!(cfg.history_ticks, 3);
         assert_eq!(cfg.output, PathBuf::from("/tmp/test_world.tec11"));
     }
@@ -650,6 +737,8 @@ mod tests {
             moon_mass: None,
             moon_dist_radii: None,
             meteor_freq: None,
+            star_filter: None,
+            atmosphere_id: None,
             target_stage: TargetStage::History,
             prehistory_ticks: 4,
             history_ticks: 2,
