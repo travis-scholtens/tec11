@@ -5367,8 +5367,10 @@ impl HistorySimulation {
         let east = normal(cross(ref_up, center));
         let north = normal(cross(center, east));
 
+        // Negate x so geographic east maps leftward, matching the globe's
+        // rotate_axes convention ([-Y, Z, X]) which mirrors east–west.
         let project_pt = |v: Vec3| -> [f32; 2] {
-            let x = dot(v, east) as f32;
+            let x = -dot(v, east) as f32;
             let y = -dot(v, north) as f32;
             [x, y]
         };
