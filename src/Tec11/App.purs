@@ -631,6 +631,72 @@ foreign import closeInspectorNation :: Effect Unit
 foreign import setTileSkyYear :: Int -> Effect Unit
 foreign import setTileSkyDay :: Int -> Effect Unit
 foreign import toggleTileSkyAnimation :: Effect Unit
+foreign import toggleStratigraphySideZoom :: Effect Unit
+
+renderStratigraphySideViewBox :: JSX
+renderStratigraphySideViewBox =
+  R.div
+    { id: "stratigraphy-side-box"
+    , style:
+        R.css
+          { marginBottom: "6px"
+          , padding: "7px 8px"
+          , borderRadius: "6px"
+          , border: "1px solid #334155"
+          , backgroundColor: "rgba(15, 23, 42, 0.78)"
+          }
+    , children:
+        [ R.div
+            { style:
+                R.css
+                  { display: "flex"
+                  , justifyContent: "space-between"
+                  , alignItems: "center"
+                  , marginBottom: "4px"
+                  , gap: "6px"
+                  }
+            , children:
+                [ R.div
+                    { style: R.css { fontSize: "0.75rem", fontWeight: "700", color: "#38bdf8" }
+                    , children: [ R.text "Rock Layers & Mineral Veins (Side View)" ]
+                    }
+                , R.button
+                    { id: "stratigraphy-zoom-btn"
+                    , className: "action-btn secondary"
+                    , style: R.css { padding: "1px 8px", fontSize: "0.71rem" }
+                    , onClick: capture_ toggleStratigraphySideZoom
+                    , children: [ R.text "🔍 Top 8 km Zoom" ]
+                    }
+                ]
+            }
+        , R.canvas
+            { id: "stratigraphy-side-canvas"
+            , style:
+                R.css
+                  { width: "100%"
+                  , height: "215px"
+                  , display: "block"
+                  , borderRadius: "5px"
+                  , border: "1px solid #1e293b"
+                  , background: "#09101d"
+                  , cursor: "crosshair"
+                  }
+            }
+        , R.div
+            { id: "stratigraphy-hover-label"
+            , style:
+                R.css
+                  { fontSize: "0.71rem"
+                  , color: "#cbd5e1"
+                  , marginTop: "4px"
+                  , lineHeight: "1.3"
+                  , minHeight: "1.35em"
+                  }
+            , children:
+                [ R.text "Click any tile on the globe to view its cross-section; hover a rock layer for composition & veins." ]
+            }
+        ]
+    }
 
 renderDemographicPills :: Array DemographicShareItem -> Int -> (Int -> Effect Unit) -> String -> JSX
 renderDemographicPills items activeId onSelect emptyText =
@@ -1042,6 +1108,10 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                                   ]
                               }
                           ]
+                      }
+                  , R.div
+                      { style: R.css { marginTop: "8px" }
+                      , children: [ renderStratigraphySideViewBox ]
                       }
                   , R.div
                       { id: "tile-sky-box"
@@ -2831,6 +2901,7 @@ mkApp = do
                                   { className: "control-label"
                                   , children: [ R.text "Selection (Stratigraphy)" ]
                                   }
+                              , renderStratigraphySideViewBox
                               , R.pre
                                   { id: "tectonics-details"
                                   , className: "tile-details-box"
@@ -3337,6 +3408,7 @@ mkApp = do
                                   { className: "control-label"
                                   , children: [ R.text "Selection" ]
                                   }
+                              , renderStratigraphySideViewBox
                               , R.pre
                                   { id: "erosion-details"
                                   , className: "tile-details-box"
@@ -4432,6 +4504,7 @@ mkApp = do
                                   { className: "control-label"
                                   , children: [ R.text "Subdivided Terrain & River Routing Inspector" ]
                                   }
+                              , renderStratigraphySideViewBox
                               , R.div
                                   { id: "terrain-details-box"
                                   , className: "tile-details-box"
@@ -5031,9 +5104,14 @@ mkApp = do
                                     worldInfo.selectedReport
                                 else
                                   R.div
-                                    { id: "world-details-box"
-                                    , className: "tile-details-box"
-                                    , children: [ R.text worldInfo.selectedReport ]
+                                    { children:
+                                        [ renderStratigraphySideViewBox
+                                        , R.div
+                                            { id: "world-details-box"
+                                            , className: "tile-details-box"
+                                            , children: [ R.text worldInfo.selectedReport ]
+                                            }
+                                        ]
                                     }
                               ]
                           }
@@ -5583,6 +5661,7 @@ mkApp = do
                                   { className: "control-label"
                                   , children: [ R.text "Tile Inspection (Local Tidal Range, Coastal Scour vs. Rain Erosion & Strata)" ]
                                   }
+                              , renderStratigraphySideViewBox
                               , R.div
                                   { id: "moon-details-box"
                                   , className: "tile-details-box"
@@ -5890,6 +5969,7 @@ mkApp = do
                                   { className: "control-label"
                                   , children: [ R.text "Tile Inspection (Crater Excavation, Ejecta Breccia, Impact Winter & Strata)" ]
                                   }
+                              , renderStratigraphySideViewBox
                               , R.div
                                   { id: "meteor-details-box"
                                   , className: "tile-details-box"

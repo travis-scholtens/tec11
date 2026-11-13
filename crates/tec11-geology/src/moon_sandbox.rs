@@ -709,6 +709,13 @@ impl MoonSandbox {
         lines.join("\n")
     }
 
+    pub fn inspect_tile_stratigraphy_json(&self, idx: usize) -> String {
+        let Some(t) = self.tiles.get(idx) else {
+            return "{\"hasColumn\":false}".to_string();
+        };
+        t.to_stratigraphy_json(idx, None)
+    }
+
     /// Compute RGB vertex/tile colors for the Moon Sandbox:
     /// - `"tidal_erosion"`: Natural terrain + amber/gold coastal tidal scour + cyan shelf deposition + magenta fluvial erosion
     /// - `"tidal_range"`: Global tidal range & live quadrupolar tidal bulge heatmap

@@ -114,6 +114,10 @@ impl WasmMoonSession {
         self.sim.inspect_tile(tile_idx)
     }
 
+    pub fn inspect_tile_stratigraphy_json(&self, tile_idx: usize) -> String {
+        self.sim.inspect_tile_stratigraphy_json(tile_idx)
+    }
+
     pub fn tile_colors_rgb(
         &self,
         aspect: &str,

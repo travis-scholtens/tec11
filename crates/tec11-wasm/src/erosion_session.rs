@@ -69,6 +69,10 @@ impl WasmErosionSession {
         self.sim.inspect_tile(tile_idx)
     }
 
+    pub fn inspect_tile_stratigraphy_json(&self, tile_idx: usize) -> String {
+        self.sim.inspect_tile_stratigraphy_json(tile_idx)
+    }
+
     pub fn mesh_positions(&self) -> Vec<f32> {
         build_mesh_positions(self.sim.grid())
     }

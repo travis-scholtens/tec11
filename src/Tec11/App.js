@@ -1014,6 +1014,7 @@ function buildTectonicsInfo(view) {
     selectedTileIdx >= 0
       ? session.inspect_tile(selectedTileIdx)
       : "Click any tile on the globe to inspect its rock layers.";
+  scheduleStratigraphySidePaint(view, selectedTileIdx);
   return {
     gridSize: session.grid_size(),
     tileCount: session.tile_count(),
@@ -1759,6 +1760,7 @@ function buildErosionInfo(view) {
     view.selectedTileIdx >= 0
       ? s.inspect_tile(view.selectedTileIdx)
       : "Click any tile on the globe to inspect elevation, erosion, and deposition.";
+  scheduleStratigraphySidePaint(view, view.selectedTileIdx);
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -3830,6 +3832,7 @@ function buildHistoryInspectorBundle(view) {
       if (parsedTile && parsedTile.hasTile) {
         const sky = parsedTile.sky || null;
         view.tileSky = sky;
+        view.tileStratigraphy = parsedTile.stratigraphy || null;
         if (view.tileSkyYear === undefined) view.tileSkyYear = 0;
         if (view.tileSkyDay === undefined) view.tileSkyDay = 0;
         if (view.tileSkyHourFrac === undefined) view.tileSkyHourFrac = 0.35;
@@ -3965,6 +3968,10 @@ function buildHistoryInspectorBundle(view) {
       ensureTileSkyLoop(view);
     }, 45);
   }
+  if (tileView.hasTile && typeof window !== "undefined") {
+    window.requestAnimationFrame(() => paintStratigraphySideCanvas(view));
+    setTimeout(() => paintStratigraphySideCanvas(view), 45);
+  }
 
   return { stateView, tileView, languageDetail, nationDetail };
 }
@@ -3989,6 +3996,798 @@ export const toggleTileSkyAnimation = () => {
   if (!activeView || !activeView.session) return;
   activeView.tileSkyAnimated = activeView.tileSkyAnimated === false;
   refreshActiveInspectorView(activeView);
+};
+
+function rockLayerBaseStyle(layer) {
+  const name = (layer.name || "").toLowerCase();
+  const kind = layer.kind || "I";
+  const f = typeof layer.felsity === "number" ? layer.felsity : 0.5;
+  switch (name) {
+    case "basalt":
+      return { fill: "#28303d", stroke: "#475569", pattern: "mafic" };
+    case "gabbro":
+      return { fill: "#1e2530", stroke: "#334155", pattern: "plutonic_dark" };
+    case "andesite":
+      return { fill: "#4b4e63", stroke: "#64748b", pattern: "porphyritic" };
+    case "diorite":
+      return { fill: "#43495c", stroke: "#64748b", pattern: "plutonic_mid" };
+    case "dacite":
+      return { fill: "#6c677d", stroke: "#94a3b8", pattern: "porphyritic" };
+    case "granodiorite":
+      return { fill: "#8c7785", stroke: "#94a3b8", pattern: "granitic" };
+    case "rhyolite":
+      return { fill: "#b57c78", stroke: "#fda4af", pattern: "flow_banded" };
+    case "granite":
+      return { fill: "#c48882", stroke: "#fecdd3", pattern: "granitic" };
+    case "claystone":
+      return { fill: "#575a4e", stroke: "#78716c", pattern: "shale" };
+    case "siltstone":
+      return { fill: "#706552", stroke: "#a8a29e", pattern: "silt" };
+    case "sandstone":
+      return { fill: "#bf8f46", stroke: "#fcd34d", pattern: "sand" };
+    case "conglomerate":
+      return { fill: "#9e6738", stroke: "#fdba74", pattern: "pebbles" };
+    case "limestone":
+      return { fill: "#b8b6a6", stroke: "#e7e5e4", pattern: "carbonate" };
+    case "chalk":
+      return { fill: "#d9d7c9", stroke: "#f5f5f4", pattern: "carbonate" };
+    case "pelite":
+      return { fill: "#4c5464", stroke: "#94a3b8", pattern: "foliated" };
+    case "psammite":
+      return { fill: "#8c7252", stroke: "#d6d3d1", pattern: "foliated" };
+    case "psephite":
+      return { fill: "#7c583c", stroke: "#d6d3d1", pattern: "pebbles" };
+    case "greenschist":
+      return { fill: "#365944", stroke: "#6ee7b7", pattern: "schist" };
+    case "blueschist":
+      return { fill: "#294670", stroke: "#7dd3fc", pattern: "schist" };
+    case "amphibolite":
+      return { fill: "#23393d", stroke: "#5eead4", pattern: "foliated" };
+    case "eclogite":
+      return { fill: "#214736", stroke: "#6ee7b7", pattern: "eclogite" };
+    case "hornfels":
+      return { fill: "#4c3844", stroke: "#c084fc", pattern: "baked" };
+    case "granulite":
+      return { fill: "#5c4033", stroke: "#fdba74", pattern: "granitic" };
+    case "marble":
+      return { fill: "#e5e3da", stroke: "#f8fafc", pattern: "marble" };
+    default: {
+      if (kind === "S") return { fill: "#8c7853", stroke: "#cbd5e1", pattern: "silt" };
+      if (kind === "M") return { fill: "#475569", stroke: "#94a3b8", pattern: "foliated" };
+      const r = Math.round(45 + 150 * f);
+      const g = Math.round(50 + 85 * f);
+      const b = Math.round(65 + 65 * f);
+      return { fill: `rgb(${r},${g},${b})`, stroke: "#64748b", pattern: "granitic" };
+    }
+  }
+}
+
+function detRand(seed, a, b) {
+  const x = Math.sin(seed * 12.9898 + a * 78.233 + b * 37.719) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+function paintStratigraphySideCanvas(view) {
+  const canvas = document.getElementById("stratigraphy-side-canvas");
+  if (!canvas || !view) return;
+
+  const zoomBtn = document.getElementById("stratigraphy-zoom-btn");
+  if (zoomBtn) {
+    zoomBtn.textContent = view.stratigraphyTopZoom ? "🔍 Full Crust" : "🔍 Top 8 km Zoom";
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const cssW = Math.max(240, Math.round(rect.width || 280));
+  const cssH = Math.max(185, Math.round(rect.height || 215));
+  const dpr = window.devicePixelRatio || 1;
+  const targetW = Math.round(cssW * dpr);
+  const targetH = Math.round(cssH * dpr);
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.scale(dpr, dpr);
+
+  ctx.fillStyle = "#080f1d";
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  const strat = view.tileStratigraphy;
+  if (!strat || !strat.hasColumn || !strat.layers || strat.layers.length === 0) {
+    ctx.fillStyle = "#64748b";
+    ctx.font = "11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(
+      "Click any tile on the globe to inspect its 2D rock strata & mineral veins",
+      cssW * 0.5,
+      cssH * 0.5
+    );
+    ctx.restore();
+    return;
+  }
+
+  const elevKm = typeof strat.elevationKm === "number" ? strat.elevationKm : 0.0;
+  const mohoKm = typeof strat.bottomKm === "number" ? strat.bottomKm : elevKm - 10.0;
+  const mountNorm = Math.max(0.0, Math.min(1.0, strat.mountainosityNorm || 0.0));
+  const impactScar = Math.max(0.0, Math.min(1.0, strat.impactScar || 0.0));
+  const tileSeed = (strat.tileIdx || 0) + 17;
+
+  // Vertical coordinate mapping (km elevation -> canvas Y)
+  const topSkyMarginKm = elevKm >= 0.0 ? Math.max(1.8, elevKm * 0.28) : 1.5;
+  const viewTopKm = Math.max(elevKm + topSkyMarginKm, 1.5);
+  const fullBottomKm = mohoKm - Math.max(2.2, (elevKm - mohoKm) * 0.1);
+  const zoomBottomKm = Math.max(fullBottomKm, elevKm - 8.5);
+  const viewBottomKm = view.stratigraphyTopZoom ? zoomBottomKm : fullBottomKm;
+  const spanKm = Math.max(1.0, viewTopKm - viewBottomKm);
+
+  const padTop = 10;
+  const padBot = 10;
+  const plotH = cssH - padTop - padBot;
+  const colLeft = 42;
+  const colRight = cssW - 116;
+  const colW = Math.max(80, colRight - colLeft);
+
+  const kmToY = (km) => padTop + ((viewTopKm - km) / spanKm) * plotH;
+  const yToKm = (y) => viewTopKm - ((y - padTop) / plotH) * spanKm;
+
+  // Tectonic folding / crater bowl wave offset (in pixels) at horizontal fraction u in [0, 1]
+  const foldOffsetPx = (u, depthKm) => {
+    const waveFreq = 2.0 + Math.round(mountNorm * 2.0);
+    const phase = (tileSeed % 11) * 0.55;
+    const foldAmpPx = mountNorm * 9.5 * Math.sin(u * Math.PI * waveFreq + phase);
+    const craterBowlPx =
+      impactScar > 0.35
+        ? Math.min(10.0, impactScar * 7.5) *
+          Math.sin(u * Math.PI) *
+          Math.exp(-Math.max(0.0, depthKm) * 0.12)
+        : 0.0;
+    return foldAmpPx + craterBowlPx;
+  };
+
+  // 1. Sky & Ocean Background inside column
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(colLeft, padTop, colW, plotH);
+  ctx.clip();
+
+  const ySea = kmToY(0.0);
+  const ySurfBase = kmToY(elevKm);
+  const skyGrad = ctx.createLinearGradient(0, padTop, 0, Math.max(padTop + 20, Math.min(ySea, ySurfBase)));
+  skyGrad.addColorStop(0.0, "#0b192c");
+  skyGrad.addColorStop(1.0, "#1e3a5f");
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(colLeft, padTop, colW, plotH);
+
+  // If submarine (elevKm < 0), fill ocean water above the seafloor
+  if (elevKm < 0.0) {
+    const oceanGrad = ctx.createLinearGradient(0, Math.max(padTop, ySea), 0, Math.min(cssH, ySurfBase + 12));
+    oceanGrad.addColorStop(0.0, "rgba(14, 116, 144, 0.78)");
+    oceanGrad.addColorStop(0.6, "rgba(12, 74, 110, 0.88)");
+    oceanGrad.addColorStop(1.0, "rgba(8, 47, 73, 0.95)");
+    ctx.fillStyle = oceanGrad;
+    ctx.beginPath();
+    ctx.moveTo(colLeft, Math.max(padTop, ySea));
+    ctx.lineTo(colRight, Math.max(padTop, ySea));
+    const steps = 28;
+    for (let s = steps; s >= 0; s--) {
+      const u = s / steps;
+      const x = colLeft + u * colW;
+      const y = ySurfBase + foldOffsetPx(u, 0.0);
+      ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // Active seafloor Black Smoker hydrothermal plumes if top layer has VMS sulfidity
+    const topL = strat.layers[0];
+    if (topL && topL.kind === "I" && (topL.sulfidity || 0) >= 0.12) {
+      const ventPositions = [0.28, 0.68];
+      for (let vi = 0; vi < ventPositions.length; vi++) {
+        const vu = ventPositions[vi];
+        const vx = colLeft + vu * colW;
+        const vy = ySurfBase + foldOffsetPx(vu, 0.0);
+        // Sulfide chimney mound
+        ctx.fillStyle = "#ca8a04";
+        ctx.beginPath();
+        ctx.moveTo(vx - 4, vy + 1);
+        ctx.lineTo(vx - 1.5, vy - 6);
+        ctx.lineTo(vx + 1.5, vy - 6);
+        ctx.lineTo(vx + 4, vy + 1);
+        ctx.closePath();
+        ctx.fill();
+        // Black smoker plume rising into ocean water
+        const plumeGrad = ctx.createRadialGradient(vx, vy - 13, 1, vx, vy - 16, 14);
+        plumeGrad.addColorStop(0.0, "rgba(30, 41, 59, 0.92)");
+        plumeGrad.addColorStop(0.5, "rgba(71, 85, 105, 0.55)");
+        plumeGrad.addColorStop(1.0, "rgba(15, 23, 42, 0.0)");
+        ctx.fillStyle = plumeGrad;
+        ctx.beginPath();
+        ctx.arc(vx, vy - 15, 13, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // 2. Upper Mantle below Moho
+  const yMohoBase = kmToY(mohoKm);
+  if (yMohoBase < cssH) {
+    const mantleGrad = ctx.createLinearGradient(0, Math.max(padTop, yMohoBase - 5), 0, cssH);
+    mantleGrad.addColorStop(0.0, "#7c2d12");
+    mantleGrad.addColorStop(0.5, "#9a3412");
+    mantleGrad.addColorStop(1.0, "#431407");
+    ctx.fillStyle = mantleGrad;
+    ctx.fillRect(colLeft, Math.max(padTop, yMohoBase - 12), colW, cssH - Math.max(padTop, yMohoBase - 12));
+  }
+
+  // 3. Draw each RockLayer polygon from top (index 0) to bottom
+  const steps = 28;
+  const hitBands = [];
+
+  for (let i = 0; i < strat.layers.length; i++) {
+    const layer = strat.layers[i];
+    const yTopBase = kmToY(layer.topKm);
+    const yBotBase = kmToY(layer.bottomKm);
+    if (yBotBase < padTop - 10 || yTopBase > cssH + 10) {
+      continue;
+    }
+
+    const style = rockLayerBaseStyle(layer);
+    const topPts = [];
+    const botPts = [];
+    for (let s = 0; s <= steps; s++) {
+      const u = s / steps;
+      const x = colLeft + u * colW;
+      topPts.push([x, yTopBase + foldOffsetPx(u, layer.depthTopKm)]);
+      botPts.push([x, yBotBase + foldOffsetPx(u, layer.depthBottomKm)]);
+    }
+
+    const traceLayerPoly = () => {
+      ctx.beginPath();
+      for (let s = 0; s <= steps; s++) {
+        if (s === 0) ctx.moveTo(topPts[s][0], topPts[s][1]);
+        else ctx.lineTo(topPts[s][0], topPts[s][1]);
+      }
+      for (let s = steps; s >= 0; s--) {
+        ctx.lineTo(botPts[s][0], botPts[s][1]);
+      }
+      ctx.closePath();
+    };
+
+    traceLayerPoly();
+    ctx.fillStyle = style.fill;
+    ctx.fill();
+
+    // Clip interior textures & mineral veins to this rock layer
+    ctx.save();
+    traceLayerPoly();
+    ctx.clip();
+
+    const midY = 0.5 * (yTopBase + yBotBase);
+    const bandH = Math.max(2.0, yBotBase - yTopBase);
+    const lSeed = tileSeed * 31 + i * 13;
+
+    // Lithological background texture
+    if (style.pattern === "shale" || style.pattern === "silt") {
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.28)";
+      ctx.lineWidth = 0.8;
+      const numLines = Math.min(8, Math.max(1, Math.floor(bandH / 5)));
+      for (let ln = 1; ln <= numLines; ln++) {
+        const frac = ln / (numLines + 1);
+        ctx.beginPath();
+        for (let s = 0; s <= steps; s += 2) {
+          const x = topPts[s][0];
+          const y = topPts[s][1] * (1 - frac) + botPts[s][1] * frac;
+          if (s === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    } else if (style.pattern === "carbonate" || style.pattern === "marble") {
+      ctx.strokeStyle = "rgba(30, 41, 59, 0.25)";
+      ctx.lineWidth = 0.8;
+      const rowStep = Math.max(5, Math.min(10, bandH * 0.45));
+      for (let ry = yTopBase - 4; ry <= yBotBase + 6; ry += rowStep) {
+        ctx.beginPath();
+        ctx.moveTo(colLeft, ry);
+        ctx.lineTo(colRight, ry);
+        ctx.stroke();
+      }
+    } else if (style.pattern === "foliated" || style.pattern === "schist") {
+      ctx.strokeStyle = "rgba(226, 232, 240, 0.18)";
+      ctx.lineWidth = 0.9;
+      const numWaves = Math.min(6, Math.max(1, Math.floor(bandH / 6)));
+      for (let w = 1; w <= numWaves; w++) {
+        const frac = w / (numWaves + 1);
+        ctx.beginPath();
+        for (let s = 0; s <= steps; s++) {
+          const x = topPts[s][0];
+          const y =
+            topPts[s][1] * (1 - frac) +
+            botPts[s][1] * frac +
+            Math.sin(s * 0.9 + w) * 1.3;
+          if (s === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    } else if (style.pattern === "granitic" || style.pattern === "plutonic_mid" || style.pattern === "porphyritic") {
+      const numSpecks = Math.min(28, Math.max(6, Math.floor((colW * bandH) / 95)));
+      for (let sp = 0; sp < numSpecks; sp++) {
+        const u = detRand(lSeed, sp, 1);
+        const v = detRand(lSeed, sp, 2);
+        const idx = Math.min(steps, Math.floor(u * steps));
+        const x = colLeft + u * colW;
+        const y = topPts[idx][1] * (1 - v) + botPts[idx][1] * v;
+        ctx.fillStyle = sp % 2 === 0 ? "rgba(255,255,255,0.22)" : "rgba(15,23,42,0.28)";
+        ctx.fillRect(x, y, 1.6, 1.6);
+      }
+    } else if (style.pattern === "eclogite") {
+      // Red garnet porphyroblasts in green omphacite matrix
+      const numGarnets = Math.min(18, Math.max(4, Math.floor(bandH * 0.7)));
+      for (let g = 0; g < numGarnets; g++) {
+        const u = detRand(lSeed, g, 3);
+        const v = 0.15 + 0.7 * detRand(lSeed, g, 4);
+        const idx = Math.min(steps, Math.floor(u * steps));
+        const x = colLeft + u * colW;
+        const y = topPts[idx][1] * (1 - v) + botPts[idx][1] * v;
+        ctx.fillStyle = "#dc2626";
+        ctx.beginPath();
+        ctx.arc(x, y, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (style.pattern === "pebbles" || style.pattern === "sand") {
+      const numGrains = Math.min(26, Math.max(6, Math.floor((colW * bandH) / 90)));
+      for (let g = 0; g < numGrains; g++) {
+        const u = detRand(lSeed, g, 5);
+        const v = 0.1 + 0.8 * detRand(lSeed, g, 6);
+        const idx = Math.min(steps, Math.floor(u * steps));
+        const x = colLeft + u * colW;
+        const y = topPts[idx][1] * (1 - v) + botPts[idx][1] * v;
+        ctx.fillStyle = g % 2 === 0 ? "rgba(254, 243, 199, 0.35)" : "rgba(69, 26, 3, 0.35)";
+        ctx.beginPath();
+        ctx.arc(x, y, style.pattern === "pebbles" ? 2.1 : 1.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // --- EMBEDDED MINERAL DEPOSITS & VEINS ---
+    const bog = layer.bogginess || 0.0;
+    const calc = layer.calcity || 0.0;
+    const qtz = layer.quartzity || 0.0;
+    const sulf = layer.sulfidity || 0.0;
+    const sal = layer.salinity || 0.0;
+    const lname = (layer.name || "").toLowerCase();
+
+    // A. Banded Iron Formation (BIF) alternating red chert & dark magnetite bands
+    if (layer.kind === "S" && sulf >= 0.08 && qtz >= 0.08) {
+      const bifBands = Math.min(7, Math.max(3, Math.floor(bandH / 3.5)));
+      for (let b = 0; b < bifBands; b++) {
+        const frac = (b + 0.5) / bifBands;
+        ctx.strokeStyle = b % 2 === 0 ? "rgba(185, 28, 28, 0.82)" : "rgba(15, 23, 42, 0.88)";
+        ctx.lineWidth = Math.max(1.2, (bandH / bifBands) * 0.45);
+        ctx.beginPath();
+        for (let s = 0; s <= steps; s++) {
+          const x = topPts[s][0];
+          const y = topPts[s][1] * (1 - frac) + botPts[s][1] * frac;
+          if (s === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    }
+
+    // B. Evaporite Salt / Gypsum / Potash Beds (`salinity >= 0.08`)
+    if (sal >= 0.08) {
+      const saltFrac = 0.32;
+      ctx.strokeStyle = sal >= 0.45 ? "rgba(253, 164, 175, 0.9)" : "rgba(248, 250, 252, 0.88)";
+      ctx.lineWidth = Math.max(2.0, Math.min(6.0, bandH * 0.28 * Math.min(1.0, sal + 0.3)));
+      ctx.beginPath();
+      for (let s = 0; s <= steps; s++) {
+        const x = topPts[s][0];
+        const y = topPts[s][1] * (1 - saltFrac) + botPts[s][1] * saltFrac;
+        if (s === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    // C. Coal & Graphite Seams (`bogginess >= 0.05`) + Eclogite Diamonds
+    if (bog >= 0.05) {
+      const isGraphite =
+        layer.kind === "M" &&
+        ["greenschist", "amphibolite", "granulite", "hornfels", "eclogite"].includes(lname);
+      const isLignite = layer.kind === "S" && layer.depthTopKm < 0.8 && bog < 0.2;
+      ctx.strokeStyle = isGraphite
+        ? "#94a3b8"
+        : isLignite
+          ? "#3f271d"
+          : "#090d16";
+      const seamWidth = Math.max(2.2, Math.min(7.5, bandH * 0.32 * Math.min(1.0, bog * 1.4)));
+      ctx.lineWidth = seamWidth;
+      const seamFrac = 0.52;
+      ctx.beginPath();
+      for (let s = 0; s <= steps; s++) {
+        const x = topPts[s][0];
+        const y = topPts[s][1] * (1 - seamFrac) + botPts[s][1] * seamFrac;
+        if (s === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Glossy highlight along coal/anthracite/graphite seam
+      ctx.strokeStyle = isGraphite ? "rgba(226, 232, 240, 0.7)" : "rgba(148, 163, 184, 0.38)";
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+
+      // Ultra-high-pressure Diamonds in organic-rich Eclogite
+      if (lname === "eclogite" && bog >= 0.15) {
+        for (let d = 0; d < 4; d++) {
+          const u = 0.18 + d * 0.21;
+          const idx = Math.min(steps, Math.floor(u * steps));
+          const dx = colLeft + u * colW;
+          const dy = topPts[idx][1] * 0.48 + botPts[idx][1] * 0.52;
+          ctx.fillStyle = "#67e8f9";
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 0.9;
+          ctx.beginPath();
+          ctx.moveTo(dx, dy - 3.2);
+          ctx.lineTo(dx + 2.8, dy);
+          ctx.lineTo(dx, dy + 3.2);
+          ctx.lineTo(dx - 2.8, dy);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+    }
+
+    // D. Karst Caverns in shallow high-calcity Limestone / Marble
+    if (calc >= 0.45 && (lname === "limestone" || lname === "chalk" || lname === "marble") && layer.depthTopKm < 2.5) {
+      for (let c = 0; c < 3; c++) {
+        const u = 0.22 + c * 0.27 + (detRand(lSeed, c, 9) - 0.5) * 0.08;
+        const idx = Math.min(steps, Math.floor(u * steps));
+        const cx = colLeft + u * colW;
+        const cy = topPts[idx][1] * 0.45 + botPts[idx][1] * 0.55;
+        ctx.fillStyle = "#090d16";
+        ctx.strokeStyle = "rgba(148, 163, 184, 0.6)";
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, 6.5, Math.min(4.2, Math.max(2.0, bandH * 0.26)), 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    // E. Hydrothermal Quartz / Gold / Tin Veins (`quartzity >= 0.05`)
+    if (qtz >= 0.05 && !(layer.kind === "S" && sulf >= 0.08)) {
+      const veinCount = Math.min(6, Math.max(2, Math.round(qtz * 7)));
+      for (let v = 0; v < veinCount; v++) {
+        const u0 = 0.1 + 0.8 * detRand(lSeed, v, 11);
+        const u1 = Math.max(0.04, Math.min(0.96, u0 + (detRand(lSeed, v, 12) - 0.5) * 0.22));
+        const uMid = 0.5 * (u0 + u1) + (detRand(lSeed, v, 13) - 0.5) * 0.08;
+        const i0 = Math.min(steps, Math.floor(u0 * steps));
+        const iMid = Math.min(steps, Math.floor(Math.max(0, Math.min(1, uMid)) * steps));
+        const i1 = Math.min(steps, Math.floor(u1 * steps));
+
+        const x0 = colLeft + u0 * colW;
+        const y0 = botPts[i0][1] + 1;
+        const xMid = colLeft + uMid * colW;
+        const yMid = 0.5 * (topPts[iMid][1] + botPts[iMid][1]);
+        const x1 = colLeft + u1 * colW;
+        const y1 = topPts[i1][1] - 1;
+
+        // Milky white quartz vein
+        ctx.strokeStyle = "rgba(248, 250, 252, 0.9)";
+        ctx.lineWidth = qtz >= 0.35 ? 2.1 : 1.35;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(xMid, yMid);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+
+        // Branching offshoot veinlet
+        const xb = xMid + (detRand(lSeed, v, 14) > 0.5 ? 9 : -9);
+        const yb = yMid - 0.25 * bandH;
+        ctx.lineWidth = 0.95;
+        ctx.beginPath();
+        ctx.moveTo(xMid, yMid);
+        ctx.lineTo(xb, yb);
+        ctx.stroke();
+
+        // Gold / Cassiterite flecks along the quartz vein
+        if (qtz >= 0.12) {
+          ctx.fillStyle =
+            layer.felsity >= 0.65 && layer.kind === "I" ? "#e2e8f0" : "#facc15";
+          ctx.beginPath();
+          ctx.arc(xMid, yMid, qtz >= 0.35 ? 2.0 : 1.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    // F. Sulfide Ore Veins / Porphyry Stockwork / VMS / Impact Nickel-Copper Sulfides (`sulfidity >= 0.10`)
+    if (sulf >= 0.10 && !(layer.kind === "S" && qtz >= 0.08)) {
+      const sulfCount = Math.min(6, Math.max(2, Math.round(sulf * 6)));
+      for (let sv = 0; sv < sulfCount; sv++) {
+        const u0 = 0.12 + 0.76 * detRand(lSeed, sv, 21);
+        const u1 = Math.max(0.05, Math.min(0.95, u0 + (detRand(lSeed, sv, 22) - 0.5) * 0.24));
+        const i0 = Math.min(steps, Math.floor(u0 * steps));
+        const i1 = Math.min(steps, Math.floor(u1 * steps));
+        const x0 = colLeft + u0 * colW;
+        const y0 = botPts[i0][1];
+        const x1 = colLeft + u1 * colW;
+        const y1 = topPts[i1][1] * 0.65 + botPts[i1][1] * 0.35;
+
+        ctx.strokeStyle = sv % 2 === 0 ? "#eab308" : "#f97316";
+        ctx.lineWidth = sulf >= 0.4 ? 2.0 : 1.3;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(0.5 * (x0 + x1) - 4, 0.5 * (y0 + y1));
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+      }
+      // Basal massive sulfide lens for VMS or impact melt sheet
+      if (sulf >= 0.35) {
+        ctx.strokeStyle = "#f59e0b";
+        ctx.lineWidth = Math.min(4.0, Math.max(1.8, bandH * 0.22));
+        ctx.beginPath();
+        for (let s = 4; s <= steps - 4; s++) {
+          const x = botPts[s][0];
+          const y = botPts[s][1] - 1.5;
+          if (s === 4) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    }
+
+    // G. Alluvial Placer Gold / Tin Nuggets at base of Sandstone / Conglomerate
+    if (layer.kind === "S" && (lname === "conglomerate" || lname === "sandstone") && qtz >= 0.05) {
+      const nuggetCount = Math.min(9, Math.max(3, Math.round(qtz * 12)));
+      for (let n = 0; n < nuggetCount; n++) {
+        const u = 0.08 + 0.84 * detRand(lSeed, n, 31);
+        const idx = Math.min(steps, Math.floor(u * steps));
+        const nx = colLeft + u * colW;
+        const ny = botPts[idx][1] - 2.2;
+        ctx.fillStyle = "#facc15";
+        ctx.strokeStyle = "#713f12";
+        ctx.lineWidth = 0.7;
+        ctx.beginPath();
+        ctx.arc(nx, ny, 2.0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore(); // End layer clip
+
+    // Draw layer boundary stroke (highlight if hovered)
+    const isHovered = view.hoveredStratLayerIdx === i;
+    traceLayerPoly();
+    ctx.strokeStyle = isHovered ? "#38bdf8" : style.stroke;
+    ctx.lineWidth = isHovered ? 2.0 : 0.9;
+    ctx.stroke();
+
+    hitBands.push({
+      idx: i,
+      layer,
+      yTop: Math.max(padTop, Math.min(cssH - padBot, yTopBase)),
+      yBot: Math.max(padTop, Math.min(cssH - padBot, yBotBase)),
+      midY: Math.max(padTop + 6, Math.min(cssH - padBot - 6, midY)),
+      style,
+    });
+  }
+
+  // Moho boundary line
+  if (yMohoBase >= padTop && yMohoBase <= cssH) {
+    ctx.strokeStyle = "#fb923c";
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([4, 2]);
+    ctx.beginPath();
+    for (let s = 0; s <= steps; s++) {
+      const u = s / steps;
+      const x = colLeft + u * colW;
+      const y = yMohoBase + foldOffsetPx(u, elevKm - mohoKm);
+      if (s === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Sea level dashed line across column
+  if (ySea >= padTop && ySea <= cssH) {
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.75)";
+    ctx.lineWidth = 1.1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(colLeft, ySea);
+    ctx.lineTo(colRight, ySea);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore(); // End column clip
+
+  // Column border frame
+  ctx.strokeStyle = "#334155";
+  ctx.lineWidth = 1.1;
+  ctx.strokeRect(colLeft, padTop, colW, plotH);
+
+  // 4. Left Depth & Elevation Ruler
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "9.5px sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+
+  const drawLeftTick = (km, label, color = "#94a3b8") => {
+    const y = kmToY(km);
+    if (y < padTop + 4 || y > cssH - padBot - 4) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(colLeft - 4, y);
+    ctx.lineTo(colLeft, y);
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.fillText(label, colLeft - 6, y);
+  };
+
+  drawLeftTick(elevKm, `${elevKm >= 0 ? "+" : ""}${elevKm.toFixed(1)}k`, "#e2e8f0");
+  if (Math.abs(elevKm) > 1.2) {
+    drawLeftTick(0.0, "0.0k", "#38bdf8");
+  }
+  const tickStepKm = spanKm > 25 ? 10 : spanKm > 12 ? 5 : 2;
+  const firstTickKm = Math.floor(Math.min(elevKm - 1.0, 0.0) / tickStepKm) * tickStepKm;
+  for (let tk = firstTickKm; tk > viewBottomKm + 1.0; tk -= tickStepKm) {
+    if (Math.abs(tk - elevKm) < 1.2 || Math.abs(tk - mohoKm) < 1.5) continue;
+    drawLeftTick(tk, `${tk.toFixed(0)}k`, "#64748b");
+  }
+  if (!view.stratigraphyTopZoom && yMohoBase >= padTop + 6 && yMohoBase <= cssH - 6) {
+    drawLeftTick(mohoKm, `Moho`, "#fb923c");
+  }
+
+  // 5. Right-side Layer Callouts & Deposit Badges (de-overlapped)
+  const minLabelSpacing = 13.5;
+  let lastLabelY = padTop - 6;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+
+  for (let i = 0; i < hitBands.length; i++) {
+    const hb = hitBands[i];
+    const layer = hb.layer;
+    const isHovered = view.hoveredStratLayerIdx === hb.idx;
+    if (hb.yBot - hb.yTop < 3.5 && !isHovered && (!layer.deposits || layer.deposits.length === 0)) {
+      continue;
+    }
+    const labelY = Math.max(lastLabelY + minLabelSpacing, Math.min(cssH - 8, hb.midY));
+    if (labelY > cssH - 5) break;
+    lastLabelY = labelY;
+
+    // Leader line from layer right edge to label
+    const edgeY = Math.max(padTop + 2, Math.min(cssH - padBot - 2, hb.midY));
+    ctx.strokeStyle = isHovered ? "#38bdf8" : "rgba(100, 116, 139, 0.55)";
+    ctx.lineWidth = isHovered ? 1.3 : 0.8;
+    ctx.beginPath();
+    ctx.moveTo(colRight, edgeY);
+    ctx.lineTo(colRight + 7, labelY);
+    ctx.stroke();
+
+    // Short deposit tag if present
+    let badge = "";
+    const deps = layer.deposits || [];
+    const depJoined = deps.join(" ");
+    if (depJoined.includes("Diamond")) badge = " 💎";
+    else if (depJoined.includes("Banded Iron")) badge = " [BIF]";
+    else if (depJoined.includes("Anthracite") || depJoined.includes("Bituminous") || depJoined.includes("Lignite") || depJoined.includes("Peat")) badge = " [Coal]";
+    else if (depJoined.includes("Graphite")) badge = " [C]";
+    else if (depJoined.includes("Gold")) badge = " [Au]";
+    else if (depJoined.includes("Tin")) badge = " [Sn]";
+    else if (depJoined.includes("Copper") || depJoined.includes("Sulfide") || depJoined.includes("Black Smoker")) badge = " [Cu/S]";
+    else if (depJoined.includes("Halite") || depJoined.includes("Gypsum") || depJoined.includes("Potash")) badge = " [Salt]";
+    else if (depJoined.includes("Quartz")) badge = " [Qtz]";
+    else if (depJoined.includes("Karst")) badge = " [Cave]";
+
+    ctx.fillStyle = isHovered ? "#fef08a" : badge ? "#f8fafc" : "#cbd5e1";
+    ctx.font = isHovered || badge ? "bold 9.5px sans-serif" : "9.5px sans-serif";
+    const textStr = `${layer.name} (${layer.thicknessKm.toFixed(1)}k)${badge}`;
+    ctx.fillText(textStr, colRight + 9, labelY, cssW - colRight - 11);
+  }
+
+  ctx.restore();
+
+  // Interactive hover handler on canvas to inspect individual layers
+  const updateHoverReadout = (hoveredIdx) => {
+    const labelEl = document.getElementById("stratigraphy-hover-label");
+    if (!labelEl) return;
+    if (hoveredIdx >= 0 && strat.layers[hoveredIdx]) {
+      const l = strat.layers[hoveredIdx];
+      const kindWord =
+        l.kind === "I" ? "Igneous" : l.kind === "S" ? "Sedimentary" : "Metamorphic";
+      const depsText =
+        l.deposits && l.deposits.length > 0
+          ? ` | Veins/Deposits: ${l.deposits.join(", ")}`
+          : " | No major mineral veins";
+      labelEl.textContent = `Layer #${hoveredIdx + 1}: ${l.name} (${kindWord}, ${l.thicknessKm.toFixed(2)} km thick, depth ${l.depthTopKm.toFixed(1)}–${l.depthBottomKm.toFixed(1)} km) | f=${l.felsity.toFixed(2)} bog=${l.bogginess.toFixed(2)} calc=${l.calcity.toFixed(2)} qtz=${l.quartzity.toFixed(2)} sulf=${l.sulfidity.toFixed(2)} sal=${l.salinity.toFixed(2)}${depsText}`;
+    } else {
+      const totalDeps = [];
+      for (const l of strat.layers) {
+        for (const d of l.deposits || []) {
+          if (!totalDeps.includes(d)) totalDeps.push(d);
+        }
+      }
+      labelEl.textContent =
+        totalDeps.length > 0
+          ? `Tile #${strat.tileIdx} (${strat.layers.length} layers, ${ strat.thicknessKm.toFixed(1)} km crust, fold ${(mountNorm * 100).toFixed(0)}%) — Deposits: ${totalDeps.join(" · ")}`
+          : `Tile #${strat.tileIdx} (${strat.layers.length} layers, ${strat.thicknessKm.toFixed(1)} km crust, fold ${(mountNorm * 100).toFixed(0)}%) — Hover any rock layer for composition & veins.`;
+    }
+  };
+
+  updateHoverReadout(
+    typeof view.hoveredStratLayerIdx === "number" ? view.hoveredStratLayerIdx : -1
+  );
+
+  canvas.onmousemove = (ev) => {
+    const r = canvas.getBoundingClientRect();
+    const my = ev.clientY - r.top;
+    const kmAtMouse = yToKm(my);
+    let foundIdx = -1;
+    for (let i = 0; i < strat.layers.length; i++) {
+      const l = strat.layers[i];
+      if (kmAtMouse <= l.topKm + 0.15 && kmAtMouse >= l.bottomKm - 0.15) {
+        foundIdx = i;
+        break;
+      }
+    }
+    if (view.hoveredStratLayerIdx !== foundIdx) {
+      view.hoveredStratLayerIdx = foundIdx;
+      paintStratigraphySideCanvas(view);
+    }
+  };
+
+  canvas.onmouseleave = () => {
+    if (view.hoveredStratLayerIdx !== -1 && view.hoveredStratLayerIdx !== undefined) {
+      view.hoveredStratLayerIdx = -1;
+      paintStratigraphySideCanvas(view);
+    }
+  };
+}
+
+function scheduleStratigraphySidePaint(view, explicitTileIdx) {
+  if (!view || typeof window === "undefined") return;
+  const s = view.session;
+  const tid =
+    explicitTileIdx !== undefined
+      ? explicitTileIdx
+      : view.selectedTileIdx !== undefined
+        ? view.selectedTileIdx
+        : view.selectedFaceIdx !== undefined
+          ? view.selectedFaceIdx
+          : -1;
+
+  if (tid >= 0 && s && typeof s.inspect_tile_stratigraphy_json === "function") {
+    try {
+      view.tileStratigraphy = JSON.parse(s.inspect_tile_stratigraphy_json(tid));
+    } catch (_) {
+      view.tileStratigraphy = null;
+    }
+  } else if (tid < 0) {
+    view.tileStratigraphy = null;
+  }
+  view.hoveredStratLayerIdx = -1;
+
+  window.requestAnimationFrame(() => paintStratigraphySideCanvas(view));
+  setTimeout(() => paintStratigraphySideCanvas(view), 45);
+}
+
+export const toggleStratigraphySideZoom = () => {
+  if (!activeView) return;
+  activeView.stratigraphyTopZoom = !activeView.stratigraphyTopZoom;
+  paintStratigraphySideCanvas(activeView);
 };
 
 export const selectInspectorLanguage = (langId) => () => {
@@ -4025,6 +4824,9 @@ function buildHistoryInfo(view) {
       ? s.inspect_tile(view.selectedTileIdx)
       : "Click any state on the globe to open its zoomed-in State Map, demographics, imports & exports, and diplomacy, or click any tile in the state to inspect its local population and native flora & fauna.";
   const bundle = buildHistoryInspectorBundle(view);
+  if (s.stage_index() !== 2) {
+    scheduleStratigraphySidePaint(view, view.selectedTileIdx);
+  }
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -4272,6 +5074,9 @@ function buildTravelInfo(view) {
       ? s.inspect_travel_tile(view.selectedTileIdx)
       : "Click any coastal port, ocean tile, or river corridor on the globe to inspect prevailing wind & current vectors and travel routes (yellow = active trade, red = naval conflict, cyan/emerald = connected sea/river lane, violet = hypothetical/unconnected drift).";
   const bundle = buildHistoryInspectorBundle(view);
+  if (s.stage_index() !== 2) {
+    scheduleStratigraphySidePaint(view, view.selectedTileIdx);
+  }
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -4550,6 +5355,9 @@ function buildWorldInfo(view) {
       ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`
       : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`;
   const bundle = buildHistoryInspectorBundle(view);
+  if (s.stage_index() !== 2) {
+    scheduleStratigraphySidePaint(view, view.selectedTileIdx);
+  }
   return {
     stageIndex: s.stage_index(),
     stageName: s.stage_name(),
@@ -4872,6 +5680,7 @@ function buildTerrainInfo(view) {
     view.selectedFaceIdx >= 0
       ? s.inspect_face(view.selectedFaceIdx)
       : "Click any subdivided land face or routed river channel on the globe to inspect its 7-octave Simplex noise elevation and coarse tile parentage.";
+  scheduleStratigraphySidePaint(view, view.selectedFaceIdx);
   return {
     planetName,
     displayFaceCount: s.display_face_count(),
@@ -5035,6 +5844,7 @@ function buildMoonInfo(view) {
     view.selectedTileIdx >= 0
       ? s.inspect_tile(view.selectedTileIdx)
       : "Click any coastal, ocean, or inland tile on the globe to inspect local tidal range (m), tidal scour vs. rainfall erosion rates, shelf deposition, and rock strata.";
+  scheduleStratigraphySidePaint(view, view.selectedTileIdx);
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -5253,6 +6063,7 @@ function buildMeteorInfo(view) {
     view.selectedTileIdx >= 0
       ? s.inspect_tile(view.selectedTileIdx)
       : "Click any tile on the globe to target it for a meteor strike and inspect crater excavation, ejecta breccia, impact winter cooling, and rock strata.";
+  scheduleStratigraphySidePaint(view, view.selectedTileIdx);
   return {
     planetName,
     tileCount: s.tile_count(),

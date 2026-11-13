@@ -200,4 +200,26 @@ impl TerrainSandbox {
             }
         }
     }
+
+    pub fn inspect_face_stratigraphy_json(&self, display_idx: usize) -> String {
+        let Some(face) = self.terrain.display_faces.get(display_idx) else {
+            return "{\"hasColumn\":false}".to_string();
+        };
+        let tiles = self.prehistory.tiles();
+        match face.source {
+            DisplayFaceSource::OceanCoarse(c_idx) => tiles
+                .get(c_idx)
+                .map(|t| t.to_stratigraphy_json(c_idx, None))
+                .unwrap_or_else(|| "{\"hasColumn\":false}".to_string()),
+            DisplayFaceSource::Fine(fine_idx) => {
+                let fine_elev = self.terrain.fine_elevations[fine_idx];
+                let coarse_elevs = self.prehistory.tile_elevations();
+                let primary_c = self.terrain.primary_coarse_tile(fine_idx, &coarse_elevs);
+                tiles
+                    .get(primary_c)
+                    .map(|t| t.to_stratigraphy_json(primary_c, Some(fine_elev)))
+                    .unwrap_or_else(|| "{\"hasColumn\":false}".to_string())
+            }
+        }
+    }
 }

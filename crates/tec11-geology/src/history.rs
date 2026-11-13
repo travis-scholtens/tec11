@@ -606,6 +606,7 @@ pub struct TileInspectionView {
     pub flora: Vec<String>,
     pub fauna: Vec<String>,
     pub sky: TileSkyView,
+    pub stratigraphy_json: String,
 }
 
 impl TileInspectionView {
@@ -613,7 +614,7 @@ impl TileInspectionView {
         let nats: Vec<String> = self.nationalities.iter().map(|n| n.to_json()).collect();
         let langs: Vec<String> = self.languages.iter().map(|l| l.to_json()).collect();
         format!(
-            "{{\"hasTile\":true,\"displayIdx\":{},\"stateId\":{},\"title\":{},\"locationSummary\":{},\"populationSummary\":{},\"technology\":{},\"nationalities\":[{}],\"languages\":[{}],\"flora\":{},\"fauna\":{},\"sky\":{}}}",
+            "{{\"hasTile\":true,\"displayIdx\":{},\"stateId\":{},\"title\":{},\"locationSummary\":{},\"populationSummary\":{},\"technology\":{},\"nationalities\":[{}],\"languages\":[{}],\"flora\":{},\"fauna\":{},\"sky\":{},\"stratigraphy\":{}}}",
             self.display_idx,
             self.state_id.map(|s| s as i32).unwrap_or(-1),
             json_escape(&self.title),
@@ -624,7 +625,8 @@ impl TileInspectionView {
             langs.join(","),
             json_str_array(&self.flora),
             json_str_array(&self.fauna),
-            self.sky.to_json()
+            self.sky.to_json(),
+            self.stratigraphy_json
         )
     }
 }
@@ -5932,10 +5934,34 @@ impl HistorySimulation {
         }
     }
 
+    /// Return the 1D stratigraphic column & derived mineral deposits/veins JSON for `display_idx`.
+    pub fn inspect_tile_stratigraphy_json(&self, display_idx: usize) -> String {
+        let Some(face) = self.terrain.display_faces.get(display_idx) else {
+            return "{\"hasColumn\":false}".to_string();
+        };
+        let tiles = self.prehistory.tiles();
+        match face.source {
+            DisplayFaceSource::OceanCoarse(c_idx) => tiles
+                .get(c_idx)
+                .map(|t| t.to_stratigraphy_json(c_idx, None))
+                .unwrap_or_else(|| "{\"hasColumn\":false}".to_string()),
+            DisplayFaceSource::Fine(fine_idx) => {
+                let fine_elev = self.terrain.fine_elevations[fine_idx];
+                let coarse_elevs = self.prehistory.tile_elevations();
+                let primary_c = self.terrain.primary_coarse_tile(fine_idx, &coarse_elevs);
+                tiles
+                    .get(primary_c)
+                    .map(|t| t.to_stratigraphy_json(primary_c, Some(fine_elev)))
+                    .unwrap_or_else(|| "{\"hasColumn\":false}".to_string())
+            }
+        }
+    }
+
     /// Structured inspection report for a single clicked tile (`display_idx`), including tile-level
     /// nationalities, languages, native flora & fauna, and local 2D sky ephemeris.
     pub fn inspect_tile_structured(&self, display_idx: usize) -> Option<TileInspectionView> {
         let face = self.terrain.display_faces.get(display_idx)?;
+        let stratigraphy_json = self.inspect_tile_stratigraphy_json(display_idx);
         let fine_idx = match face.source {
             DisplayFaceSource::OceanCoarse(c_idx) => {
                 let ocean_label = self.ocean_and_sea_label_for_tile(c_idx, None);
@@ -5960,6 +5986,7 @@ impl HistorySimulation {
                     flora: Vec::new(),
                     fauna: Vec::new(),
                     sky,
+                    stratigraphy_json,
                 });
             }
             DisplayFaceSource::Fine(f) => f,
@@ -5985,6 +6012,7 @@ impl HistorySimulation {
                 flora: Vec::new(),
                 fauna: Vec::new(),
                 sky,
+                stratigraphy_json,
             });
         }
 
@@ -6215,6 +6243,7 @@ impl HistorySimulation {
             flora,
             fauna,
             sky,
+            stratigraphy_json,
         })
     }
 

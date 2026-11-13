@@ -123,6 +123,10 @@ impl WasmTectonicsSession {
         self.sim.inspect_tile(tile_idx)
     }
 
+    pub fn inspect_tile_stratigraphy_json(&self, tile_idx: usize) -> String {
+        self.sim.inspect_tile_stratigraphy_json(tile_idx)
+    }
+
     pub fn export_snapshot_bytes(&self) -> Vec<u8> {
         self.sim.encode_snapshot()
     }

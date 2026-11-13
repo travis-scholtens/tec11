@@ -781,10 +781,18 @@ impl WorldSimulation {
             lines.push("Meteor Scar: Impact Ejecta Rim (Breccia Conglomerate)".to_string());
         }
         lines.push("Layers (surface -> Moho):".to_string());
-        for layer in tile.layers.iter().rev() {
+        let mut depth_from_surface = 0.0f32;
+        for (idx, layer) in tile.layers.iter().enumerate().rev() {
             let r = &layer.rock;
+            let deposits = tile.derive_layer_deposits(idx, depth_from_surface);
+            depth_from_surface += layer.thickness;
+            let dep_suffix = if deposits.is_empty() {
+                String::new()
+            } else {
+                format!(" → {}", deposits.join(" + "))
+            };
             lines.push(format!(
-                "  • {} ({:.2} km, {}, felsity {:.2}, tough {:.2})",
+                "  • {} ({:.2} km, {}, felsity {:.2}, tough {:.2}){dep_suffix}",
                 r.name,
                 layer.thickness,
                 r.kind.code(),
@@ -793,6 +801,18 @@ impl WorldSimulation {
             ));
         }
         lines.join("\n")
+    }
+
+    pub fn inspect_tile_stratigraphy_json(&self, tile_idx: usize) -> String {
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.inspect_tile_stratigraphy_json(tile_idx),
+            WorldStageState::Prehistory(pre) => pre
+                .tiles()
+                .get(tile_idx)
+                .map(|t| t.to_stratigraphy_json(tile_idx, None))
+                .unwrap_or_else(|| "{\"hasColumn\":false}".to_string()),
+            WorldStageState::History(hist) => hist.inspect_tile_stratigraphy_json(tile_idx),
+        }
     }
 
     fn format_heritage_ancestry(

@@ -759,6 +759,13 @@ impl MeteorSandbox {
         lines.join("\n")
     }
 
+    pub fn inspect_tile_stratigraphy_json(&self, idx: usize) -> String {
+        let Some(t) = self.tiles.get(idx) else {
+            return "{\"hasColumn\":false}".to_string();
+        };
+        t.to_stratigraphy_json(idx, None)
+    }
+
     /// Compute RGB vertex/tile colors for the Meteor Sandbox:
     /// - `"crater_ejecta"`: Natural terrain + glowing orange/crimson crater floors + gold ejecta rims + violet blast wave
     /// - `"topography"`: Natural terrain & bathymetry showing flooded circular crater bays and inland basins

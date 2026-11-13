@@ -63,6 +63,10 @@ impl WasmTerrainSession {
         self.sim.inspect_face(display_idx)
     }
 
+    pub fn inspect_tile_stratigraphy_json(&self, display_idx: usize) -> String {
+        self.sim.inspect_face_stratigraphy_json(display_idx)
+    }
+
     pub fn tile_colors_rgb(&self, show_rivers: bool, selected_face: i32) -> Vec<f32> {
         self.sim.tile_colors_rgb(show_rivers, selected_face)
     }

@@ -1592,7 +1592,8 @@ impl TectonicsSimulation {
         }
 
         // Layers from surface (top) down to Moho (bottom):
-        for layer in tile.layers.iter().rev() {
+        let mut depth_from_surface = 0.0f32;
+        for (idx, layer) in tile.layers.iter().enumerate().rev() {
             let r = &layer.rock;
             let mut attrs = vec![
                 format!("type: {}", r.kind.code()),
@@ -1617,8 +1618,15 @@ impl TectonicsSimulation {
             if let Some(s) = r.salinity {
                 attrs.push(format!("salt: {s:.2}"));
             }
+            let deposits = tile.derive_layer_deposits(idx, depth_from_surface);
+            depth_from_surface += layer.thickness;
+            let dep_suffix = if deposits.is_empty() {
+                String::new()
+            } else {
+                format!(" → {}", deposits.join(" + "))
+            };
             lines.push(format!(
-                "{} ({:.2} km) [{}]",
+                "{} ({:.2} km) [{}]{dep_suffix}",
                 r.name,
                 layer.thickness,
                 attrs.join(", ")
@@ -1626,6 +1634,13 @@ impl TectonicsSimulation {
         }
 
         lines.join("\n")
+    }
+
+    pub fn inspect_tile_stratigraphy_json(&self, tile_idx: usize) -> String {
+        let Some(tile) = self.tiles.get(tile_idx) else {
+            return "{\"hasColumn\":false}".to_string();
+        };
+        tile.to_stratigraphy_json(tile_idx, None)
     }
 
     fn refresh_climate_fields(&mut self) {

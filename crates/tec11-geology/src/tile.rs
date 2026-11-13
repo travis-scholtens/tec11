@@ -735,6 +735,223 @@ impl TileGeology {
         tile.impact_scar = tile.stratigraphic_impact_signature();
         Some(tile)
     }
+
+    /// Deterministically derive the mineral deposits, coal seams, and ore veins hosted inside
+    /// `self.layers[layer_idx]` at `depth_from_surface_km` purely from its compositional fields
+    /// (`bogginess`, `calcity`, `quartzity`, `sulfidity`, `salinity`, `clasticity`, `felsity`, `toughness`).
+    pub fn derive_layer_deposits(&self, layer_idx: usize, depth_from_surface_km: f32) -> Vec<String> {
+        let Some(l) = self.layers.get(layer_idx) else {
+            return Vec::new();
+        };
+        let r = &l.rock;
+        let mut deposits = Vec::new();
+
+        // 1. Carbon / Coal / Graphite / Diamond seams from `bogginess` + peak metamorphic facies:
+        if let Some(b) = r.bogginess.filter(|&v| v >= 0.05) {
+            let grade = if b >= 0.55 {
+                "Rich "
+            } else if b >= 0.22 {
+                ""
+            } else {
+                "Thin "
+            };
+            let rank = match r.kind {
+                RockKind::Sedimentary => {
+                    if depth_from_surface_km < 1.0 {
+                        "Peat / Lignite Beds"
+                    } else {
+                        "Lignite (Brown Coal) Seams"
+                    }
+                }
+                RockKind::Metamorphic => match r.name {
+                    "pelite" | "psammite" | "psephite" => "Bituminous Coal Seams",
+                    "greenschist" | "blueschist" => "Anthracite Coal Seams",
+                    "hornfels" => "Contact Anthracite / Natural Coke",
+                    "amphibolite" | "granulite" => "Crystalline Graphite Seams",
+                    "eclogite" => "Diamondiferous Graphite / Micro-diamonds",
+                    _ => "Coal / Carbon Seams",
+                },
+                RockKind::Igneous => "Carbonatite / Graphite Xenoliths",
+            };
+            deposits.push(format!("{grade}{rank}"));
+        }
+
+        let q = r.quartzity.unwrap_or(0.0);
+        let s = r.sulfidity.unwrap_or(0.0);
+        let sal = r.salinity.unwrap_or(0.0);
+        let calc = r.calcity.unwrap_or(0.0);
+
+        // 2. Banded Iron Formations (co-precipitated iron/sulfide `sulfidity` + chert `quartzity` in marine beds):
+        let is_bif = r.kind != RockKind::Igneous
+            && s >= 0.12
+            && q >= 0.18
+            && r.clasticity.unwrap_or(1.5) >= 0.8;
+        if is_bif {
+            if r.kind == RockKind::Metamorphic {
+                deposits.push("Metamorphosed Banded Iron (Taconite / Magnetite-Chert)".to_string());
+            } else {
+                deposits.push("Banded Iron Formation (Hematite-Magnetite Chert)".to_string());
+            }
+        }
+
+        // 3. Evaporite salt/gypsum/potash beds from `salinity`:
+        if sal >= 0.08 {
+            if sal >= 0.42 {
+                deposits.push("Thick Evaporite Beds (Halite, Potash & Lithium Brines)".to_string());
+            } else if sal >= 0.20 {
+                deposits.push("Evaporite Beds (Rock Salt / Halite & Gypsum)".to_string());
+            } else {
+                deposits.push("Gypsum & Anhydrite Evaporite Lenses".to_string());
+            }
+        }
+
+        // 4. Quartz veins, pegmatites/greisens, and alluvial placer gravels from `quartzity`:
+        if q >= 0.05 && !is_bif {
+            match r.kind {
+                RockKind::Sedimentary => {
+                    if r.clasticity.unwrap_or(2.0) <= 1.5 {
+                        if r.felsity > 0.62 {
+                            deposits.push("Alluvial Placer Gold & Cassiterite (Tin) Gravels".to_string());
+                        } else {
+                            deposits.push("Alluvial Placer Gold Gravels".to_string());
+                        }
+                    } else if q >= 0.16 {
+                        deposits.push("Silica Chert / Quartzose Beds".to_string());
+                    }
+                }
+                RockKind::Igneous => {
+                    if r.name == "granite" {
+                        deposits.push("Pegmatite & Greisen Quartz-Tin-Tungsten Veins".to_string());
+                    } else if matches!(r.name, "andesite" | "dacite" | "rhyolite") {
+                        deposits.push("Epithermal Quartz-Gold-Silver Veins".to_string());
+                    } else if q >= 0.08 {
+                        deposits.push("Hydrothermal Siliceous Sinter Cap".to_string());
+                    }
+                }
+                RockKind::Metamorphic => {
+                    if matches!(r.name, "hornfels" | "granulite") {
+                        if r.felsity > 0.62 {
+                            deposits.push("Contact Greisen Quartz-Tin-Tungsten Veins".to_string());
+                        } else {
+                            deposits.push("Contact Hydrothermal Quartz-Gold Veins".to_string());
+                        }
+                    } else if matches!(
+                        r.name,
+                        "greenschist" | "blueschist" | "pelite" | "psammite" | "psephite" | "amphibolite"
+                    ) {
+                        deposits.push("Orogenic Quartz-Gold Veins".to_string());
+                    }
+                }
+            }
+        }
+
+        // 5. Sulfide ore bodies (VMS black smokers, porphyry Cu-Mo-Au, skarns, magmatic Ni-Cu-PGM) from `sulfidity`:
+        if s >= 0.10 && !is_bif {
+            match r.kind {
+                RockKind::Igneous => {
+                    if r.name == "basalt" && self.impact_scar >= 0.45 && s >= 0.25 {
+                        deposits.push("Impact-Melt Ni-Cu-PGM Sulfide Sheet".to_string());
+                    } else if r.name == "basalt" && s >= 0.12 {
+                        deposits.push("Black-Smoker VMS (Cu-Zn-Au Massive Sulfides)".to_string());
+                    } else if r.name == "gabbro" && s >= 0.11 {
+                        deposits.push("Magmatic Cumulate Ni-Cu-Chromite Sulfides".to_string());
+                    } else if matches!(r.name, "andesite" | "dacite") {
+                        deposits.push("Porphyry Copper-Molybdenum-Gold Stockwork".to_string());
+                    } else if matches!(r.name, "granite" | "rhyolite") {
+                        deposits.push("Polymetallic Ag-Pb-Zn-Cu Sulfide Veins".to_string());
+                    }
+                }
+                RockKind::Metamorphic => {
+                    if r.name == "marble" || calc > 0.35 {
+                        deposits.push("Carbonate-Replacement Skarn (Cu-Fe-Pb-Zn-Ag)".to_string());
+                    } else if r.name == "hornfels" && (0.82..=0.94).contains(&r.toughness) {
+                        deposits.push("Shocked Sub-Crater Ni-Cu-PGM Sulfide Breccia".to_string());
+                    } else if matches!(r.name, "hornfels" | "granulite") {
+                        deposits.push("Contact Porphyry / Skarn Cu-Fe-Au Halo".to_string());
+                    } else if s >= 0.13 {
+                        deposits.push("Metamorphic Polymetallic Sulfide Lodes (Cu-Zn-Pb-Ag)".to_string());
+                    }
+                }
+                RockKind::Sedimentary => {
+                    if s >= 0.14 {
+                        deposits.push("Stratiform Sediment-Hosted Cu-Pb-Zn Sulfides".to_string());
+                    }
+                }
+            }
+        }
+
+        // 6. Near-surface karst caverns in high-calcity carbonate rocks:
+        if calc >= 0.72 && depth_from_surface_km < 2.5 && self.elevation() > 0.0 {
+            deposits.push("Karst Limestone Caverns & Aquifer".to_string());
+        }
+
+        deposits
+    }
+
+    /// Serialize this tile's 1D stratigraphic column (ordered top-to-bottom from surface to Moho)
+    /// and its derived mineral deposits/veins into JSON for the Side View cross-section canvas.
+    pub fn to_stratigraphy_json(&self, tile_idx: usize, surface_elev_override: Option<f32>) -> String {
+        fn opt_f32_json(v: Option<f32>) -> String {
+            match v {
+                Some(x) if x.is_finite() => format!("{x:.4}"),
+                _ => "null".to_string(),
+            }
+        }
+
+        let total_thick = self.thickness();
+        let surface_elev = surface_elev_override.unwrap_or_else(|| self.elevation());
+        let bottom_km = surface_elev - total_thick;
+        let impact_sig = self.impact_signature();
+
+        let mut layers_json = Vec::with_capacity(self.layers.len());
+        let mut cur_top = surface_elev;
+        let mut depth_from_surface = 0.0f32;
+
+        // Iterate from surface (top layer) down to Moho (bottom layer):
+        for (idx, layer) in self.layers.iter().enumerate().rev() {
+            let cur_bot = cur_top - layer.thickness;
+            let deposits = self.derive_layer_deposits(idx, depth_from_surface);
+            let deps_json: Vec<String> = deposits
+                .iter()
+                .map(|d| format!("\"{}\"", d.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect();
+            let r = &layer.rock;
+            layers_json.push(format!(
+                "{{\"name\":\"{}\",\"kind\":\"{}\",\"thicknessKm\":{:.4},\"topKm\":{:.4},\"bottomKm\":{:.4},\"depthTopKm\":{:.4},\"depthBottomKm\":{:.4},\"felsity\":{:.4},\"toughness\":{:.4},\"clasticity\":{},\"calcity\":{},\"bogginess\":{},\"quartzity\":{},\"sulfidity\":{},\"salinity\":{},\"deposits\":[{}]}}",
+                r.name,
+                r.kind.code(),
+                layer.thickness,
+                cur_top,
+                cur_bot,
+                depth_from_surface,
+                depth_from_surface + layer.thickness,
+                r.felsity,
+                r.toughness,
+                opt_f32_json(r.clasticity),
+                opt_f32_json(r.calcity),
+                opt_f32_json(r.bogginess),
+                opt_f32_json(r.quartzity),
+                opt_f32_json(r.sulfidity),
+                opt_f32_json(r.salinity),
+                deps_json.join(",")
+            ));
+            cur_top = cur_bot;
+            depth_from_surface += layer.thickness;
+        }
+
+        format!(
+            "{{\"hasColumn\":true,\"tileIdx\":{},\"bottomKm\":{:.4},\"elevationKm\":{:.4},\"thicknessKm\":{:.4},\"mountainosity\":{:.4},\"mountainosityNorm\":{:.4},\"subduction\":{:.4},\"impactScar\":{:.4},\"layers\":[{}]}}",
+            tile_idx,
+            bottom_km,
+            surface_elev,
+            total_thick,
+            self.mountainosity,
+            self.mountainosity_norm(),
+            self.subduction,
+            impact_sig,
+            layers_json.join(",")
+        )
+    }
 }
 
 #[cfg(test)]
