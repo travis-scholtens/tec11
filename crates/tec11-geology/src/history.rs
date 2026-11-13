@@ -149,8 +149,12 @@ pub const MINERAL_COAL: u32 = 5;
 pub const MINERAL_QUARTZ: u32 = 6;
 pub const MINERAL_FLINT: u32 = 7; // chert / silica in limestone
 pub const MINERAL_GYPSUM: u32 = 8;
+pub const MINERAL_SILVER: u32 = 9;
+pub const MINERAL_LEAD_ZINC: u32 = 10;
+pub const MINERAL_TUNGSTEN: u32 = 11;
+pub const MINERAL_NICKEL: u32 = 12;
 
-pub const MINERAL_CONCEPT_GLOSSES: [&str; 9] = [
+pub const MINERAL_CONCEPT_GLOSSES: [&str; 13] = [
     "iron ore",
     "salt (rock salt / halite)",
     "gold",
@@ -159,7 +163,11 @@ pub const MINERAL_CONCEPT_GLOSSES: [&str; 9] = [
     "coal / peat",
     "quartz (crystal stone)",
     "flint / chert",
-    "gite / gypsum (plaster stone)",
+    "gypsum (plaster stone)",
+    "silver ore",
+    "lead & zinc ore (galena)",
+    "tungsten ore (wolframite)",
+    "nickel ore",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -3141,6 +3149,30 @@ impl HistorySimulation {
             // Flint also from siliceous chert beds
             if q >= 0.16 && r.kind == RockKind::Sedimentary {
                 minerals.insert(MINERAL_FLINT);
+            }
+
+            let is_bif = s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8 && r.kind != RockKind::Igneous;
+
+            // Silver from polymetallic sulfide veins in felsic igneous/metamorphic rocks
+            if s >= 0.10 && !is_bif {
+                if r.felsity > 0.52 || r.kind == RockKind::Metamorphic {
+                    minerals.insert(MINERAL_SILVER);
+                }
+            }
+            // Lead & zinc from stratiform sulfide deposits and polymetallic veins
+            if s >= 0.12 && !is_bif {
+                minerals.insert(MINERAL_LEAD_ZINC);
+            }
+            // Tungsten from granitic pegmatite / greisen veins (felsic + quartz-rich)
+            if q >= 0.08 && r.felsity > 0.62 && matches!(r.kind, RockKind::Igneous | RockKind::Metamorphic) {
+                minerals.insert(MINERAL_TUNGSTEN);
+            }
+            // Nickel from mafic/ultramafic sulfide cumulates and impact melts
+            if s >= 0.11 && r.kind == RockKind::Igneous && r.felsity < 0.52 {
+                minerals.insert(MINERAL_NICKEL);
+            }
+            if tile.impact_scar >= 0.45 && r.name == "basalt" && s >= 0.20 {
+                minerals.insert(MINERAL_NICKEL);
             }
 
             depth_from_surface += layer.thickness;
