@@ -5,13 +5,13 @@ use tec11_climate::ClimateModel;
 use tec11_math_grid::{
     cross, dot, length, normal, rotate, GreatCircleArc, Pcg64Mcg, PointTree, SphericalGrid, Vec3,
 };
-use tec11_proto::{MetamorphicFaciesExt, PlanetSnapshotExt};
+use tec11_proto::PlanetSnapshotExt;
 
 use crate::movement::{center_tile, farthest_tile, move_group, split_group};
 use crate::pangea::PangeaWorld;
 use crate::rock::{
-    deposit_sedimentary, metamorphic_contact, metamorphic_regional_in_place, DepositClimate,
-    ErodedMaterialBatch, Rock, RockKind, RockLayer,
+    deposit_sedimentary, enrich_orogenic_veins_in_place, metamorphic_contact,
+    metamorphic_regional_in_place, DepositClimate, ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
 use crate::tile::{TileGeology, TileSourceColumn};
 
@@ -525,7 +525,12 @@ impl TectonicsSimulation {
             if cap > 0.05 {
                 let _ = self.tiles[center].erode_column(cap, 1.0, cap);
             }
-            // Shock-metamorphosed hornfels crater floor:
+            // Shock-metamorphosed hornfels crater floor (enriched in meteoritic/impact sulfides for large basins):
+            let impact_sulfidity = if d_km >= 180.0 {
+                Some(((d_km - 150.0) / 300.0).clamp(0.18, 0.45) as f32)
+            } else {
+                None
+            };
             self.tiles[center].deposit(RockLayer {
                 rock: Rock {
                     kind: RockKind::Metamorphic,
@@ -535,13 +540,19 @@ impl TectonicsSimulation {
                     clasticity: None,
                     calcity: None,
                     bogginess: None,
+                    quartzity: None,
+                    sulfidity: impact_sulfidity,
+                    salinity: None,
                 },
                 thickness: 0.18,
             });
-            // Large multi-ring basins (>= 240 km, e.g. Sudbury/Vredefort) extrude an impact-melt basalt sheet:
+            // Large multi-ring basins (>= 240 km, e.g. Sudbury/Vredefort) extrude an impact-melt basalt sheet
+            // hosting rich magmatic Ni-Cu-PGM sulfide lenses:
             if d_km >= 240.0 {
+                let mut melt_sheet = Rock::extrusive(0.48);
+                melt_sheet.sulfidity = Some(0.38);
                 self.tiles[center].deposit(RockLayer {
-                    rock: Rock::extrusive(0.48),
+                    rock: melt_sheet,
                     thickness: 0.22,
                 });
             }
@@ -563,6 +574,9 @@ impl TectonicsSimulation {
                     clasticity: None,
                     calcity: None,
                     bogginess: None,
+                    quartzity: None,
+                    sulfidity: Some(0.15),
+                    salinity: None,
                 },
                 thickness: 0.15,
             });
@@ -587,6 +601,9 @@ impl TectonicsSimulation {
                         clasticity: Some(TileGeology::IMPACT_BRECCIA_CLASTICITY),
                         calcity: None,
                         bogginess: None,
+                        quartzity: None,
+                        sulfidity: None,
+                        salinity: None,
                     },
                     thickness: rim_thick,
                 });
@@ -827,8 +844,16 @@ impl TectonicsSimulation {
             };
 
             // Scrape off any marine sedimentary layers from the overridden ocean tile
-            // before replacing it with the advancing continental column (Accretionary Wedge).
+            // before replacing it with the advancing continental column (Accretionary Wedge),
+            // and preserve the overridden ocean floor's basalt/VMS composition for subduction underplating.
             let mut scraped_sediments: Vec<RockLayer> = Vec::new();
+            let subducted_seafloor = self.tiles[dest]
+                .layers
+                .iter()
+                .rev()
+                .find(|l| l.rock.kind == RockKind::Igneous)
+                .map(|l| l.rock.clone())
+                .unwrap_or_else(Rock::seafloor);
             if is_leading_edge {
                 for l in &self.tiles[dest].layers {
                     if l.rock.kind == RockKind::Sedimentary {
@@ -851,7 +876,7 @@ impl TectonicsSimulation {
                 let taper = ((max_sub_h - cur_h) / 5.8).clamp(0.0, 1.0);
                 let build_amount = raw_build * taper;
                 if build_amount > 0.01 {
-                    self.tiles[dest].build(build_amount, Rock::seafloor());
+                    self.tiles[dest].build(build_amount, subducted_seafloor);
                 }
             }
 
@@ -923,12 +948,19 @@ impl TectonicsSimulation {
 
             let p_v = self.grid.faces[v].0;
             let mut z_ridge = -5.5f64;
+            let mut ridge_vent_intensity = 0.0f32;
             for &(ref arc, maturity) in &active_arcs {
                 let d_km = arc.distance_to_point(p_v) * self.radius_km;
                 let u = (d_km / 2600.0).clamp(0.0, 1.0);
                 let z_arc = -5.5 + maturity * 3.0 * (1.0 - u.sqrt());
                 if z_arc > z_ridge {
                     z_ridge = z_arc;
+                }
+                if d_km < 650.0 {
+                    let vent = (maturity * (1.0 - d_km / 650.0)) as f32;
+                    if vent > ridge_vent_intensity {
+                        ridge_vent_intensity = vent;
+                    }
                 }
             }
 
@@ -984,6 +1016,26 @@ impl TectonicsSimulation {
                 self.tiles[v] = TileGeology::empty_ocean_with_depth(Rock::seafloor(), target_elev);
             } else {
                 self.tiles[v].bottom = target_elev.min(-0.15) - self.tiles[v].thickness();
+            }
+
+            // Black-smoker hydrothermal venting at active mid-ocean spreading ridge axes
+            // precipitates Volcanogenic Massive Sulfide (VMS) lenses and siliceous sinter caps:
+            if ridge_vent_intensity > 0.01 {
+                if let Some(top_igneous) = self.tiles[v]
+                    .layers
+                    .iter_mut()
+                    .rev()
+                    .find(|l| l.rock.kind == RockKind::Igneous)
+                {
+                    let s = (top_igneous.rock.sulfidity.unwrap_or(0.08)
+                        + 0.09 * ridge_vent_intensity)
+                        .clamp(0.0, 0.55);
+                    let q = (top_igneous.rock.quartzity.unwrap_or(0.0)
+                        + 0.04 * ridge_vent_intensity)
+                        .clamp(0.0, 0.30);
+                    top_igneous.rock.sulfidity = Some(s);
+                    top_igneous.rock.quartzity = Some(q);
+                }
             }
         }
 
@@ -1128,12 +1180,24 @@ impl TectonicsSimulation {
                 };
 
                 if !overlapping[t].is_empty() {
-                    let dep = deposit_sedimentary(
+                    let mut dep = deposit_sedimentary(
                         &incoming_batches[t],
                         has_life,
                         false,
                         Some(clim_summary),
                     );
+                    // Endorheic (landlocked) basins with no downhill river outlet concentrate
+                    // dissolved runoff into evaporite salt pans / lithium brines when warm & dry:
+                    if outgoing_dests[t].is_empty()
+                        && clim_summary.temperature_c > 5.0
+                        && clim_summary.precipitation_norm < 0.45
+                    {
+                        let endorheic_sal = ((0.45 - clim_summary.precipitation_norm) * 1.2)
+                            .clamp(0.10, 0.50);
+                        dep.rock.salinity = Some(
+                            (dep.rock.salinity.unwrap_or(0.0) + endorheic_sal).clamp(0.0, 1.0),
+                        );
+                    }
                     let dep_t = dep.thickness;
                     self.tiles[t].deposit(dep);
                     // Local Airy basin subsidence under the weight of newly deposited sediment:
@@ -1168,6 +1232,25 @@ impl TectonicsSimulation {
                                 self.groups[best_g].tiles.push(t);
                             }
                             overlapping[t].push(best_g);
+                        }
+                    } else if adj_continent_count >= 2
+                        && total_amount > 0.08
+                        && (!has_life || self.life_ticks_remaining > 0)
+                    {
+                        // Pre-biotic and Great Oxidation Era continental shelves precipitate
+                        // Banded Iron Formation (BIF) marine shelf beds (`sulfidity` + `quartzity`),
+                        // which later prograde onto cratons or get scraped into accretionary wedges:
+                        let mut shelf_dep = deposit_sedimentary(
+                            &incoming_batches[t],
+                            false,
+                            true,
+                            Some(clim_summary),
+                        );
+                        shelf_dep.thickness = (shelf_dep.thickness * 0.25).clamp(0.03, 0.25);
+                        let new_top = self.tiles[t].elevation() + shelf_dep.thickness;
+                        self.tiles[t].deposit(shelf_dep);
+                        if new_top > -0.15 {
+                            self.tiles[t].bottom = -0.15 - self.tiles[t].thickness();
                         }
                     }
                 }
@@ -1237,10 +1320,21 @@ impl TectonicsSimulation {
             }
         }
 
-        // 8. Regional metamorphism (`planetsimulation.py:333-335`).
+        // 8. Regional metamorphism (`planetsimulation.py:333-335`) & orogenic quartz-vein enrichment.
         for t in 0..n {
             let sub = self.tiles[t].subduction > 0.0;
             metamorphic_regional_in_place(&mut self.tiles[t].layers, sub);
+            let is_collision = overlapping[t].len() > 1;
+            if sub || is_collision {
+                let orogenic_intensity = if sub && is_collision {
+                    1.0
+                } else if is_collision {
+                    0.85
+                } else {
+                    self.tiles[t].subduction.clamp(0.35, 1.0)
+                };
+                enrich_orogenic_veins_in_place(&mut self.tiles[t].layers, orogenic_intensity);
+            }
             self.tiles[t].compact();
         }
 
@@ -1514,6 +1608,15 @@ impl TectonicsSimulation {
             if let Some(b) = r.bogginess {
                 attrs.push(format!("bog: {b:.2}"));
             }
+            if let Some(q) = r.quartzity {
+                attrs.push(format!("quartz: {q:.2}"));
+            }
+            if let Some(s) = r.sulfidity {
+                attrs.push(format!("sulf: {s:.2}"));
+            }
+            if let Some(s) = r.salinity {
+                attrs.push(format!("salt: {s:.2}"));
+            }
             lines.push(format!(
                 "{} ({:.2} km) [{}]",
                 r.name,
@@ -1554,57 +1657,7 @@ impl TectonicsSimulation {
         let proto_tiles: Vec<tec11_proto::GeologicalTile> = self
             .tiles
             .iter()
-            .map(|t| {
-                let layers = t
-                    .layers
-                    .iter()
-                    .map(|l| {
-                        let r = &l.rock;
-                        let kind = match r.kind {
-                            RockKind::Igneous => {
-                                let is_intrusive =
-                                    matches!(r.name, "gabbro" | "andesite" | "granite");
-                                tec11_proto::RockKindOneof::Igneous(tec11_proto::IgneousRock {
-                                    is_intrusive,
-                                    felsity: r.felsity,
-                                })
-                            }
-                            RockKind::Sedimentary => {
-                                tec11_proto::RockKindOneof::Sedimentary(
-                                    tec11_proto::SedimentaryRock {
-                                        clasticity: r.clasticity.unwrap_or(1.0),
-                                        felsity: Some(r.felsity),
-                                        calcity: r.calcity,
-                                        bogginess: r.bogginess,
-                                    },
-                                )
-                            }
-                            RockKind::Metamorphic => {
-                                tec11_proto::RockKindOneof::Metamorphic(
-                                    tec11_proto::MetamorphicRock {
-                                        facies: tec11_proto::MetamorphicFacies::from_rock_name(
-                                            r.name,
-                                        ) as i32,
-                                        toughness: r.toughness,
-                                        felsity: Some(r.felsity),
-                                        calcity: r.calcity,
-                                        bogginess: r.bogginess,
-                                    },
-                                )
-                            }
-                        };
-                        tec11_proto::RockLayer {
-                            rock: Some(tec11_proto::Rock { kind: Some(kind) }),
-                            thickness: l.thickness,
-                        }
-                    })
-                    .collect();
-                tec11_proto::GeologicalTile {
-                    bottom: t.bottom,
-                    mountainosity: t.mountainosity,
-                    layers,
-                }
-            })
+            .map(TileGeology::to_proto_geological_tile)
             .collect();
 
         let proto_groups: Vec<tec11_proto::LithosphericGroup> = self
@@ -2358,5 +2411,73 @@ mod tests {
             peak_tile != impact_tile && dot_dir > 0.0,
             "Expected crater peak tile to move from {impact_tile} to {peak_tile} along plate velocity (dot={dot_dir:.5})"
         );
+    }
+
+    #[test]
+    fn test_compositional_mineral_fields_populate_and_roundtrip() {
+        let mut sim = TectonicsSimulation::new_with_params(3, 24.0, 23.5, 35.0, 10, 15, 42);
+        for _ in 0..25 {
+            sim.step();
+        }
+
+        let mut bog_count = 0usize;
+        let mut quartz_count = 0usize;
+        let mut sulf_count = 0usize;
+        let mut salt_count = 0usize;
+        let mut black_smoker_count = 0usize;
+        let mut bif_count = 0usize;
+
+        for tile in sim.tiles() {
+            for layer in &tile.layers {
+                let q = layer.rock.quartzity.unwrap_or(0.0);
+                let s = layer.rock.sulfidity.unwrap_or(0.0);
+                if layer.rock.bogginess.unwrap_or(0.0) > 0.0 {
+                    bog_count += 1;
+                }
+                if q > 0.0 {
+                    quartz_count += 1;
+                }
+                if s > 0.0 {
+                    sulf_count += 1;
+                }
+                if layer.rock.salinity.unwrap_or(0.0) > 0.0 {
+                    salt_count += 1;
+                }
+                if layer.rock.kind == RockKind::Igneous && s > 0.12 && q > 0.01 {
+                    black_smoker_count += 1;
+                }
+                if layer.rock.kind != RockKind::Igneous && s > 0.10 && q > 0.10 {
+                    bif_count += 1;
+                }
+            }
+        }
+
+        assert!(bog_count > 0, "Expected bogginess > 0 in humid vegetated layers");
+        assert!(quartz_count > 0, "Expected quartzity > 0 in orogenic/contact/placer layers");
+        assert!(sulf_count > 0, "Expected sulfidity > 0 in seafloor/contact/orogenic layers");
+        assert!(salt_count > 0, "Expected salinity > 0 in warm arid evaporite layers");
+        assert!(
+            black_smoker_count > 0,
+            "Expected black-smoker VMS enrichment on spreading-ridge basalt layers"
+        );
+        assert!(
+            bif_count > 0,
+            "Expected Banded Iron Formation (co-enriched sulfidity + quartzity) layers"
+        );
+
+        // Verify .tec11 snapshot roundtrip preserves all four compositional fields:
+        let bytes = sim.encode_snapshot();
+        let restored = TectonicsSimulation::decode_snapshot(&bytes, 42).expect("roundtrip snapshot");
+        for (a, b) in sim.tiles().iter().zip(restored.tiles().iter()) {
+            let mut a_norm = a.clone();
+            a_norm.normalize_for_snapshot();
+            assert_eq!(a_norm.layers.len(), b.layers.len());
+            for (la, lb) in a_norm.layers.iter().zip(b.layers.iter()) {
+                assert_eq!(la.rock.bogginess, lb.rock.bogginess);
+                assert_eq!(la.rock.quartzity, lb.rock.quartzity);
+                assert_eq!(la.rock.sulfidity, lb.rock.sulfidity);
+                assert_eq!(la.rock.salinity, lb.rock.salinity);
+            }
+        }
     }
 }

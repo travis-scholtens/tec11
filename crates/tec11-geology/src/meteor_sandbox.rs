@@ -76,6 +76,9 @@ impl MeteorSandbox {
                             clasticity: Some(1.0),
                             calcity: None,
                             bogginess: None,
+                            quartzity: None,
+                            sulfidity: None,
+                            salinity: None,
                         },
                         thickness: elev_km + 1.0,
                     }],
@@ -355,13 +358,22 @@ impl MeteorSandbox {
                             clasticity: None,
                             calcity: None,
                             bogginess: None,
+                            quartzity: None,
+                            sulfidity: if d_crater_km >= 180.0 {
+                                Some(((d_crater_km - 150.0) / 300.0).clamp(0.18, 0.45) as f32)
+                            } else {
+                                None
+                            },
+                            salinity: None,
                         },
                         thickness: 0.20,
                     });
                     if d_crater_km >= 220.0 {
                         // Impact-melt basalt sheet in large complex basins:
+                        let mut melt_sheet = Rock::extrusive(0.48);
+                        melt_sheet.sulfidity = Some(0.38);
                         self.tiles[u].deposit(RockLayer {
-                            rock: Rock::extrusive(0.48),
+                            rock: melt_sheet,
                             thickness: 0.24,
                         });
                     }
@@ -386,6 +398,9 @@ impl MeteorSandbox {
                             clasticity: None,
                             calcity: None,
                             bogginess: None,
+                            quartzity: None,
+                            sulfidity: Some(0.15),
+                            salinity: None,
                         },
                         thickness: 0.16,
                     });
@@ -413,6 +428,9 @@ impl MeteorSandbox {
                             clasticity: Some(0.96),
                             calcity: None,
                             bogginess: None,
+                            quartzity: None,
+                            sulfidity: None,
+                            salinity: None,
                         },
                         thickness: rim_t,
                     });

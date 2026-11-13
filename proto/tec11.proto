@@ -12,13 +12,18 @@ message Vec3 {
 message IgneousRock {
   bool is_intrusive = 1; // false = extrusive (basalt/dacite/rhyolite), true = intrusive (gabbro/andesite/granite)
   float felsity = 2;     // [0.0, 1.0]; determines both rock name and toughness (== felsity)
+  optional float quartzity = 3; // [0.0, 1.0]; hydrothermal quartz/pegmatite vein fraction
+  optional float sulfidity = 4; // [0.0, 1.0]; magmatic/hydrothermal sulfide ore fraction
 }
 
 message SedimentaryRock {
   float clasticity = 1;          // Grain-size divisor (determines claystone/siltstone/sandstone/conglomerate)
   optional float felsity = 2;    // Inherited weighted silica content
   optional float calcity = 3;    // [0.0, 1.0]; >0.75 = limestone, >0.99 = chalk
-  optional float bogginess = 4;  // [0.0, 1.0]; C-climate wetland peat fraction
+  optional float bogginess = 4;  // [0.0, 1.0]; wetland peat/organic carbon fraction
+  optional float quartzity = 5;  // [0.0, 1.0]; detrital/placer quartz-gold/cassiterite fraction
+  optional float sulfidity = 6;  // [0.0, 1.0]; detrital/chemical sulfide/ironstone fraction
+  optional float salinity = 7;   // [0.0, 1.0]; evaporite halite/gypsum/potash salt fraction
 }
 
 enum MetamorphicFacies {
@@ -40,6 +45,9 @@ message MetamorphicRock {
   optional float felsity = 3;
   optional float calcity = 4;
   optional float bogginess = 5;
+  optional float quartzity = 6;
+  optional float sulfidity = 7;
+  optional float salinity = 8;
 }
 
 message Rock {

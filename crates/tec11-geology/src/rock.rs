@@ -24,6 +24,9 @@ pub struct Rock {
     pub clasticity: Option<f32>,
     pub calcity: Option<f32>,
     pub bogginess: Option<f32>,
+    pub quartzity: Option<f32>,
+    pub sulfidity: Option<f32>,
+    pub salinity: Option<f32>,
 }
 
 impl Rock {
@@ -44,6 +47,9 @@ impl Rock {
             clasticity: None,
             calcity: None,
             bogginess: None,
+            quartzity: None,
+            sulfidity: None,
+            salinity: None,
         }
     }
 
@@ -64,17 +70,25 @@ impl Rock {
             clasticity: None,
             calcity: None,
             bogginess: None,
+            quartzity: None,
+            sulfidity: None,
+            salinity: None,
         }
     }
 
-    /// Standard basaltic seafloor (`PlanetSimulation.seafloor()`).
+    /// Standard basaltic seafloor (`PlanetSimulation.seafloor()`), slightly enriched in
+    /// seafloor hydrothermal VMS sulfides (`sulfidity = 0.08`).
     pub fn seafloor() -> Self {
-        Self::extrusive(0.5)
+        let mut r = Self::extrusive(0.5);
+        r.sulfidity = Some(0.08);
+        r
     }
 
-    /// Lower oceanic crust intrusive gabbro.
+    /// Lower oceanic crust intrusive gabbro, slightly enriched in magmatic cumulate sulfides (`sulfidity = 0.12`).
     pub fn gabbro_seafloor() -> Self {
-        Self::intrusive(0.45)
+        let mut r = Self::intrusive(0.45);
+        r.sulfidity = Some(0.12);
+        r
     }
 
     /// Map a serialized rock name string back to its static `'static str` literal.
@@ -159,6 +173,9 @@ pub fn deposit_sedimentary(
         clasticity: f32,
         calcity: f32,
         bogginess: f32,
+        quartzity: f32,
+        sulfidity: f32,
+        salinity: f32,
         thickness: f32,
     }
 
@@ -166,6 +183,9 @@ pub fn deposit_sedimentary(
     let mut any_clasticity = false;
     let mut any_calcity = false;
     let mut any_bogginess = false;
+    let mut any_quartzity = false;
+    let mut any_sulfidity = false;
+    let mut any_salinity = false;
 
     for m in materials {
         let total = m.total.max(1e-7);
@@ -189,6 +209,12 @@ pub fn deposit_sedimentary(
         let mut has_calc = false;
         let mut bog_sum = 0.0f32;
         let mut has_bog = false;
+        let mut quartz_sum = 0.0f32;
+        let mut has_quartz = false;
+        let mut sulf_sum = 0.0f32;
+        let mut has_sulf = false;
+        let mut sal_sum = 0.0f32;
+        let mut has_sal = false;
 
         for (r, thick) in &sources {
             felsity_sum += thick * r.felsity;
@@ -204,17 +230,35 @@ pub fn deposit_sedimentary(
                 bog_sum += thick * b;
                 has_bog = true;
             }
+            if let Some(q) = r.quartzity {
+                quartz_sum += thick * q;
+                has_quartz = true;
+            }
+            if let Some(s) = r.sulfidity {
+                sulf_sum += thick * s;
+                has_sulf = true;
+            }
+            if let Some(s) = r.salinity {
+                sal_sum += thick * s;
+                has_sal = true;
+            }
         }
 
         any_clasticity |= has_clast;
         any_calcity |= has_calc;
         any_bogginess |= has_bog;
+        any_quartzity |= has_quartz;
+        any_sulfidity |= has_sulf;
+        any_salinity |= has_sal;
 
         contribs.push(Contrib {
             felsity: felsity_sum / total,
             clasticity: clast_sum / total,
             calcity: calc_sum / total,
             bogginess: bog_sum / total,
+            quartzity: quartz_sum / total,
+            sulfidity: sulf_sum / total,
+            salinity: sal_sum / total,
             thickness: m.amount,
         });
     }
@@ -243,6 +287,59 @@ pub fn deposit_sedimentary(
         Some(c) if c > 0.0 => c * 2.0,
         _ => 1.0,
     };
+
+    // Heavy detrital vein minerals (native gold, cassiterite/tin, quartz-vein pebbles) concentrate
+    // hydraulically in coarse fluvial gravels/sands (`clasticity <= 2.5`) as placer deposits,
+    // whereas fine silts/clays winnow them out (`placer_factor < 1.0`).
+    let placer_factor = (1.35 / clasticity.max(0.5).sqrt()).clamp(0.25, 1.65);
+    let mut quartzity = if any_quartzity {
+        let q = (contribs.iter().map(|c| c.thickness * c.quartzity).sum::<f32>() / denom)
+            * placer_factor;
+        (q > 1e-4).then_some(q.clamp(0.0, 1.0))
+    } else {
+        None
+    };
+
+    // Sulfide minerals weather/oxidize during subaerial transport (`0.65` retention),
+    // but in anoxic pre-biotic oceans (`is_sea && !has_life`) dissolved ferrous iron, sulfur,
+    // and silica precipitate together as Banded Iron Formations (alternating iron/sulfide
+    // `sulfidity` + chert `quartzity` bands).
+    let mut sulfidity = if any_sulfidity {
+        let s = (contribs.iter().map(|c| c.thickness * c.sulfidity).sum::<f32>() / denom) * 0.65;
+        (s > 1e-4).then_some(s.clamp(0.0, 1.0))
+    } else {
+        None
+    };
+    if is_sea && !has_life {
+        let bif_iron = (0.22 * (1.0 - 0.5 * felsity)).clamp(0.10, 0.35);
+        let bif_chert = 0.24;
+        sulfidity = Some((sulfidity.unwrap_or(0.0) + bif_iron).clamp(0.0, 1.0));
+        quartzity = Some((quartzity.unwrap_or(0.0) + bif_chert).clamp(0.0, 1.0));
+    }
+
+    // Halite/gypsum evaporite salts dissolve in wet runoff (`0.25` inherited retention) and
+    // precipitate in hot, arid basins where potential evaporation exceeds precipitation
+    // (`precipitation_norm < evap_limit`, strictly keyed off physical temperature & precipitation).
+    let mut salinity = if any_salinity {
+        let s = (contribs.iter().map(|c| c.thickness * c.salinity).sum::<f32>() / denom) * 0.25;
+        (s > 1e-4).then_some(s.clamp(0.0, 1.0))
+    } else {
+        None
+    };
+    if let Some(clim) = climate {
+        if clim.temperature_c > 8.0 {
+            let evap_limit = (0.20 + 0.008 * (clim.temperature_c - 8.0)).clamp(0.20, 0.48);
+            if clim.precipitation_norm < evap_limit {
+                let dryness = ((evap_limit - clim.precipitation_norm) / evap_limit).clamp(0.0, 1.0);
+                let heat = ((clim.temperature_c - 8.0) / 32.0).clamp(0.15, 1.0);
+                let basin_boost = if is_sea { 0.85 } else { 1.0 };
+                let evap_sal = (dryness * heat * basin_boost * 1.15).clamp(0.0, 1.0);
+                if evap_sal > 1e-4 {
+                    salinity = Some(salinity.unwrap_or(0.0).max(evap_sal));
+                }
+            }
+        }
+    }
 
     let mut chosen_name: Option<&'static str> = None;
 
@@ -294,6 +391,9 @@ pub fn deposit_sedimentary(
             clasticity: Some(clasticity),
             calcity,
             bogginess,
+            quartzity,
+            sulfidity,
+            salinity,
         },
         thickness: total_thickness,
     }
@@ -563,7 +663,100 @@ pub fn metamorphic_contact(
         }
     }
 
-    transform_by_facies(layers, &facies)
+    let mut transformed = transform_by_facies(layers, &facies);
+
+    // Magmatic-hydrothermal fluid injection across the intrusion (`top..bottom`) and its
+    // surrounding contact aureole (`d0..bottom + thickness`):
+    // - Felsic plutons (`granite`, high `felsity`) exsolve silica-rich hydrothermal fluids (`quartzity`).
+    // - Intermediate/mafic plutons (`andesite`/`gabbro`) and carbonate skarns (`calcity > 0.35`)
+    //   precipitate metallic sulfides (`sulfidity`).
+    let mut pluton_felsity = 0.65f32;
+    let mut d = 0.0f32;
+    for l in transformed.iter().rev() {
+        let l_top = d;
+        let l_bot = d + l.thickness;
+        if l.rock.kind == RockKind::Igneous
+            && l_bot > top - 0.1
+            && l_top < bottom + 0.1
+            && matches!(l.rock.name, "granite" | "andesite" | "gabbro")
+        {
+            pluton_felsity = l.rock.felsity;
+            break;
+        }
+        d = l_bot;
+    }
+
+    let aureole_top = d0;
+    let aureole_bot = bottom + thickness;
+    let mut d = 0.0f32;
+    for l in transformed.iter_mut().rev() {
+        let l_top = d;
+        let l_bot = d + l.thickness;
+        d = l_bot;
+        let overlap = (l_bot.min(aureole_bot) - l_top.max(aureole_top)).max(0.0);
+        if overlap <= 1e-5 {
+            continue;
+        }
+        let is_intrusion = l_bot > top + 1e-4 && l_top < bottom - 1e-4;
+        let skarn_boost = if l.rock.calcity.unwrap_or(0.0) > 0.35 {
+            0.35 * l.rock.calcity.unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let q_gain = if is_intrusion {
+            (0.45 * (pluton_felsity - 0.45).max(0.0)).clamp(0.05, 0.35)
+        } else {
+            (0.65 * (pluton_felsity - 0.35).max(0.0) + 0.15 * skarn_boost).clamp(0.10, 0.55)
+        };
+        let s_gain = if is_intrusion {
+            (0.42 * (1.05 - pluton_felsity).max(0.2)).clamp(0.10, 0.40)
+        } else {
+            (0.38 * (1.0 - (pluton_felsity - 0.58).abs()) + skarn_boost).clamp(0.12, 0.70)
+        };
+        l.rock.quartzity = Some((l.rock.quartzity.unwrap_or(0.0) + q_gain).clamp(0.0, 1.0));
+        l.rock.sulfidity = Some((l.rock.sulfidity.unwrap_or(0.0) + s_gain).clamp(0.0, 1.0));
+    }
+
+    transformed
+}
+
+/// Apply orogenic metamorphic dewatering (`quartzity` & `sulfidity` vein enrichment)
+/// to `Zeolite`, `Greenschist`, and `Blueschist` facies (`5..35 km` depth) during active
+/// subduction or continental-collision compression (`orogenic_intensity > 0.0`).
+pub fn enrich_orogenic_veins_in_place(layers: &mut [RockLayer], orogenic_intensity: f32) {
+    if orogenic_intensity <= 1e-4 || layers.is_empty() {
+        return;
+    }
+    let intensity = orogenic_intensity.clamp(0.0, 1.0);
+    let mut depth = 0.0f32;
+    for l in layers.iter_mut().rev() {
+        let l_top = depth;
+        let l_bot = depth + l.thickness;
+        depth = l_bot;
+        // Orogenic quartz-gold and polymetallic veins precipitate in brittle-ductile
+        // shear zones between 5 km and 35 km depth (`pelite`, `psammite`, `psephite`,
+        // `greenschist`, `blueschist`).
+        let zone_overlap = (l_bot.min(35.0) - l_top.max(5.0)).max(0.0);
+        if zone_overlap <= 1e-4 || l.rock.kind != RockKind::Metamorphic {
+            continue;
+        }
+        let host_factor = match l.rock.name {
+            "greenschist" | "blueschist" => 1.0,
+            "pelite" | "psammite" | "psephite" => 0.85,
+            "amphibolite" => 0.45,
+            _ => 0.25,
+        };
+        let dq = 0.045 * intensity * host_factor;
+        let ds = 0.022 * intensity * host_factor * (1.1 - 0.5 * l.rock.felsity).max(0.3);
+        let new_q = (l.rock.quartzity.unwrap_or(0.0) + dq).clamp(0.0, 1.0);
+        let new_s = (l.rock.sulfidity.unwrap_or(0.0) + ds).clamp(0.0, 1.0);
+        if new_q > 1e-4 {
+            l.rock.quartzity = Some(new_q);
+        }
+        if new_s > 1e-4 {
+            l.rock.sulfidity = Some(new_s);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -722,7 +915,7 @@ mod tests {
         );
         assert!(tropical_swamp_dep.rock.bogginess.unwrap_or(0.0) > 0.5);
 
-        // Arid terrestrial basin has no bogginess:
+        // Arid terrestrial basin has no bogginess, and warm arid basins accumulate evaporite salinity:
         let arid_dep = deposit_sedimentary(
             &[ErodedMaterialBatch {
                 amount: 1.0,
@@ -732,11 +925,37 @@ mod tests {
             true,
             false,
             Some(DepositClimate {
-                temperature_c: 25.0,
-                precipitation_norm: 0.35,
+                temperature_c: 28.0,
+                precipitation_norm: 0.15,
                 life: 1.0,
             }),
         );
         assert_eq!(arid_dep.rock.bogginess, None);
+        assert!(
+            arid_dep.rock.salinity.unwrap_or(0.0) > 0.25,
+            "Expected hot arid basin to precipitate evaporite salinity, got {:?}",
+            arid_dep.rock.salinity
+        );
+
+        // Eroding a quartz-veined metamorphic rock into coarse conglomerate concentrates placer quartzity:
+        let mut veined = dummy_layer(1.0);
+        veined.rock.kind = RockKind::Metamorphic;
+        veined.rock.name = "greenschist";
+        veined.rock.quartzity = Some(0.50);
+        let placer_dep = deposit_sedimentary(
+            &[ErodedMaterialBatch {
+                amount: 1.0,
+                total: 1.0,
+                substance: vec![veined],
+            }],
+            true,
+            false,
+            None,
+        );
+        assert!(
+            placer_dep.rock.quartzity.unwrap_or(0.0) > 0.60,
+            "Expected coarse gravel conglomerate to hydraulically concentrate placer quartzity, got {:?}",
+            placer_dep.rock.quartzity
+        );
     }
 }

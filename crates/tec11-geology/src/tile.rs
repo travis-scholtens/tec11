@@ -532,17 +532,25 @@ impl TileGeology {
             match l.rock.kind {
                 RockKind::Igneous => {
                     let is_intrusive = matches!(l.rock.name, "gabbro" | "andesite" | "granite");
-                    l.rock = if is_intrusive {
+                    let quartzity = l.rock.quartzity;
+                    let sulfidity = l.rock.sulfidity;
+                    let mut r = if is_intrusive {
                         Rock::intrusive(l.rock.felsity)
                     } else {
                         Rock::extrusive(l.rock.felsity)
                     };
+                    r.quartzity = quartzity;
+                    r.sulfidity = sulfidity;
+                    l.rock = r;
                 }
                 RockKind::Sedimentary => {
                     let clasticity = l.rock.clasticity.unwrap_or(1.0).max(1e-6);
                     let felsity = l.rock.felsity;
                     let calcity = l.rock.calcity;
                     let bogginess = l.rock.bogginess;
+                    let quartzity = l.rock.quartzity;
+                    let sulfidity = l.rock.sulfidity;
+                    let salinity = l.rock.salinity;
                     let name = if calcity.unwrap_or(0.0) > 0.99 {
                         "chalk"
                     } else if calcity.unwrap_or(0.0) > 0.75 {
@@ -567,6 +575,9 @@ impl TileGeology {
                         clasticity: Some(clasticity),
                         calcity,
                         bogginess,
+                        quartzity,
+                        sulfidity,
+                        salinity,
                     };
                 }
                 RockKind::Metamorphic => {
@@ -579,6 +590,9 @@ impl TileGeology {
                         clasticity: None,
                         calcity: l.rock.calcity,
                         bogginess: l.rock.bogginess,
+                        quartzity: l.rock.quartzity,
+                        sulfidity: l.rock.sulfidity,
+                        salinity: l.rock.salinity,
                     };
                 }
             }
@@ -600,6 +614,8 @@ impl TileGeology {
                         tec11_proto::RockKindOneof::Igneous(tec11_proto::IgneousRock {
                             is_intrusive,
                             felsity: r.felsity,
+                            quartzity: r.quartzity,
+                            sulfidity: r.sulfidity,
                         })
                     }
                     RockKind::Sedimentary => {
@@ -608,6 +624,9 @@ impl TileGeology {
                             felsity: Some(r.felsity),
                             calcity: r.calcity,
                             bogginess: r.bogginess,
+                            quartzity: r.quartzity,
+                            sulfidity: r.sulfidity,
+                            salinity: r.salinity,
                         })
                     }
                     RockKind::Metamorphic => {
@@ -618,6 +637,9 @@ impl TileGeology {
                             felsity: Some(r.felsity),
                             calcity: r.calcity,
                             bogginess: r.bogginess,
+                            quartzity: r.quartzity,
+                            sulfidity: r.sulfidity,
+                            salinity: r.salinity,
                         })
                     }
                 };
@@ -641,11 +663,14 @@ impl TileGeology {
             let pr = pl.rock.as_ref()?;
             let rock = match pr.kind.as_ref()? {
                 tec11_proto::RockKindOneof::Igneous(ig) => {
-                    if ig.is_intrusive {
+                    let mut r = if ig.is_intrusive {
                         Rock::intrusive(ig.felsity)
                     } else {
                         Rock::extrusive(ig.felsity)
-                    }
+                    };
+                    r.quartzity = ig.quartzity;
+                    r.sulfidity = ig.sulfidity;
+                    r
                 }
                 tec11_proto::RockKindOneof::Sedimentary(sed) => {
                     let clasticity = sed.clasticity.max(1e-6);
@@ -676,6 +701,9 @@ impl TileGeology {
                         clasticity: Some(clasticity),
                         calcity,
                         bogginess,
+                        quartzity: sed.quartzity,
+                        sulfidity: sed.sulfidity,
+                        salinity: sed.salinity,
                     }
                 }
                 tec11_proto::RockKindOneof::Metamorphic(met) => Rock {
@@ -686,6 +714,9 @@ impl TileGeology {
                     clasticity: None,
                     calcity: met.calcity,
                     bogginess: met.bogginess,
+                    quartzity: met.quartzity,
+                    sulfidity: met.sulfidity,
+                    salinity: met.salinity,
                 },
             };
             layers.push(RockLayer {
