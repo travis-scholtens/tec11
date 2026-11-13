@@ -112,6 +112,56 @@ pub const WEATHER_CONCEPT_GLOSSES: [&str; 9] = [
     "ice / glacier",
 ];
 
+// Surface-accessible rock types that people would name (quarried, built with, carved, etc.)
+pub const ROCK_GRANITE: u32 = 0;
+pub const ROCK_BASALT: u32 = 1;
+pub const ROCK_SANDSTONE: u32 = 2;
+pub const ROCK_LIMESTONE: u32 = 3;
+pub const ROCK_MARBLE: u32 = 4;
+pub const ROCK_CHALK: u32 = 5;
+pub const ROCK_SLATE: u32 = 6; // pelite / psammite low-grade metamorphic
+pub const ROCK_CLAY: u32 = 7; // claystone / siltstone
+pub const ROCK_CONGLOMERATE: u32 = 8;
+pub const ROCK_OBSIDIAN: u32 = 9; // rhyolite / dacite (volcanic glass)
+pub const ROCK_GNEISS: u32 = 10; // amphibolite / granulite (banded metamorphic)
+
+pub const ROCK_CONCEPT_GLOSSES: [&str; 11] = [
+    "granite (hard building stone)",
+    "basalt (dark volcanic stone)",
+    "sandstone (gritty layered stone)",
+    "limestone (pale shell-stone)",
+    "marble (polished white stone)",
+    "chalk (soft white stone)",
+    "slate (flat splitting stone)",
+    "clay / mudstone",
+    "gravel / conglomerate",
+    "obsidian (volcanic glass)",
+    "gneiss (banded hard stone)",
+];
+
+// Mineral / resource concepts people would encounter in near-surface deposits
+pub const MINERAL_IRON: u32 = 0;
+pub const MINERAL_SALT: u32 = 1;
+pub const MINERAL_GOLD: u32 = 2;
+pub const MINERAL_COPPER: u32 = 3;
+pub const MINERAL_TIN: u32 = 4;
+pub const MINERAL_COAL: u32 = 5;
+pub const MINERAL_QUARTZ: u32 = 6;
+pub const MINERAL_FLINT: u32 = 7; // chert / silica in limestone
+pub const MINERAL_GYPSUM: u32 = 8;
+
+pub const MINERAL_CONCEPT_GLOSSES: [&str; 9] = [
+    "iron ore",
+    "salt (rock salt / halite)",
+    "gold",
+    "copper ore",
+    "tin ore (cassiterite)",
+    "coal / peat",
+    "quartz (crystal stone)",
+    "flint / chert",
+    "gite / gypsum (plaster stone)",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConceptKey {
     BasicWord(u32),
@@ -131,6 +181,8 @@ pub enum ConceptKey {
     Nation(u32),
     State(u32),
     Language(u32),
+    Rock(u32),
+    Mineral(u32),
 }
 
 impl ConceptKey {
@@ -204,6 +256,14 @@ impl ConceptKey {
                 kind: tec11_proto::ConceptKind::Language as i32,
                 id,
             },
+            Self::Rock(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Rock as i32,
+                id,
+            },
+            Self::Mineral(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Mineral as i32,
+                id,
+            },
         }
     }
 
@@ -228,6 +288,8 @@ impl ConceptKey {
             tec11_proto::ConceptKind::Nation => Self::Nation(c.id),
             tec11_proto::ConceptKind::State => Self::State(c.id),
             tec11_proto::ConceptKind::Language => Self::Language(c.id),
+            tec11_proto::ConceptKind::Rock => Self::Rock(c.id),
+            tec11_proto::ConceptKind::Mineral => Self::Mineral(c.id),
         }
     }
 }
@@ -1729,6 +1791,25 @@ impl HistorySimulation {
                 for c_idx in vis {
                     lang.coin_concept(ConceptKey::Constellation(c_idx), &mut temp_rng);
                 }
+                // Coin words for surface-accessible rocks and minerals in the state's territory
+                let geo_tiles = self.prehistory.tiles();
+                let mut seen_coarse_init: BTreeSet<usize> = BTreeSet::new();
+                for &f_idx in tiles {
+                    let c = self.fine_primary_coarse[f_idx];
+                    if !seen_coarse_init.insert(c) {
+                        continue;
+                    }
+                    if let Some(tile_geo) = geo_tiles.get(c) {
+                        let (rock_ids, mineral_ids) =
+                            Self::surface_rock_and_mineral_concepts(tile_geo, 0.5);
+                        for r_id in rock_ids {
+                            lang.coin_concept(ConceptKey::Rock(r_id), &mut temp_rng);
+                        }
+                        for m_id in mineral_ids {
+                            lang.coin_concept(ConceptKey::Mineral(m_id), &mut temp_rng);
+                        }
+                    }
+                }
                 lang.refresh_phonology();
             }
             self.rng = temp_rng;
@@ -2965,6 +3046,108 @@ impl HistorySimulation {
         &self.geography
     }
 
+    /// Determine which Rock and Mineral concept keys are present in the near-surface layers of `tile`.
+    /// "Near surface" means within `max_depth_km` of the surface (default 0.5 km for rocks people can
+    /// quarry or encounter in outcrops, riverbeds, and caves).
+    fn surface_rock_and_mineral_concepts(
+        tile: &crate::tile::TileGeology,
+        max_depth_km: f32,
+    ) -> (BTreeSet<u32>, BTreeSet<u32>) {
+        use crate::rock::RockKind;
+        let mut rocks = BTreeSet::new();
+        let mut minerals = BTreeSet::new();
+
+        let elev = tile.elevation();
+        // Only consider land tiles (or very shallow submarine)
+        if elev < -0.5 {
+            return (rocks, minerals);
+        }
+
+        let mut depth_from_surface = 0.0f32;
+        for layer in tile.layers.iter().rev() {
+            if depth_from_surface >= max_depth_km {
+                break;
+            }
+            let r = &layer.rock;
+            // Map rock name → Rock concept
+            match r.name {
+                "granite" => { rocks.insert(ROCK_GRANITE); }
+                "basalt" => { rocks.insert(ROCK_BASALT); }
+                "sandstone" => { rocks.insert(ROCK_SANDSTONE); }
+                "limestone" => { rocks.insert(ROCK_LIMESTONE); }
+                "marble" => { rocks.insert(ROCK_MARBLE); }
+                "chalk" => { rocks.insert(ROCK_CHALK); }
+                "pelite" | "psammite" | "psephite" => { rocks.insert(ROCK_SLATE); }
+                "claystone" | "siltstone" => { rocks.insert(ROCK_CLAY); }
+                "conglomerate" => { rocks.insert(ROCK_CONGLOMERATE); }
+                "rhyolite" | "dacite" => { rocks.insert(ROCK_OBSIDIAN); }
+                "amphibolite" | "granulite" | "greenschist" => { rocks.insert(ROCK_GNEISS); }
+                _ => {}
+            }
+
+            // Derive mineral concepts from rock properties
+            let q = r.quartzity.unwrap_or(0.0);
+            let s = r.sulfidity.unwrap_or(0.0);
+            let sal = r.salinity.unwrap_or(0.0);
+            let calc = r.calcity.unwrap_or(0.0);
+            let bog = r.bogginess.unwrap_or(0.0);
+
+            // Iron ore from BIF (co-precipitated sulfide + chert in marine beds)
+            if s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8 && r.kind != RockKind::Igneous {
+                minerals.insert(MINERAL_IRON);
+            }
+            // Salt / halite / gypsum from evaporites
+            if sal >= 0.08 {
+                minerals.insert(MINERAL_SALT);
+                if sal >= 0.08 && sal < 0.20 {
+                    minerals.insert(MINERAL_GYPSUM);
+                }
+                if sal >= 0.20 {
+                    minerals.insert(MINERAL_GYPSUM);
+                }
+            }
+            // Gold from quartz veins and alluvial placers
+            if q >= 0.05 && !(s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8) {
+                minerals.insert(MINERAL_QUARTZ);
+                match r.kind {
+                    RockKind::Sedimentary if r.clasticity.unwrap_or(2.0) <= 1.5 => {
+                        minerals.insert(MINERAL_GOLD);
+                    }
+                    RockKind::Igneous if matches!(r.name, "andesite" | "dacite" | "rhyolite" | "granite") => {
+                        minerals.insert(MINERAL_GOLD);
+                    }
+                    RockKind::Metamorphic => {
+                        minerals.insert(MINERAL_GOLD);
+                    }
+                    _ => {}
+                }
+                // Tin from granitic pegmatites and felsic alluvial placers
+                if r.felsity > 0.62 {
+                    minerals.insert(MINERAL_TIN);
+                }
+            }
+            // Copper from sulfide ores
+            if s >= 0.10 && !(s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8) {
+                minerals.insert(MINERAL_COPPER);
+            }
+            // Coal / peat from bogginess
+            if bog >= 0.05 {
+                minerals.insert(MINERAL_COAL);
+            }
+            // Flint / chert from siliceous limestone and chalk
+            if (r.name == "limestone" || r.name == "chalk") && q >= 0.04 {
+                minerals.insert(MINERAL_FLINT);
+            }
+            // Flint also from siliceous chert beds
+            if q >= 0.16 && r.kind == RockKind::Sedimentary {
+                minerals.insert(MINERAL_FLINT);
+            }
+
+            depth_from_surface += layer.thickness;
+        }
+        (rocks, minerals)
+    }
+
     /// Accumulate concepts across co-resident communities, trade partners, rivals, and recursive trade imports,
     /// borrowing missing words from source state majority languages (`historysimulation.py:664-705`).
     fn accumulate_and_borrow_concepts(
@@ -3103,6 +3286,30 @@ impl HistorySimulation {
                     concepts
                         .entry(ConceptKey::Weather(w_id))
                         .or_insert(Some(lang_id));
+                }
+
+                // Surface-accessible rocks and minerals on tiles where this language is spoken
+                let tiles = self.prehistory.tiles();
+                let mut seen_coarse: BTreeSet<usize> = BTreeSet::new();
+                for &f_idx in ltiles {
+                    let c_idx = self.fine_primary_coarse[f_idx];
+                    if !seen_coarse.insert(c_idx) {
+                        continue; // already scanned this coarse tile
+                    }
+                    if let Some(tile_geo) = tiles.get(c_idx) {
+                        let (rock_ids, mineral_ids) =
+                            Self::surface_rock_and_mineral_concepts(tile_geo, 0.5);
+                        for rid in rock_ids {
+                            concepts
+                                .entry(ConceptKey::Rock(rid))
+                                .or_insert(Some(lang_id));
+                        }
+                        for mid in mineral_ids {
+                            concepts
+                                .entry(ConceptKey::Mineral(mid))
+                                .or_insert(Some(lang_id));
+                        }
+                    }
                 }
             }
 
@@ -5282,6 +5489,16 @@ impl HistorySimulation {
                     .unwrap_or_else(|| format!("Lang_{}", id + 1));
                 format!("language #{} ({lname})", id + 1)
             }
+            ConceptKey::Rock(id) => ROCK_CONCEPT_GLOSSES
+                .get(id as usize)
+                .copied()
+                .unwrap_or("stone")
+                .to_string(),
+            ConceptKey::Mineral(id) => MINERAL_CONCEPT_GLOSSES
+                .get(id as usize)
+                .copied()
+                .unwrap_or("mineral")
+                .to_string(),
         }
     }
 
@@ -5303,6 +5520,7 @@ impl HistorySimulation {
             | ConceptKey::MountainRange(_) => "Geo",
             ConceptKey::Species(_) => "Bio",
             ConceptKey::State(_) | ConceptKey::Nation(_) | ConceptKey::Language(_) => "Polity",
+            ConceptKey::Rock(_) | ConceptKey::Mineral(_) => "Geo",
         }
     }
 
@@ -7477,9 +7695,23 @@ mod tests {
             ConceptKey::Sea(0),
             ConceptKey::River(0),
             ConceptKey::MountainRange(0),
+            ConceptKey::Rock(ROCK_GRANITE),
+            ConceptKey::Rock(ROCK_SANDSTONE),
+            ConceptKey::Mineral(MINERAL_IRON),
+            ConceptKey::Mineral(MINERAL_GOLD),
         ] {
             let p = ck.to_proto();
             assert_eq!(ConceptKey::from_proto(&p), ck);
         }
+
+        // 6. Verify surface-accessible rocks and minerals get named in at least one language
+        let any_rock_named = sim
+            .languages
+            .values()
+            .any(|l| l.lexicon.keys().any(|k| matches!(k, ConceptKey::Rock(_))));
+        assert!(
+            any_rock_named,
+            "Expected at least one language to have coined a word for a surface-accessible rock"
+        );
     }
 }

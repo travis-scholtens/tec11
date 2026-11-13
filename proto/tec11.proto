@@ -164,6 +164,8 @@ message Concept {
     KIND_CULTURE = 14;
     KIND_SEASON = 15;
     KIND_WEATHER = 16;
+    KIND_ROCK = 17;
+    KIND_MINERAL = 18;
   }
   Kind kind = 1;
   uint32 id = 2;
