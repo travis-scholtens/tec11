@@ -17,6 +17,7 @@ pub mod split_session;
 pub mod sun_session;
 pub mod tectonics_session;
 pub mod terrain_session;
+pub mod tides_session;
 pub mod world_session;
 
 pub use climate_session::WasmClimateSession;
@@ -37,4 +38,5 @@ pub use split_session::WasmSplitSession;
 pub use sun_session::WasmSunSession;
 pub use tectonics_session::WasmTectonicsSession;
 pub use terrain_session::WasmTerrainSession;
+pub use tides_session::WasmTidesSession;
 pub use world_session::WasmWorldSession;

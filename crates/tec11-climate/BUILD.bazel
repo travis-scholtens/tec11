@@ -11,6 +11,7 @@ rust_library(
         "src/lib.rs",
         "src/model.rs",
         "src/ocean.rs",
+        "src/tides.rs",
     ],
     edition = "2021",
     deps = [

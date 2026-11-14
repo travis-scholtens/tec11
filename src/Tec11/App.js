@@ -18,11 +18,13 @@ import initWasmModule, {
   WasmSunSession,
   WasmTectonicsSession,
   WasmTerrainSession,
+  WasmTidesSession,
   WasmWorldSession,
 } from "tec11-wasm";
 import {
   applyParsedTileToView,
   clearTileSkyAndVantageOnView,
+  paintSparklineCanvas,
   registerSkyVantageHost,
   scheduleTileSkyAndVantagePaint,
 } from "../Tec11.SkyVantage/foreign.js";
@@ -3238,6 +3240,8 @@ function refreshActiveInspectorView(view) {
     view.setTectonicsInfo(buildTectonicsInfo(view))();
   } else if (view.inspectorMode === "prehistory" && view.setPrehistoryInfo) {
     view.setPrehistoryInfo(buildPrehistoryInfo(view))();
+  } else if (view.inspectorMode === "tides" && view.setTidesInfo) {
+    view.setTidesInfo(buildTidesInfo(view))();
   }
 }
 
@@ -6627,6 +6631,302 @@ export const setSunDisplayOptions =
       activeView.setSunInfo(buildSunInfo(activeView))();
     }
   };
+
+// ============================================================================
+// Mode 19: Dynamic Astronomical Tides on Full-Sphere Coarse+2 Grid (`TidesScreen`)
+// ============================================================================
+
+function expandFineTileColorsToVertexAttr(view, tileColors) {
+  const ids = view.vertexTileIds;
+  if (!ids || !tileColors) return;
+  const needed = ids.length * 3;
+  if (!view.vertexColorBuffer || view.vertexColorBuffer.length !== needed) {
+    view.vertexColorBuffer = new Float32Array(needed);
+    view.vertexColorAttr = new THREE.BufferAttribute(view.vertexColorBuffer, 3);
+    view.geometry.setAttribute("color", view.vertexColorAttr);
+  }
+  const buf = view.vertexColorBuffer;
+  for (let i = 0; i < ids.length; i++) {
+    const src = ids[i] * 3;
+    const dst = i * 3;
+    buf[dst] = tileColors[src];
+    buf[dst + 1] = tileColors[src + 1];
+    buf[dst + 2] = tileColors[src + 2];
+  }
+  view.vertexColorAttr.needsUpdate = true;
+}
+
+function updateTidesDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (!session) return;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    view.vertexColorBuffer = null;
+    view.vertexColorAttr = null;
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+
+  const tileColors = session.tile_colors_rgb(view.aspect || "live_eta", view.selectedTileIdx);
+  expandFineTileColorsToVertexAttr(view, tileColors);
+
+  if (view.showArrows) {
+    const arrowPos = session.tidal_arrow_positions();
+    view.arrowLines.visible = arrowPos.length > 0;
+    view.arrowGeometry.setAttribute("position", new THREE.Float32BufferAttribute(arrowPos, 3));
+  } else {
+    view.arrowLines.visible = false;
+  }
+  view.paint();
+}
+
+function buildTidesInfo(view) {
+  const s = view.session;
+  const bundle = buildHistoryInspectorBundle(view);
+  let sparkCurrentLabel = "η = +0.00 m";
+  let sparkSubtitle = "Step +1h / Play to record 48h tide gauge";
+  let sparkMinLabel = "Low: 0.00 m";
+  let sparkMaxLabel = "High: 0.00 m";
+  let selectedReport =
+    "Click any fine ocean, continental shelf, or coastal land tile on the globe to inspect dynamic Laplace tides, 48-hour tide gauge, amphidromic range, coastal wetting/drying, and synced local sky & 100° horizon vantage.";
+
+  if (view.selectedTileIdx >= 0 && bundle.tileView.hasTile) {
+    const tv = bundle.tileView;
+    const floraLine = tv.flora && tv.flora.length > 0 ? `\nNative Flora: ${tv.flora.join(", ")}` : "";
+    const faunaLine = tv.fauna && tv.fauna.length > 0 ? `\nNative Fauna: ${tv.fauna.join(", ")}` : "";
+    selectedReport = `${tv.title} (${tv.skyLatLonSummary})\n${tv.locationSummary}\n${tv.populationSummary} | ${tv.technology}${floraLine}${faunaLine}`;
+    try {
+      const parsedSpark = JSON.parse(s.tile_tide_series_json(view.selectedTileIdx));
+      sparkCurrentLabel = parsedSpark.currentLabel || sparkCurrentLabel;
+      sparkSubtitle = parsedSpark.subtitle || sparkSubtitle;
+      sparkMinLabel = parsedSpark.minLabel || sparkMinLabel;
+      sparkMaxLabel = parsedSpark.maxLabel || sparkMaxLabel;
+      if (typeof window !== "undefined") {
+        const series = parsedSpark.series || [];
+        window.requestAnimationFrame(() =>
+          paintSparklineCanvas("tides-sparkline-canvas", series, { windowHours: 48 })
+        );
+        setTimeout(
+          () => paintSparklineCanvas("tides-sparkline-canvas", series, { windowHours: 48 }),
+          45
+        );
+      }
+    } catch (_) {}
+  } else {
+    scheduleStratigraphySidePaint(view, -1);
+  }
+
+  return {
+    planetName: view.loadedFileName ? `File: ${view.loadedFileName}` : s.planet_name(),
+    coarseGridSize: s.coarse_grid_size(),
+    fineGridSize: s.fine_grid_size(),
+    tileCount: s.tile_count(),
+    elapsedHours: s.elapsed_hours(),
+    dayOfYear: s.sim_day_of_year(),
+    daysPerYear: s.days_per_year(),
+    clockLabel: s.sim_clock_label(),
+    maxTideText: `${s.max_tide_m().toFixed(2)} m`,
+    maxRangeText: `${s.max_tidal_range_m().toFixed(2)} m`,
+    maxCurrentText: `${s.max_current_mps().toFixed(2)} m/s`,
+    inundatedTiles: s.inundated_land_tiles(),
+    isRunning: view.timerId !== null,
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    sparkCurrentLabel,
+    sparkSubtitle,
+    sparkMinLabel,
+    sparkMaxLabel,
+    selectedReport,
+    tileView: bundle.tileView,
+  };
+}
+
+function stopTidesTimer(view) {
+  if (view && view.timerId !== null) {
+    clearInterval(view.timerId);
+    view.timerId = null;
+  }
+}
+
+export const mountTidesView =
+  (moonCount) =>
+  (moonMassTenths) =>
+  (moonDistRadii) =>
+  (dayOfYear) =>
+  (aspect) =>
+  (showArrows) =>
+  (setTidesInfo) =>
+  () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.material.dispose();
+    view.material = new THREE.MeshBasicMaterial({
+      side: THREE.FrontSide,
+      vertexColors: true,
+    });
+    view.mesh.material = view.material;
+    view.unlit = true;
+    view.arrowStrokeStyle = "rgba(224, 242, 254, 0.85)";
+
+    view.session = new WasmTidesSession();
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+    }
+    view.session.set_day_of_year(dayOfYear);
+    view.session.set_moon_params(moonCount, moonMassTenths / 10.0, moonDistRadii);
+
+    view.aspect = aspect;
+    view.showArrows = showArrows;
+    view.selectedTileIdx = -1;
+    view.inspectorMode = "tides";
+    view.timerId = null;
+    view.loadedFileName = null;
+    view.setTidesInfo = setTidesInfo;
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateTidesDataBuffers(view, false);
+        view.setTidesInfo(buildTidesInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateTidesDataBuffers(view, true);
+    setTidesInfo(buildTidesInfo(view))();
+
+    return () => {
+      stopTidesTimer(view);
+      canvas.removeEventListener("click", handleCanvasClick);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const stepTidesHours = (hours) => (setTidesInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.step_hours(Math.max(1, hours | 0));
+  updateTidesDataBuffers(activeView, false);
+  setTidesInfo(buildTidesInfo(activeView))();
+};
+
+export const toggleTidesRunning = (setTidesInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  if (activeView.timerId !== null) {
+    stopTidesTimer(activeView);
+  } else {
+    const viewRef = activeView;
+    viewRef.timerId = setInterval(() => {
+      if (activeView !== viewRef || !viewRef.session) {
+        stopTidesTimer(viewRef);
+        return;
+      }
+      viewRef.session.step_hours(1);
+      updateTidesDataBuffers(viewRef, false);
+      setTidesInfo(buildTidesInfo(viewRef))();
+    }, 150);
+  }
+  setTidesInfo(buildTidesInfo(activeView))();
+};
+
+export const resetTidesSim = (setTidesInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopTidesTimer(activeView);
+  activeView.session.reset_tides();
+  updateTidesDataBuffers(activeView, false);
+  setTidesInfo(buildTidesInfo(activeView))();
+};
+
+export const setTidesDayOfYear = (day) => (setTidesInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_day_of_year(Math.max(0, day | 0));
+  updateTidesDataBuffers(activeView, false);
+  setTidesInfo(buildTidesInfo(activeView))();
+};
+
+export const setTidesMoonParams =
+  (count) => (massTenths) => (distRadii) => (setTidesInfo) => () => {
+    if (!activeView || !activeView.session) return;
+    activeView.session.set_moon_params(
+      Math.max(0, count | 0),
+      Math.max(0.1, massTenths / 10.0),
+      Math.max(20.0, distRadii)
+    );
+    updateTidesDataBuffers(activeView, false);
+    setTidesInfo(buildTidesInfo(activeView))();
+  };
+
+export const setTidesDisplayOptions = (aspect) => (showArrows) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.aspect = aspect;
+  activeView.showArrows = showArrows;
+  updateTidesDataBuffers(activeView, false);
+};
+
+export const loadEarthIntoTides = (setTidesInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopTidesTimer(activeView);
+  activeClimateSnapshotBytes = null;
+  activeView.loadedFileName = null;
+  activeView.selectedTileIdx = -1;
+  activeView.session.load_earth();
+  updateTidesDataBuffers(activeView, true);
+  setTidesInfo(buildTidesInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoTides = (setTidesInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  stopTidesTimer(activeView);
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.loadedFileName = null;
+    activeView.selectedTileIdx = -1;
+    updateTidesDataBuffers(activeView, true);
+    setTidesInfo(buildTidesInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoTides = (setTidesInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes, filename) => {
+    if (!activeView || !activeView.session) return;
+    stopTidesTimer(activeView);
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.loadedFileName = filename || null;
+      activeView.selectedTileIdx = -1;
+      updateTidesDataBuffers(activeView, true);
+      setTidesInfo(buildTidesInfo(activeView))();
+    }
+  });
+};
 
 export const rotateGrid = (deg) => () => {
   if (!activeView) return;

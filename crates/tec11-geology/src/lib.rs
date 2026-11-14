@@ -18,6 +18,7 @@ pub mod split_sandbox;
 pub mod sun_sky;
 pub mod tectonics;
 pub mod terrain;
+pub mod tides_sandbox;
 pub mod tile;
 pub mod world;
 
@@ -67,5 +68,6 @@ pub use sun_sky::{
 };
 pub use tectonics::{LithosphericGroup, TectonicsSimulation};
 pub use terrain::TerrainSandbox;
+pub use tides_sandbox::{FinePlanetBase, TidesSandbox};
 pub use tile::TileGeology;
 pub use world::{WorldCreateParams, WorldSimulation, WorldStageState};

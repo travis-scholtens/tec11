@@ -16,9 +16,12 @@ import React.Basic.Hooks (Component, JSX, component, useEffect, useEffectOnce, u
 import React.Basic.Hooks as React
 import Tec11.SkyVantage
   ( DemographicShareItem
+  , SkyClockMode(..)
   , TileViewInfo
   , defaultTileViewInfo
+  , renderSparklineBox
   , renderTileSkyAndVantageBox
+  , renderTileSkyAndVantageSection
   )
 
 data Screen
@@ -43,6 +46,7 @@ data Screen
   | MoonScreen
   | MeteorScreen
   | SunScreen
+  | TidesScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -410,6 +414,29 @@ type SunInfo =
   , selectedReport :: String
   }
 
+type TidesInfo =
+  { planetName :: String
+  , coarseGridSize :: Int
+  , fineGridSize :: Int
+  , tileCount :: Int
+  , elapsedHours :: Int
+  , dayOfYear :: Int
+  , daysPerYear :: Int
+  , clockLabel :: String
+  , maxTideText :: String
+  , maxRangeText :: String
+  , maxCurrentText :: String
+  , inundatedTiles :: Int
+  , isRunning :: Boolean
+  , hasSavedPlanet :: Boolean
+  , sparkCurrentLabel :: String
+  , sparkSubtitle :: String
+  , sparkMinLabel :: String
+  , sparkMaxLabel :: String
+  , selectedReport :: String
+  , tileView :: TileViewInfo
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -584,6 +611,18 @@ foreign import chooseNewSunInGalaxy :: Int -> (SunInfo -> Effect Unit) -> Effect
 foreign import loadHipparcosIntoSun :: (SunInfo -> Effect Unit) -> Effect Unit
 foreign import setSunAtmosphere :: Int -> (SunInfo -> Effect Unit) -> Effect Unit
 foreign import setSunDisplayOptions :: String -> Boolean -> Boolean -> Effect Unit
+
+-- Dynamic Astronomical Tides on Full-Sphere Coarse+2 Grid (`TidesScreen`)
+foreign import mountTidesView :: Int -> Int -> Int -> Int -> String -> Boolean -> (TidesInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepTidesHours :: Int -> (TidesInfo -> Effect Unit) -> Effect Unit
+foreign import toggleTidesRunning :: (TidesInfo -> Effect Unit) -> Effect Unit
+foreign import resetTidesSim :: (TidesInfo -> Effect Unit) -> Effect Unit
+foreign import setTidesDayOfYear :: Int -> (TidesInfo -> Effect Unit) -> Effect Unit
+foreign import setTidesMoonParams :: Int -> Int -> Int -> (TidesInfo -> Effect Unit) -> Effect Unit
+foreign import setTidesDisplayOptions :: String -> Boolean -> Effect Unit
+foreign import loadEarthIntoTides :: (TidesInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoTides :: (TidesInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoTides :: (TidesInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation & two-level State/Tile/Language/Nation inspector FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -1429,6 +1468,36 @@ mkApp = do
       , selectedReport: "Click any star or planetary tile on the sphere to inspect its spectral class, apparent & absolute magnitude, distance in light-years, atmospheric scattering, sunset optical depth, and photosynthetic plant pigments."
       }
 
+    -- Dynamic Tides on Full-Sphere Coarse+2 Grid state (`TidesScreen`)
+    tidesMoonCount /\ setTidesMoonCount <- useState' 1
+    tidesMoonMassTenths /\ setTidesMoonMassTenths <- useState' 10
+    tidesMoonDistRadii /\ setTidesMoonDistRadii <- useState' 60
+    tidesDayOfYear /\ setTidesDayOfYearState <- useState' 80
+    tidesAspect /\ setTidesAspect <- useState' "live_eta"
+    tidesShowArrows /\ setTidesShowArrows <- useState' true
+    tidesInfo /\ setTidesInfo <- useState'
+      { planetName: "Earth (ETOPO2 Bathymetry & Relief)"
+      , coarseGridSize: 6
+      , fineGridSize: 8
+      , tileCount: 65612
+      , elapsedHours: 0
+      , dayOfYear: 80
+      , daysPerYear: 365
+      , clockLabel: "Day 80 · 12:00 UTC (+0h)"
+      , maxTideText: "0.00 m"
+      , maxRangeText: "0.00 m"
+      , maxCurrentText: "0.00 m/s"
+      , inundatedTiles: 0
+      , isRunning: false
+      , hasSavedPlanet: false
+      , sparkCurrentLabel: "η = +0.00 m"
+      , sparkSubtitle: "Click any ocean or coastal tile and step +1h / Play to record 48h tide gauge"
+      , sparkMinLabel: "Low: 0.00 m"
+      , sparkMaxLabel: "High: 0.00 m"
+      , selectedReport: "Click any fine ocean, shelf, or coastal land tile on the globe to inspect dynamic Laplace tides, 48-hour tide gauge, amphidromic range, coastal wetting/drying, and synced local sky & horizon vantage."
+      , tileView: defaultTileViewInfo
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -1495,6 +1564,9 @@ mkApp = do
         SunScreen -> do
           setRotationDeg 0
           mountSunView sunGalaxyType sunVantage sunStarFilter sunAspect sunShowGalacticPlane sunShowConstellations setSunInfo
+        TidesScreen -> do
+          setRotationDeg 0
+          mountTidesView tidesMoonCount tidesMoonMassTenths tidesMoonDistRadii tidesDayOfYear tidesAspect tidesShowArrows setTidesInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -1967,6 +2039,45 @@ mkApp = do
         setSunShowConstellations next
         setSunDisplayOptions sunAspect sunShowGalacticPlane next
 
+      handleTidesMoonCountChange :: Maybe String -> Effect Unit
+      handleTidesMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just c -> do
+          setTidesMoonCount c
+          setTidesMoonParams c tidesMoonMassTenths tidesMoonDistRadii setTidesInfo
+
+      handleTidesMoonMassChange :: Maybe String -> Effect Unit
+      handleTidesMoonMassChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just m -> do
+          setTidesMoonMassTenths m
+          setTidesMoonParams tidesMoonCount m tidesMoonDistRadii setTidesInfo
+
+      handleTidesMoonDistChange :: Maybe String -> Effect Unit
+      handleTidesMoonDistChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just d -> do
+          setTidesMoonDistRadii d
+          setTidesMoonParams tidesMoonCount tidesMoonMassTenths d setTidesInfo
+
+      handleTidesDayChange :: Maybe String -> Effect Unit
+      handleTidesDayChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just d -> do
+          setTidesDayOfYearState d
+          setTidesDayOfYear d setTidesInfo
+
+      handleTidesAspectChange :: String -> Effect Unit
+      handleTidesAspectChange asp = do
+        setTidesAspect asp
+        setTidesDisplayOptions asp tidesShowArrows
+
+      handleToggleTidesArrows :: Effect Unit
+      handleToggleTidesArrows = do
+        let next = not tidesShowArrows
+        setTidesShowArrows next
+        setTidesDisplayOptions tidesAspect next
+
     pure case screen of
       MainMenu ->
         R.div
@@ -2086,6 +2197,13 @@ mkApp = do
                                                   , disabled: not wasmReady
                                                   , onClick: capture_ (setScreen RiversScreen)
                                                   , children: [ R.text "Rivers" ]
+                                                  }
+                                              , R.button
+                                                  { id: "tides-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen TidesScreen)
+                                                  , children: [ R.text "Dynamic Tides" ]
                                                   }
                                               ]
                                           }
@@ -6477,6 +6595,325 @@ mkApp = do
                                               <> " visible stars)"
                                           )
                                       ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      TidesScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              , R.button
+                                  { id: "tides-arrows-btn"
+                                  , className: if tidesShowArrows then "action-btn" else "action-btn secondary"
+                                  , onClick: capture_ handleToggleTidesArrows
+                                  , children:
+                                      [ R.text
+                                          (if tidesShowArrows then "Tidal Currents: On" else "Tidal Currents: Off")
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text "Clicked Fine Tile Tide Gauge, Sky/Horizon Vantage & Stratigraphy" ]
+                                  }
+                              , if tidesInfo.tileView.hasTile then
+                                  React.fragment
+                                    [ renderSparklineBox
+                                        { canvasId: "tides-sparkline-canvas"
+                                        , title: "48-Hour Tide Gauge (η relative to MSL)"
+                                        , subtitle: tidesInfo.sparkSubtitle
+                                        , minLabel: tidesInfo.sparkMinLabel
+                                        , maxLabel: tidesInfo.sparkMaxLabel
+                                        , currentLabel: tidesInfo.sparkCurrentLabel
+                                        }
+                                    , renderTileSkyAndVantageSection
+                                        (SyncedSimClock tidesInfo.clockLabel)
+                                        tidesInfo.tileView
+                                    ]
+                                else
+                                  React.empty
+                              , renderStratigraphySideViewBox
+                              , R.div
+                                  { id: "tides-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text tidesInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { id: "tides-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { className: "stat-line"
+                                  , style: R.css { fontWeight: "700", color: "#38bdf8" }
+                                  , children: [ R.text tidesInfo.planetName ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Full-Sphere Fine Grid: Size "
+                                              <> show tidesInfo.coarseGridSize
+                                              <> " → "
+                                              <> show tidesInfo.fineGridSize
+                                              <> " ("
+                                              <> show tidesInfo.tileCount
+                                              <> " tiles)"
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , style: R.css { color: "#fde047", fontWeight: "600" }
+                                  , children: [ R.text ("Clock: " <> tidesInfo.clockLabel) ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Peak |η|: "
+                                              <> tidesInfo.maxTideText
+                                              <> " · Max 28h Range: "
+                                              <> tidesInfo.maxRangeText
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Peak Current: "
+                                              <> tidesInfo.maxCurrentText
+                                              <> " · Inundated Land: "
+                                              <> show tidesInfo.inundatedTiles
+                                              <> " tiles"
+                                          )
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "tides-play-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (toggleTidesRunning setTidesInfo)
+                                  , children: [ R.text (if tidesInfo.isRunning then "⏸ Pause" else "▶ Play") ]
+                                  }
+                              , R.button
+                                  { id: "tides-step1h-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: tidesInfo.isRunning
+                                  , onClick: capture_ (stepTidesHours 1 setTidesInfo)
+                                  , children: [ R.text "+1h" ]
+                                  }
+                              , R.button
+                                  { id: "tides-step24h-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: tidesInfo.isRunning
+                                  , onClick: capture_ (stepTidesHours 24 setTidesInfo)
+                                  , children: [ R.text "+24h" ]
+                                  }
+                              , R.button
+                                  { id: "tides-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (resetTidesSim setTidesInfo)
+                                  , children: [ R.text "Reset (t=0)" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Globe Display Mode" ]
+                                  }
+                              , R.div
+                                  { className: "button-row"
+                                  , children:
+                                      [ R.button
+                                          { className: if tidesAspect == "live_eta" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleTidesAspectChange "live_eta")
+                                          , children: [ R.text "Live Tide η" ]
+                                          }
+                                      , R.button
+                                          { className: if tidesAspect == "tidal_range" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleTidesAspectChange "tidal_range")
+                                          , children: [ R.text "28h Range & Nodes" ]
+                                          }
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "button-row"
+                                  , children:
+                                      [ R.button
+                                          { className: if tidesAspect == "current_speed" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleTidesAspectChange "current_speed")
+                                          , children: [ R.text "Current Speed" ]
+                                          }
+                                      , R.button
+                                          { className: if tidesAspect == "bathymetry" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleTidesAspectChange "bathymetry")
+                                          , children: [ R.text "Fine Bathymetry" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text
+                                          ( "Orbital Season Start: Day "
+                                              <> show tidesDayOfYear
+                                              <> " / "
+                                              <> show (max 1 tidesInfo.daysPerYear)
+                                          )
+                                      ]
+                                  }
+                              , R.input
+                                  { id: "tides-day-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: show (max 1 (tidesInfo.daysPerYear - 1))
+                                  , step: "1"
+                                  , value: show tidesDayOfYear
+                                  , onChange: handler targetValue handleTidesDayChange
+                                  }
+                              , R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text ("Moons in Laplace Resonance: " <> show tidesMoonCount) ]
+                                  }
+                              , R.input
+                                  { id: "tides-moon-count-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "6"
+                                  , step: "1"
+                                  , value: show tidesMoonCount
+                                  , onChange: handler targetValue handleTidesMoonCountChange
+                                  }
+                              , R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text
+                                          ( "Primary Moon Mass: "
+                                              <> show (Int.toNumber tidesMoonMassTenths / 10.0)
+                                              <> "× Lunar"
+                                          )
+                                      ]
+                                  }
+                              , R.input
+                                  { id: "tides-moon-mass-slider"
+                                  , type: "range"
+                                  , min: "1"
+                                  , max: "50"
+                                  , step: "1"
+                                  , value: show tidesMoonMassTenths
+                                  , onChange: handler targetValue handleTidesMoonMassChange
+                                  }
+                              , R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text
+                                          ("Primary Moon Distance: " <> show tidesMoonDistRadii <> " Rp")
+                                      ]
+                                  }
+                              , R.input
+                                  { id: "tides-moon-dist-slider"
+                                  , type: "range"
+                                  , min: "20"
+                                  , max: "120"
+                                  , step: "1"
+                                  , value: show tidesMoonDistRadii
+                                  , onChange: handler targetValue handleTidesMoonDistChange
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "tides-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadEarthIntoTides setTidesInfo)
+                                  , children: [ R.text "Use Earth" ]
+                                  }
+                              , R.button
+                                  { id: "tides-saved-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: not tidesInfo.hasSavedPlanet
+                                  , onClick: capture_ (loadSavedPlanetIntoTides setTidesInfo)
+                                  , children: [ R.text "Saved Planet" ]
+                                  }
+                              , R.button
+                                  { id: "tides-load-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadFilePlanetIntoTides setTidesInfo)
+                                  , children: [ R.text "Load (.tec11)" ]
                                   }
                               ]
                           }

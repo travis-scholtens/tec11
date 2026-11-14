@@ -3,9 +3,11 @@ pub mod fv_geom;
 pub mod koeppen;
 pub mod model;
 pub mod ocean;
+pub mod tides;
 
 pub use earth_data::EARTH_SIZE6_ELEVATIONS_M;
 pub use fv_geom::{CellEdgeIncidence, DirectedDualEdge, FiniteVolumeSphereGeom};
+pub use tides::{AtmosphericTideForcing, LaplaceTidalSolver, TidalMoonBody};
 pub use koeppen::{classify_tile, KoeppenCode, TileClimateClassification};
 pub use model::{
     bearing_deg, insolation, nominal_cells_for_spin, temp_range_for_glaciation, wind_direction_deg,

@@ -24,6 +24,7 @@ rust_library(
         "src/sun_sky.rs",
         "src/tectonics.rs",
         "src/terrain.rs",
+        "src/tides_sandbox.rs",
         "src/tile.rs",
         "src/world.rs",
     ],
