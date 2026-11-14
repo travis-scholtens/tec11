@@ -317,8 +317,8 @@ pub fn deposit_sedimentary(
     if is_sea && !has_life {
         let bif_iron = (0.22 * (1.0 - 0.5 * felsity)).clamp(0.10, 0.35);
         let bif_chert = 0.24;
-        sulfidity = Some((sulfidity.unwrap_or(0.0) + bif_iron).clamp(0.0, 1.0));
-        quartzity = Some((quartzity.unwrap_or(0.0) + bif_chert).clamp(0.0, 1.0));
+        sulfidity = Some(sulfidity.unwrap_or(0.0).max(bif_iron));
+        quartzity = Some(quartzity.unwrap_or(0.0).max(bif_chert));
     }
 
     // Halite/gypsum evaporite salts dissolve in wet runoff (`0.25` inherited retention) and

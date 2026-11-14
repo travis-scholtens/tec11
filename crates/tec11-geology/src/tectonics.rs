@@ -1665,6 +1665,16 @@ impl TectonicsSimulation {
                 layer.thickness,
                 attrs.join(", ")
             ));
+            if idx > 0 {
+                let intf = tile.derive_interface_occurrences(idx - 1, depth_from_surface);
+                if !intf.is_empty() {
+                    let labels: Vec<&str> = intf.iter().map(|o| o.label.as_str()).collect();
+                    lines.push(format!(
+                        "  ┄ Interface ({depth_from_surface:.2} km): {}",
+                        labels.join(" + ")
+                    ));
+                }
+            }
         }
 
         lines.join("\n")
@@ -2513,6 +2523,40 @@ mod tests {
             bif_count > 0,
             "Expected Banded Iron Formation (co-enriched sulfidity + quartzity) layers"
         );
+
+        // Verify precious minerals (e.g., workable Gold) are genuinely rare on land compared to Quartz:
+        let land_tiles: Vec<&TileGeology> =
+            sim.tiles().iter().filter(|t| t.elevation() > 0.0).collect();
+        if !land_tiles.is_empty() {
+            let mut workable_gold_tiles = 0usize;
+            let mut workable_quartz_tiles = 0usize;
+            for t in &land_tiles {
+                let acc = t.accessible_mineral_abundances(0.5);
+                if acc
+                    .get(&crate::tile::MineralKind::Gold)
+                    .map(|&(g, a)| g >= crate::tile::WORKABLE_GRADE && a >= 0.005)
+                    .unwrap_or(false)
+                {
+                    workable_gold_tiles += 1;
+                }
+                if acc
+                    .get(&crate::tile::MineralKind::Quartz)
+                    .map(|&(g, a)| g >= crate::tile::WORKABLE_GRADE && a >= 0.020)
+                    .unwrap_or(false)
+                {
+                    workable_quartz_tiles += 1;
+                }
+            }
+            let gold_frac = workable_gold_tiles as f32 / land_tiles.len() as f32;
+            assert!(
+                gold_frac < 0.10,
+                "Workable surface gold should be rare (<10% of land tiles), got {:.1}% ({}/{}); quartz={}",
+                gold_frac * 100.0,
+                workable_gold_tiles,
+                land_tiles.len(),
+                workable_quartz_tiles
+            );
+        }
 
         // Verify .tec11 snapshot roundtrip preserves all four compositional fields:
         let bytes = sim.encode_snapshot();

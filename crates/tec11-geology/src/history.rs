@@ -3077,11 +3077,40 @@ impl HistorySimulation {
     /// Determine which Rock and Mineral concept keys are present in the near-surface layers of `tile`.
     /// "Near surface" means within `max_depth_km` of the surface (default 0.5 km for rocks people can
     /// quarry or encounter in outcrops, riverbeds, and caves).
+    fn mineral_kind_to_concept_id(mk: crate::tile::MineralKind) -> Option<u32> {
+        use crate::tile::MineralKind;
+        match mk {
+            MineralKind::Iron => Some(MINERAL_IRON),
+            MineralKind::Salt => Some(MINERAL_SALT),
+            MineralKind::Gypsum => Some(MINERAL_GYPSUM),
+            MineralKind::Gold => Some(MINERAL_GOLD),
+            MineralKind::Copper => Some(MINERAL_COPPER),
+            MineralKind::Tin => Some(MINERAL_TIN),
+            MineralKind::Coal => Some(MINERAL_COAL),
+            MineralKind::Graphite => None,
+            MineralKind::Quartz => Some(MINERAL_QUARTZ),
+            MineralKind::Flint => Some(MINERAL_FLINT),
+            MineralKind::Silver => Some(MINERAL_SILVER),
+            MineralKind::LeadZinc => Some(MINERAL_LEAD_ZINC),
+            MineralKind::Tungsten => Some(MINERAL_TUNGSTEN),
+            MineralKind::Nickel => Some(MINERAL_NICKEL),
+            MineralKind::Platinum => Some(MINERAL_PLATINUM),
+            MineralKind::Diamond => Some(MINERAL_DIAMOND),
+            MineralKind::Ruby => Some(MINERAL_RUBY),
+            MineralKind::Sapphire => Some(MINERAL_SAPPHIRE),
+            MineralKind::Emerald => Some(MINERAL_EMERALD),
+            MineralKind::Jade => Some(MINERAL_JADE),
+            MineralKind::Lapis => Some(MINERAL_LAPIS),
+            MineralKind::Turquoise => Some(MINERAL_TURQUOISE),
+            MineralKind::Opal => Some(MINERAL_OPAL),
+        }
+    }
+
     fn surface_rock_and_mineral_concepts(
         tile: &crate::tile::TileGeology,
         max_depth_km: f32,
     ) -> (BTreeSet<u32>, BTreeSet<u32>) {
-        use crate::rock::RockKind;
+        use crate::tile::WORKABLE_GRADE;
         let mut rocks = BTreeSet::new();
         let mut minerals = BTreeSet::new();
 
@@ -3092,146 +3121,90 @@ impl HistorySimulation {
         }
 
         let mut depth_from_surface = 0.0f32;
-        for (layer_idx, layer) in tile.layers.iter().enumerate().rev() {
+        for layer in tile.layers.iter().rev() {
             if depth_from_surface >= max_depth_km {
                 break;
             }
             let r = &layer.rock;
-            // Map rock name → Rock concept
-            match r.name {
-                "granite" => { rocks.insert(ROCK_GRANITE); }
-                "basalt" => {
-                    if r.felsity <= 0.35 {
-                        rocks.insert(ROCK_KIMBERLITE);
-                    } else {
-                        rocks.insert(ROCK_BASALT);
+            // Map rock name → Rock concept (requiring non-trivial thickness near surface)
+            let vis_thick = (max_depth_km - depth_from_surface).min(layer.thickness);
+            if vis_thick >= 0.03 {
+                match r.name {
+                    "granite" => {
+                        rocks.insert(ROCK_GRANITE);
                     }
-                }
-                "sandstone" => { rocks.insert(ROCK_SANDSTONE); }
-                "limestone" => { rocks.insert(ROCK_LIMESTONE); }
-                "marble" => { rocks.insert(ROCK_MARBLE); }
-                "chalk" => { rocks.insert(ROCK_CHALK); }
-                "pelite" | "psammite" | "psephite" => { rocks.insert(ROCK_SLATE); }
-                "claystone" | "siltstone" => { rocks.insert(ROCK_CLAY); }
-                "conglomerate" => { rocks.insert(ROCK_CONGLOMERATE); }
-                "rhyolite" | "dacite" => { rocks.insert(ROCK_OBSIDIAN); }
-                "amphibolite" | "granulite" | "greenschist" => { rocks.insert(ROCK_GNEISS); }
-                _ => {}
-            }
-
-            // Derive mineral concepts from rock properties
-            let q = r.quartzity.unwrap_or(0.0);
-            let s = r.sulfidity.unwrap_or(0.0);
-            let sal = r.salinity.unwrap_or(0.0);
-            let bog = r.bogginess.unwrap_or(0.0);
-
-            let is_bif = s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8 && r.kind != RockKind::Igneous;
-
-            // Iron ore from BIF (co-precipitated sulfide + chert in marine beds)
-            if is_bif {
-                minerals.insert(MINERAL_IRON);
-            }
-            // Salt / halite / gypsum from evaporites
-            if sal >= 0.08 {
-                minerals.insert(MINERAL_SALT);
-                minerals.insert(MINERAL_GYPSUM);
-            }
-            // Gold from quartz veins and alluvial placers
-            if q >= 0.05 && !is_bif {
-                minerals.insert(MINERAL_QUARTZ);
-                match r.kind {
-                    RockKind::Sedimentary if r.clasticity.unwrap_or(2.0) <= 1.5 => {
-                        minerals.insert(MINERAL_GOLD);
+                    "basalt" => {
+                        if r.felsity <= 0.35 {
+                            rocks.insert(ROCK_KIMBERLITE);
+                        } else {
+                            rocks.insert(ROCK_BASALT);
+                        }
                     }
-                    RockKind::Igneous if matches!(r.name, "andesite" | "dacite" | "rhyolite" | "granite") => {
-                        minerals.insert(MINERAL_GOLD);
+                    "sandstone" => {
+                        rocks.insert(ROCK_SANDSTONE);
                     }
-                    RockKind::Metamorphic => {
-                        minerals.insert(MINERAL_GOLD);
+                    "limestone" => {
+                        rocks.insert(ROCK_LIMESTONE);
+                    }
+                    "marble" => {
+                        rocks.insert(ROCK_MARBLE);
+                    }
+                    "chalk" => {
+                        rocks.insert(ROCK_CHALK);
+                    }
+                    "pelite" | "psammite" | "psephite" => {
+                        rocks.insert(ROCK_SLATE);
+                    }
+                    "claystone" | "siltstone" => {
+                        rocks.insert(ROCK_CLAY);
+                    }
+                    "conglomerate" => {
+                        rocks.insert(ROCK_CONGLOMERATE);
+                    }
+                    "rhyolite" | "dacite" => {
+                        rocks.insert(ROCK_OBSIDIAN);
+                    }
+                    "amphibolite" | "granulite" | "greenschist" => {
+                        rocks.insert(ROCK_GNEISS);
                     }
                     _ => {}
                 }
-                // Tin from granitic pegmatites and felsic alluvial placers
-                if r.felsity > 0.62 {
-                    minerals.insert(MINERAL_TIN);
-                }
             }
-            // Copper from sulfide ores
-            if s >= 0.10 && !is_bif {
-                minerals.insert(MINERAL_COPPER);
-            }
-            // Coal / peat from non-igneous, non-diamondiferous organic seams
-            let is_shock_diamond = r.name == "hornfels" && (0.82..=0.94).contains(&r.toughness);
-            if bog >= 0.05 && r.kind != RockKind::Igneous && r.name != "eclogite" && !is_shock_diamond {
-                minerals.insert(MINERAL_COAL);
-            }
-            // Flint / chert from siliceous limestone and chalk
-            if (r.name == "limestone" || r.name == "chalk") && q >= 0.04 {
-                minerals.insert(MINERAL_FLINT);
-            }
-            // Flint also from siliceous chert beds
-            if q >= 0.16 && r.kind == RockKind::Sedimentary {
-                minerals.insert(MINERAL_FLINT);
-            }
-
-            // Silver from polymetallic sulfide veins in felsic igneous/metamorphic rocks
-            if s >= 0.10 && !is_bif {
-                if r.felsity > 0.52 || r.kind == RockKind::Metamorphic {
-                    minerals.insert(MINERAL_SILVER);
-                }
-            }
-            // Lead & zinc from stratiform sulfide deposits and polymetallic veins
-            if s >= 0.12 && !is_bif {
-                minerals.insert(MINERAL_LEAD_ZINC);
-            }
-            // Tungsten from granitic pegmatite / greisen veins (felsic + quartz-rich)
-            if q >= 0.08 && r.felsity > 0.62 && matches!(r.kind, RockKind::Igneous | RockKind::Metamorphic) {
-                minerals.insert(MINERAL_TUNGSTEN);
-            }
-            // Nickel from mafic/ultramafic sulfide cumulates and impact melts
-            if s >= 0.11 && r.kind == RockKind::Igneous && r.felsity < 0.52 {
-                minerals.insert(MINERAL_NICKEL);
-            }
-            if tile.impact_scar >= 0.45 && r.name == "basalt" && s >= 0.20 {
-                minerals.insert(MINERAL_NICKEL);
-            }
-            // Platinum (PGM) from Sudbury-type impact-melt sulfide sheets & low-felsity gabbro cumulates
-            if (tile.impact_scar >= 0.45 && r.name == "basalt" && s >= 0.25)
-                || (r.name == "gabbro" && r.felsity <= 0.46 && s >= 0.14)
-            {
-                minerals.insert(MINERAL_PLATINUM);
-            }
-
-            // Precious & semi-precious gemstones (shared with `TileGeology::derive_layer_deposits`)
-            let gems = tile.derive_layer_gems(layer_idx, depth_from_surface);
-            if gems.diamond {
-                minerals.insert(MINERAL_DIAMOND);
-            }
-            if gems.ruby {
-                minerals.insert(MINERAL_RUBY);
-            }
-            if gems.sapphire {
-                minerals.insert(MINERAL_SAPPHIRE);
-            }
-            if gems.emerald {
-                minerals.insert(MINERAL_EMERALD);
-            }
-            if gems.jade {
-                minerals.insert(MINERAL_JADE);
-            }
-            if gems.lapis {
-                minerals.insert(MINERAL_LAPIS);
-            }
-            if gems.turquoise {
-                minerals.insert(MINERAL_TURQUOISE);
-            }
-            if gems.opal {
-                minerals.insert(MINERAL_OPAL);
-            }
-
             depth_from_surface += layer.thickness;
         }
+
+        // Derive workable mineral & gemstone concepts across both layers and contact interfaces:
+        // Sparse `Trace` flecks (`< WORKABLE_GRADE`) are too minor to support local mining/lexicon naming.
+        for (mk, (max_grade, abundance)) in tile.accessible_mineral_abundances(max_depth_km) {
+            let min_abund = if mk.is_bulk_bedded() { 0.020 } else { 0.005 };
+            if max_grade >= WORKABLE_GRADE && abundance >= min_abund {
+                if let Some(cid) = Self::mineral_kind_to_concept_id(mk) {
+                    minerals.insert(cid);
+                }
+            }
+        }
+
         (rocks, minerals)
+    }
+
+    fn exportable_mineral_concepts(
+        tile: &crate::tile::TileGeology,
+        max_depth_km: f32,
+    ) -> BTreeSet<u32> {
+        let mut exported = BTreeSet::new();
+        if tile.elevation() < -0.5 {
+            return exported;
+        }
+        // Foreign trade networks export minerals from genuinely rich / abundant mining districts:
+        for (mk, (max_grade, abundance)) in tile.accessible_mineral_abundances(max_depth_km) {
+            let min_export_abund = if mk.is_bulk_bedded() { 0.055 } else { 0.015 };
+            if max_grade >= 0.30 && abundance >= min_export_abund {
+                if let Some(cid) = Self::mineral_kind_to_concept_id(mk) {
+                    exported.insert(cid);
+                }
+            }
+        }
+        exported
     }
 
     /// Accumulate concepts across co-resident communities, trade partners, rivals, and recursive trade imports,
@@ -3276,8 +3249,7 @@ impl HistorySimulation {
                 let c_idx = self.fine_primary_coarse[t];
                 if seen_c.insert(c_idx) {
                     if let Some(tg) = geo_tiles.get(c_idx) {
-                        let (_, mins) = Self::surface_rock_and_mineral_concepts(tg, 0.5);
-                        s_mins.extend(mins);
+                        s_mins.extend(Self::exportable_mineral_concepts(tg, 0.5));
                     }
                 }
             }

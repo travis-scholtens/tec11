@@ -799,6 +799,16 @@ impl WorldSimulation {
                 r.felsity,
                 r.toughness
             ));
+            if idx > 0 {
+                let intf = tile.derive_interface_occurrences(idx - 1, depth_from_surface);
+                if !intf.is_empty() {
+                    let labels: Vec<&str> = intf.iter().map(|o| o.label.as_str()).collect();
+                    lines.push(format!(
+                        "    ┄ Interface ({depth_from_surface:.2} km): {}",
+                        labels.join(" + ")
+                    ));
+                }
+            }
         }
         lines.join("\n")
     }

@@ -4465,9 +4465,25 @@ function paintStratigraphySideCanvas(view) {
       }
     }
 
-    // E. Hydrothermal Quartz / Gold / Tin Veins (`quartzity >= 0.05`)
-    if (qtz >= 0.05 && !(layer.kind === "S" && sulf >= 0.08)) {
-      const veinCount = Math.min(6, Math.max(2, Math.round(qtz * 7)));
+    // Extract continuous mineral grades (`0.0..1.0`) from structured `layer.occurrences`:
+    const minGrades = {};
+    for (const occ of layer.occurrences || []) {
+      for (const pair of occ.minerals || []) {
+        if (Array.isArray(pair) && pair.length >= 2) {
+          const mk = pair[0];
+          const mg = typeof pair[1] === "number" ? pair[1] : 0.0;
+          if (mg > (minGrades[mk] || 0.0)) minGrades[mk] = mg;
+        }
+      }
+    }
+    const goldGrade = minGrades.gold || 0.0;
+    const tinGrade = Math.max(minGrades.tin || 0.0, minGrades.tungsten || 0.0);
+
+    // E. Hydrothermal Quartz / Gold / Tin-Tungsten Veins (`quartzity >= 0.08`)
+    if (qtz >= 0.08 && !(layer.kind === "S" && sulf >= 0.12) && layer.kind !== "S") {
+      const veinCount = Math.min(6, Math.max(1, Math.round(qtz * 6.5)));
+      const metalGrade = Math.max(goldGrade, tinGrade);
+      const metalVeinLimit = metalGrade >= 0.06 ? Math.max(1, Math.ceil(veinCount * Math.min(1.0, metalGrade * 1.4))) : 0;
       for (let v = 0; v < veinCount; v++) {
         const u0 = 0.1 + 0.8 * detRand(lSeed, v, 11);
         const u1 = Math.max(0.04, Math.min(0.96, u0 + (detRand(lSeed, v, 12) - 0.5) * 0.22));
@@ -4484,8 +4500,8 @@ function paintStratigraphySideCanvas(view) {
         const y1 = topPts[i1][1] - 1;
 
         // Milky white quartz vein
-        ctx.strokeStyle = "rgba(248, 250, 252, 0.9)";
-        ctx.lineWidth = qtz >= 0.35 ? 2.1 : 1.35;
+        ctx.strokeStyle = "rgba(248, 250, 252, 0.88)";
+        ctx.lineWidth = qtz >= 0.35 ? 2.1 : 1.3;
         ctx.beginPath();
         ctx.moveTo(x0, y0);
         ctx.lineTo(xMid, yMid);
@@ -4495,25 +4511,25 @@ function paintStratigraphySideCanvas(view) {
         // Branching offshoot veinlet
         const xb = xMid + (detRand(lSeed, v, 14) > 0.5 ? 9 : -9);
         const yb = yMid - 0.25 * bandH;
-        ctx.lineWidth = 0.95;
+        ctx.lineWidth = 0.9;
         ctx.beginPath();
         ctx.moveTo(xMid, yMid);
         ctx.lineTo(xb, yb);
         ctx.stroke();
 
-        // Gold / Cassiterite flecks along the quartz vein
-        if (qtz >= 0.12) {
-          ctx.fillStyle =
-            layer.felsity >= 0.65 && layer.kind === "I" ? "#e2e8f0" : "#facc15";
+        // Gold / Cassiterite flecks ONLY when continuous gold/tin grade is present (`>= 0.06`)
+        if (v < metalVeinLimit) {
+          ctx.fillStyle = goldGrade >= tinGrade ? "#facc15" : "#e2e8f0";
+          const fleckR = 1.15 + 1.35 * Math.min(1.0, metalGrade);
           ctx.beginPath();
-          ctx.arc(xMid, yMid, qtz >= 0.35 ? 2.0 : 1.4, 0, Math.PI * 2);
+          ctx.arc(xMid, yMid, fleckR, 0, Math.PI * 2);
           ctx.fill();
         }
       }
     }
 
-    // F. Sulfide Ore Veins / Porphyry Stockwork / VMS / Impact Nickel-Copper Sulfides (`sulfidity >= 0.10`)
-    if (sulf >= 0.10 && !(layer.kind === "S" && qtz >= 0.08)) {
+    // F. Sulfide Ore Veins / Porphyry Stockwork / VMS / Impact Nickel-Copper Sulfides (`sulfidity >= 0.15`)
+    if (sulf >= 0.15 && !(layer.kind === "S" && qtz >= 0.18)) {
       const sulfCount = Math.min(6, Math.max(2, Math.round(sulf * 6)));
       for (let sv = 0; sv < sulfCount; sv++) {
         const u0 = 0.12 + 0.76 * detRand(lSeed, sv, 21);
@@ -4548,58 +4564,76 @@ function paintStratigraphySideCanvas(view) {
       }
     }
 
-    // G. Alluvial Placer Gold / Tin Nuggets at base of Sandstone / Conglomerate
-    if (layer.kind === "S" && (lname === "conglomerate" || lname === "sandstone") && qtz >= 0.05) {
-      const nuggetCount = Math.min(9, Math.max(3, Math.round(qtz * 12)));
-      for (let n = 0; n < nuggetCount; n++) {
-        const u = 0.08 + 0.84 * detRand(lSeed, n, 31);
-        const idx = Math.min(steps, Math.floor(u * steps));
-        const nx = colLeft + u * colW;
-        const ny = botPts[idx][1] - 2.2;
-        ctx.fillStyle = "#facc15";
-        ctx.strokeStyle = "#713f12";
-        ctx.lineWidth = 0.7;
-        ctx.beginPath();
-        ctx.arc(nx, ny, 2.0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
+    // G. Alluvial Placer Gold / Tin Nuggets (ONLY when `gold` or `tin` grade >= 0.06; barren quartz draws pale pebbles)
+    if (layer.kind === "S" && (lname === "conglomerate" || lname === "sandstone")) {
+      const placerGrade = Math.max(goldGrade, tinGrade);
+      if (placerGrade >= 0.06) {
+        const nuggetCount = Math.min(9, Math.max(2, Math.round(1.5 + placerGrade * 8.0)));
+        const nuggetR = 1.25 + 1.25 * Math.min(1.0, placerGrade);
+        for (let n = 0; n < nuggetCount; n++) {
+          const u = 0.08 + 0.84 * detRand(lSeed, n, 31);
+          const idx = Math.min(steps, Math.floor(u * steps));
+          const nx = colLeft + u * colW;
+          const ny = botPts[idx][1] - 2.2;
+          ctx.fillStyle = goldGrade >= tinGrade ? "#facc15" : "#cbd5e1";
+          ctx.strokeStyle = goldGrade >= tinGrade ? "#713f12" : "#334155";
+          ctx.lineWidth = 0.7;
+          ctx.beginPath();
+          ctx.arc(nx, ny, nuggetR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      } else if ((minGrades.quartz || 0.0) >= 0.12) {
+        const pebbleCount = Math.min(6, Math.max(2, Math.round((minGrades.quartz || 0.1) * 6)));
+        for (let p = 0; p < pebbleCount; p++) {
+          const u = 0.10 + 0.80 * detRand(lSeed, p, 33);
+          const idx = Math.min(steps, Math.floor(u * steps));
+          const px = colLeft + u * colW;
+          const py = botPts[idx][1] - 2.0;
+          ctx.fillStyle = "rgba(241, 245, 249, 0.65)";
+          ctx.beginPath();
+          ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
 
-    // H. Precious & Semi-Precious Gemstones (Ruby, Sapphire, Emerald, Jade, Lapis, Turquoise, Opal, Impact Diamond)
-    const layerDepStr = (layer.deposits || []).join(" ");
+    // H. Precious & Semi-Precious Gemstones (crystal count & size scaled by continuous `grade`)
     let gemStyle = null;
-    if (layerDepStr.includes("Impact-Shocked Diamond")) {
-      gemStyle = { fill: "#67e8f9", stroke: "#ffffff" };
-    } else if (layerDepStr.includes("Ruby")) {
-      gemStyle = { fill: "#ef4444", stroke: "#fecdd3" };
-    } else if (layerDepStr.includes("Sapphire")) {
-      gemStyle = { fill: "#3b82f6", stroke: "#bfdbfe" };
-    } else if (layerDepStr.includes("Emerald")) {
-      gemStyle = { fill: "#10b981", stroke: "#a7f3d0" };
-    } else if (layerDepStr.includes("Jade")) {
-      gemStyle = { fill: "#4ade80", stroke: "#dcfce7" };
-    } else if (layerDepStr.includes("Lapis")) {
-      gemStyle = { fill: "#1d4ed8", stroke: "#facc15" };
-    } else if (layerDepStr.includes("Turquoise")) {
-      gemStyle = { fill: "#06b6d4", stroke: "#cffafe" };
-    } else if (layerDepStr.includes("Opal")) {
-      gemStyle = { fill: "#f0abfc", stroke: "#fef08a" };
+    if (layer.kind !== "I" && minGrades.diamond >= 0.06) {
+      gemStyle = { fill: "#67e8f9", stroke: "#ffffff", grade: minGrades.diamond };
+    } else if (minGrades.ruby >= 0.06) {
+      gemStyle = { fill: "#ef4444", stroke: "#fecdd3", grade: minGrades.ruby };
+    } else if (minGrades.sapphire >= 0.06) {
+      gemStyle = { fill: "#3b82f6", stroke: "#bfdbfe", grade: minGrades.sapphire };
+    } else if (minGrades.emerald >= 0.06) {
+      gemStyle = { fill: "#10b981", stroke: "#a7f3d0", grade: minGrades.emerald };
+    } else if (minGrades.jade >= 0.06) {
+      gemStyle = { fill: "#4ade80", stroke: "#dcfce7", grade: minGrades.jade };
+    } else if (minGrades.lapis >= 0.06) {
+      gemStyle = { fill: "#1d4ed8", stroke: "#facc15", grade: minGrades.lapis };
+    } else if (minGrades.turquoise >= 0.06) {
+      gemStyle = { fill: "#06b6d4", stroke: "#cffafe", grade: minGrades.turquoise };
+    } else if (minGrades.opal >= 0.06) {
+      gemStyle = { fill: "#f0abfc", stroke: "#fef08a", grade: minGrades.opal };
     }
     if (gemStyle) {
-      for (let g = 0; g < 4; g++) {
-        const u = 0.16 + g * 0.22 + (detRand(lSeed, g, 41) - 0.5) * 0.06;
-        const idx = Math.min(steps, Math.floor(Math.max(0, Math.min(1, u)) * steps));
-        const gx = colLeft + u * colW;
+      const gemCount = Math.min(6, Math.max(1, Math.round(1.0 + gemStyle.grade * 5.0)));
+      const gemR = 2.0 + 1.4 * Math.min(1.0, gemStyle.grade);
+      for (let g = 0; g < gemCount; g++) {
+        const u = ((g + 0.65) / (gemCount + 0.3)) + (detRand(lSeed, g, 41) - 0.5) * 0.06;
+        const uClamped = Math.max(0.08, Math.min(0.92, u));
+        const idx = Math.min(steps, Math.floor(uClamped * steps));
+        const gx = colLeft + uClamped * colW;
         const gy = topPts[idx][1] * 0.48 + botPts[idx][1] * 0.52;
         ctx.fillStyle = gemStyle.fill;
         ctx.strokeStyle = gemStyle.stroke;
         ctx.lineWidth = 0.9;
         ctx.beginPath();
-        ctx.moveTo(gx, gy - 3.0);
-        ctx.lineTo(gx + 2.6, gy);
-        ctx.lineTo(gx, gy + 3.0);
-        ctx.lineTo(gx - 2.6, gy);
+        ctx.moveTo(gx, gy - gemR * 1.1);
+        ctx.lineTo(gx + gemR * 0.9, gy);
+        ctx.lineTo(gx, gy + gemR * 1.1);
+        ctx.lineTo(gx - gemR * 0.9, gy);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
@@ -4609,7 +4643,7 @@ function paintStratigraphySideCanvas(view) {
     ctx.restore(); // End layer clip
 
     // Draw layer boundary stroke (highlight if hovered)
-    const isHovered = view.hoveredStratLayerIdx === i;
+    const isHovered = view.hoveredStratLayerIdx === i && (view.hoveredStratInterfaceIdx === undefined || view.hoveredStratInterfaceIdx < 0);
     traceLayerPoly();
     ctx.strokeStyle = isHovered ? "#38bdf8" : style.stroke;
     ctx.lineWidth = isHovered ? 2.0 : 0.9;
@@ -4622,6 +4656,68 @@ function paintStratigraphySideCanvas(view) {
       yBot: Math.max(padTop, Math.min(cssH - padBot, yBotBase)),
       midY: Math.max(padTop + 6, Math.min(cssH - padBot - 6, midY)),
       style,
+    });
+  }
+
+  // Layer-to-Layer Contact Interface Deposits (Skarns, Pegmatite-Schist Emeralds, Redox Traps, Unconformity Placers)
+  const hitInterfaces = [];
+  for (let ii = 0; ii < (strat.interfaces || []).length; ii++) {
+    const intf = strat.interfaces[ii];
+    const yBase = kmToY(intf.elevationKm);
+    if (yBase < padTop - 8 || yBase > cssH - padBot + 8) continue;
+    const depJoined = (intf.deposits || []).join(" ");
+    const grade = Math.max(0.06, Math.min(1.0, intf.peakGrade || 0.25));
+    const isIntfHovered = view.hoveredStratInterfaceIdx === ii;
+
+    let strokeCol = "#f59e0b";
+    let glowCol = "rgba(245, 158, 11, 0.35)";
+    if (depJoined.includes("Emerald")) {
+      strokeCol = "#10b981";
+      glowCol = "rgba(16, 185, 129, 0.42)";
+    } else if (depJoined.includes("Ruby")) {
+      strokeCol = "#ef4444";
+      glowCol = "rgba(239, 68, 68, 0.40)";
+    } else if (depJoined.includes("Jade")) {
+      strokeCol = "#4ade80";
+      glowCol = "rgba(74, 222, 128, 0.40)";
+    } else if (depJoined.includes("Lapis")) {
+      strokeCol = "#3b82f6";
+      glowCol = "rgba(59, 130, 246, 0.40)";
+    } else if (depJoined.includes("Diamond")) {
+      strokeCol = "#67e8f9";
+      glowCol = "rgba(103, 232, 249, 0.42)";
+    } else if (depJoined.includes("Gold")) {
+      strokeCol = "#facc15";
+      glowCol = "rgba(250, 204, 21, 0.42)";
+    } else if (depJoined.includes("Tungsten")) {
+      strokeCol = "#e2e8f0";
+      glowCol = "rgba(226, 232, 240, 0.38)";
+    }
+
+    const haloPx = Math.max(3.2, Math.min(9.0, 2.5 + grade * 5.5));
+    ctx.strokeStyle = isIntfHovered ? "rgba(56, 189, 248, 0.65)" : glowCol;
+    ctx.lineWidth = isIntfHovered ? haloPx + 2.5 : haloPx;
+    ctx.beginPath();
+    for (let s = 0; s <= steps; s++) {
+      const u = s / steps;
+      const x = colLeft + u * colW;
+      const y = yBase + foldOffsetPx(u, intf.depthKm || 0.0);
+      if (s === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    ctx.strokeStyle = isIntfHovered ? "#fef08a" : strokeCol;
+    ctx.lineWidth = isIntfHovered ? 2.2 : 1.4 + grade * 1.1;
+    ctx.setLineDash([5, 2]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    hitInterfaces.push({
+      idx: ii,
+      intf,
+      yBase: Math.max(padTop + 4, Math.min(cssH - padBot - 4, yBase)),
+      strokeCol,
     });
   }
 
@@ -4747,84 +4843,140 @@ function paintStratigraphySideCanvas(view) {
     drawLeftTick(mohoKm, `Moho`, "#fb923c");
   }
 
-  // 5. Right-side Layer Callouts & Deposit Badges (de-overlapped)
+  // 5. Right-side Layer & Contact Interface Callouts (de-overlapped in depth order)
   const minLabelSpacing = 13.5;
   let lastLabelY = padTop - 6;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
 
+  const shortDepositBadge = (depJoined) => {
+    if (depJoined.includes("Diamond")) return " 💎";
+    if (depJoined.includes("Ruby")) return " [Ruby]";
+    if (depJoined.includes("Sapphire")) return " [Sapph]";
+    if (depJoined.includes("Emerald")) return " [Emer]";
+    if (depJoined.includes("Jade")) return " [Jade]";
+    if (depJoined.includes("Lapis")) return " [Lapis]";
+    if (depJoined.includes("Turquoise")) return " [Turq]";
+    if (depJoined.includes("Opal")) return " [Opal]";
+    if (depJoined.includes("Kimberlite Pipe")) return " [Pipe]";
+    if (depJoined.includes("Banded Iron")) return " [BIF]";
+    if (depJoined.includes("Anthracite") || depJoined.includes("Bituminous") || depJoined.includes("Lignite") || depJoined.includes("Peat")) return " [Coal]";
+    if (depJoined.includes("Graphite")) return " [C]";
+    if (depJoined.includes("Gold")) return " [Au]";
+    if (depJoined.includes("Tungsten")) return " [W/Sn]";
+    if (depJoined.includes("Tin")) return " [Sn]";
+    if (depJoined.includes("Copper") || depJoined.includes("Sulfide") || depJoined.includes("Black-Smoker") || depJoined.includes("Skarn")) return " [Cu/S]";
+    if (depJoined.includes("Halite") || depJoined.includes("Gypsum") || depJoined.includes("Potash")) return " [Salt]";
+    if (depJoined.includes("Flint") || depJoined.includes("Chert")) return " [Flint]";
+    if (depJoined.includes("Quartz")) return " [Qtz]";
+    if (depJoined.includes("Karst")) return " [Cave]";
+    return "";
+  };
+
+  const callouts = [];
   for (let i = 0; i < hitBands.length; i++) {
     const hb = hitBands[i];
     const layer = hb.layer;
-    const isHovered = view.hoveredStratLayerIdx === hb.idx;
+    const isHovered =
+      view.hoveredStratLayerIdx === hb.idx &&
+      (view.hoveredStratInterfaceIdx === undefined || view.hoveredStratInterfaceIdx < 0);
     if (hb.yBot - hb.yTop < 3.5 && !isHovered && (!layer.deposits || layer.deposits.length === 0)) {
       continue;
     }
-    const labelY = Math.max(lastLabelY + minLabelSpacing, Math.min(cssH - 8, hb.midY));
+    const deps = layer.deposits || [];
+    const badge = shortDepositBadge(deps.join(" "));
+    const dispName =
+      layer.kind === "I" && typeof layer.felsity === "number" && layer.felsity <= 0.35
+        ? "kimberlite"
+        : layer.name;
+    callouts.push({
+      midY: hb.midY,
+      isHovered,
+      hasBadge: Boolean(badge),
+      isInterface: false,
+      text: `${dispName} (${layer.thicknessKm.toFixed(1)}k)${badge}`,
+      color: isHovered ? "#fef08a" : badge ? "#f8fafc" : "#cbd5e1",
+    });
+  }
+  for (let ii = 0; ii < hitInterfaces.length; ii++) {
+    const hi = hitInterfaces[ii];
+    const intf = hi.intf;
+    const isHovered = view.hoveredStratInterfaceIdx === hi.idx;
+    const badge = shortDepositBadge((intf.deposits || []).join(" "));
+    const pct = Math.round((intf.peakGrade || 0) * 100);
+    callouts.push({
+      midY: hi.yBase,
+      isHovered,
+      hasBadge: true,
+      isInterface: true,
+      text: `⇄ contact${badge} ${pct}%`,
+      color: isHovered ? "#fef08a" : hi.strokeCol,
+    });
+  }
+  callouts.sort((a, b) => a.midY - b.midY);
+
+  for (let c = 0; c < callouts.length; c++) {
+    const item = callouts[c];
+    const labelY = Math.max(lastLabelY + minLabelSpacing, Math.min(cssH - 8, item.midY));
     if (labelY > cssH - 5) break;
     lastLabelY = labelY;
 
-    // Leader line from layer right edge to label
-    const edgeY = Math.max(padTop + 2, Math.min(cssH - padBot - 2, hb.midY));
-    ctx.strokeStyle = isHovered ? "#38bdf8" : "rgba(100, 116, 139, 0.55)";
-    ctx.lineWidth = isHovered ? 1.3 : 0.8;
+    const edgeY = Math.max(padTop + 2, Math.min(cssH - padBot - 2, item.midY));
+    ctx.strokeStyle = item.isHovered
+      ? "#38bdf8"
+      : item.isInterface
+        ? item.color
+        : "rgba(100, 116, 139, 0.55)";
+    ctx.lineWidth = item.isHovered ? 1.4 : item.isInterface ? 1.0 : 0.8;
     ctx.beginPath();
     ctx.moveTo(colRight, edgeY);
     ctx.lineTo(colRight + 7, labelY);
     ctx.stroke();
 
-    // Short deposit tag if present
-    let badge = "";
-    const deps = layer.deposits || [];
-    const depJoined = deps.join(" ");
-    if (depJoined.includes("Diamond")) badge = " 💎";
-    else if (depJoined.includes("Ruby")) badge = " [Ruby]";
-    else if (depJoined.includes("Sapphire")) badge = " [Sapph]";
-    else if (depJoined.includes("Emerald")) badge = " [Emer]";
-    else if (depJoined.includes("Jade")) badge = " [Jade]";
-    else if (depJoined.includes("Lapis")) badge = " [Lapis]";
-    else if (depJoined.includes("Turquoise")) badge = " [Turq]";
-    else if (depJoined.includes("Opal")) badge = " [Opal]";
-    else if (depJoined.includes("Kimberlite Pipe")) badge = " [Pipe]";
-    else if (depJoined.includes("Banded Iron")) badge = " [BIF]";
-    else if (depJoined.includes("Anthracite") || depJoined.includes("Bituminous") || depJoined.includes("Lignite") || depJoined.includes("Peat")) badge = " [Coal]";
-    else if (depJoined.includes("Graphite")) badge = " [C]";
-    else if (depJoined.includes("Gold")) badge = " [Au]";
-    else if (depJoined.includes("Tin")) badge = " [Sn]";
-    else if (depJoined.includes("Copper") || depJoined.includes("Sulfide") || depJoined.includes("Black Smoker")) badge = " [Cu/S]";
-    else if (depJoined.includes("Halite") || depJoined.includes("Gypsum") || depJoined.includes("Potash")) badge = " [Salt]";
-    else if (depJoined.includes("Quartz")) badge = " [Qtz]";
-    else if (depJoined.includes("Karst")) badge = " [Cave]";
-
-    const dispName =
-      layer.kind === "I" && typeof layer.felsity === "number" && layer.felsity <= 0.35
-        ? "kimberlite"
-        : layer.name;
-    ctx.fillStyle = isHovered ? "#fef08a" : badge ? "#f8fafc" : "#cbd5e1";
-    ctx.font = isHovered || badge ? "bold 9.5px sans-serif" : "9.5px sans-serif";
-    const textStr = `${dispName} (${layer.thicknessKm.toFixed(1)}k)${badge}`;
-    ctx.fillText(textStr, colRight + 9, labelY, cssW - colRight - 11);
+    ctx.fillStyle = item.color;
+    ctx.font = item.isHovered || item.hasBadge ? "bold 9.5px sans-serif" : "9.5px sans-serif";
+    ctx.fillText(item.text, colRight + 9, labelY, cssW - colRight - 11);
   }
 
   ctx.restore();
 
-  // Interactive hover handler on canvas to inspect individual layers
-  const updateHoverReadout = (hoveredIdx) => {
+  // Interactive hover handler on canvas to inspect individual layers & contact interfaces
+  const updateHoverReadout = (hoveredLayerIdx, hoveredIntfIdx) => {
     const labelEl = document.getElementById("stratigraphy-hover-label");
     if (!labelEl) return;
-    if (hoveredIdx >= 0 && strat.layers[hoveredIdx]) {
-      const l = strat.layers[hoveredIdx];
+    if (hoveredIntfIdx >= 0 && strat.interfaces && strat.interfaces[hoveredIntfIdx]) {
+      const intf = strat.interfaces[hoveredIntfIdx];
+      const upL = strat.layers[intf.upperLayerIdx];
+      const loL = strat.layers[intf.lowerLayerIdx];
+      const upName = upL ? upL.name : "upper";
+      const loName = loL ? loL.name : "lower";
+      const occSummary = (intf.occurrences || [])
+        .map(
+          (o) =>
+            `${o.label} [zone ${o.thicknessKm.toFixed(2)} km, abundance ${o.abundance.toFixed(3)}]`
+        )
+        .join(", ");
+      labelEl.textContent = `Contact Interface (${upName} ⇄ ${loName}, depth ${intf.depthKm.toFixed(2)} km) | ${occSummary || (intf.deposits || []).join(", ")}`;
+    } else if (hoveredLayerIdx >= 0 && strat.layers[hoveredLayerIdx]) {
+      const l = strat.layers[hoveredLayerIdx];
       const lDispName =
         l.kind === "I" && typeof l.felsity === "number" && l.felsity <= 0.35
           ? "kimberlite"
           : l.name;
       const kindWord =
         l.kind === "I" ? "Igneous" : l.kind === "S" ? "Sedimentary" : "Metamorphic";
+      const occList =
+        l.occurrences && l.occurrences.length > 0
+          ? l.occurrences.map(
+              (o) => `${o.label} [abund ${o.abundance.toFixed(3)}]`
+            )
+          : l.deposits || [];
       const depsText =
-        l.deposits && l.deposits.length > 0
-          ? ` | Veins/Deposits: ${l.deposits.join(", ")}`
+        occList.length > 0
+          ? ` | Veins/Deposits: ${occList.join(", ")}`
           : " | No major mineral veins";
-      labelEl.textContent = `Layer #${hoveredIdx + 1}: ${lDispName} (${kindWord}, ${l.thicknessKm.toFixed(2)} km thick, depth ${l.depthTopKm.toFixed(1)}–${l.depthBottomKm.toFixed(1)} km) | f=${l.felsity.toFixed(2)} bog=${l.bogginess.toFixed(2)} calc=${l.calcity.toFixed(2)} qtz=${l.quartzity.toFixed(2)} sulf=${l.sulfidity.toFixed(2)} sal=${l.salinity.toFixed(2)}${depsText}`;
+      const fmtOpt = (v) => (typeof v === "number" ? v.toFixed(2) : "—");
+      labelEl.textContent = `Layer #${hoveredLayerIdx + 1}: ${lDispName} (${kindWord}, ${l.thicknessKm.toFixed(2)} km thick, depth ${l.depthTopKm.toFixed(1)}–${l.depthBottomKm.toFixed(1)} km) | f=${l.felsity.toFixed(2)} bog=${fmtOpt(l.bogginess)} calc=${fmtOpt(l.calcity)} qtz=${fmtOpt(l.quartzity)} sulf=${fmtOpt(l.sulfidity)} sal=${fmtOpt(l.salinity)}${depsText}`;
     } else {
       const totalDeps = [];
       for (const l of strat.layers) {
@@ -4832,38 +4984,61 @@ function paintStratigraphySideCanvas(view) {
           if (!totalDeps.includes(d)) totalDeps.push(d);
         }
       }
+      for (const intf of strat.interfaces || []) {
+        for (const d of intf.deposits || []) {
+          if (!totalDeps.includes(d)) totalDeps.push(d);
+        }
+      }
       labelEl.textContent =
         totalDeps.length > 0
-          ? `Tile #${strat.tileIdx} (${strat.layers.length} layers, ${ strat.thicknessKm.toFixed(1)} km crust, fold ${(mountNorm * 100).toFixed(0)}%) — Deposits: ${totalDeps.join(" · ")}`
-          : `Tile #${strat.tileIdx} (${strat.layers.length} layers, ${strat.thicknessKm.toFixed(1)} km crust, fold ${(mountNorm * 100).toFixed(0)}%) — Hover any rock layer for composition & veins.`;
+          ? `Tile #${strat.tileIdx} (${strat.layers.length} layers, ${strat.thicknessKm.toFixed(1)} km crust, fold ${(mountNorm * 100).toFixed(0)}%) — Deposits: ${totalDeps.join(" · ")}`
+          : `Tile #${strat.tileIdx} (${strat.layers.length} layers, ${strat.thicknessKm.toFixed(1)} km crust, fold ${(mountNorm * 100).toFixed(0)}%) — Hover any rock layer or contact boundary for composition & veins.`;
     }
   };
 
   updateHoverReadout(
-    typeof view.hoveredStratLayerIdx === "number" ? view.hoveredStratLayerIdx : -1
+    typeof view.hoveredStratLayerIdx === "number" ? view.hoveredStratLayerIdx : -1,
+    typeof view.hoveredStratInterfaceIdx === "number" ? view.hoveredStratInterfaceIdx : -1
   );
 
   canvas.onmousemove = (ev) => {
     const r = canvas.getBoundingClientRect();
     const my = ev.clientY - r.top;
     const kmAtMouse = yToKm(my);
-    let foundIdx = -1;
-    for (let i = 0; i < strat.layers.length; i++) {
-      const l = strat.layers[i];
-      if (kmAtMouse <= l.topKm + 0.15 && kmAtMouse >= l.bottomKm - 0.15) {
-        foundIdx = i;
+    let foundIntf = -1;
+    for (let ii = 0; ii < hitInterfaces.length; ii++) {
+      if (Math.abs(my - hitInterfaces[ii].yBase) <= 4.5) {
+        foundIntf = hitInterfaces[ii].idx;
         break;
       }
     }
-    if (view.hoveredStratLayerIdx !== foundIdx) {
+    let foundIdx = -1;
+    if (foundIntf < 0) {
+      for (let i = 0; i < strat.layers.length; i++) {
+        const l = strat.layers[i];
+        if (kmAtMouse <= l.topKm + 0.15 && kmAtMouse >= l.bottomKm - 0.15) {
+          foundIdx = i;
+          break;
+        }
+      }
+    }
+    if (
+      view.hoveredStratLayerIdx !== foundIdx ||
+      view.hoveredStratInterfaceIdx !== foundIntf
+    ) {
       view.hoveredStratLayerIdx = foundIdx;
+      view.hoveredStratInterfaceIdx = foundIntf;
       paintStratigraphySideCanvas(view);
     }
   };
 
   canvas.onmouseleave = () => {
-    if (view.hoveredStratLayerIdx !== -1 && view.hoveredStratLayerIdx !== undefined) {
+    if (
+      (view.hoveredStratLayerIdx !== -1 && view.hoveredStratLayerIdx !== undefined) ||
+      (view.hoveredStratInterfaceIdx !== -1 && view.hoveredStratInterfaceIdx !== undefined)
+    ) {
       view.hoveredStratLayerIdx = -1;
+      view.hoveredStratInterfaceIdx = -1;
       paintStratigraphySideCanvas(view);
     }
   };
@@ -4891,6 +5066,7 @@ function scheduleStratigraphySidePaint(view, explicitTileIdx) {
     view.tileStratigraphy = null;
   }
   view.hoveredStratLayerIdx = -1;
+  view.hoveredStratInterfaceIdx = -1;
 
   window.requestAnimationFrame(() => paintStratigraphySideCanvas(view));
   setTimeout(() => paintStratigraphySideCanvas(view), 45);
