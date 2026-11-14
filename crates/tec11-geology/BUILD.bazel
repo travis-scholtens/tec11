@@ -26,6 +26,7 @@ rust_library(
         "src/terrain.rs",
         "src/tides_sandbox.rs",
         "src/tile.rs",
+        "src/weather_sandbox.rs",
         "src/world.rs",
     ],
     compile_data = [

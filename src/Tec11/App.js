@@ -19,6 +19,7 @@ import initWasmModule, {
   WasmTectonicsSession,
   WasmTerrainSession,
   WasmTidesSession,
+  WasmWeatherSession,
   WasmWorldSession,
 } from "tec11-wasm";
 import {
@@ -3242,6 +3243,8 @@ function refreshActiveInspectorView(view) {
     view.setPrehistoryInfo(buildPrehistoryInfo(view))();
   } else if (view.inspectorMode === "tides" && view.setTidesInfo) {
     view.setTidesInfo(buildTidesInfo(view))();
+  } else if (view.inspectorMode === "weather" && view.setWeatherInfo) {
+    view.setWeatherInfo(buildWeatherInfo(view))();
   }
 }
 
@@ -6924,6 +6927,321 @@ export const loadFilePlanetIntoTides = (setTidesInfo) => () => {
       activeView.selectedTileIdx = -1;
       updateTidesDataBuffers(activeView, true);
       setTidesInfo(buildTidesInfo(activeView))();
+    }
+  });
+};
+
+// ============================================================================
+// Mode 20: Global Coupled Weather & Storm Surge on Full-Sphere Coarse+2 Grid (`WeatherScreen`)
+// ============================================================================
+
+function applyWeatherArrowColor(view, arrowMode) {
+  if (arrowMode === "jet_stream") {
+    view.arrowMaterial.color.setHex(0xfde047);
+    view.arrowStrokeStyle = "rgba(253, 224, 71, 0.90)";
+  } else if (arrowMode === "tidal_current") {
+    view.arrowMaterial.color.setHex(0x67e8f9);
+    view.arrowStrokeStyle = "rgba(103, 232, 249, 0.88)";
+  } else {
+    view.arrowMaterial.color.setHex(0xe0f2fe);
+    view.arrowStrokeStyle = "rgba(224, 242, 254, 0.84)";
+  }
+}
+
+function updateWeatherDataBuffers(view, rebuildGeometry = false) {
+  const { session, geometry } = view;
+  if (!session) return;
+  if (rebuildGeometry) {
+    const positions = session.mesh_positions();
+    const normals = session.mesh_normals();
+    view.vertexTileIds = session.vertex_tile_ids();
+    view.vertexColorBuffer = null;
+    view.vertexColorAttr = null;
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.computeBoundingSphere();
+  }
+
+  const tileColors = session.tile_colors_rgb(view.aspect || "satellite", view.selectedTileIdx);
+  expandFineTileColorsToVertexAttr(view, tileColors);
+
+  const arrowMode = view.arrowMode || "none";
+  if (arrowMode !== "none") {
+    applyWeatherArrowColor(view, arrowMode);
+    const arrowPos = session.weather_arrow_positions(arrowMode);
+    view.arrowLines.visible = arrowPos.length > 0;
+    view.arrowGeometry.setAttribute("position", new THREE.Float32BufferAttribute(arrowPos, 3));
+  } else {
+    view.arrowLines.visible = false;
+  }
+  view.paint();
+}
+
+function buildWeatherInfo(view) {
+  const s = view.session;
+  const bundle = buildHistoryInspectorBundle(view);
+  let sparkCurrentLabel = "+15.0 °C · 1013 hPa · 0.00 mm/h";
+  let sparkSubtitle = "Step +1h / Play to record 48h meteogram";
+  let sparkMinLabel = "Low: +15.0 °C";
+  let sparkMaxLabel = "High: +15.0 °C";
+  let selectedReport =
+    "Click any fine tile on the globe to inspect live temperature, sea-level pressure, surface & 300 hPa jet winds, cloud decks, rain/snowfall, snowpack, river discharge, coastal storm surge, 48-hour meteogram, and synced local sky & 100° horizon vantage.";
+
+  if (view.selectedTileIdx >= 0 && bundle.tileView.hasTile) {
+    const tv = bundle.tileView;
+    const floraLine = tv.flora && tv.flora.length > 0 ? `\nNative Flora: ${tv.flora.join(", ")}` : "";
+    const faunaLine = tv.fauna && tv.fauna.length > 0 ? `\nNative Fauna: ${tv.fauna.join(", ")}` : "";
+    selectedReport = `${tv.title} (${tv.skyLatLonSummary})\n${tv.locationSummary}\n${tv.populationSummary} | ${tv.technology}${floraLine}${faunaLine}`;
+    try {
+      const parsedSpark = JSON.parse(s.tile_meteogram_json(view.selectedTileIdx));
+      sparkCurrentLabel = parsedSpark.currentLabel || sparkCurrentLabel;
+      sparkSubtitle = parsedSpark.subtitle || sparkSubtitle;
+      sparkMinLabel = parsedSpark.minLabel || sparkMinLabel;
+      sparkMaxLabel = parsedSpark.maxLabel || sparkMaxLabel;
+      if (typeof window !== "undefined") {
+        const series = parsedSpark.series || [];
+        const legend = parsedSpark.legend || [];
+        window.requestAnimationFrame(() =>
+          paintSparklineCanvas("weather-meteogram-canvas", series, { windowHours: 48, legend })
+        );
+        setTimeout(
+          () => paintSparklineCanvas("weather-meteogram-canvas", series, { windowHours: 48, legend }),
+          45
+        );
+      }
+    } catch (_) {}
+  } else {
+    scheduleStratigraphySidePaint(view, -1);
+  }
+
+  const meanT = s.global_mean_temp_c();
+  const minP = s.min_slp_hpa();
+  const maxP = s.max_slp_hpa();
+
+  return {
+    planetName: view.loadedFileName ? `File: ${view.loadedFileName}` : s.planet_name(),
+    coarseGridSize: s.coarse_grid_size(),
+    fineGridSize: s.fine_grid_size(),
+    tileCount: s.tile_count(),
+    elapsedHours: s.elapsed_hours(),
+    dayOfYear: s.sim_day_of_year(),
+    daysPerYear: s.days_per_year(),
+    clockLabel: s.sim_clock_label(),
+    atmosphereName: s.atmosphere_name(),
+    meanTempText: `${meanT >= 0 ? "+" : ""}${meanT.toFixed(1)} °C`,
+    slpRangeText: `${Math.round(minP)}..${Math.round(maxP)} hPa`,
+    maxWindText: `${s.max_wind_mps().toFixed(1)} m/s`,
+    maxJetText: `${s.max_jet_mps().toFixed(1)} m/s`,
+    maxPrecipText: `${s.max_precip_mm_hr().toFixed(2)} mm/h`,
+    maxSurgeText: `${s.max_storm_surge_m().toFixed(2)} m`,
+    inundatedTiles: s.inundated_land_tiles(),
+    isRunning: view.timerId !== null,
+    hasSavedPlanet: getSavedSnapshotBytes() !== null,
+    sparkCurrentLabel,
+    sparkSubtitle,
+    sparkMinLabel,
+    sparkMaxLabel,
+    selectedReport,
+    tileView: bundle.tileView,
+  };
+}
+
+function stopWeatherTimer(view) {
+  if (view && view.timerId !== null) {
+    clearInterval(view.timerId);
+    view.timerId = null;
+  }
+}
+
+export const mountWeatherView =
+  (atmId) =>
+  (glacPct) =>
+  (moonCount) =>
+  (moonMassTenths) =>
+  (moonDistRadii) =>
+  (dayOfYear) =>
+  (aspect) =>
+  (arrowMode) =>
+  (setWeatherInfo) =>
+  () => {
+    const canvas = document.getElementById("sphere-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.material.dispose();
+    view.material = new THREE.MeshBasicMaterial({
+      side: THREE.FrontSide,
+      vertexColors: true,
+    });
+    view.mesh.material = view.material;
+    view.unlit = true;
+
+    view.session = new WasmWeatherSession();
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+    }
+    view.session.set_day_of_year(dayOfYear);
+    view.session.set_environment_params(
+      Math.max(0, atmId | 0),
+      Math.max(0.0, Math.min(1.0, glacPct / 100.0)),
+      Math.max(0, moonCount | 0),
+      Math.max(0.1, moonMassTenths / 10.0),
+      Math.max(20.0, moonDistRadii)
+    );
+
+    view.aspect = aspect;
+    view.arrowMode = arrowMode;
+    view.selectedTileIdx = -1;
+    view.inspectorMode = "weather";
+    view.timerId = null;
+    view.loadedFileName = null;
+    view.setWeatherInfo = setWeatherInfo;
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateWeatherDataBuffers(view, false);
+        view.setWeatherInfo(buildWeatherInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    activeView = view;
+    updateWeatherDataBuffers(view, true);
+    setWeatherInfo(buildWeatherInfo(view))();
+
+    return () => {
+      stopWeatherTimer(view);
+      canvas.removeEventListener("click", handleCanvasClick);
+      if (activeView === view) {
+        activeView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const stepWeatherHours = (hours) => (setWeatherInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.step_hours(Math.max(1, hours | 0));
+  updateWeatherDataBuffers(activeView, false);
+  setWeatherInfo(buildWeatherInfo(activeView))();
+};
+
+export const toggleWeatherRunning = (setWeatherInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  if (activeView.timerId !== null) {
+    stopWeatherTimer(activeView);
+  } else {
+    const viewRef = activeView;
+    viewRef.timerId = setInterval(() => {
+      if (activeView !== viewRef || !viewRef.session) {
+        stopWeatherTimer(viewRef);
+        return;
+      }
+      viewRef.session.step_hours(1);
+      updateWeatherDataBuffers(viewRef, false);
+      setWeatherInfo(buildWeatherInfo(viewRef))();
+    }, 180);
+  }
+  setWeatherInfo(buildWeatherInfo(activeView))();
+};
+
+export const resetWeatherSim = (setWeatherInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopWeatherTimer(activeView);
+  activeView.session.reset_weather();
+  updateWeatherDataBuffers(activeView, false);
+  setWeatherInfo(buildWeatherInfo(activeView))();
+};
+
+export const setWeatherDayOfYear = (day) => (setWeatherInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.session.set_day_of_year(Math.max(0, day | 0));
+  updateWeatherDataBuffers(activeView, false);
+  setWeatherInfo(buildWeatherInfo(activeView))();
+};
+
+export const setWeatherEnvParams =
+  (atmId) =>
+  (glacPct) =>
+  (moonCount) =>
+  (moonMassTenths) =>
+  (moonDistRadii) =>
+  (setWeatherInfo) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.session.set_environment_params(
+      Math.max(0, atmId | 0),
+      Math.max(0.0, Math.min(1.0, glacPct / 100.0)),
+      Math.max(0, moonCount | 0),
+      Math.max(0.1, moonMassTenths / 10.0),
+      Math.max(20.0, moonDistRadii)
+    );
+    updateWeatherDataBuffers(activeView, false);
+    setWeatherInfo(buildWeatherInfo(activeView))();
+  };
+
+export const setWeatherDisplayOptions = (aspect) => (arrowMode) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.aspect = aspect;
+  activeView.arrowMode = arrowMode;
+  updateWeatherDataBuffers(activeView, false);
+};
+
+export const loadEarthIntoWeather = (setWeatherInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  stopWeatherTimer(activeView);
+  activeClimateSnapshotBytes = null;
+  activeView.loadedFileName = null;
+  activeView.selectedTileIdx = -1;
+  activeView.session.load_earth();
+  updateWeatherDataBuffers(activeView, true);
+  setWeatherInfo(buildWeatherInfo(activeView))();
+};
+
+export const loadSavedPlanetIntoWeather = (setWeatherInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  const saved = getSavedSnapshotBytes();
+  if (!saved) return;
+  stopWeatherTimer(activeView);
+  if (activeView.session.load_snapshot_bytes(saved)) {
+    activeClimateSnapshotBytes = saved;
+    activeView.loadedFileName = null;
+    activeView.selectedTileIdx = -1;
+    updateWeatherDataBuffers(activeView, true);
+    setWeatherInfo(buildWeatherInfo(activeView))();
+  }
+};
+
+export const loadFilePlanetIntoWeather = (setWeatherInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  pickBinarySnapshotFile((bytes, filename) => {
+    if (!activeView || !activeView.session) return;
+    stopWeatherTimer(activeView);
+    if (activeView.session.load_snapshot_bytes(bytes)) {
+      storeSavedSnapshotBytes(bytes);
+      activeClimateSnapshotBytes = bytes;
+      activeView.loadedFileName = filename || null;
+      activeView.selectedTileIdx = -1;
+      updateWeatherDataBuffers(activeView, true);
+      setWeatherInfo(buildWeatherInfo(activeView))();
     }
   });
 };

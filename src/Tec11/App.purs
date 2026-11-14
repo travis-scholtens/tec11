@@ -47,6 +47,7 @@ data Screen
   | MeteorScreen
   | SunScreen
   | TidesScreen
+  | WeatherScreen
 
 derive instance eqScreen :: Eq Screen
 
@@ -437,6 +438,33 @@ type TidesInfo =
   , tileView :: TileViewInfo
   }
 
+type WeatherInfo =
+  { planetName :: String
+  , coarseGridSize :: Int
+  , fineGridSize :: Int
+  , tileCount :: Int
+  , elapsedHours :: Int
+  , dayOfYear :: Int
+  , daysPerYear :: Int
+  , clockLabel :: String
+  , atmosphereName :: String
+  , meanTempText :: String
+  , slpRangeText :: String
+  , maxWindText :: String
+  , maxJetText :: String
+  , maxPrecipText :: String
+  , maxSurgeText :: String
+  , inundatedTiles :: Int
+  , isRunning :: Boolean
+  , hasSavedPlanet :: Boolean
+  , sparkCurrentLabel :: String
+  , sparkSubtitle :: String
+  , sparkMinLabel :: String
+  , sparkMaxLabel :: String
+  , selectedReport :: String
+  , tileView :: TileViewInfo
+  }
+
 foreign import initWasm :: Effect Unit -> Effect Unit
 
 -- Grid mode FFI
@@ -623,6 +651,18 @@ foreign import setTidesDisplayOptions :: String -> Boolean -> Effect Unit
 foreign import loadEarthIntoTides :: (TidesInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoTides :: (TidesInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoTides :: (TidesInfo -> Effect Unit) -> Effect Unit
+
+-- Global Coupled Weather & Storm Surge on Full-Sphere Coarse+2 Grid (`WeatherScreen`)
+foreign import mountWeatherView :: Int -> Int -> Int -> Int -> Int -> Int -> String -> String -> (WeatherInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import stepWeatherHours :: Int -> (WeatherInfo -> Effect Unit) -> Effect Unit
+foreign import toggleWeatherRunning :: (WeatherInfo -> Effect Unit) -> Effect Unit
+foreign import resetWeatherSim :: (WeatherInfo -> Effect Unit) -> Effect Unit
+foreign import setWeatherDayOfYear :: Int -> (WeatherInfo -> Effect Unit) -> Effect Unit
+foreign import setWeatherEnvParams :: Int -> Int -> Int -> Int -> Int -> (WeatherInfo -> Effect Unit) -> Effect Unit
+foreign import setWeatherDisplayOptions :: String -> String -> Effect Unit
+foreign import loadEarthIntoWeather :: (WeatherInfo -> Effect Unit) -> Effect Unit
+foreign import loadSavedPlanetIntoWeather :: (WeatherInfo -> Effect Unit) -> Effect Unit
+foreign import loadFilePlanetIntoWeather :: (WeatherInfo -> Effect Unit) -> Effect Unit
 
 -- Shared viewport rotation & two-level State/Tile/Language/Nation inspector FFI
 foreign import rotateGrid :: Number -> Effect Unit
@@ -1498,6 +1538,42 @@ mkApp = do
       , tileView: defaultTileViewInfo
       }
 
+    -- Global Coupled Weather & Storm Surge on Full-Sphere Coarse+2 Grid state (`WeatherScreen`)
+    weatherAtmId /\ setWeatherAtmId <- useState' 0
+    weatherGlaciationPct /\ setWeatherGlaciationPct <- useState' 50
+    weatherMoonCount /\ setWeatherMoonCount <- useState' 1
+    weatherMoonMassTenths /\ setWeatherMoonMassTenths <- useState' 10
+    weatherMoonDistRadii /\ setWeatherMoonDistRadii <- useState' 60
+    weatherDayOfYear /\ setWeatherDayOfYearState <- useState' 80
+    weatherAspect /\ setWeatherAspect <- useState' "satellite"
+    weatherArrowMode /\ setWeatherArrowMode <- useState' "surface_wind"
+    weatherInfo /\ setWeatherInfo <- useState'
+      { planetName: "Earth (ETOPO2 Bathymetry & Relief)"
+      , coarseGridSize: 6
+      , fineGridSize: 8
+      , tileCount: 65612
+      , elapsedHours: 0
+      , dayOfYear: 80
+      , daysPerYear: 365
+      , clockLabel: "Year 0 · Day 80 · 12:00 UTC (+0h)"
+      , atmosphereName: "N2-O2 + O3 Ozone (Earth-like, 1.0 bar)"
+      , meanTempText: "+14.5 °C"
+      , slpRangeText: "1013..1013 hPa"
+      , maxWindText: "0.0 m/s"
+      , maxJetText: "0.0 m/s"
+      , maxPrecipText: "0.00 mm/h"
+      , maxSurgeText: "0.00 m"
+      , inundatedTiles: 0
+      , isRunning: false
+      , hasSavedPlanet: false
+      , sparkCurrentLabel: "+15.0 °C · 1013 hPa · 0.00 mm/h"
+      , sparkSubtitle: "Click any fine tile and step +1h / Play to record 48h meteogram"
+      , sparkMinLabel: "Low: +15.0 °C"
+      , sparkMaxLabel: "High: +15.0 °C"
+      , selectedReport: "Click any fine tile on the globe to inspect live temperature, sea-level pressure, surface & 300 hPa jet winds, cloud decks, rain/snowfall, snowpack, river discharge, coastal storm surge, 48-hour meteogram, and synced local sky & 100° horizon vantage."
+      , tileView: defaultTileViewInfo
+      }
+
     useEffectOnce do
       initWasm (setWasmReady true)
       pure (pure unit)
@@ -1567,6 +1643,9 @@ mkApp = do
         TidesScreen -> do
           setRotationDeg 0
           mountTidesView tidesMoonCount tidesMoonMassTenths tidesMoonDistRadii tidesDayOfYear tidesAspect tidesShowArrows setTidesInfo
+        WeatherScreen -> do
+          setRotationDeg 0
+          mountWeatherView weatherAtmId weatherGlaciationPct weatherMoonCount weatherMoonMassTenths weatherMoonDistRadii weatherDayOfYear weatherAspect weatherArrowMode setWeatherInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -2078,6 +2157,58 @@ mkApp = do
         setTidesShowArrows next
         setTidesDisplayOptions tidesAspect next
 
+      handleWeatherAtmChange :: Maybe String -> Effect Unit
+      handleWeatherAtmChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just atm -> do
+          setWeatherAtmId atm
+          setWeatherEnvParams atm weatherGlaciationPct weatherMoonCount weatherMoonMassTenths weatherMoonDistRadii setWeatherInfo
+
+      handleWeatherGlaciationChange :: Maybe String -> Effect Unit
+      handleWeatherGlaciationChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just g -> do
+          setWeatherGlaciationPct g
+          setWeatherEnvParams weatherAtmId g weatherMoonCount weatherMoonMassTenths weatherMoonDistRadii setWeatherInfo
+
+      handleWeatherMoonCountChange :: Maybe String -> Effect Unit
+      handleWeatherMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just c -> do
+          setWeatherMoonCount c
+          setWeatherEnvParams weatherAtmId weatherGlaciationPct c weatherMoonMassTenths weatherMoonDistRadii setWeatherInfo
+
+      handleWeatherMoonMassChange :: Maybe String -> Effect Unit
+      handleWeatherMoonMassChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just m -> do
+          setWeatherMoonMassTenths m
+          setWeatherEnvParams weatherAtmId weatherGlaciationPct weatherMoonCount m weatherMoonDistRadii setWeatherInfo
+
+      handleWeatherMoonDistChange :: Maybe String -> Effect Unit
+      handleWeatherMoonDistChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just d -> do
+          setWeatherMoonDistRadii d
+          setWeatherEnvParams weatherAtmId weatherGlaciationPct weatherMoonCount weatherMoonMassTenths d setWeatherInfo
+
+      handleWeatherDayChange :: Maybe String -> Effect Unit
+      handleWeatherDayChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just d -> do
+          setWeatherDayOfYearState d
+          setWeatherDayOfYear d setWeatherInfo
+
+      handleWeatherAspectChange :: String -> Effect Unit
+      handleWeatherAspectChange asp = do
+        setWeatherAspect asp
+        setWeatherDisplayOptions asp weatherArrowMode
+
+      handleWeatherArrowModeChange :: String -> Effect Unit
+      handleWeatherArrowModeChange am = do
+        setWeatherArrowMode am
+        setWeatherDisplayOptions weatherAspect am
+
     pure case screen of
       MainMenu ->
         R.div
@@ -2204,6 +2335,13 @@ mkApp = do
                                                   , disabled: not wasmReady
                                                   , onClick: capture_ (setScreen TidesScreen)
                                                   , children: [ R.text "Dynamic Tides" ]
+                                                  }
+                                              , R.button
+                                                  { id: "weather-btn"
+                                                  , className: "menu-btn"
+                                                  , disabled: not wasmReady
+                                                  , onClick: capture_ (setScreen WeatherScreen)
+                                                  , children: [ R.text "Global Weather" ]
                                                   }
                                               ]
                                           }
@@ -6913,6 +7051,402 @@ mkApp = do
                                   { id: "tides-load-btn"
                                   , className: "action-btn secondary"
                                   , onClick: capture_ (loadFilePlanetIntoTides setTidesInfo)
+                                  , children: [ R.text "Load (.tec11)" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "done-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (setScreen MainMenu)
+                                  , children: [ R.text "Done" ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              ]
+          }
+
+      WeatherScreen ->
+        R.div
+          { className: "mode-layout"
+          , children:
+              [ R.div
+                  { className: "viewport-column"
+                  , children:
+                      [ R.div
+                          { className: "canvas-container"
+                          , children:
+                              [ R.canvas
+                                  { id: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.input
+                                  { id: "rotate-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "-180"
+                                  , max: "180"
+                                  , step: "1"
+                                  , value: show rotationDeg
+                                  , onChange: handler targetValue handleRotateChange
+                                  }
+                              , R.span
+                                  { id: "rotation-label"
+                                  , className: "rotation-label"
+                                  , children: [ R.text (show rotationDeg <> "°") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text "Clicked Fine Tile 48h Meteogram, Live Sky/Horizon Vantage & Stratigraphy" ]
+                                  }
+                              , if weatherInfo.tileView.hasTile then
+                                  React.fragment
+                                    [ renderSparklineBox
+                                        { canvasId: "weather-meteogram-canvas"
+                                        , title: "48-Hour Meteogram (Temp · SLP · Precip)"
+                                        , subtitle: weatherInfo.sparkSubtitle
+                                        , minLabel: weatherInfo.sparkMinLabel
+                                        , maxLabel: weatherInfo.sparkMaxLabel
+                                        , currentLabel: weatherInfo.sparkCurrentLabel
+                                        }
+                                    , renderTileSkyAndVantageSection
+                                        (SyncedSimClock weatherInfo.clockLabel)
+                                        weatherInfo.tileView
+                                    ]
+                                else
+                                  React.empty
+                              , renderStratigraphySideViewBox
+                              , R.div
+                                  { id: "weather-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text weatherInfo.selectedReport ]
+                                  }
+                              ]
+                          }
+                      ]
+                  }
+              , R.div
+                  { className: "sidebar-column tectonics-sidebar"
+                  , children:
+                      [ R.div
+                          { id: "weather-stats"
+                          , className: "grid-stats"
+                          , children:
+                              [ R.div
+                                  { className: "stat-line"
+                                  , style: R.css { fontWeight: "700", color: "#38bdf8" }
+                                  , children: [ R.text weatherInfo.planetName ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Full-Sphere Fine Grid: Size "
+                                              <> show weatherInfo.coarseGridSize
+                                              <> " → "
+                                              <> show weatherInfo.fineGridSize
+                                              <> " ("
+                                              <> show weatherInfo.tileCount
+                                              <> " tiles)"
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , style: R.css { color: "#fde047", fontWeight: "600" }
+                                  , children: [ R.text ("Clock: " <> weatherInfo.clockLabel) ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Mean T: "
+                                              <> weatherInfo.meanTempText
+                                              <> " · SLP: "
+                                              <> weatherInfo.slpRangeText
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Peak Wind: "
+                                              <> weatherInfo.maxWindText
+                                              <> " · 300 hPa Jet: "
+                                              <> weatherInfo.maxJetText
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "stat-line"
+                                  , children:
+                                      [ R.text
+                                          ( "Peak Precip: "
+                                              <> weatherInfo.maxPrecipText
+                                              <> " · Surge: "
+                                              <> weatherInfo.maxSurgeText
+                                              <> " ("
+                                              <> show weatherInfo.inundatedTiles
+                                              <> " flooded)"
+                                          )
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "weather-play-btn"
+                                  , className: "action-btn"
+                                  , onClick: capture_ (toggleWeatherRunning setWeatherInfo)
+                                  , children: [ R.text (if weatherInfo.isRunning then "⏸ Pause" else "▶ Play") ]
+                                  }
+                              , R.button
+                                  { id: "weather-step1h-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: weatherInfo.isRunning
+                                  , onClick: capture_ (stepWeatherHours 1 setWeatherInfo)
+                                  , children: [ R.text "+1h" ]
+                                  }
+                              , R.button
+                                  { id: "weather-step24h-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: weatherInfo.isRunning
+                                  , onClick: capture_ (stepWeatherHours 24 setWeatherInfo)
+                                  , children: [ R.text "+24h" ]
+                                  }
+                              , R.button
+                                  { id: "weather-reset-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (resetWeatherSim setWeatherInfo)
+                                  , children: [ R.text "Reset (t=0)" ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Globe Weather Mode" ]
+                                  }
+                              , R.div
+                                  { className: "button-row"
+                                  , children:
+                                      [ R.button
+                                          { className: if weatherAspect == "satellite" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherAspectChange "satellite")
+                                          , children: [ R.text "Satellite True-Color" ]
+                                          }
+                                      , R.button
+                                          { className: if weatherAspect == "pressure_fronts" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherAspectChange "pressure_fronts")
+                                          , children: [ R.text "Pressure & Fronts" ]
+                                          }
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "button-row"
+                                  , children:
+                                      [ R.button
+                                          { className: if weatherAspect == "temperature" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherAspectChange "temperature")
+                                          , children: [ R.text "Surface Temp" ]
+                                          }
+                                      , R.button
+                                          { className: if weatherAspect == "precipitation" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherAspectChange "precipitation")
+                                          , children: [ R.text "Precip & Clouds" ]
+                                          }
+                                      ]
+                                  }
+                              , R.div
+                                  { className: "button-row"
+                                  , children:
+                                      [ R.button
+                                          { className: if weatherAspect == "winds_jet" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherAspectChange "winds_jet")
+                                          , children: [ R.text "300 hPa Jet" ]
+                                          }
+                                      , R.button
+                                          { className: if weatherAspect == "storm_surge" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherAspectChange "storm_surge")
+                                          , children: [ R.text "Tides & Surge" ]
+                                          }
+                                      ]
+                                  }
+                              , R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "3D Vector Arrows" ]
+                                  }
+                              , R.div
+                                  { className: "button-row"
+                                  , children:
+                                      [ R.button
+                                          { className: if weatherArrowMode == "none" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherArrowModeChange "none")
+                                          , children: [ R.text "Off" ]
+                                          }
+                                      , R.button
+                                          { className: if weatherArrowMode == "surface_wind" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherArrowModeChange "surface_wind")
+                                          , children: [ R.text "Surface Wind" ]
+                                          }
+                                      , R.button
+                                          { className: if weatherArrowMode == "jet_stream" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherArrowModeChange "jet_stream")
+                                          , children: [ R.text "Upper Jet" ]
+                                          }
+                                      , R.button
+                                          { className: if weatherArrowMode == "tidal_current" then "action-btn" else "action-btn secondary"
+                                          , onClick: capture_ (handleWeatherArrowModeChange "tidal_current")
+                                          , children: [ R.text "Tidal Current" ]
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text ("Atmosphere: " <> weatherInfo.atmosphereName) ]
+                                  }
+                              , R.select
+                                  { id: "weather-atm-select"
+                                  , value: show weatherAtmId
+                                  , onChange: handler targetValue handleWeatherAtmChange
+                                  , children:
+                                      [ R.option { value: "0", children: [ R.text "N2-O2 + O3 Ozone (Earth-like, 1.0 bar)" ] }
+                                      , R.option { value: "1", children: [ R.text "N2-CH4 Methane-Rich (1.2 bar)" ] }
+                                      , R.option { value: "2", children: [ R.text "Dense CO2-N2 Greenhouse (4.5 bar)" ] }
+                                      , R.option { value: "3", children: [ R.text "N2-CH4 Tholin Haze (1.5 bar)" ] }
+                                      , R.option { value: "4", children: [ R.text "Thin Dusty CO2 (Mars-like, 0.08 bar)" ] }
+                                      , R.option { value: "5", children: [ R.text "H2-He-N2 Hycean (2.5 bar)" ] }
+                                      ]
+                                  }
+                              , R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text ("Glaciation State: " <> show weatherGlaciationPct <> "%") ]
+                                  }
+                              , R.input
+                                  { id: "weather-glac-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "100"
+                                  , step: "1"
+                                  , value: show weatherGlaciationPct
+                                  , onChange: handler targetValue handleWeatherGlaciationChange
+                                  }
+                              , R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text
+                                          ( "Orbital Season Start: Day "
+                                              <> show weatherDayOfYear
+                                              <> " / "
+                                              <> show (max 1 weatherInfo.daysPerYear)
+                                          )
+                                      ]
+                                  }
+                              , R.input
+                                  { id: "weather-day-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: show (max 1 (weatherInfo.daysPerYear - 1))
+                                  , step: "1"
+                                  , value: show weatherDayOfYear
+                                  , onChange: handler targetValue handleWeatherDayChange
+                                  }
+                              , R.label
+                                  { className: "control-label"
+                                  , children:
+                                      [ R.text
+                                          ( "Moons: "
+                                              <> show weatherMoonCount
+                                              <> " · Mass: "
+                                              <> show (Int.toNumber weatherMoonMassTenths / 10.0)
+                                              <> "× · Dist: "
+                                              <> show weatherMoonDistRadii
+                                              <> " Rp"
+                                          )
+                                      ]
+                                  }
+                              , R.div
+                                  { style: R.css { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px" }
+                                  , children:
+                                      [ R.input
+                                          { id: "weather-moon-count-slider"
+                                          , type: "range"
+                                          , min: "0"
+                                          , max: "6"
+                                          , step: "1"
+                                          , value: show weatherMoonCount
+                                          , onChange: handler targetValue handleWeatherMoonCountChange
+                                          }
+                                      , R.input
+                                          { id: "weather-moon-mass-slider"
+                                          , type: "range"
+                                          , min: "1"
+                                          , max: "50"
+                                          , step: "1"
+                                          , value: show weatherMoonMassTenths
+                                          , onChange: handler targetValue handleWeatherMoonMassChange
+                                          }
+                                      , R.input
+                                          { id: "weather-moon-dist-slider"
+                                          , type: "range"
+                                          , min: "20"
+                                          , max: "120"
+                                          , step: "1"
+                                          , value: show weatherMoonDistRadii
+                                          , onChange: handler targetValue handleWeatherMoonDistChange
+                                          }
+                                      ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "button-row"
+                          , children:
+                              [ R.button
+                                  { id: "weather-earth-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadEarthIntoWeather setWeatherInfo)
+                                  , children: [ R.text "Use Earth" ]
+                                  }
+                              , R.button
+                                  { id: "weather-saved-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: not weatherInfo.hasSavedPlanet
+                                  , onClick: capture_ (loadSavedPlanetIntoWeather setWeatherInfo)
+                                  , children: [ R.text "Saved Planet" ]
+                                  }
+                              , R.button
+                                  { id: "weather-load-btn"
+                                  , className: "action-btn secondary"
+                                  , onClick: capture_ (loadFilePlanetIntoWeather setWeatherInfo)
                                   , children: [ R.text "Load (.tec11)" ]
                                   }
                               ]

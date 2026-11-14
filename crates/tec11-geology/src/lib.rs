@@ -20,6 +20,7 @@ pub mod tectonics;
 pub mod terrain;
 pub mod tides_sandbox;
 pub mod tile;
+pub mod weather_sandbox;
 pub mod world;
 
 pub use erosion_sandbox::ErosionSandbox;
@@ -70,4 +71,5 @@ pub use tectonics::{LithosphericGroup, TectonicsSimulation};
 pub use terrain::TerrainSandbox;
 pub use tides_sandbox::{FinePlanetBase, TidesSandbox};
 pub use tile::TileGeology;
+pub use weather_sandbox::WeatherSandbox;
 pub use world::{WorldCreateParams, WorldSimulation, WorldStageState};
