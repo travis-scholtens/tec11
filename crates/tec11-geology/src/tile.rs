@@ -1,5 +1,19 @@
 use crate::rock::{Rock, RockKind, RockLayer};
 
+/// Precious and semi-precious gemstones hosted in a stratigraphic layer, derived from
+/// pressure-temperature facies and compositional intersections.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct LayerGems {
+    pub diamond: bool,
+    pub ruby: bool,
+    pub sapphire: bool,
+    pub emerald: bool,
+    pub jade: bool,
+    pub lapis: bool,
+    pub turquoise: bool,
+    pub opal: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct TileSourceColumn {
     pub bottom: f32,
@@ -519,6 +533,88 @@ impl TileGeology {
         self.intrusion = Some((d, d + 1.0));
     }
 
+    /// Explosive volatile-rich ultramafic kimberlite / lamproite pipe eruption punching from
+    /// the base of thick continental crust (`>= 20 km`) straight to the surface:
+    /// - Scans deep lithospheric root layers (`depth >= 20 km`, especially `eclogite` and deep
+    ///   `amphibolite`/`granulite`/`blueschist`) for high-pressure carbon (`bogginess` and reduced
+    ///   subducted/buried carbonate `calcity`), converting it into entrained diamond xenocrysts.
+    /// - Excavates up to `0.35 km` of surface rock into a maar crater and emplaces a `0.75 km`
+    ///   ultramafic kimberlite diatreme pipe (`felsity = 0.28`), leaving `+0.20 km` of net surface
+    ///   tuff-ring relief while extending the pipe root `0.55 km` into the upper crust.
+    /// Returns `true` if the pipe carries diamond xenocrysts (`bogginess >= 0.05`).
+    pub fn erupt_kimberlite(&mut self) -> bool {
+        let total_thick = self.thickness();
+        if total_thick < 20.0 || self.layers.is_empty() {
+            return false;
+        }
+
+        // 1. Sample deep lithospheric layers (`depth >= 20 km` from surface) for high-pressure carbon:
+        let mut depth_top = 0.0f32;
+        let mut weighted_carbon = 0.0f32;
+        let mut weight_sum = 0.0f32;
+        let mut peak_diamond = 0.0f32;
+        for l in self.layers.iter().rev() {
+            let depth_bot = depth_top + l.thickness;
+            let deep_thick = (depth_bot - depth_top.max(20.0)).max(0.0);
+            if deep_thick > 1e-4 {
+                let r = &l.rock;
+                let raw_c = r
+                    .bogginess
+                    .unwrap_or(0.0)
+                    .max(0.20 * r.calcity.unwrap_or(0.0));
+                let p_factor = if r.name == "eclogite" || depth_bot >= 50.0 {
+                    1.75
+                } else if matches!(r.name, "amphibolite" | "granulite" | "blueschist")
+                    && depth_bot >= 28.0
+                {
+                    1.15
+                } else {
+                    0.60
+                };
+                let d_grade = (raw_c * p_factor).clamp(0.0, 1.0);
+                peak_diamond = peak_diamond.max(d_grade);
+                weighted_carbon += deep_thick * d_grade;
+                weight_sum += deep_thick;
+            }
+            depth_top = depth_bot;
+        }
+
+        let avg_diamond = if weight_sum > 1e-4 {
+            weighted_carbon / weight_sum
+        } else {
+            0.0
+        };
+        // Kimberlite pipe samples both peak eclogite lenses and average deep root carbon:
+        let diamond_grade = (0.65 * peak_diamond + 0.35 * avg_diamond).clamp(0.0, 1.0);
+
+        // 2. Blast maar diatreme crater through top ~0.35 km of country rock:
+        let orig_elev = self.elevation();
+        let excavate = (self.thickness() - Self::MIN_THICKNESS)
+            .max(0.0)
+            .min(0.35);
+        if excavate > 1e-4 {
+            let _ = self.erode_column(excavate * 4.0, 1.0, excavate);
+        }
+
+        // 3. Emplace 0.75 km ultramafic kimberlite diatreme + maar tuff ring (`felsity = 0.28`):
+        let mut kimberlite = Rock::extrusive(0.28);
+        let has_diamonds = diamond_grade >= 0.05;
+        if has_diamonds {
+            kimberlite.bogginess = Some(diamond_grade);
+        }
+        kimberlite.sulfidity = Some(0.06);
+
+        self.layers.push(RockLayer {
+            rock: kimberlite,
+            thickness: 0.75,
+        });
+        let target_elev = (orig_elev + 0.20).min(Self::MAX_HEIGHT);
+        self.bottom = target_elev - self.thickness();
+        self.limit();
+        self.compact();
+        has_diamonds
+    }
+
     pub fn clear_temp(&mut self) {
         self.subduction = 0.0;
         self.intrusion = None;
@@ -534,6 +630,7 @@ impl TileGeology {
                     let is_intrusive = matches!(l.rock.name, "gabbro" | "andesite" | "granite");
                     let quartzity = l.rock.quartzity;
                     let sulfidity = l.rock.sulfidity;
+                    let bogginess = l.rock.bogginess;
                     let mut r = if is_intrusive {
                         Rock::intrusive(l.rock.felsity)
                     } else {
@@ -541,6 +638,7 @@ impl TileGeology {
                     };
                     r.quartzity = quartzity;
                     r.sulfidity = sulfidity;
+                    r.bogginess = bogginess;
                     l.rock = r;
                 }
                 RockKind::Sedimentary => {
@@ -616,6 +714,7 @@ impl TileGeology {
                             felsity: r.felsity,
                             quartzity: r.quartzity,
                             sulfidity: r.sulfidity,
+                            bogginess: r.bogginess,
                         })
                     }
                     RockKind::Sedimentary => {
@@ -670,6 +769,7 @@ impl TileGeology {
                     };
                     r.quartzity = ig.quartzity;
                     r.sulfidity = ig.sulfidity;
+                    r.bogginess = ig.bogginess;
                     r
                 }
                 tec11_proto::RockKindOneof::Sedimentary(sed) => {
@@ -766,14 +866,28 @@ impl TileGeology {
                 RockKind::Metamorphic => match r.name {
                     "pelite" | "psammite" | "psephite" => "Bituminous Coal Seams",
                     "greenschist" | "blueschist" => "Anthracite Coal Seams",
-                    "hornfels" => "Contact Anthracite / Natural Coke",
+                    "hornfels" => {
+                        if (0.82..=0.94).contains(&r.toughness) {
+                            "Impact-Shocked Diamondiferous Carbon (Popigai-Type)"
+                        } else {
+                            "Contact Anthracite / Natural Coke"
+                        }
+                    }
                     "amphibolite" | "granulite" => "Crystalline Graphite Seams",
                     "eclogite" => "Diamondiferous Graphite / Micro-diamonds",
                     _ => "Coal / Carbon Seams",
                 },
-                RockKind::Igneous => "Carbonatite / Graphite Xenoliths",
+                RockKind::Igneous => {
+                    if r.felsity <= 0.35 {
+                        "Diamondiferous Kimberlite Pipe (Gem Diamonds & Pyrope Garnet)"
+                    } else {
+                        "Carbonatite / Graphite Xenoliths"
+                    }
+                }
             };
             deposits.push(format!("{grade}{rank}"));
+        } else if r.kind == RockKind::Igneous && r.felsity <= 0.35 {
+            deposits.push("Ultramafic Kimberlite Pipe (Peridot & Mantle Xenoliths)".to_string());
         }
 
         let q = r.quartzity.unwrap_or(0.0);
@@ -885,7 +999,118 @@ impl TileGeology {
             deposits.push("Karst Limestone Caverns & Aquifer".to_string());
         }
 
+        // 7. Precious & semi-precious gemstones from metamorphic facies + compositional intersections:
+        let gems = self.derive_layer_gems(layer_idx, depth_from_surface_km);
+        if gems.ruby {
+            deposits.push("Corundum Marble (Ruby & Spinel)".to_string());
+        }
+        if gems.sapphire {
+            deposits.push("Metamorphic Corundum Zone (Blue Sapphire)".to_string());
+        }
+        if gems.emerald {
+            deposits.push("Beryl-Chromium Veins (Precious Emerald)".to_string());
+        }
+        if gems.jade {
+            deposits.push("High-Pressure Jadeite / Nephrite Lodes (Jade)".to_string());
+        }
+        if gems.lapis {
+            deposits.push("Lazurite-Pyrite Marble (Lapis Lazuli)".to_string());
+        }
+        if gems.turquoise {
+            deposits.push("Supergene Arid Copper-Phosphate Veins (Turquoise)".to_string());
+        }
+        if gems.opal {
+            deposits.push("Hydrated Silica Seams (Precious Opal)".to_string());
+        }
+
         deposits
+    }
+
+    /// Deterministically evaluate precious and semi-precious gemstone occurrences in
+    /// `self.layers[layer_idx]` at `depth_from_surface_km`.
+    pub fn derive_layer_gems(&self, layer_idx: usize, depth_from_surface_km: f32) -> LayerGems {
+        let Some(l) = self.layers.get(layer_idx) else {
+            return LayerGems::default();
+        };
+        let r = &l.rock;
+        let bog = r.bogginess.unwrap_or(0.0);
+        let q = r.quartzity.unwrap_or(0.0);
+        let s = r.sulfidity.unwrap_or(0.0);
+        let sal = r.salinity.unwrap_or(0.0);
+        let calc = r.calcity.unwrap_or(0.0);
+        let is_bif = r.kind != RockKind::Igneous
+            && s >= 0.12
+            && q >= 0.18
+            && r.clasticity.unwrap_or(1.5) >= 0.8;
+
+        let adj_felsic_pluton = [layer_idx.checked_sub(1), Some(layer_idx + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|idx| self.layers.get(idx))
+            .any(|nb| nb.rock.kind == RockKind::Igneous && nb.rock.felsity > 0.62);
+
+        let diamond = (r.kind == RockKind::Igneous && r.felsity <= 0.35 && bog >= 0.05)
+            || (r.name == "eclogite" && bog >= 0.05)
+            || (r.name == "hornfels" && (0.82..=0.94).contains(&r.toughness) && bog >= 0.05)
+            || (self.impact_scar >= 0.55 && bog >= 0.08);
+
+        let lapis = r.name == "marble" && r.toughness >= 0.75 && s >= 0.10 && sal >= 0.04;
+
+        let ruby = r.name == "marble"
+            && r.toughness >= 0.75
+            && calc < 0.98
+            && q < 0.18
+            && s < 0.10
+            && (sal >= 0.04 || r.felsity < 0.53);
+
+        let sapphire = !ruby
+            && !lapis
+            && ((matches!(r.name, "granulite" | "amphibolite")
+                && r.toughness >= 0.80
+                && q < 0.08
+                && (0.46..=0.60).contains(&r.felsity))
+                || (r.name == "marble"
+                    && r.toughness >= 0.80
+                    && calc < 0.98
+                    && q < 0.12
+                    && s < 0.10
+                    && sal < 0.04
+                    && r.felsity >= 0.53));
+
+        let emerald = (matches!(r.name, "greenschist" | "amphibolite")
+            && r.felsity < 0.52
+            && (q >= 0.14 || (adj_felsic_pluton && q >= 0.07)))
+            || (r.name == "pelite" && bog >= 0.08 && q >= 0.09 && sal >= 0.05);
+
+        let jade = (r.name == "blueschist" && r.felsity <= 0.58 && q >= 0.04)
+            || (matches!(r.name, "greenschist" | "amphibolite")
+                && (0.30..=0.75).contains(&calc)
+                && r.felsity <= 0.55);
+
+        let turquoise = depth_from_surface_km < 0.8
+            && self.elevation() > 0.0
+            && !is_bif
+            && s >= 0.12
+            && sal >= 0.06
+            && r.name != "marble";
+
+        let opal = depth_from_surface_km < 0.8
+            && self.elevation() > 0.0
+            && !is_bif
+            && q >= 0.10
+            && sal >= 0.10
+            && matches!(r.kind, RockKind::Sedimentary | RockKind::Igneous);
+
+        LayerGems {
+            diamond,
+            ruby,
+            sapphire,
+            emerald,
+            jade,
+            lapis,
+            turquoise,
+            opal,
+        }
     }
 
     /// Serialize this tile's 1D stratigraphic column (ordered top-to-bottom from surface to Moho)
@@ -1020,5 +1245,140 @@ mod tests {
             (0.0, 0.0, vec![('B', 1.0), ('A', 1.0)]),
         ]);
         assert_eq!(l4[0].0, 'B');
+    }
+
+    #[test]
+    fn test_kimberlite_eruption_and_precious_gems() {
+        // 1. Thick continental column with carbon-bearing eclogite at depth -> diamondiferous kimberlite
+        let mut deep_eclogite = Rock {
+            kind: RockKind::Metamorphic,
+            name: "eclogite",
+            felsity: 0.50,
+            toughness: 0.85,
+            clasticity: None,
+            calcity: None,
+            bogginess: Some(0.18),
+            quartzity: None,
+            sulfidity: None,
+            salinity: None,
+        };
+        let mut tile = TileGeology {
+            bottom: -44.0,
+            mountainosity: 0.5,
+            subduction: 0.0,
+            intrusion: None,
+            impact_scar: 0.0,
+            layers: vec![
+                RockLayer {
+                    rock: deep_eclogite.clone(),
+                    thickness: 12.0,
+                },
+                RockLayer {
+                    rock: Rock::intrusive(0.72),
+                    thickness: 33.0,
+                },
+            ],
+        };
+        assert!(tile.erupt_kimberlite(), "Expected diamondiferous kimberlite");
+        let top_idx = tile.layers.len() - 1;
+        let gems = tile.derive_layer_gems(top_idx, 0.0);
+        assert!(gems.diamond, "Surface kimberlite pipe should host diamonds");
+        let deps = tile.derive_layer_deposits(top_idx, 0.0).join(" ");
+        assert!(deps.contains("Diamondiferous Kimberlite Pipe"));
+
+        // Verify protobuf snapshot roundtrip preserves kimberlite diamond grade
+        let proto = tile.to_proto_geological_tile();
+        let mut norm = tile.clone();
+        norm.normalize_for_snapshot();
+        let restored = TileGeology::from_proto_geological_tile(&proto).unwrap();
+        assert_eq!(norm.layers, restored.layers);
+        assert!(restored.derive_layer_gems(restored.layers.len() - 1, 0.0).diamond);
+
+        // 2. Barren craton without deep carbon -> barren kimberlite (peridot/xenoliths, no diamonds)
+        deep_eclogite.bogginess = None;
+        let mut barren_tile = TileGeology {
+            bottom: -35.0,
+            mountainosity: 0.2,
+            subduction: 0.0,
+            intrusion: None,
+            impact_scar: 0.0,
+            layers: vec![
+                RockLayer {
+                    rock: deep_eclogite,
+                    thickness: 10.0,
+                },
+                RockLayer {
+                    rock: Rock::intrusive(0.70),
+                    thickness: 26.0,
+                },
+            ],
+        };
+        assert!(!barren_tile.erupt_kimberlite(), "Expected barren kimberlite without deep carbon");
+        let b_top = barren_tile.layers.len() - 1;
+        assert!(!barren_tile.derive_layer_gems(b_top, 0.0).diamond);
+        assert!(barren_tile.derive_layer_deposits(b_top, 0.0).join(" ").contains("Ultramafic Kimberlite Pipe"));
+
+        // 3. Verify Ruby, Emerald, Jade, and Lapis Lazuli gem derivations
+        let gem_tile = TileGeology {
+            bottom: -8.0,
+            mountainosity: 1.0,
+            subduction: 0.0,
+            intrusion: None,
+            impact_scar: 0.0,
+            layers: vec![
+                RockLayer {
+                    rock: Rock::intrusive(0.75), // adjacent felsic granite pegmatite
+                    thickness: 3.0,
+                },
+                RockLayer {
+                    rock: Rock {
+                        kind: RockKind::Metamorphic,
+                        name: "greenschist",
+                        felsity: 0.48,
+                        toughness: 0.75,
+                        clasticity: None,
+                        calcity: None,
+                        bogginess: None,
+                        quartzity: Some(0.12),
+                        sulfidity: None,
+                        salinity: None,
+                    },
+                    thickness: 2.0,
+                },
+                RockLayer {
+                    rock: Rock {
+                        kind: RockKind::Metamorphic,
+                        name: "blueschist",
+                        felsity: 0.50,
+                        toughness: 0.75,
+                        clasticity: None,
+                        calcity: None,
+                        bogginess: None,
+                        quartzity: Some(0.08),
+                        sulfidity: None,
+                        salinity: None,
+                    },
+                    thickness: 2.0,
+                },
+                RockLayer {
+                    rock: Rock {
+                        kind: RockKind::Metamorphic,
+                        name: "marble",
+                        felsity: 0.50,
+                        toughness: 0.80,
+                        clasticity: None,
+                        calcity: Some(0.85),
+                        bogginess: None,
+                        quartzity: Some(0.03),
+                        sulfidity: Some(0.02),
+                        salinity: Some(0.08),
+                    },
+                    thickness: 2.0,
+                },
+            ],
+        };
+        assert!(gem_tile.derive_layer_gems(1, 4.0).emerald);
+        assert!(gem_tile.derive_layer_gems(2, 2.0).jade);
+        assert!(gem_tile.derive_layer_gems(3, 0.0).ruby);
     }
 }

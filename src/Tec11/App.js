@@ -4004,6 +4004,9 @@ function rockLayerBaseStyle(layer) {
   const f = typeof layer.felsity === "number" ? layer.felsity : 0.5;
   switch (name) {
     case "basalt":
+      if (f <= 0.35) {
+        return { fill: "#163537", stroke: "#2dd4bf", pattern: "pebbles" };
+      }
       return { fill: "#28303d", stroke: "#475569", pattern: "mafic" };
     case "gabbro":
       return { fill: "#1e2530", stroke: "#334155", pattern: "plutonic_dark" };
@@ -4424,7 +4427,7 @@ function paintStratigraphySideCanvas(view) {
       ctx.stroke();
 
       // Ultra-high-pressure Diamonds in organic-rich Eclogite
-      if (lname === "eclogite" && bog >= 0.15) {
+      if (lname === "eclogite" && bog >= 0.05) {
         for (let d = 0; d < 4; d++) {
           const u = 0.18 + d * 0.21;
           const idx = Math.min(steps, Math.floor(u * steps));
@@ -4563,6 +4566,46 @@ function paintStratigraphySideCanvas(view) {
       }
     }
 
+    // H. Precious & Semi-Precious Gemstones (Ruby, Sapphire, Emerald, Jade, Lapis, Turquoise, Opal, Impact Diamond)
+    const layerDepStr = (layer.deposits || []).join(" ");
+    let gemStyle = null;
+    if (layerDepStr.includes("Impact-Shocked Diamond")) {
+      gemStyle = { fill: "#67e8f9", stroke: "#ffffff" };
+    } else if (layerDepStr.includes("Ruby")) {
+      gemStyle = { fill: "#ef4444", stroke: "#fecdd3" };
+    } else if (layerDepStr.includes("Sapphire")) {
+      gemStyle = { fill: "#3b82f6", stroke: "#bfdbfe" };
+    } else if (layerDepStr.includes("Emerald")) {
+      gemStyle = { fill: "#10b981", stroke: "#a7f3d0" };
+    } else if (layerDepStr.includes("Jade")) {
+      gemStyle = { fill: "#4ade80", stroke: "#dcfce7" };
+    } else if (layerDepStr.includes("Lapis")) {
+      gemStyle = { fill: "#1d4ed8", stroke: "#facc15" };
+    } else if (layerDepStr.includes("Turquoise")) {
+      gemStyle = { fill: "#06b6d4", stroke: "#cffafe" };
+    } else if (layerDepStr.includes("Opal")) {
+      gemStyle = { fill: "#f0abfc", stroke: "#fef08a" };
+    }
+    if (gemStyle) {
+      for (let g = 0; g < 4; g++) {
+        const u = 0.16 + g * 0.22 + (detRand(lSeed, g, 41) - 0.5) * 0.06;
+        const idx = Math.min(steps, Math.floor(Math.max(0, Math.min(1, u)) * steps));
+        const gx = colLeft + u * colW;
+        const gy = topPts[idx][1] * 0.48 + botPts[idx][1] * 0.52;
+        ctx.fillStyle = gemStyle.fill;
+        ctx.strokeStyle = gemStyle.stroke;
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(gx, gy - 3.0);
+        ctx.lineTo(gx + 2.6, gy);
+        ctx.lineTo(gx, gy + 3.0);
+        ctx.lineTo(gx - 2.6, gy);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
     ctx.restore(); // End layer clip
 
     // Draw layer boundary stroke (highlight if hovered)
@@ -4580,6 +4623,59 @@ function paintStratigraphySideCanvas(view) {
       midY: Math.max(padTop + 6, Math.min(cssH - padBot - 6, midY)),
       style,
     });
+  }
+
+  // Kimberlite Diatreme Pipe ascending from the mantle Moho through the crust
+  for (let i = 0; i < layers.length; i++) {
+    const kl = layers[i];
+    if (kl.kind === "I" && typeof kl.felsity === "number" && kl.felsity <= 0.35) {
+      const pipeU = 0.5 + (detRand((strat.tileIdx || 0) + 17, i, 77) - 0.5) * 0.28;
+      const pipeX = colLeft + pipeU * colW;
+      const yPipeTop = kmToY(kl.topKm);
+      const yPipeBot = Math.min(cssH + 6, Math.max(yPipeTop + 14, yMohoBase));
+      const topHalfW = 7.5;
+      const botHalfW = 2.2;
+
+      ctx.fillStyle = "rgba(20, 53, 55, 0.92)";
+      ctx.strokeStyle = "#2dd4bf";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(pipeX - topHalfW, yPipeTop);
+      ctx.lineTo(pipeX + topHalfW, yPipeTop);
+      ctx.lineTo(pipeX + botHalfW, yPipeBot);
+      ctx.lineTo(pipeX - botHalfW, yPipeBot);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      const hasDiamonds = (kl.bogginess || 0) >= 0.05;
+      const sparkCount = 6;
+      for (let sp = 0; sp < sparkCount; sp++) {
+        const frac = (sp + 0.6) / (sparkCount + 0.4);
+        const sy = yPipeTop + frac * (yPipeBot - yPipeTop);
+        const curHalfW = topHalfW * (1 - frac) + botHalfW * frac;
+        const sx = pipeX + (detRand(i + 3, sp, 88) - 0.5) * 1.2 * curHalfW;
+        if (hasDiamonds && sp % 2 === 0) {
+          ctx.fillStyle = "#67e8f9";
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 0.85;
+          ctx.beginPath();
+          ctx.moveTo(sx, sy - 2.8);
+          ctx.lineTo(sx + 2.3, sy);
+          ctx.lineTo(sx, sy + 2.8);
+          ctx.lineTo(sx - 2.3, sy);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          // Mantle peridot (olivine green) & pyrope garnet (crimson) xenoliths
+          ctx.fillStyle = sp % 2 === 0 ? "#84cc16" : "#f43f5e";
+          ctx.beginPath();
+          ctx.arc(sx, sy, 1.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
   }
 
   // Moho boundary line
@@ -4682,6 +4778,14 @@ function paintStratigraphySideCanvas(view) {
     const deps = layer.deposits || [];
     const depJoined = deps.join(" ");
     if (depJoined.includes("Diamond")) badge = " 💎";
+    else if (depJoined.includes("Ruby")) badge = " [Ruby]";
+    else if (depJoined.includes("Sapphire")) badge = " [Sapph]";
+    else if (depJoined.includes("Emerald")) badge = " [Emer]";
+    else if (depJoined.includes("Jade")) badge = " [Jade]";
+    else if (depJoined.includes("Lapis")) badge = " [Lapis]";
+    else if (depJoined.includes("Turquoise")) badge = " [Turq]";
+    else if (depJoined.includes("Opal")) badge = " [Opal]";
+    else if (depJoined.includes("Kimberlite Pipe")) badge = " [Pipe]";
     else if (depJoined.includes("Banded Iron")) badge = " [BIF]";
     else if (depJoined.includes("Anthracite") || depJoined.includes("Bituminous") || depJoined.includes("Lignite") || depJoined.includes("Peat")) badge = " [Coal]";
     else if (depJoined.includes("Graphite")) badge = " [C]";
@@ -4692,9 +4796,13 @@ function paintStratigraphySideCanvas(view) {
     else if (depJoined.includes("Quartz")) badge = " [Qtz]";
     else if (depJoined.includes("Karst")) badge = " [Cave]";
 
+    const dispName =
+      layer.kind === "I" && typeof layer.felsity === "number" && layer.felsity <= 0.35
+        ? "kimberlite"
+        : layer.name;
     ctx.fillStyle = isHovered ? "#fef08a" : badge ? "#f8fafc" : "#cbd5e1";
     ctx.font = isHovered || badge ? "bold 9.5px sans-serif" : "9.5px sans-serif";
-    const textStr = `${layer.name} (${layer.thicknessKm.toFixed(1)}k)${badge}`;
+    const textStr = `${dispName} (${layer.thicknessKm.toFixed(1)}k)${badge}`;
     ctx.fillText(textStr, colRight + 9, labelY, cssW - colRight - 11);
   }
 
@@ -4706,13 +4814,17 @@ function paintStratigraphySideCanvas(view) {
     if (!labelEl) return;
     if (hoveredIdx >= 0 && strat.layers[hoveredIdx]) {
       const l = strat.layers[hoveredIdx];
+      const lDispName =
+        l.kind === "I" && typeof l.felsity === "number" && l.felsity <= 0.35
+          ? "kimberlite"
+          : l.name;
       const kindWord =
         l.kind === "I" ? "Igneous" : l.kind === "S" ? "Sedimentary" : "Metamorphic";
       const depsText =
         l.deposits && l.deposits.length > 0
           ? ` | Veins/Deposits: ${l.deposits.join(", ")}`
           : " | No major mineral veins";
-      labelEl.textContent = `Layer #${hoveredIdx + 1}: ${l.name} (${kindWord}, ${l.thicknessKm.toFixed(2)} km thick, depth ${l.depthTopKm.toFixed(1)}–${l.depthBottomKm.toFixed(1)} km) | f=${l.felsity.toFixed(2)} bog=${l.bogginess.toFixed(2)} calc=${l.calcity.toFixed(2)} qtz=${l.quartzity.toFixed(2)} sulf=${l.sulfidity.toFixed(2)} sal=${l.salinity.toFixed(2)}${depsText}`;
+      labelEl.textContent = `Layer #${hoveredIdx + 1}: ${lDispName} (${kindWord}, ${l.thicknessKm.toFixed(2)} km thick, depth ${l.depthTopKm.toFixed(1)}–${l.depthBottomKm.toFixed(1)} km) | f=${l.felsity.toFixed(2)} bog=${l.bogginess.toFixed(2)} calc=${l.calcity.toFixed(2)} qtz=${l.quartzity.toFixed(2)} sulf=${l.sulfidity.toFixed(2)} sal=${l.salinity.toFixed(2)}${depsText}`;
     } else {
       const totalDeps = [];
       for (const l of strat.layers) {

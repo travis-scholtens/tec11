@@ -14,6 +14,7 @@ message IgneousRock {
   float felsity = 2;     // [0.0, 1.0]; determines both rock name and toughness (== felsity)
   optional float quartzity = 3; // [0.0, 1.0]; hydrothermal quartz/pegmatite vein fraction
   optional float sulfidity = 4; // [0.0, 1.0]; magmatic/hydrothermal sulfide ore fraction
+  optional float bogginess = 5; // [0.0, 1.0]; entrained deep mantle/slab carbon & kimberlite diamond xenocrysts
 }
 
 message SedimentaryRock {

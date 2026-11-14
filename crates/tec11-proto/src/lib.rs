@@ -134,6 +134,7 @@ mod tests {
                                     felsity: 0.5,
                                     quartzity: None,
                                     sulfidity: None,
+                                    bogginess: None,
                                 })),
                             }),
                             thickness: 5.0,

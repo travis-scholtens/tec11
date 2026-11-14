@@ -124,8 +124,9 @@ pub const ROCK_CLAY: u32 = 7; // claystone / siltstone
 pub const ROCK_CONGLOMERATE: u32 = 8;
 pub const ROCK_OBSIDIAN: u32 = 9; // rhyolite / dacite (volcanic glass)
 pub const ROCK_GNEISS: u32 = 10; // amphibolite / granulite (banded metamorphic)
+pub const ROCK_KIMBERLITE: u32 = 11; // ultramafic volatile-rich pipe rock
 
-pub const ROCK_CONCEPT_GLOSSES: [&str; 11] = [
+pub const ROCK_CONCEPT_GLOSSES: [&str; 12] = [
     "granite (hard building stone)",
     "basalt (dark volcanic stone)",
     "sandstone (gritty layered stone)",
@@ -137,6 +138,7 @@ pub const ROCK_CONCEPT_GLOSSES: [&str; 11] = [
     "gravel / conglomerate",
     "obsidian (volcanic glass)",
     "gneiss (banded hard stone)",
+    "kimberlite (blue-ground pipe stone)",
 ];
 
 // Mineral / resource concepts people would encounter in near-surface deposits
@@ -153,8 +155,17 @@ pub const MINERAL_SILVER: u32 = 9;
 pub const MINERAL_LEAD_ZINC: u32 = 10;
 pub const MINERAL_TUNGSTEN: u32 = 11;
 pub const MINERAL_NICKEL: u32 = 12;
+pub const MINERAL_PLATINUM: u32 = 13;
+pub const MINERAL_DIAMOND: u32 = 14;
+pub const MINERAL_RUBY: u32 = 15;
+pub const MINERAL_SAPPHIRE: u32 = 16;
+pub const MINERAL_EMERALD: u32 = 17;
+pub const MINERAL_JADE: u32 = 18;
+pub const MINERAL_LAPIS: u32 = 19;
+pub const MINERAL_TURQUOISE: u32 = 20;
+pub const MINERAL_OPAL: u32 = 21;
 
-pub const MINERAL_CONCEPT_GLOSSES: [&str; 13] = [
+pub const MINERAL_CONCEPT_GLOSSES: [&str; 22] = [
     "iron ore",
     "salt (rock salt / halite)",
     "gold",
@@ -168,6 +179,15 @@ pub const MINERAL_CONCEPT_GLOSSES: [&str; 13] = [
     "lead & zinc ore (galena)",
     "tungsten ore (wolframite)",
     "nickel ore",
+    "platinum",
+    "diamond",
+    "ruby",
+    "sapphire",
+    "emerald",
+    "jade",
+    "lapis lazuli",
+    "turquoise",
+    "opal",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -3072,7 +3092,7 @@ impl HistorySimulation {
         }
 
         let mut depth_from_surface = 0.0f32;
-        for layer in tile.layers.iter().rev() {
+        for (layer_idx, layer) in tile.layers.iter().enumerate().rev() {
             if depth_from_surface >= max_depth_km {
                 break;
             }
@@ -3080,7 +3100,13 @@ impl HistorySimulation {
             // Map rock name → Rock concept
             match r.name {
                 "granite" => { rocks.insert(ROCK_GRANITE); }
-                "basalt" => { rocks.insert(ROCK_BASALT); }
+                "basalt" => {
+                    if r.felsity <= 0.35 {
+                        rocks.insert(ROCK_KIMBERLITE);
+                    } else {
+                        rocks.insert(ROCK_BASALT);
+                    }
+                }
                 "sandstone" => { rocks.insert(ROCK_SANDSTONE); }
                 "limestone" => { rocks.insert(ROCK_LIMESTONE); }
                 "marble" => { rocks.insert(ROCK_MARBLE); }
@@ -3097,25 +3123,21 @@ impl HistorySimulation {
             let q = r.quartzity.unwrap_or(0.0);
             let s = r.sulfidity.unwrap_or(0.0);
             let sal = r.salinity.unwrap_or(0.0);
-            let calc = r.calcity.unwrap_or(0.0);
             let bog = r.bogginess.unwrap_or(0.0);
 
+            let is_bif = s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8 && r.kind != RockKind::Igneous;
+
             // Iron ore from BIF (co-precipitated sulfide + chert in marine beds)
-            if s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8 && r.kind != RockKind::Igneous {
+            if is_bif {
                 minerals.insert(MINERAL_IRON);
             }
             // Salt / halite / gypsum from evaporites
             if sal >= 0.08 {
                 minerals.insert(MINERAL_SALT);
-                if sal >= 0.08 && sal < 0.20 {
-                    minerals.insert(MINERAL_GYPSUM);
-                }
-                if sal >= 0.20 {
-                    minerals.insert(MINERAL_GYPSUM);
-                }
+                minerals.insert(MINERAL_GYPSUM);
             }
             // Gold from quartz veins and alluvial placers
-            if q >= 0.05 && !(s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8) {
+            if q >= 0.05 && !is_bif {
                 minerals.insert(MINERAL_QUARTZ);
                 match r.kind {
                     RockKind::Sedimentary if r.clasticity.unwrap_or(2.0) <= 1.5 => {
@@ -3135,11 +3157,12 @@ impl HistorySimulation {
                 }
             }
             // Copper from sulfide ores
-            if s >= 0.10 && !(s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8) {
+            if s >= 0.10 && !is_bif {
                 minerals.insert(MINERAL_COPPER);
             }
-            // Coal / peat from bogginess
-            if bog >= 0.05 {
+            // Coal / peat from non-igneous, non-diamondiferous organic seams
+            let is_shock_diamond = r.name == "hornfels" && (0.82..=0.94).contains(&r.toughness);
+            if bog >= 0.05 && r.kind != RockKind::Igneous && r.name != "eclogite" && !is_shock_diamond {
                 minerals.insert(MINERAL_COAL);
             }
             // Flint / chert from siliceous limestone and chalk
@@ -3150,8 +3173,6 @@ impl HistorySimulation {
             if q >= 0.16 && r.kind == RockKind::Sedimentary {
                 minerals.insert(MINERAL_FLINT);
             }
-
-            let is_bif = s >= 0.12 && q >= 0.18 && r.clasticity.unwrap_or(1.5) >= 0.8 && r.kind != RockKind::Igneous;
 
             // Silver from polymetallic sulfide veins in felsic igneous/metamorphic rocks
             if s >= 0.10 && !is_bif {
@@ -3173,6 +3194,39 @@ impl HistorySimulation {
             }
             if tile.impact_scar >= 0.45 && r.name == "basalt" && s >= 0.20 {
                 minerals.insert(MINERAL_NICKEL);
+            }
+            // Platinum (PGM) from Sudbury-type impact-melt sulfide sheets & low-felsity gabbro cumulates
+            if (tile.impact_scar >= 0.45 && r.name == "basalt" && s >= 0.25)
+                || (r.name == "gabbro" && r.felsity <= 0.46 && s >= 0.14)
+            {
+                minerals.insert(MINERAL_PLATINUM);
+            }
+
+            // Precious & semi-precious gemstones (shared with `TileGeology::derive_layer_deposits`)
+            let gems = tile.derive_layer_gems(layer_idx, depth_from_surface);
+            if gems.diamond {
+                minerals.insert(MINERAL_DIAMOND);
+            }
+            if gems.ruby {
+                minerals.insert(MINERAL_RUBY);
+            }
+            if gems.sapphire {
+                minerals.insert(MINERAL_SAPPHIRE);
+            }
+            if gems.emerald {
+                minerals.insert(MINERAL_EMERALD);
+            }
+            if gems.jade {
+                minerals.insert(MINERAL_JADE);
+            }
+            if gems.lapis {
+                minerals.insert(MINERAL_LAPIS);
+            }
+            if gems.turquoise {
+                minerals.insert(MINERAL_TURQUOISE);
+            }
+            if gems.opal {
+                minerals.insert(MINERAL_OPAL);
             }
 
             depth_from_surface += layer.thickness;
@@ -3196,6 +3250,7 @@ impl HistorySimulation {
         let mut state_seas: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_rivers: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_mountains: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut state_minerals: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_tech: BTreeMap<u32, (bool, bool, bool)> = BTreeMap::new();
         let mut state_rec_partners: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_direct_partners: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
@@ -3213,6 +3268,20 @@ impl HistorySimulation {
             state_rec_partners.insert(sid, self.recursive_trade_partners(sid));
             state_direct_partners.insert(sid, self.lookup_trade_partners(sid));
             state_rivals.insert(sid, self.lookup_opponents(sid));
+
+            let geo_tiles = self.prehistory.tiles();
+            let mut s_mins = BTreeSet::new();
+            let mut seen_c = BTreeSet::new();
+            for &t in tiles {
+                let c_idx = self.fine_primary_coarse[t];
+                if seen_c.insert(c_idx) {
+                    if let Some(tg) = geo_tiles.get(c_idx) {
+                        let (_, mins) = Self::surface_rock_and_mineral_concepts(tg, 0.5);
+                        s_mins.extend(mins);
+                    }
+                }
+            }
+            state_minerals.insert(sid, s_mins);
 
             let mut has_ag = false;
             let mut has_riv = false;
@@ -3488,11 +3557,17 @@ impl HistorySimulation {
                 let home_seas = state_seas.get(&state_id).unwrap_or(&empty_u32_set);
                 let home_rivers = state_rivers.get(&state_id).unwrap_or(&empty_u32_set);
                 let home_mountains = state_mountains.get(&state_id).unwrap_or(&empty_u32_set);
+                let home_minerals = state_minerals.get(&state_id).unwrap_or(&empty_u32_set);
                 for &partner in rec_partners {
                     let p_lang = state_langs.get(&partner).copied().flatten();
                     if let Some(psp) = state_species.get(&partner) {
                         for &sp in psp.difference(native).take(6) {
                             concepts.insert(ConceptKey::Species(sp as u32), p_lang);
+                        }
+                    }
+                    if let Some(pmins) = state_minerals.get(&partner) {
+                        for &mid in pmins.difference(home_minerals).take(6) {
+                            concepts.entry(ConceptKey::Mineral(mid)).or_insert(p_lang);
                         }
                     }
                     if let Some(pconts) = state_continents.get(&partner) {

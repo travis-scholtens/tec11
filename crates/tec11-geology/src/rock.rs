@@ -227,8 +227,12 @@ pub fn deposit_sedimentary(
                 has_calc = true;
             }
             if let Some(b) = r.bogginess {
-                bog_sum += thick * b;
-                has_bog = true;
+                // Igneous bogginess represents mantle/kimberlite diamond or carbonatite xenocrysts,
+                // not detrital organic peat that would form downstream lignite beds.
+                if r.kind != RockKind::Igneous {
+                    bog_sum += thick * b;
+                    has_bog = true;
+                }
             }
             if let Some(q) = r.quartzity {
                 quartz_sum += thick * q;

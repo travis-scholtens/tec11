@@ -847,7 +847,7 @@ impl TectonicsSimulation {
             // before replacing it with the advancing continental column (Accretionary Wedge),
             // and preserve the overridden ocean floor's basalt/VMS composition for subduction underplating.
             let mut scraped_sediments: Vec<RockLayer> = Vec::new();
-            let subducted_seafloor = self.tiles[dest]
+            let mut subducted_seafloor = self.tiles[dest]
                 .layers
                 .iter()
                 .rev()
@@ -855,10 +855,24 @@ impl TectonicsSimulation {
                 .map(|l| l.rock.clone())
                 .unwrap_or_else(Rock::seafloor);
             if is_leading_edge {
+                let mut slab_carbon = 0.0f32;
+                let mut had_marine_sed = false;
                 for l in &self.tiles[dest].layers {
                     if l.rock.kind == RockKind::Sedimentary {
+                        had_marine_sed = true;
+                        let sed_c = l
+                            .rock
+                            .bogginess
+                            .unwrap_or(0.0)
+                            .max(0.24 * l.rock.calcity.unwrap_or(0.0));
+                        slab_carbon = slab_carbon.max(sed_c);
                         scraped_sediments.push(l.clone());
                     }
+                }
+                if had_marine_sed {
+                    let existing_c = subducted_seafloor.bogginess.unwrap_or(0.0);
+                    subducted_seafloor.bogginess =
+                        Some((existing_c.max(slab_carbon) + 0.04).clamp(0.04, 0.55));
                 }
             }
 
@@ -1336,6 +1350,26 @@ impl TectonicsSimulation {
                 enrich_orogenic_veins_in_place(&mut self.tiles[t].layers, orogenic_intensity);
             }
             self.tiles[t].compact();
+        }
+
+        // 8b. Deep-mantle kimberlite / lamproite pipe eruptions punching through thick,
+        // non-subducting continental interiors, sampling deep eclogite/amphibolite carbon into surface diamonds.
+        let kimb_seed = u128::from_le_bytes(self.rng.to_bytes())
+            ^ ((self.geoticks as u128).wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835));
+        let mut kimb_rng = Pcg64Mcg::new(kimb_seed | 1);
+        for t in 0..n {
+            if overlapping[t].len() == 1
+                && self.tiles[t].subduction == 0.0
+                && self.tiles[t].elevation() > 0.05
+            {
+                let thick = self.tiles[t].thickness();
+                if thick >= 22.0 {
+                    let prob = 0.0065 * (((thick - 20.0) / 30.0).clamp(0.25, 1.5) as f64);
+                    if kimb_rng.next_f64() < prob {
+                        let _ = self.tiles[t].erupt_kimberlite();
+                    }
+                }
+            }
         }
 
         // 9. Merge overlapping continent shapes (`planetsimulation.py:342-370`).
