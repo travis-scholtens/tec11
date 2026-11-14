@@ -61,8 +61,10 @@ pub const CULTURE_SEA_FISHING: u32 = 3;
 pub const CULTURE_TRADING: u32 = 4;
 pub const CULTURE_WARFARE: u32 = 5;
 pub const CULTURE_CITY: u32 = 6;
+pub const CULTURE_BRONZEWORKING: u32 = 7;
+pub const CULTURE_IRONWORKING: u32 = 8;
 
-pub const CULTURE_CONCEPT_GLOSSES: [&str; 7] = [
+pub const CULTURE_CONCEPT_GLOSSES: [&str; 9] = [
     "foraging / gathering",
     "farming / agriculture",
     "river fishing / boating",
@@ -70,6 +72,8 @@ pub const CULTURE_CONCEPT_GLOSSES: [&str; 7] = [
     "trading / commerce",
     "warfare / battle",
     "city / citadel",
+    "bronzeworking / smithing",
+    "ironworking / forging",
 ];
 
 pub const SEASON_SUMMER: u32 = 0;
@@ -331,6 +335,8 @@ pub struct Community {
     pub agriculture: bool,
     pub rivergoing: bool,
     pub seafaring: bool,
+    pub bronzeworking: bool,
+    pub ironworking: bool,
     pub racial_mix: BTreeMap<u32, f32>,
 }
 
@@ -359,6 +365,8 @@ impl Community {
         self.agriculture = self.agriculture || other.agriculture;
         self.rivergoing = self.rivergoing || other.rivergoing;
         self.seafaring = self.seafaring || other.seafaring;
+        self.bronzeworking = self.bronzeworking || other.bronzeworking;
+        self.ironworking = self.ironworking || other.ironworking;
         self.racial_mix = new_mix;
         self.normalize_racial_mix();
     }
@@ -1240,11 +1248,13 @@ impl TravelRoute {
     }
 }
 
-/// Computed territorial, ecological, and diplomatic adjacency topology of all active states.
+/// Computed territorial, ecological, mineral, and diplomatic adjacency topology of all active states.
 #[derive(Clone, Debug)]
 pub struct StateTopology {
     pub extents: BTreeMap<u32, Vec<usize>>,
     pub species: BTreeMap<u32, BTreeSet<usize>>,
+    pub domestic_minerals: BTreeMap<u32, BTreeSet<u32>>,
+    pub export_minerals: BTreeMap<u32, BTreeSet<u32>>,
     pub neighbors: BTreeMap<u32, BTreeSet<u32>>,
 }
 
@@ -1298,6 +1308,8 @@ pub struct HistorySimulation {
     fine_adj: std::sync::Arc<Vec<Vec<usize>>>,
     coarse_elevs: Vec<f32>,
     coarse_koeppen: Vec<u8>,
+    coarse_workable_minerals: Vec<BTreeSet<u32>>,
+    coarse_export_minerals: Vec<BTreeSet<u32>>,
     fine_primary_coarse: Vec<usize>,
     fine_lat_deg: Vec<f64>,
     base_capacities: Vec<f32>,
@@ -1419,6 +1431,8 @@ impl HistorySimulation {
             fine_adj,
             coarse_elevs,
             coarse_koeppen: Vec::new(),
+            coarse_workable_minerals: Vec::new(),
+            coarse_export_minerals: Vec::new(),
             fine_primary_coarse: vec![0; num_fine],
             fine_lat_deg: vec![0.0; num_fine],
             base_capacities: vec![0.0; num_fine],
@@ -1450,6 +1464,24 @@ impl HistorySimulation {
         self.initialize_terrain_and_polities();
     }
 
+    /// Mutable access to coarse geological tiles (used by tests or world editors, followed by `refresh_mineral_caches`).
+    pub fn prehistory_tiles_mut(&mut self) -> &mut [crate::tile::TileGeology] {
+        self.prehistory.tiles_mut()
+    }
+
+    /// Recompute cached per-coarse-tile workable and exportable mineral concept sets from stratigraphy.
+    pub fn refresh_mineral_caches(&mut self) {
+        let geo_tiles = self.prehistory.tiles();
+        self.coarse_workable_minerals = geo_tiles
+            .iter()
+            .map(|tg| Self::surface_rock_and_mineral_concepts(tg, 0.5).1)
+            .collect();
+        self.coarse_export_minerals = geo_tiles
+            .iter()
+            .map(|tg| Self::exportable_mineral_concepts(tg, 0.5))
+            .collect();
+    }
+
     fn initialize_terrain_and_polities(&mut self) {
         let coarse_adj = self.prehistory.adjacency().to_vec();
         let coarse_elevs = self.prehistory.tile_elevations();
@@ -1460,6 +1492,7 @@ impl HistorySimulation {
         let fine_adj = std::sync::Arc::clone(&self.fine_adj);
         self.coarse_elevs = coarse_elevs.clone();
         self.coarse_koeppen = koeppen.clone();
+        self.refresh_mineral_caches();
         self.fine_primary_coarse = (0..num_fine)
             .map(|f_idx| self.terrain.primary_coarse_tile(f_idx, &coarse_elevs))
             .collect();
@@ -1887,6 +1920,8 @@ impl HistorySimulation {
                 agriculture,
                 rivergoing,
                 seafaring,
+                bronzeworking: false,
+                ironworking: false,
                 racial_mix: mix,
             };
             comm.normalize_racial_mix();
@@ -1908,9 +1943,12 @@ impl HistorySimulation {
         self.update_diplomacy_and_trade(&fine_adj);
     }
 
-    /// Recompute `self.capacities` from `self.base_capacities`, granting a `+35%` freshwater fishing
-    /// carrying capacity bonus on river tiles with `rivergoing` communities and a `+45%` marine fishing
-    /// carrying capacity bonus on coastal tiles with `seafaring` communities.
+    /// Recompute `self.capacities` from `self.base_capacities`, granting:
+    /// - `+35%` freshwater fishing carrying capacity on river tiles with `rivergoing` communities,
+    /// - `+45%` marine fishing carrying capacity on coastal tiles with `seafaring` communities,
+    /// - `+12%` agricultural carrying capacity with `bronzeworking` sickles/ard-shares, or
+    /// - `+25%` (`+35%` in dense forested/humid climates) agricultural carrying capacity with `ironworking`
+    ///   axes and heavy iron plows clearing dense forest and heavy clay soils.
     pub fn refresh_fishing_capacities(&mut self) {
         let num_fine = self.base_capacities.len();
         if self.capacities.len() != num_fine {
@@ -1919,13 +1957,29 @@ impl HistorySimulation {
         for f_idx in 0..num_fine {
             let mut mult = 1.0f32;
             if let Some(comms) = self.tile_communities.get(&f_idx) {
+                let has_ag = comms.iter().any(|c| c.thousands > 0.0 && c.agriculture);
                 let has_riv = comms.iter().any(|c| c.thousands > 0.0 && c.rivergoing);
                 let has_sea = comms.iter().any(|c| c.thousands > 0.0 && c.seafaring);
+                let has_bronze = comms.iter().any(|c| c.thousands > 0.0 && c.bronzeworking);
+                let has_iron = comms.iter().any(|c| c.thousands > 0.0 && c.ironworking);
                 if has_riv && self.river_tiles.get(f_idx).copied().unwrap_or(false) {
                     mult *= 1.35;
                 }
                 if has_sea && self.is_coastal_fine.get(f_idx).copied().unwrap_or(false) {
                     mult *= 1.45;
+                }
+                if has_ag {
+                    if has_iron {
+                        let c_idx = self.fine_primary_coarse.get(f_idx).copied().unwrap_or(0);
+                        let k = self.coarse_koeppen.get(c_idx).copied().unwrap_or(0);
+                        if matches!(k, 1 | 2 | 6 | 8 | 9 | 11) {
+                            mult *= 1.35;
+                        } else {
+                            mult *= 1.25;
+                        }
+                    } else if has_bronze {
+                        mult *= 1.12;
+                    }
                 }
             }
             self.capacities[f_idx] = self.base_capacities[f_idx] * mult;
@@ -2501,27 +2555,35 @@ impl HistorySimulation {
     }
 
     /// Metaethnic faultline intensity $I_f \in [0.0, 1.0]$ on fine face `f_idx` across political borders
-    /// (Turchin, *Historical Dynamics*, 2003, Ch. 4), incorporating agricultural, seafaring, and rivergoing
-    /// lifeway faultlines alongside nationality and linguistic divides:
-    /// `+0.35` across the agricultural/foraging divide, `+0.25` across the seafaring/landlocked divide,
-    /// `+0.15` across the rivergoing/upland divide, `+0.25` across nationality boundaries, and
-    /// `+0.20` across language boundaries (with `-0.05` solidarity dampening when neighboring states share
-    /// the same waterborne lifeway).
+    /// (Turchin, *Historical Dynamics*, 2003, Ch. 4), incorporating agricultural, metallurgical, seafaring,
+    /// and rivergoing lifeway faultlines alongside nationality and linguistic divides:
+    /// `+0.35` across the agricultural/foraging divide, `+0.15` per metallurgical tier gap (Stone / Bronze / Iron),
+    /// `+0.25` across the seafaring/landlocked divide, `+0.15` across the rivergoing/upland divide,
+    /// `+0.25` across nationality boundaries, and `+0.20` across language boundaries
+    /// (with `-0.05` solidarity dampening when neighboring states share the same waterborne lifeway).
     pub fn tile_metaethnic_intensity(&self, f_idx: usize, fine_adj: &[Vec<usize>]) -> f32 {
         let Some(&sid) = self.tile_states.get(&f_idx) else {
             return 0.0;
         };
-        let (f_ag, f_riv, f_sea) = self
+        let (f_ag, f_riv, f_sea, f_metal) = self
             .tile_communities
             .get(&f_idx)
             .map(|cs| {
+                let tier = if cs.iter().any(|c| c.thousands > 0.0 && c.ironworking) {
+                    2u8
+                } else if cs.iter().any(|c| c.thousands > 0.0 && c.bronzeworking) {
+                    1u8
+                } else {
+                    0u8
+                };
                 (
                     cs.iter().any(|c| c.thousands > 0.0 && c.agriculture),
                     cs.iter().any(|c| c.thousands > 0.0 && c.rivergoing),
                     cs.iter().any(|c| c.thousands > 0.0 && c.seafaring),
+                    tier,
                 )
             })
-            .unwrap_or((false, false, false));
+            .unwrap_or((false, false, false, 0));
         let f_nat = self.majority_nationality(f_idx);
         let f_lang = self.majority_language(f_idx);
 
@@ -2539,7 +2601,18 @@ impl HistorySimulation {
                 let nb_ag = nb_comms.iter().any(|c| c.thousands > 0.0 && c.agriculture);
                 let nb_riv = nb_comms.iter().any(|c| c.thousands > 0.0 && c.rivergoing);
                 let nb_sea = nb_comms.iter().any(|c| c.thousands > 0.0 && c.seafaring);
+                let nb_metal = if nb_comms.iter().any(|c| c.thousands > 0.0 && c.ironworking) {
+                    2u8
+                } else if nb_comms
+                    .iter()
+                    .any(|c| c.thousands > 0.0 && c.bronzeworking)
+                {
+                    1u8
+                } else {
+                    0u8
+                };
                 let ag_diff = if f_ag != nb_ag { 0.35f32 } else { 0.0f32 };
+                let metal_diff = 0.15f32 * (f_metal.abs_diff(nb_metal) as f32);
                 let sea_diff = if f_sea != nb_sea { 0.25f32 } else { 0.0f32 };
                 let riv_diff = if f_riv != nb_riv { 0.15f32 } else { 0.0f32 };
                 let nat_diff = if f_nat != self.majority_nationality(nb) {
@@ -2559,7 +2632,13 @@ impl HistorySimulation {
                         0.0f32
                     };
                 Some(
-                    (ag_diff + sea_diff + riv_diff + nat_diff + lang_diff + shared_water_solidarity)
+                    (ag_diff
+                        + metal_diff
+                        + sea_diff
+                        + riv_diff
+                        + nat_diff
+                        + lang_diff
+                        + shared_water_solidarity)
                         .clamp(0.0, 1.0),
                 )
             })
@@ -2607,11 +2686,13 @@ impl HistorySimulation {
             .collect()
     }
 
-    /// Compute per-state tile extents, native species sets, and neighboring states (including across rivers
-    /// and along established maritime/riverine wind & current travel routes).
+    /// Compute per-state tile extents, native species sets, domestic/exportable mineral sets, and
+    /// neighboring states (including across rivers and along established maritime/riverine travel routes).
     fn state_topology(&self, adjacency: &[Vec<usize>]) -> StateTopology {
         let mut extents: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         let mut species: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
+        let mut domestic_minerals: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut export_minerals: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut neighbors: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
 
         for (&t, &s1) in &self.tile_states {
@@ -2623,6 +2704,20 @@ impl HistorySimulation {
                         break;
                     }
                     sp_set.insert(sp);
+                }
+            }
+            if let Some(&c_idx) = self.fine_primary_coarse.get(t) {
+                if let Some(w_mins) = self.coarse_workable_minerals.get(c_idx) {
+                    domestic_minerals
+                        .entry(s1)
+                        .or_default()
+                        .extend(w_mins.iter().copied());
+                }
+                if let Some(e_mins) = self.coarse_export_minerals.get(c_idx) {
+                    export_minerals
+                        .entry(s1)
+                        .or_default()
+                        .extend(e_mins.iter().copied());
                 }
             }
             let nb_set = neighbors.entry(s1).or_default();
@@ -2662,26 +2757,109 @@ impl HistorySimulation {
         StateTopology {
             extents,
             species,
+            domestic_minerals,
+            export_minerals,
             neighbors,
         }
     }
 
+    /// Check whether state `sid` has access to Copper, Tin, and Iron across its domestic workable deposits
+    /// and its recursive trade partners' exportable mining districts.
+    pub fn state_mineral_supply(
+        &self,
+        sid: u32,
+        domestic_minerals: &BTreeMap<u32, BTreeSet<u32>>,
+        export_minerals: &BTreeMap<u32, BTreeSet<u32>>,
+    ) -> (bool, bool, bool) {
+        let mut avail: BTreeSet<u32> = domestic_minerals.get(&sid).cloned().unwrap_or_default();
+        for partner in self.recursive_trade_partners(sid) {
+            if let Some(p_exp) = export_minerals.get(&partner) {
+                avail.extend(p_exp.iter().copied());
+            }
+        }
+        (
+            avail.contains(&MINERAL_COPPER),
+            avail.contains(&MINERAL_TIN),
+            avail.contains(&MINERAL_IRON),
+        )
+    }
+
+    /// Population-weighted metallurgical military effectiveness multiplier for state `sid`:
+    /// - Stone-armed communities: `1.00x`
+    /// - Bronzeworking communities: `1.30x` when supplied with both Copper + Tin, dropping to `1.08x`
+    ///   under tin/copper trade disruption (the Late Bronze Age supply vulnerability)
+    /// - Ironworking communities: `1.60x` when supplied with Iron (`1.32x` if temporarily iron-scarce)
+    pub fn state_metallurgy_multiplier(
+        &self,
+        sid: u32,
+        has_bronze_supply: bool,
+        has_iron_supply: bool,
+    ) -> f32 {
+        let mut total_pop = 0.0f32;
+        let mut weighted_mult = 0.0f32;
+        for (&t, &st) in &self.tile_states {
+            if st != sid {
+                continue;
+            }
+            if let Some(comms) = self.tile_communities.get(&t) {
+                for c in comms {
+                    if c.thousands > 0.0 {
+                        let m = if c.ironworking {
+                            if has_iron_supply {
+                                1.60
+                            } else {
+                                1.32
+                            }
+                        } else if c.bronzeworking {
+                            if has_bronze_supply {
+                                1.30
+                            } else {
+                                1.08
+                            }
+                        } else {
+                            1.00
+                        };
+                        total_pop += c.thousands;
+                        weighted_mult += c.thousands * m;
+                    }
+                }
+            }
+        }
+        if total_pop > 1e-5 {
+            weighted_mult / total_pop
+        } else {
+            1.0
+        }
+    }
+
     /// Hop-decayed Heckscher-Ohlin & Tinbergen trade pressure $\text{Pressure}_{n \leftarrow o}$:
-    /// each novel species $s \notin S_n$ available in $o$ (at hop $h = 0$) or via $o$'s recursive trade
-    /// network at minimum hop $h \ge 1$ contributes $0.5^h$, damped by effective land/maritime distance $e^{-0.25 d_{no}}$.
+    /// combines novel domesticable species $s \notin S_n$ and foreign exportable minerals $m \notin M_n$
+    /// available in $o$ (at hop $h = 0$) or via $o$'s recursive trade network ($h \ge 1$) with $0.5^h$ decay,
+    /// granting strong complementary alloy demand when Copper-rich or Bronzeworking polities seek Tin
+    /// (and vice versa), damped by effective land/maritime distance $e^{-0.25 d_{no}}$.
     fn compute_trade_pressure(
         &self,
         n: u32,
         o: u32,
         state_species: &BTreeMap<u32, BTreeSet<usize>>,
+        domestic_minerals: &BTreeMap<u32, BTreeSet<u32>>,
+        export_minerals: &BTreeMap<u32, BTreeSet<u32>>,
     ) -> f32 {
-        let Some(native) = state_species.get(&n) else {
-            return 0.0;
-        };
+        let empty_sp = BTreeSet::new();
+        let empty_min = BTreeSet::new();
+        let native = state_species.get(&n).unwrap_or(&empty_sp);
+        let dom_min = domestic_minerals.get(&n).unwrap_or(&empty_min);
+
         let mut min_hop_for_species: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut min_hop_for_mineral: BTreeMap<u32, usize> = BTreeMap::new();
         if let Some(osp) = state_species.get(&o) {
             for &sp in osp.difference(native) {
                 min_hop_for_species.insert(sp, 0);
+            }
+        }
+        if let Some(omin) = export_minerals.get(&o) {
+            for &mid in omin.difference(dom_min) {
+                min_hop_for_mineral.insert(mid, 0);
             }
         }
         for (partner, hop) in self.recursive_trade_partner_distances(o) {
@@ -2696,19 +2874,60 @@ impl HistorySimulation {
                     }
                 }
             }
+            if let Some(pmin) = export_minerals.get(&partner) {
+                for &mid in pmin.difference(dom_min) {
+                    let entry = min_hop_for_mineral.entry(mid).or_insert(hop);
+                    if hop < *entry {
+                        *entry = hop;
+                    }
+                }
+            }
         }
-        let raw_gain: f32 = min_hop_for_species
+
+        let (n_has_bronze, n_has_iron) = self
+            .tile_states
+            .iter()
+            .filter(|&(_, &sid)| sid == n)
+            .fold((false, false), |(hb, hi), (&t, _)| {
+                if let Some(cs) = self.tile_communities.get(&t) {
+                    (
+                        hb || cs.iter().any(|c| c.thousands > 0.0 && c.bronzeworking),
+                        hi || cs.iter().any(|c| c.thousands > 0.0 && c.ironworking),
+                    )
+                } else {
+                    (hb, hi)
+                }
+            });
+        let has_dom_cu = dom_min.contains(&MINERAL_COPPER);
+        let has_dom_sn = dom_min.contains(&MINERAL_TIN);
+
+        let species_gain: f32 = min_hop_for_species
             .values()
             .map(|&h| 0.5f32.powi(h as i32))
             .sum();
+        let mineral_gain: f32 = min_hop_for_mineral
+            .iter()
+            .map(|(&mid, &h)| {
+                let w = match mid {
+                    MINERAL_TIN if has_dom_cu || n_has_bronze => 3.5,
+                    MINERAL_COPPER if has_dom_sn || n_has_bronze => 3.0,
+                    MINERAL_TIN | MINERAL_COPPER => 1.5,
+                    MINERAL_IRON if n_has_iron => 2.2,
+                    MINERAL_IRON => 1.3,
+                    _ => 1.2,
+                };
+                w * 0.5f32.powi(h as i32)
+            })
+            .sum();
+
         let dist = self.effective_state_distance(n, o);
-        raw_gain * (-0.25 * dist).exp()
+        (species_gain + mineral_gain) * (-0.25 * dist).exp()
     }
 
     /// Update trade partnerships and military conflicts using:
     /// 1. Heckscher-Ohlin comparative advantage + Tinbergen hop/distance gravity decay (`compute_trade_pressure`),
     /// 2. Polachek commercial peace (active war blocks trade; trade raises war threshold by peace dividend $\tau_{\text{trade}}$),
-    /// 3. Collins resource + territorial carrying-capacity + demographic tension with Boulding distance decay (`e^{-0.5 d}`).
+    /// 3. Collins resource + territorial carrying-capacity + demographic/metallurgical tension with Boulding distance decay (`e^{-0.5 d}`).
     fn update_diplomacy_and_trade(&mut self, adjacency: &[Vec<usize>]) {
         let _span_trade = (self.history_ticks > 0)
             .then(|| crate::profile::span(crate::profile::ProfilePhase::HistStepTradeAndConflicts))
@@ -2717,6 +2936,8 @@ impl HistorySimulation {
         let StateTopology {
             extents,
             species: state_species,
+            domestic_minerals,
+            export_minerals,
             neighbors,
         } = self.state_topology(adjacency);
         let active_states: BTreeSet<u32> = extents.keys().copied().collect();
@@ -2750,7 +2971,13 @@ impl HistorySimulation {
                     if active_conflict_set.contains(&pair) {
                         continue;
                     }
-                    let p = self.compute_trade_pressure(n, o, &state_species);
+                    let p = self.compute_trade_pressure(
+                        n,
+                        o,
+                        &state_species,
+                        &domestic_minerals,
+                        &export_minerals,
+                    );
                     pressure_map.insert((n, o), p);
                     if p >= min_gain {
                         n_elig.insert(o);
@@ -2769,9 +2996,11 @@ impl HistorySimulation {
                 let p_ab = pressure_map.get(&(pair.a, pair.b)).copied().unwrap_or(0.0);
                 let p_ba = pressure_map.get(&(pair.b, pair.a)).copied().unwrap_or(0.0);
                 let min_a =
-                    (state_species.get(&pair.a).map(|s| s.len()).unwrap_or(0) as f32) * 0.025;
+                    ((state_species.get(&pair.a).map(|s| s.len()).unwrap_or(0) as f32) * 0.025)
+                        .max(0.25);
                 let min_b =
-                    (state_species.get(&pair.b).map(|s| s.len()).unwrap_or(0) as f32) * 0.025;
+                    ((state_species.get(&pair.b).map(|s| s.len()).unwrap_or(0) as f32) * 0.025)
+                        .max(0.25);
                 p_ab >= min_a && p_ba >= min_b
             })
             .collect();
@@ -2783,14 +3012,21 @@ impl HistorySimulation {
                 }
             }
         }
+        // Reflect updated trade pacts before evaluating metallurgical mineral supplies for conflict deterrence
+        self.trade_partners = partner_set.iter().copied().collect();
 
-        // 2. Collins military tension + Turchin asabiya mobilization + Boulding Loss-of-Strength Gradient + Polachek commercial peace
+        // 2. Collins military tension + Turchin asabiya mobilization + Metallurgical arms multiplier
+        //    + Boulding Loss-of-Strength Gradient + Polachek commercial peace
         let state_eff_pops: BTreeMap<u32, f32> = active_states
             .iter()
             .map(|&sid| {
                 let pop = self.state_population_thousands(sid);
                 let asabiya = self.state_asabiya(sid);
-                (sid, pop * (0.5 + asabiya))
+                let (has_cu, has_sn, has_fe) =
+                    self.state_mineral_supply(sid, &domestic_minerals, &export_minerals);
+                let metal_mult =
+                    self.state_metallurgy_multiplier(sid, has_cu && has_sn, has_fe);
+                (sid, pop * (0.5 + asabiya) * metal_mult)
             })
             .collect();
         let state_caps: BTreeMap<u32, f32> = extents
@@ -2802,6 +3038,7 @@ impl HistorySimulation {
 
         for &n in &active_states {
             let native = state_species.get(&n).cloned().unwrap_or_default();
+            let dom_min = domestic_minerals.get(&n).cloned().unwrap_or_default();
             let eff_n = state_eff_pops.get(&n).copied().unwrap_or(0.0);
             let cap_n = state_caps.get(&n).copied().unwrap_or(1.0);
             let best_rival = neighbors.get(&n).and_then(|nbs| {
@@ -2813,13 +3050,16 @@ impl HistorySimulation {
                         }
                         let cap_o = state_caps.get(&o).copied().unwrap_or(1.0);
                         let osp = state_species.get(&o).cloned().unwrap_or_default();
+                        let omin = export_minerals.get(&o).cloned().unwrap_or_default();
 
-                        // Heckscher-Ohlin resource motive + Collins territorial carrying-capacity motive
-                        let dr = if native.is_empty() {
+                        // Heckscher-Ohlin resource motive (species + strategic ores) + Collins territorial motive
+                        let sp_dr = if native.is_empty() {
                             0.0
                         } else {
                             (osp.difference(&native).count() as f32) / (native.len() as f32)
                         };
+                        let min_dr = (omin.difference(&dom_min).count() as f32) * 0.12;
+                        let dr = sp_dr + min_dr;
                         let dk = cap_o / (cap_n + cap_o);
                         let dp = (eff_n - eff_o) / eff_o;
                         let dist = self.effective_state_distance(n, o);
@@ -2831,7 +3071,9 @@ impl HistorySimulation {
                         let war_threshold = if partner_set.contains(&pair) {
                             let p_no = pressure_map.get(&(n, o)).copied().unwrap_or(0.0);
                             let p_on = pressure_map.get(&(o, n)).copied().unwrap_or(0.0);
-                            let denom = (native.len() + osp.len()).max(1) as f32;
+                            let denom =
+                                (native.len() + osp.len() + dom_min.len() + omin.len()).max(1)
+                                    as f32;
                             let peace_dividend = (1.5 * (p_no + p_on) / denom).max(1.0);
                             1.0 + peace_dividend
                         } else {
@@ -3191,14 +3433,26 @@ impl HistorySimulation {
         tile: &crate::tile::TileGeology,
         max_depth_km: f32,
     ) -> BTreeSet<u32> {
+        use crate::tile::{MineralKind, WORKABLE_GRADE};
         let mut exported = BTreeSet::new();
         if tile.elevation() < -0.5 {
             return exported;
         }
-        // Foreign trade networks export minerals from genuinely rich / abundant mining districts:
+        // Foreign trade networks export strategic metals & precious gems from workable lodes/placers,
+        // and bulk industrial/evaporite minerals from genuinely rich mining districts (excluding ubiquitous quartz/flint):
         for (mk, (max_grade, abundance)) in tile.accessible_mineral_abundances(max_depth_km) {
-            let min_export_abund = if mk.is_bulk_bedded() { 0.055 } else { 0.015 };
-            if max_grade >= 0.30 && abundance >= min_export_abund {
+            if matches!(mk, MineralKind::Quartz | MineralKind::Flint | MineralKind::Graphite) {
+                continue;
+            }
+            let is_exportable = if mk.is_bulk_bedded()
+                || matches!(mk, MineralKind::LeadZinc | MineralKind::Nickel)
+            {
+                max_grade >= 0.28 && abundance >= if mk.is_bulk_bedded() { 0.045 } else { 0.015 }
+            } else {
+                // Strategic bronze metals (Copper, Tin), Tungsten, precious metals (Gold, Silver, Platinum), and gems
+                max_grade >= WORKABLE_GRADE && abundance >= 0.006
+            };
+            if is_exportable {
                 if let Some(cid) = Self::mineral_kind_to_concept_id(mk) {
                     exported.insert(cid);
                 }
@@ -3224,7 +3478,7 @@ impl HistorySimulation {
         let mut state_rivers: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_mountains: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_minerals: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
-        let mut state_tech: BTreeMap<u32, (bool, bool, bool)> = BTreeMap::new();
+        let mut state_tech: BTreeMap<u32, (bool, bool, bool, bool, bool)> = BTreeMap::new();
         let mut state_rec_partners: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_direct_partners: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_rivals: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
@@ -3242,14 +3496,13 @@ impl HistorySimulation {
             state_direct_partners.insert(sid, self.lookup_trade_partners(sid));
             state_rivals.insert(sid, self.lookup_opponents(sid));
 
-            let geo_tiles = self.prehistory.tiles();
             let mut s_mins = BTreeSet::new();
             let mut seen_c = BTreeSet::new();
             for &t in tiles {
                 let c_idx = self.fine_primary_coarse[t];
                 if seen_c.insert(c_idx) {
-                    if let Some(tg) = geo_tiles.get(c_idx) {
-                        s_mins.extend(Self::exportable_mineral_concepts(tg, 0.5));
+                    if let Some(e_mins) = self.coarse_export_minerals.get(c_idx) {
+                        s_mins.extend(e_mins.iter().copied());
                     }
                 }
             }
@@ -3258,6 +3511,8 @@ impl HistorySimulation {
             let mut has_ag = false;
             let mut has_riv = false;
             let mut has_sea = false;
+            let mut has_bronze = false;
+            let mut has_iron = false;
             for &t in tiles {
                 if let Some(comms) = self.tile_communities.get(&t) {
                     for c in comms {
@@ -3265,18 +3520,20 @@ impl HistorySimulation {
                             has_ag |= c.agriculture;
                             has_riv |= c.rivergoing;
                             has_sea |= c.seafaring;
+                            has_bronze |= c.bronzeworking;
+                            has_iron |= c.ironworking;
                         }
                     }
                 }
             }
-            state_tech.insert(sid, (has_ag, has_riv, has_sea));
+            state_tech.insert(sid, (has_ag, has_riv, has_sea, has_bronze, has_iron));
         }
 
         let mut lang_concepts: BTreeMap<u32, BTreeMap<ConceptKey, Option<u32>>> = BTreeMap::new();
         let mut state_sources: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut lang_visible_constellations: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut lang_tiles: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
-        let mut lang_own_tech: BTreeMap<u32, (bool, bool, bool)> = BTreeMap::new();
+        let mut lang_own_tech: BTreeMap<u32, (bool, bool, bool, bool, bool)> = BTreeMap::new();
 
         for (&f, comms) in &self.tile_communities {
             let Some(&sid) = self.tile_states.get(&f) else {
@@ -3289,10 +3546,12 @@ impl HistorySimulation {
                 lang_tiles.entry(lang).or_default().push(f);
                 let tech_entry = lang_own_tech
                     .entry(lang)
-                    .or_insert((false, false, false));
+                    .or_insert((false, false, false, false, false));
                 tech_entry.0 |= c1.agriculture;
                 tech_entry.1 |= c1.rivergoing;
                 tech_entry.2 |= c1.seafaring;
+                tech_entry.3 |= c1.bronzeworking;
+                tech_entry.4 |= c1.ironworking;
 
                 let entry = lang_concepts.entry(lang).or_default();
                 for c2 in &active_comms {
@@ -3300,7 +3559,7 @@ impl HistorySimulation {
                     let l = c2.language_id;
                     entry.insert(ConceptKey::Language(l), Some(l));
                     entry.insert(ConceptKey::Nation(n), Some(l));
-                    // Co-resident exposure to farming, river fishing, and sea fishing:
+                    // Co-resident exposure to farming, fishing, bronzeworking, and ironworking:
                     if c2.agriculture {
                         entry
                             .entry(ConceptKey::Culture(CULTURE_FARMING))
@@ -3314,6 +3573,16 @@ impl HistorySimulation {
                     if c2.seafaring {
                         entry
                             .entry(ConceptKey::Culture(CULTURE_SEA_FISHING))
+                            .or_insert(Some(l));
+                    }
+                    if c2.bronzeworking {
+                        entry
+                            .entry(ConceptKey::Culture(CULTURE_BRONZEWORKING))
+                            .or_insert(Some(l));
+                    }
+                    if c2.ironworking {
+                        entry
+                            .entry(ConceptKey::Culture(CULTURE_IRONWORKING))
                             .or_insert(Some(l));
                     }
                 }
@@ -3335,8 +3604,10 @@ impl HistorySimulation {
                 .entry(ConceptKey::Culture(CULTURE_CITY))
                 .or_insert(Some(lang_id));
 
-            // Own technological practices coin/retain words for farming, river fishing, and sea fishing
-            if let Some(&(own_ag, own_riv, own_sea)) = lang_own_tech.get(&lang_id) {
+            // Own technological practices coin/retain words for farming, fishing, bronzeworking, and ironworking
+            if let Some(&(own_ag, own_riv, own_sea, own_bronze, own_iron)) =
+                lang_own_tech.get(&lang_id)
+            {
                 if own_ag {
                     concepts.insert(ConceptKey::Culture(CULTURE_FARMING), Some(lang_id));
                 }
@@ -3345,6 +3616,12 @@ impl HistorySimulation {
                 }
                 if own_sea {
                     concepts.insert(ConceptKey::Culture(CULTURE_SEA_FISHING), Some(lang_id));
+                }
+                if own_bronze {
+                    concepts.insert(ConceptKey::Culture(CULTURE_BRONZEWORKING), Some(lang_id));
+                }
+                if own_iron {
+                    concepts.insert(ConceptKey::Culture(CULTURE_IRONWORKING), Some(lang_id));
                 }
             }
 
@@ -3461,8 +3738,8 @@ impl HistorySimulation {
                 for s in &related_states {
                     let rel_lang = state_langs.get(s).copied().flatten();
                     concepts.insert(ConceptKey::State(*s), rel_lang);
-                    // Exposure to farming, river fishing, and sea fishing from neighbors, rivals, or trading partners:
-                    if let Some(&(s_ag, s_riv, s_sea)) = state_tech.get(s) {
+                    // Exposure to farming, fishing, bronzeworking, and ironworking from neighbors, rivals, or trading partners:
+                    if let Some(&(s_ag, s_riv, s_sea, s_bronze, s_iron)) = state_tech.get(s) {
                         if s_ag {
                             concepts
                                 .entry(ConceptKey::Culture(CULTURE_FARMING))
@@ -3476,6 +3753,16 @@ impl HistorySimulation {
                         if s_sea {
                             concepts
                                 .entry(ConceptKey::Culture(CULTURE_SEA_FISHING))
+                                .or_insert(rel_lang);
+                        }
+                        if s_bronze {
+                            concepts
+                                .entry(ConceptKey::Culture(CULTURE_BRONZEWORKING))
+                                .or_insert(rel_lang);
+                        }
+                        if s_iron {
+                            concepts
+                                .entry(ConceptKey::Culture(CULTURE_IRONWORKING))
                                 .or_insert(rel_lang);
                         }
                     }
@@ -3530,16 +3817,19 @@ impl HistorySimulation {
                 let home_rivers = state_rivers.get(&state_id).unwrap_or(&empty_u32_set);
                 let home_mountains = state_mountains.get(&state_id).unwrap_or(&empty_u32_set);
                 let home_minerals = state_minerals.get(&state_id).unwrap_or(&empty_u32_set);
+                for &partner in &trade_network {
+                    let p_lang = state_langs.get(&partner).copied().flatten();
+                    if let Some(pmins) = state_minerals.get(&partner) {
+                        for &mid in pmins.difference(home_minerals).take(8) {
+                            concepts.entry(ConceptKey::Mineral(mid)).or_insert(p_lang);
+                        }
+                    }
+                }
                 for &partner in rec_partners {
                     let p_lang = state_langs.get(&partner).copied().flatten();
                     if let Some(psp) = state_species.get(&partner) {
                         for &sp in psp.difference(native).take(6) {
                             concepts.insert(ConceptKey::Species(sp as u32), p_lang);
-                        }
-                    }
-                    if let Some(pmins) = state_minerals.get(&partner) {
-                        for &mid in pmins.difference(home_minerals).take(6) {
-                            concepts.entry(ConceptKey::Mineral(mid)).or_insert(p_lang);
                         }
                     }
                     if let Some(pconts) = state_continents.get(&partner) {
@@ -3778,17 +4068,25 @@ impl HistorySimulation {
                     continue;
                 }
             }
-            let (curr_ag, curr_riv, curr_sea) = self
+            let (curr_ag, curr_riv, curr_sea, curr_metal) = self
                 .tile_communities
                 .get(&curr)
                 .map(|cs| {
+                    let tier = if cs.iter().any(|c| c.ironworking) {
+                        2u8
+                    } else if cs.iter().any(|c| c.bronzeworking) {
+                        1u8
+                    } else {
+                        0u8
+                    };
                     (
                         cs.iter().any(|c| c.agriculture),
                         cs.iter().any(|c| c.rivergoing),
                         cs.iter().any(|c| c.seafaring),
+                        tier,
                     )
                 })
-                .unwrap_or((false, false, false));
+                .unwrap_or((false, false, false, 0));
             let curr_nat = self.majority_nationality(curr);
             let curr_lang = self.majority_language(curr);
 
@@ -3796,18 +4094,26 @@ impl HistorySimulation {
                 if !tile_set.contains(&next) {
                     continue;
                 }
-                let (next_pop, next_ag, next_riv, next_sea) = self
+                let (next_pop, next_ag, next_riv, next_sea, next_metal) = self
                     .tile_communities
                     .get(&next)
                     .map(|cs| {
+                        let tier = if cs.iter().any(|c| c.ironworking) {
+                            2u8
+                        } else if cs.iter().any(|c| c.bronzeworking) {
+                            1u8
+                        } else {
+                            0u8
+                        };
                         (
                             cs.iter().map(|c| c.thousands).sum::<f32>(),
                             cs.iter().any(|c| c.agriculture),
                             cs.iter().any(|c| c.rivergoing),
                             cs.iter().any(|c| c.seafaring),
+                            tier,
                         )
                     })
-                    .unwrap_or((0.0, false, false, false));
+                    .unwrap_or((0.0, false, false, false, 0));
                 if self.terrain.fine_elevations[next] <= 0.0 || next_pop <= 0.0 || curr_ag != next_ag {
                     continue;
                 }
@@ -3828,7 +4134,8 @@ impl HistorySimulation {
                 };
                 let water_faultline =
                     u32::from(curr_riv != next_riv) * 2 + u32::from(curr_sea != next_sea) * 2;
-                let step_cost = base_step_cost + water_faultline;
+                let metal_faultline = u32::from(curr_metal.abs_diff(next_metal)) * 2;
+                let step_cost = base_step_cost + water_faultline + metal_faultline;
                 let next_cost = cost.saturating_add(step_cost);
                 let is_better = match best_cost.get(&next) {
                     Some(&(bc, b_idx)) => (next_cost, city_idx) < (bc, b_idx),
@@ -4078,11 +4385,14 @@ impl HistorySimulation {
                 .push(item.community);
         }
 
-        // 2c. Independent invention and neighbor/route diffusion of agriculture, rivergoing, and seafaring
-        // (rivergoing and seafaring develop independently of agriculture and of each other, with a 3x mutual synergy boost).
+        // 2c. Independent invention and neighbor/route diffusion of agriculture, rivergoing, seafaring,
+        //     bronzeworking, and ironworking (including pyrotechnological prerequisites and the
+        //     Late Bronze Age tin-shortage catalyst for ironworking).
         let mut ag_tiles = BTreeSet::new();
         let mut riv_tiles = BTreeSet::new();
         let mut sea_tiles = BTreeSet::new();
+        let mut bronze_tiles = BTreeSet::new();
+        let mut iron_tiles = BTreeSet::new();
         for (&t, comms) in &self.tile_communities {
             for c in comms {
                 if c.thousands > 0.0 {
@@ -4095,9 +4405,46 @@ impl HistorySimulation {
                     if c.seafaring {
                         sea_tiles.insert(t);
                     }
+                    if c.bronzeworking {
+                        bronze_tiles.insert(t);
+                    }
+                    if c.ironworking {
+                        iron_tiles.insert(t);
+                    }
                 }
             }
         }
+        let mut pre_dom_mins: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        let mut pre_exp_mins: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+        for (&f_t, &sid) in &self.tile_states {
+            if let Some(&c_idx) = self.fine_primary_coarse.get(f_t) {
+                if let Some(w_mins) = self.coarse_workable_minerals.get(c_idx) {
+                    pre_dom_mins
+                        .entry(sid)
+                        .or_default()
+                        .extend(w_mins.iter().copied());
+                }
+                if let Some(e_mins) = self.coarse_export_minerals.get(c_idx) {
+                    pre_exp_mins
+                        .entry(sid)
+                        .or_default()
+                        .extend(e_mins.iter().copied());
+                }
+            }
+        }
+        let state_supply_cache: BTreeMap<u32, (bool, bool, bool, bool)> = self
+            .states
+            .keys()
+            .map(|&sid| {
+                let (has_cu, has_sn, has_net_fe) =
+                    self.state_mineral_supply(sid, &pre_dom_mins, &pre_exp_mins);
+                let has_dom_fe = pre_dom_mins
+                    .get(&sid)
+                    .is_some_and(|m| m.contains(&MINERAL_IRON));
+                (sid, (has_cu, has_sn, has_dom_fe, has_net_fe))
+            })
+            .collect();
+
         let mut route_neighbors: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for r in &self.travel_routes {
             route_neighbors
@@ -4114,8 +4461,30 @@ impl HistorySimulation {
             let is_riv_tile = self.river_tiles.get(t).copied().unwrap_or(false);
             let is_coast_tile = self.is_coastal_fine.get(t).copied().unwrap_or(false);
             let c_coarse = self.fine_primary_coarse[t];
-            let farmable_tile =
-                is_farmable(self.terrain.fine_elevations[t], self.coarse_koeppen[c_coarse]);
+            let k_code = self.coarse_koeppen[c_coarse];
+            let farmable_tile = is_farmable(self.terrain.fine_elevations[t], k_code);
+            let tile_mins = self.coarse_workable_minerals.get(c_coarse);
+            let tile_has_cu_or_sn = tile_mins.is_some_and(|m| {
+                m.contains(&MINERAL_COPPER) || m.contains(&MINERAL_TIN)
+            });
+            let tile_has_iron = tile_mins.is_some_and(|m| m.contains(&MINERAL_IRON));
+            let tile_has_coal = tile_mins.is_some_and(|m| m.contains(&MINERAL_COAL));
+            // Pyrotechnological fuel: wood charcoal in forest/woodland/gallery-river climates, or workable coal seams
+            let has_fuel = tile_has_coal
+                || matches!(k_code, 1..=3 | 6..=11)
+                || (k_code == 4 && is_riv_tile);
+            let (st_has_cu, st_has_sn, st_has_dom_fe, st_has_net_fe) = self
+                .tile_states
+                .get(&t)
+                .and_then(|sid| state_supply_cache.get(sid))
+                .copied()
+                .unwrap_or((
+                    tile_mins.is_some_and(|m| m.contains(&MINERAL_COPPER)),
+                    tile_mins.is_some_and(|m| m.contains(&MINERAL_TIN)),
+                    tile_has_iron,
+                    tile_has_iron,
+                ));
+
             let adj_has_ag = fine_adj[t].iter().any(|nb| ag_tiles.contains(nb));
             let adj_has_riv = fine_adj[t].iter().any(|nb| riv_tiles.contains(nb))
                 || route_neighbors
@@ -4125,6 +4494,22 @@ impl HistorySimulation {
                 || route_neighbors
                     .get(&t)
                     .is_some_and(|nbs| nbs.iter().any(|nb| sea_tiles.contains(nb)));
+            let adj_has_bronze = fine_adj[t].iter().any(|nb| bronze_tiles.contains(nb))
+                || route_neighbors
+                    .get(&t)
+                    .is_some_and(|nbs| nbs.iter().any(|nb| bronze_tiles.contains(nb)));
+            let adj_has_iron = fine_adj[t].iter().any(|nb| iron_tiles.contains(nb))
+                || route_neighbors
+                    .get(&t)
+                    .is_some_and(|nbs| nbs.iter().any(|nb| iron_tiles.contains(nb)));
+
+            let tile_cap = self.capacities[t].max(0.2) as f64;
+            let total_t_pop = self
+                .tile_communities
+                .get(&t)
+                .map(|cs| cs.iter().map(|c| c.thousands).sum::<f32>())
+                .unwrap_or(0.0) as f64;
+            let density_factor = (total_t_pop / tile_cap).clamp(0.35, 1.5);
 
             if let Some(comms) = self.tile_communities.get_mut(&t) {
                 for c in comms.iter_mut() {
@@ -4166,6 +4551,64 @@ impl HistorySimulation {
                             c.seafaring = true;
                         }
                     }
+                    // Bronzeworking: requires settled kiln/agricultural craft specialization, fuel, and Cu + Sn access
+                    if !c.bronzeworking {
+                        let spark_p = if c.agriculture && has_fuel && st_has_cu && st_has_sn {
+                            (if tile_has_cu_or_sn { 0.024 } else { 0.008 }) * density_factor
+                        } else {
+                            0.0
+                        };
+                        let diff_p = if adj_has_bronze {
+                            if st_has_cu && st_has_sn {
+                                0.12
+                            } else if st_has_cu || st_has_sn {
+                                0.04
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            0.0
+                        };
+                        if (spark_p + diff_p) > 0.0
+                            && self.rng.next_f64() < (spark_p + diff_p).min(0.85)
+                        {
+                            c.bronzeworking = true;
+                        }
+                    }
+                    // Ironworking: bloomery smelting (~1200 C) builds on bronze furnace pyrotechnology, fuel, and iron ore,
+                    // with a 3.5x Late Bronze Age tin-shortage catalyst when a bronzeworking society loses tin access
+                    if !c.ironworking {
+                        let spark_p = if c.agriculture
+                            && (c.bronzeworking || adj_has_bronze)
+                            && has_fuel
+                            && (tile_has_iron || st_has_dom_fe)
+                        {
+                            let base = if tile_has_iron { 0.020 } else { 0.007 };
+                            let coal_boost = if tile_has_coal { 1.4 } else { 1.0 };
+                            let tin_crisis_boost = if c.bronzeworking && !st_has_sn {
+                                3.5
+                            } else {
+                                1.0
+                            };
+                            base * coal_boost * tin_crisis_boost * density_factor
+                        } else {
+                            0.0
+                        };
+                        let diff_p = if adj_has_iron {
+                            if st_has_net_fe && has_fuel {
+                                0.12
+                            } else {
+                                0.035
+                            }
+                        } else {
+                            0.0
+                        };
+                        if (spark_p + diff_p) > 0.0
+                            && self.rng.next_f64() < (spark_p + diff_p).min(0.85)
+                        {
+                            c.ironworking = true;
+                        }
+                    }
                 }
             }
         }
@@ -4203,12 +4646,24 @@ impl HistorySimulation {
                     .filter(|c| c.seafaring)
                     .map(|c| c.thousands)
                     .sum();
-                // Cultural assimilation (`assimilateculture`: >= 75% agricultural or >= 65% rivergoing/seafaring converts communities > 5%)
+                let bronze_pop: f32 = comms
+                    .iter()
+                    .filter(|c| c.bronzeworking)
+                    .map(|c| c.thousands)
+                    .sum();
+                let iron_pop: f32 = comms
+                    .iter()
+                    .filter(|c| c.ironworking)
+                    .map(|c| c.thousands)
+                    .sum();
+                // Cultural assimilation (`assimilateculture`: >= 75% ag, >= 65% waterborne, >= 60% metallurgical converts communities > 5%)
                 if total_pop > 0.0 {
                     let adopt_ag = ag_pop / total_pop >= 0.75;
                     let adopt_riv = riv_pop / total_pop >= 0.65;
                     let adopt_sea = sea_pop / total_pop >= 0.65;
-                    if adopt_ag || adopt_riv || adopt_sea {
+                    let adopt_bronze = bronze_pop / total_pop >= 0.60;
+                    let adopt_iron = iron_pop / total_pop >= 0.60;
+                    if adopt_ag || adopt_riv || adopt_sea || adopt_bronze || adopt_iron {
                         for c in comms.iter_mut() {
                             if c.thousands / total_pop > 0.05 {
                                 if adopt_ag {
@@ -4219,6 +4674,12 @@ impl HistorySimulation {
                                 }
                                 if adopt_sea {
                                     c.seafaring = true;
+                                }
+                                if adopt_bronze {
+                                    c.bronzeworking = true;
+                                }
+                                if adopt_iron {
+                                    c.ironworking = true;
                                 }
                             }
                         }
@@ -4256,14 +4717,23 @@ impl HistorySimulation {
 
         let _span_war = crate::profile::span(crate::profile::ProfilePhase::HistStepWarfareConquestAndSplits);
         // 5. Update Turchin metaethnic frontier asabiya & resolve conflicts via Collins-Turchin multi-front force allocation & Boulding distance decay
-        let StateTopology { extents, .. } = self.state_topology(&fine_adj);
+        let StateTopology {
+            extents,
+            domestic_minerals: war_dom_mins,
+            export_minerals: war_exp_mins,
+            ..
+        } = self.state_topology(&fine_adj);
         self.update_state_asabiya(&extents, &fine_adj);
         let state_eff_pops: BTreeMap<u32, f32> = extents
             .keys()
             .map(|&sid| {
                 let pop = self.state_population_thousands(sid);
                 let asabiya = self.state_asabiya(sid);
-                (sid, pop * (0.5 + asabiya))
+                let (has_cu, has_sn, has_fe) =
+                    self.state_mineral_supply(sid, &war_dom_mins, &war_exp_mins);
+                let metal_mult =
+                    self.state_metallurgy_multiplier(sid, has_cu && has_sn, has_fe);
+                (sid, pop * (0.5 + asabiya) * metal_mult)
             })
             .collect();
         let opp_pop_totals: BTreeMap<u32, f32> = extents
@@ -5239,20 +5709,43 @@ impl HistorySimulation {
             cap
         ));
 
-        // Nationalities & Languages breakdown
+        // Nationalities, Languages & Metallurgy breakdown
         let mut nat_totals: BTreeMap<u32, f32> = BTreeMap::new();
         let mut lang_totals: BTreeMap<u32, f32> = BTreeMap::new();
+        let mut st_bronze_pop = 0.0f32;
+        let mut st_iron_pop = 0.0f32;
         for (&t, &st) in &self.tile_states {
             if st == sid {
                 if let Some(comms) = self.tile_communities.get(&t) {
                     for c in comms {
                         *nat_totals.entry(c.nationality_id).or_insert(0.0) += c.thousands;
                         *lang_totals.entry(c.language_id).or_insert(0.0) += c.thousands;
+                        if c.bronzeworking {
+                            st_bronze_pop += c.thousands;
+                        }
+                        if c.ironworking {
+                            st_iron_pop += c.thousands;
+                        }
                     }
                 }
             }
         }
         let denom = st_pop.max(1e-3);
+        let metal_summary = if st_iron_pop > 0.0 {
+            format!(
+                "Iron Age ({:.0}% ironworking, {:.0}% bronzeworking)",
+                (st_iron_pop * 100.0 / denom).clamp(0.0, 100.0),
+                (st_bronze_pop * 100.0 / denom).clamp(0.0, 100.0)
+            )
+        } else if st_bronze_pop > 0.0 {
+            format!(
+                "Bronze Age ({:.0}% bronzeworking)",
+                (st_bronze_pop * 100.0 / denom).clamp(0.0, 100.0)
+            )
+        } else {
+            "Stone / Chalcolithic".to_string()
+        };
+        lines.push(format!("Metallurgy: {metal_summary}"));
         let nat_strs: Vec<String> = nat_totals
             .iter()
             .map(|(&nid, &p)| {
@@ -5804,6 +6297,8 @@ impl HistorySimulation {
         let StateTopology {
             extents,
             species: state_species,
+            domestic_minerals,
+            export_minerals,
             ..
         } = self.state_topology(fine_adj);
         let tiles = extents.get(&state_id)?;
@@ -5841,6 +6336,8 @@ impl HistorySimulation {
         let mut agri_pop = 0.0f32;
         let mut riv_pop = 0.0f32;
         let mut sea_pop = 0.0f32;
+        let mut bronze_pop = 0.0f32;
+        let mut iron_pop = 0.0f32;
         for &t in tiles {
             if let Some(comms) = self.tile_communities.get(&t) {
                 for c in comms {
@@ -5855,6 +6352,12 @@ impl HistorySimulation {
                         if c.seafaring {
                             sea_pop += c.thousands;
                         }
+                        if c.bronzeworking {
+                            bronze_pop += c.thousands;
+                        }
+                        if c.ironworking {
+                            iron_pop += c.thousands;
+                        }
                         *nat_totals.entry(c.nationality_id).or_insert(0.0) += c.thousands;
                         *lang_totals.entry(c.language_id).or_insert(0.0) += c.thousands;
                     }
@@ -5864,14 +6367,23 @@ impl HistorySimulation {
         let st_cap = self.state_carrying_capacity(tiles);
 
         let native_sp = state_species.get(&state_id).cloned().unwrap_or_default();
+        let dom_min = domestic_minerals.get(&state_id).cloned().unwrap_or_default();
+        let exp_min = export_minerals.get(&state_id).cloned().unwrap_or_default();
         let direct_partners = self.lookup_trade_partners(state_id);
         let net_partners = self.recursive_trade_partners(state_id);
         let mut avail_sp: BTreeSet<usize> = native_sp.clone();
+        let mut avail_min: BTreeSet<u32> = dom_min.clone();
         for &p in &net_partners {
             if let Some(psp) = state_species.get(&p) {
                 avail_sp.extend(psp.iter().copied());
             }
+            if let Some(pmin) = export_minerals.get(&p) {
+                avail_min.extend(pmin.iter().copied());
+            }
         }
+        let has_cu = avail_min.contains(&MINERAL_COPPER);
+        let has_sn = avail_min.contains(&MINERAL_TIN);
+        let has_fe = avail_min.contains(&MINERAL_IRON);
         let denom_pop = st_pop.max(1e-4);
         let mut tech_parts = Vec::new();
         if agri_pop > 0.0 {
@@ -5883,6 +6395,30 @@ impl HistorySimulation {
             ));
         } else {
             tech_parts.push("Pre-Agricultural / Foraging (0% farming)".to_string());
+        }
+        if bronze_pop > 0.0 {
+            let pct = (bronze_pop * 100.0 / denom_pop).clamp(0.0, 100.0);
+            let supply_note = if has_cu && has_sn {
+                "Cu+Sn supplied"
+            } else if !has_sn && has_cu {
+                "tin shortage!"
+            } else if !has_cu && has_sn {
+                "copper shortage!"
+            } else {
+                "Cu+Sn starved!"
+            };
+            tech_parts.push(format!("Bronzeworking ({:.0}%, {supply_note})", pct));
+        }
+        if iron_pop > 0.0 {
+            let pct = (iron_pop * 100.0 / denom_pop).clamp(0.0, 100.0);
+            let fe_note = if dom_min.contains(&MINERAL_IRON) {
+                "local Fe"
+            } else if has_fe {
+                "imported Fe"
+            } else {
+                "iron-scarce"
+            };
+            tech_parts.push(format!("Ironworking ({:.0}%, {fe_note})", pct));
         }
         if riv_pop > 0.0 {
             let pct = (riv_pop * 100.0 / denom_pop).clamp(0.0, 100.0);
@@ -5943,8 +6479,38 @@ impl HistorySimulation {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Exports: native domesticates of this state demanded by trading partners (or available for export)
+        // Exports: strategic metals, precious gems, and native domesticates demanded by trading partners
         let mut exports = Vec::new();
+        let mut ordered_exp_mins: Vec<u32> = exp_min.iter().copied().collect();
+        ordered_exp_mins.sort_by_key(|&mid| match mid {
+            MINERAL_TIN => 0u8,
+            MINERAL_COPPER => 1,
+            MINERAL_IRON => 2,
+            MINERAL_GOLD | MINERAL_SILVER | MINERAL_PLATINUM => 3,
+            _ => 4,
+        });
+        for mid in ordered_exp_mins {
+            let m_label = MINERAL_CONCEPT_GLOSSES
+                .get(mid as usize)
+                .copied()
+                .unwrap_or("mineral");
+            let buyers: Vec<String> = direct_partners
+                .iter()
+                .chain(net_partners.iter().filter(|p| !direct_partners.contains(p)))
+                .filter(|&&p| {
+                    domestic_minerals
+                        .get(&p)
+                        .is_none_or(|pmin| !pmin.contains(&mid))
+                })
+                .take(3)
+                .map(|&p| self.state_name(p))
+                .collect();
+            if !buyers.is_empty() {
+                exports.push(format!("{m_label} (mineral) → {}", buyers.join(", ")));
+            } else {
+                exports.push(format!("{m_label} (mineral, domestic lodes)"));
+            }
+        }
         for &sp_idx in &native_sp {
             let Some(sp) = self.settled_species.get(sp_idx) else {
                 continue;
@@ -5971,8 +6537,38 @@ impl HistorySimulation {
             }
         }
 
-        // Imports: foreign domesticates acquired via trade partners
+        // Imports: foreign strategic ores, gems, and domesticates acquired via trade partners
         let mut imports = Vec::new();
+        let mut imported_mins: Vec<u32> = avail_min.difference(&dom_min).copied().collect();
+        imported_mins.sort_by_key(|&mid| match mid {
+            MINERAL_TIN => 0u8,
+            MINERAL_COPPER => 1,
+            MINERAL_IRON => 2,
+            MINERAL_GOLD | MINERAL_SILVER | MINERAL_PLATINUM => 3,
+            _ => 4,
+        });
+        for mid in imported_mins {
+            let m_label = MINERAL_CONCEPT_GLOSSES
+                .get(mid as usize)
+                .copied()
+                .unwrap_or("mineral");
+            let sellers: Vec<String> = direct_partners
+                .iter()
+                .chain(net_partners.iter().filter(|p| !direct_partners.contains(p)))
+                .filter(|&&p| {
+                    export_minerals
+                        .get(&p)
+                        .is_some_and(|pmin| pmin.contains(&mid))
+                })
+                .take(2)
+                .map(|&p| self.state_name(p))
+                .collect();
+            if !sellers.is_empty() {
+                imports.push(format!("{m_label} (mineral) ← {}", sellers.join(", ")));
+            } else {
+                imports.push(format!("{m_label} (mineral)"));
+            }
+        }
         for &sp_idx in avail_sp.difference(&native_sp) {
             let Some(sp) = self.settled_species.get(sp_idx) else {
                 continue;
@@ -6335,6 +6931,8 @@ impl HistorySimulation {
         let mut agri_pop = 0.0f32;
         let mut riv_pop = 0.0f32;
         let mut sea_pop = 0.0f32;
+        let mut bronze_pop = 0.0f32;
+        let mut iron_pop = 0.0f32;
         if let Some(comms) = self.tile_communities.get(&fine_idx) {
             for c in comms {
                 if c.thousands > 1e-4 {
@@ -6347,6 +6945,12 @@ impl HistorySimulation {
                     }
                     if c.seafaring {
                         sea_pop += c.thousands;
+                    }
+                    if c.bronzeworking {
+                        bronze_pop += c.thousands;
+                    }
+                    if c.ironworking {
+                        iron_pop += c.thousands;
                     }
                     *nat_totals.entry(c.nationality_id).or_insert(0.0) += c.thousands;
                     *lang_totals.entry(c.language_id).or_insert(0.0) += c.thousands;
@@ -6366,6 +6970,14 @@ impl HistorySimulation {
                 parts.push(format!("Agricultural ({:.0}% farming)", pct));
             } else {
                 parts.push("Pre-Agricultural / Foraging".to_string());
+            }
+            if bronze_pop > 0.0 {
+                let pct = (bronze_pop * 100.0 / denom).clamp(0.0, 100.0);
+                parts.push(format!("Bronzeworking ({:.0}%)", pct));
+            }
+            if iron_pop > 0.0 {
+                let pct = (iron_pop * 100.0 / denom).clamp(0.0, 100.0);
+                parts.push(format!("Ironworking ({:.0}%)", pct));
             }
             if riv_pop > 0.0 {
                 let pct = (riv_pop * 100.0 / denom).clamp(0.0, 100.0);
@@ -6957,6 +7569,44 @@ impl HistorySimulation {
                     let s = (self.capacities[f_idx] / max_cap).clamp(0.0, 1.0);
                     out.extend_from_slice(&[0.2 * s, 0.85 * s, 0.3 * s]);
                 }
+                "metallurgy" => {
+                    if let Some(comms) = self.tile_communities.get(&f_idx) {
+                        let has_pop = comms.iter().any(|c| c.thousands > 0.0);
+                        let has_iron = comms.iter().any(|c| c.thousands > 0.0 && c.ironworking);
+                        let has_bronze = comms.iter().any(|c| c.thousands > 0.0 && c.bronzeworking);
+                        if has_iron {
+                            // Steel-blue / forged iron
+                            out.extend_from_slice(&[0.36, 0.74, 0.98]);
+                        } else if has_bronze {
+                            // Burnished bronze-amber
+                            out.extend_from_slice(&[0.90, 0.56, 0.16]);
+                        } else if has_pop {
+                            // Neolithic / Chalcolithic terracotta-ochre
+                            out.extend_from_slice(&[0.64, 0.54, 0.42]);
+                        } else {
+                            out.extend_from_slice(&[0.20, 0.24, 0.20]);
+                        }
+                    } else if koeppen[c_idx] == 12 || koeppen[c_idx] == 13 {
+                        out.extend_from_slice(&[0.88, 0.91, 0.95]);
+                    } else {
+                        let mins = self.coarse_workable_minerals.get(c_idx);
+                        let has_sn = mins.is_some_and(|m| m.contains(&MINERAL_TIN));
+                        let has_cu = mins.is_some_and(|m| m.contains(&MINERAL_COPPER));
+                        let has_fe = mins.is_some_and(|m| m.contains(&MINERAL_IRON));
+                        if has_sn {
+                            // Unclaimed cassiterite tin district: pale silvery-teal highlight
+                            out.extend_from_slice(&[0.42, 0.62, 0.58]);
+                        } else if has_cu {
+                            // Unclaimed copper malachite/porphyry district: verdigris green-copper
+                            out.extend_from_slice(&[0.24, 0.54, 0.38]);
+                        } else if has_fe {
+                            // Unclaimed iron-formation district: rust-hematite tint
+                            out.extend_from_slice(&[0.44, 0.27, 0.22]);
+                        } else {
+                            out.extend_from_slice(&[0.20, 0.24, 0.20]);
+                        }
+                    }
+                }
                 _ => {
                     // "nations" aspect (`historydisplay.py:39-72`)
                     if let Some(&sid) = self.tile_states.get(&f_idx) {
@@ -7019,6 +7669,8 @@ impl HistorySimulation {
                         agriculture: c.agriculture,
                         rivergoing: c.rivergoing,
                         seafaring: c.seafaring,
+                        bronzeworking: c.bronzeworking,
+                        ironworking: c.ironworking,
                         racial_mix: c
                             .racial_mix
                             .iter()
@@ -7143,6 +7795,8 @@ impl HistorySimulation {
                                     agriculture: pc.agriculture,
                                     rivergoing: pc.rivergoing,
                                     seafaring: pc.seafaring,
+                                    bronzeworking: pc.bronzeworking,
+                                    ironworking: pc.ironworking,
                                     racial_mix: pc
                                         .racial_mix
                                         .iter()
@@ -7792,5 +8446,328 @@ mod tests {
             any_rock_named,
             "Expected at least one language to have coined a word for a surface-accessible rock"
         );
+    }
+
+    #[test]
+    fn test_bronze_and_ironworking_trade_invention_capacity_warfare_and_lexicon() {
+        use crate::rock::{Rock, RockKind, RockLayer};
+
+        let mut sim = HistorySimulation::new_earth(42);
+        let fine_adj = sim.terrain.terrain_adj.clone();
+
+        // Find two neighboring states (`s_a`, `s_b`) across a land border
+        let (f_a, s_a, f_b, s_b) = sim
+            .tile_states
+            .iter()
+            .find_map(|(&fa, &sa)| {
+                fine_adj[fa].iter().find_map(|&fb| {
+                    let &sb = sim.tile_states.get(&fb)?;
+                    (sa != sb
+                        && sim.tile_communities.contains_key(&fa)
+                        && sim.tile_communities.contains_key(&fb)
+                        && sim.base_capacities[fa] > 0.1)
+                        .then_some((fa, sa, fb, sb))
+                })
+            })
+            .expect("Expected at least two neighboring states on Earth");
+
+        // Equalize native species on `s_a` and `s_b` so trade pressure comes purely from complementary Copper + Tin!
+        let shared_sp = vec![0usize];
+        let mut sa_coarse = BTreeSet::new();
+        let mut sb_coarse = BTreeSet::new();
+        for (&f, &sid) in &sim.tile_states {
+            if sid == s_a {
+                sim.tile_species[f] = shared_sp.clone();
+                sa_coarse.insert(sim.fine_primary_coarse[f]);
+            } else if sid == s_b {
+                sim.tile_species[f] = shared_sp.clone();
+                sb_coarse.insert(sim.fine_primary_coarse[f]);
+            }
+        }
+        // Remove any shared coarse boundary tiles from `sb_coarse` so `s_a` gets pure Copper+Iron and `s_b` gets pure Tin
+        for c in &sa_coarse {
+            sb_coarse.remove(c);
+        }
+        assert!(!sa_coarse.is_empty() && !sb_coarse.is_empty());
+
+        {
+            let gtiles = sim.prehistory_tiles_mut();
+            let mut cu_porphyry = Rock::extrusive(0.60);
+            cu_porphyry.sulfidity = Some(0.65);
+            cu_porphyry.quartzity = Some(0.45);
+            let fe_formation = Rock {
+                kind: RockKind::Sedimentary,
+                name: "sandstone",
+                felsity: 0.45,
+                toughness: 0.55,
+                clasticity: Some(8.0),
+                calcity: None,
+                bogginess: None,
+                quartzity: Some(0.38),
+                sulfidity: Some(0.32),
+                salinity: None,
+            };
+            let mut sn_granite = Rock::intrusive(0.86);
+            sn_granite.quartzity = Some(0.62);
+            sn_granite.sulfidity = Some(0.25);
+
+            for &c in &sa_coarse {
+                let total_t: f32 = gtiles[c].layers.iter().map(|l| l.thickness).sum();
+                gtiles[c].layers.clear();
+                gtiles[c].layers.push(RockLayer {
+                    rock: fe_formation.clone(),
+                    thickness: (total_t - 0.15).max(0.20),
+                });
+                gtiles[c].layers.push(RockLayer {
+                    rock: cu_porphyry.clone(),
+                    thickness: 0.15,
+                });
+            }
+            for &c in &sb_coarse {
+                // Replace State B's near-surface crust with S-type cassiterite tin granite (zero copper)
+                let total_t: f32 = gtiles[c].layers.iter().map(|l| l.thickness).sum();
+                gtiles[c].layers.clear();
+                gtiles[c].layers.push(RockLayer {
+                    rock: sn_granite.clone(),
+                    thickness: total_t,
+                });
+            }
+        }
+        sim.refresh_mineral_caches();
+        // Ensure every tile in `s_a` maps to `sa_coarse` (not a shared vertex coarse tile in `sb_coarse`) and vice versa
+        let rep_ca = *sa_coarse.iter().next().unwrap();
+        let rep_cb = *sb_coarse.iter().next().unwrap();
+        for (&f, &sid) in &sim.tile_states {
+            if sid == s_a {
+                sim.fine_primary_coarse[f] = rep_ca;
+            } else if sid == s_b {
+                sim.fine_primary_coarse[f] = rep_cb;
+            }
+        }
+
+        // Equalize populations so military tension doesn't override trade before we inspect trade pressure
+        for (&f, &sid) in &sim.tile_states {
+            if sid == s_a || sid == s_b {
+                if let Some(comms) = sim.tile_communities.get_mut(&f) {
+                    for c in comms.iter_mut() {
+                        c.thousands = 1.0;
+                        c.agriculture = true;
+                        c.bronzeworking = false;
+                        c.ironworking = false;
+                    }
+                }
+            }
+        }
+        sim.conflicts.clear();
+        sim.trade_partners.clear();
+
+        // 1. Verify complementary Copper <-> Tin trade pressure forms a mutual Bronze Age trade pact
+        //    even when both states have identical biological species!
+        let topo0 = sim.state_topology(&fine_adj);
+        assert!(topo0.domestic_minerals[&s_a].contains(&MINERAL_COPPER));
+        assert!(!topo0.domestic_minerals[&s_a].contains(&MINERAL_TIN));
+        assert!(topo0.export_minerals[&s_b].contains(&MINERAL_TIN));
+        let p_ab = sim.compute_trade_pressure(
+            s_a,
+            s_b,
+            &topo0.species,
+            &topo0.domestic_minerals,
+            &topo0.export_minerals,
+        );
+        let p_ba = sim.compute_trade_pressure(
+            s_b,
+            s_a,
+            &topo0.species,
+            &topo0.domestic_minerals,
+            &topo0.export_minerals,
+        );
+        assert!(
+            p_ab > 0.8 && p_ba > 0.8,
+            "Expected strong complementary Cu<->Sn trade pressure, got p_ab={p_ab}, p_ba={p_ba}"
+        );
+        sim.update_diplomacy_and_trade(&fine_adj);
+        assert!(
+            sim.lookup_trade_partners(s_a).contains(&s_b),
+            "Copper-rich State A and Tin-rich State B should establish a trade partnership"
+        );
+
+        // 2. Verify carrying capacity progression: Neolithic < Bronzeworking (+12%) < Ironworking (+25%..+35%)
+        sim.coarse_koeppen[rep_ca] = 6; // Temperate humid forest (`Cf`), so iron plow/axe grants +35%
+        for c in sim.tile_communities.get_mut(&f_a).unwrap() {
+            c.agriculture = true;
+            c.rivergoing = false;
+            c.seafaring = false;
+            c.bronzeworking = false;
+            c.ironworking = false;
+        }
+        sim.refresh_fishing_capacities();
+        let cap_stone = sim.capacities[f_a];
+
+        for c in sim.tile_communities.get_mut(&f_a).unwrap() {
+            c.bronzeworking = true;
+        }
+        sim.refresh_fishing_capacities();
+        let cap_bronze = sim.capacities[f_a];
+        assert!(
+            (cap_bronze - cap_stone * 1.12).abs() < 1e-4,
+            "Bronzeworking should boost agricultural carrying capacity by +12% ({cap_stone} -> {cap_bronze})"
+        );
+
+        for c in sim.tile_communities.get_mut(&f_a).unwrap() {
+            c.ironworking = true;
+        }
+        sim.refresh_fishing_capacities();
+        let cap_iron = sim.capacities[f_a];
+        assert!(
+            (cap_iron - cap_stone * 1.35).abs() < 1e-4,
+            "Ironworking in humid temperate forest should boost carrying capacity by +35% ({cap_stone} -> {cap_iron})"
+        );
+
+        // 3. Verify military metallurgy multiplier & Late Bronze Age tin-collapse vulnerability:
+        //    Set all of State A to bronzeworking (no iron yet):
+        for (&f, &sid) in &sim.tile_states {
+            if sid == s_a {
+                if let Some(comms) = sim.tile_communities.get_mut(&f) {
+                    for c in comms.iter_mut() {
+                        c.bronzeworking = true;
+                        c.ironworking = false;
+                    }
+                }
+            }
+        }
+        let topo_bronze = sim.state_topology(&fine_adj);
+        let (cu_ok, sn_ok, fe_ok) = sim.state_mineral_supply(
+            s_a,
+            &topo_bronze.domestic_minerals,
+            &topo_bronze.export_minerals,
+        );
+        assert!(cu_ok && sn_ok && fe_ok);
+        let mult_supplied = sim.state_metallurgy_multiplier(s_a, cu_ok && sn_ok, fe_ok);
+        assert!(
+            (mult_supplied - 1.30).abs() < 1e-4,
+            "Supplied Bronze Age army should have 1.30x multiplier, got {mult_supplied}"
+        );
+
+        // Sever trade routes (tin collapse!): State A loses tin access -> bronze multiplier drops to 1.08x
+        sim.trade_partners.clear();
+        let (cu_cut, sn_cut, _) = sim.state_mineral_supply(
+            s_a,
+            &topo_bronze.domestic_minerals,
+            &topo_bronze.export_minerals,
+        );
+        assert!(cu_cut && !sn_cut, "Without trade, State A should lack tin");
+        let mult_starved = sim.state_metallurgy_multiplier(s_a, cu_cut && sn_cut, true);
+        assert!(
+            (mult_starved - 1.08).abs() < 1e-4,
+            "Tin-starved Bronze Age army should drop to 1.08x, got {mult_starved}"
+        );
+
+        // Step under tin shortage: with domestic Iron + Fuel + Bronzeworking + Tin Crisis (3.5x boost),
+        // State A communities rapidly invent Ironworking!
+        let mut invented_iron = false;
+        for _ in 0..8 {
+            sim.trade_partners.clear();
+            sim.conflicts.clear();
+            sim.step();
+            if sim
+                .tile_communities
+                .values()
+                .flatten()
+                .any(|c| c.ironworking)
+            {
+                invented_iron = true;
+                break;
+            }
+        }
+        assert!(
+            invented_iron,
+            "Bronzeworking society with domestic iron and fuel under tin shortage should spark ironworking"
+        );
+
+        // 4. Verify Turchin metaethnic faultline across Stone / Bronze / Iron frontier (`+0.15` / `+0.30`)
+        if let Some(&cur_sa) = sim.tile_states.get(&f_a) {
+            for &nb in &fine_adj[f_a] {
+                sim.tile_states.insert(nb, cur_sa);
+            }
+            sim.tile_states.insert(f_b, cur_sa + 999);
+            for f in [f_a, f_b] {
+                if let Some(comms) = sim.tile_communities.get_mut(&f) {
+                    for c in comms.iter_mut() {
+                        c.thousands = 2.0;
+                        c.nationality_id = 0;
+                        c.language_id = 0;
+                        c.agriculture = true;
+                        c.rivergoing = false;
+                        c.seafaring = false;
+                        c.bronzeworking = false;
+                        c.ironworking = false;
+                    }
+                }
+            }
+            assert_eq!(sim.tile_metaethnic_intensity(f_a, &fine_adj), 0.0);
+            for c in sim.tile_communities.get_mut(&f_b).unwrap() {
+                c.bronzeworking = true;
+                c.ironworking = true;
+            }
+            let iron_vs_stone_i = sim.tile_metaethnic_intensity(f_a, &fine_adj);
+            assert!(
+                (iron_vs_stone_i - 0.30).abs() < 1e-4,
+                "Iron vs Stone border should add +0.30 metaethnic frontier intensity, got {iron_vs_stone_i}"
+            );
+        }
+
+        // 5. Verify lexicon coining/borrowing (`CULTURE_BRONZEWORKING`, `CULTURE_IRONWORKING`),
+        //    State Inspector readouts, `"metallurgy"` globe colors, and `.tec11` snapshot roundtrip!
+        let topo_post = sim.state_topology(&fine_adj);
+        sim.accumulate_and_borrow_concepts(&topo_post.extents, &topo_post.species);
+        assert!(
+            sim.languages
+                .values()
+                .any(|l| l.describes(ConceptKey::Culture(CULTURE_BRONZEWORKING))),
+            "Expected lexicon word coined/borrowed for bronzeworking"
+        );
+        assert!(
+            sim.languages
+                .values()
+                .any(|l| l.describes(ConceptKey::Culture(CULTURE_IRONWORKING))),
+            "Expected lexicon word coined/borrowed for ironworking"
+        );
+
+        let metal_colors = sim.tile_colors_rgb("metallurgy", true, None);
+        assert_eq!(metal_colors.len(), sim.tile_count() * 3);
+
+        let any_iron_sid = sim
+            .tile_states
+            .iter()
+            .find_map(|(&f, &sid)| {
+                sim.tile_communities
+                    .get(&f)?
+                    .iter()
+                    .any(|c| c.thousands > 0.0 && c.ironworking)
+                    .then_some(sid)
+            })
+            .expect("Expected at least one state with ironworking");
+        let st_view = sim
+            .inspect_state(any_iron_sid, None)
+            .expect("Expected StateInspectionView");
+        assert!(
+            st_view.technology.contains("Ironworking"),
+            "State inspector technology should display Ironworking, got: {}",
+            st_view.technology
+        );
+
+        let snap_bytes = sim.encode_snapshot();
+        let mut restored = HistorySimulation::new_earth(99);
+        assert!(restored.load_snapshot_bytes(&snap_bytes));
+        assert!(restored
+            .tile_communities
+            .values()
+            .flatten()
+            .any(|c| c.bronzeworking));
+        assert!(restored
+            .tile_communities
+            .values()
+            .flatten()
+            .any(|c| c.ironworking));
     }
 }

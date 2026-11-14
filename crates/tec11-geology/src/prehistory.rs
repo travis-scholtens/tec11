@@ -144,30 +144,144 @@ impl PrehistorySimulation {
         let n = grid.faces.len();
         let mut tiles = Vec::with_capacity(n);
 
-        for &elev_m in EARTH_SIZE6_ELEVATIONS_M.iter() {
+        for (idx, &elev_m) in EARTH_SIZE6_ELEVATIONS_M.iter().enumerate() {
             let elev_km = (elev_m as f32) / 550.0;
             if elev_km > 0.0 {
+                let p = grid.faces[idx].0;
+                let lat_abs = (p[2].abs() as f32).clamp(0.0, 1.0);
+                let h = (idx as u32)
+                    .wrapping_mul(0x9E37_79B9)
+                    ^ (p[0].to_bits() as u32).rotate_left(7)
+                    ^ (p[1].to_bits() as u32).rotate_left(17);
+                let u = ((h % 1000) as f32) * 0.001;
+
+                let top_thick = 0.35f32;
+                let base_thick = elev_km + 24.0 - top_thick;
+                let base_rock = if elev_km >= 2.2 && u < 0.30 {
+                    let mut r = Rock::intrusive(0.60);
+                    r.sulfidity = Some(0.28);
+                    r.quartzity = Some(0.22);
+                    r
+                } else if elev_km >= 0.7 && (0.30..0.37).contains(&u) {
+                    let mut r = Rock::intrusive(0.78);
+                    r.quartzity = Some(0.38);
+                    r.sulfidity = Some(0.10);
+                    r
+                } else if elev_km < 1.8 && (0.37..0.52).contains(&u) {
+                    Rock {
+                        kind: RockKind::Metamorphic,
+                        name: "greenschist",
+                        felsity: 0.48,
+                        toughness: 0.75,
+                        clasticity: None,
+                        calcity: None,
+                        bogginess: None,
+                        quartzity: Some(0.32),
+                        sulfidity: Some(0.22),
+                        salinity: None,
+                    }
+                } else {
+                    Rock::intrusive(0.68)
+                };
+
+                let top_rock = if elev_km >= 2.4 && u < 0.22 {
+                    let mut r = Rock::extrusive(0.58);
+                    r.sulfidity = Some(0.28);
+                    r.quartzity = Some(0.20);
+                    r
+                } else if elev_km >= 0.9 && (0.30..0.36).contains(&u) {
+                    let mut r = Rock::intrusive(0.80);
+                    r.quartzity = Some(0.38);
+                    r
+                } else if (0.35..1.60).contains(&elev_km) && (0.38..0.48).contains(&u) {
+                    Rock {
+                        kind: RockKind::Sedimentary,
+                        name: "sandstone",
+                        felsity: 0.50,
+                        toughness: 0.5,
+                        clasticity: Some(8.0),
+                        calcity: None,
+                        bogginess: None,
+                        quartzity: Some(0.30),
+                        sulfidity: Some(0.22),
+                        salinity: None,
+                    }
+                } else if elev_km < 1.2
+                    && (lat_abs < 0.18 || (0.42..0.68).contains(&lat_abs))
+                    && (0.52..0.63).contains(&u)
+                {
+                    Rock {
+                        kind: RockKind::Sedimentary,
+                        name: "siltstone",
+                        felsity: 0.55,
+                        toughness: 0.35,
+                        clasticity: Some(20.0),
+                        calcity: None,
+                        bogginess: Some(0.45),
+                        quartzity: None,
+                        sulfidity: None,
+                        salinity: None,
+                    }
+                } else if (0.22..0.40).contains(&lat_abs)
+                    && elev_km < 1.4
+                    && (0.64..0.72).contains(&u)
+                {
+                    Rock {
+                        kind: RockKind::Sedimentary,
+                        name: "limestone",
+                        felsity: 0.50,
+                        toughness: 0.45,
+                        clasticity: Some(8.0),
+                        calcity: Some(0.80),
+                        bogginess: None,
+                        quartzity: None,
+                        sulfidity: None,
+                        salinity: Some(0.36),
+                    }
+                } else if lat_abs < 0.48 && elev_km < 1.1 && u >= 0.78 {
+                    Rock {
+                        kind: RockKind::Sedimentary,
+                        name: "limestone",
+                        felsity: 0.52,
+                        toughness: 0.48,
+                        clasticity: Some(4.0),
+                        calcity: Some(0.85),
+                        bogginess: None,
+                        quartzity: None,
+                        sulfidity: None,
+                        salinity: None,
+                    }
+                } else {
+                    Rock {
+                        kind: RockKind::Sedimentary,
+                        name: "sandstone",
+                        felsity: 0.55,
+                        toughness: 0.5,
+                        clasticity: Some(1.0),
+                        calcity: None,
+                        bogginess: None,
+                        quartzity: None,
+                        sulfidity: None,
+                        salinity: None,
+                    }
+                };
+
                 let mut t = TileGeology {
-                    bottom: -1.0,
+                    bottom: -24.0,
                     mountainosity: (elev_km * 2.0).clamp(0.0, 20.0),
                     subduction: 0.0,
                     intrusion: None,
                     impact_scar: 0.0,
-                    layers: vec![RockLayer {
-                        rock: Rock {
-                            kind: RockKind::Sedimentary,
-                            name: "sandstone",
-                            felsity: 0.55,
-                            toughness: 0.5,
-                            clasticity: Some(1.0),
-                            calcity: None,
-                            bogginess: None,
-                            quartzity: None,
-                            sulfidity: None,
-                            salinity: None,
+                    layers: vec![
+                        RockLayer {
+                            rock: base_rock,
+                            thickness: base_thick,
                         },
-                        thickness: elev_km + 1.0,
-                    }],
+                        RockLayer {
+                            rock: top_rock,
+                            thickness: top_thick,
+                        },
+                    ],
                 };
                 t.limit();
                 tiles.push(t);
@@ -1017,6 +1131,10 @@ impl PrehistorySimulation {
 
     pub fn tiles(&self) -> &[TileGeology] {
         &self.tiles
+    }
+
+    pub fn tiles_mut(&mut self) -> &mut [TileGeology] {
+        &mut self.tiles
     }
 
     pub fn groups(&self) -> &[LithosphericGroup] {

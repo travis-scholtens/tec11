@@ -137,6 +137,8 @@ message Community {
   repeated RaceContribution racial_mix = 5;
   bool rivergoing = 6;
   bool seafaring = 7;
+  bool bronzeworking = 8;
+  bool ironworking = 9;
 }
 
 // Only stored for populated/claimed fine faces (capacities & species are derived on load)

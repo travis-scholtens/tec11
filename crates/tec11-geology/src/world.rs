@@ -888,6 +888,37 @@ impl WorldSimulation {
                                 let scar = scars[t].max(tiles[t].impact_signature());
                                 Self::blend_impact_scar_color(base, scar)
                             }
+                            "metallurgy" => {
+                                if h <= 0.0 {
+                                    Self::natural_color_with_optics(
+                                        h,
+                                        tiles[t].top_felsity(),
+                                        koeppen[t],
+                                        life[t],
+                                        has_atm,
+                                        &self.optics,
+                                    )
+                                } else {
+                                    use crate::tile::{MineralKind, WORKABLE_GRADE};
+                                    let mins = tiles[t].accessible_mineral_abundances(0.5);
+                                    let workable = |mk: MineralKind| {
+                                        mins.get(&mk)
+                                            .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.006)
+                                    };
+                                    if workable(MineralKind::Tin) {
+                                        [0.42, 0.68, 0.62]
+                                    } else if workable(MineralKind::Copper) {
+                                        [0.24, 0.60, 0.40]
+                                    } else if mins
+                                        .get(&MineralKind::Iron)
+                                        .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.020)
+                                    {
+                                        [0.52, 0.30, 0.22]
+                                    } else {
+                                        [0.20, 0.24, 0.20]
+                                    }
+                                }
+                            }
                             _ => Self::natural_color_with_optics(
                                 h,
                                 tiles[t].top_felsity(),
@@ -941,6 +972,37 @@ impl WorldSimulation {
                                     &self.optics,
                                 );
                                 Self::blend_impact_scar_color(base, tiles[t].impact_signature())
+                            }
+                            "metallurgy" => {
+                                if h <= 0.0 {
+                                    Self::natural_color_with_optics(
+                                        h,
+                                        tiles[t].top_felsity(),
+                                        koeppen[t],
+                                        life[t],
+                                        true,
+                                        &self.optics,
+                                    )
+                                } else {
+                                    use crate::tile::{MineralKind, WORKABLE_GRADE};
+                                    let mins = tiles[t].accessible_mineral_abundances(0.5);
+                                    let workable = |mk: MineralKind| {
+                                        mins.get(&mk)
+                                            .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.006)
+                                    };
+                                    if workable(MineralKind::Tin) {
+                                        [0.42, 0.68, 0.62]
+                                    } else if workable(MineralKind::Copper) {
+                                        [0.24, 0.60, 0.40]
+                                    } else if mins
+                                        .get(&MineralKind::Iron)
+                                        .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.020)
+                                    {
+                                        [0.52, 0.30, 0.22]
+                                    } else {
+                                        [0.20, 0.24, 0.20]
+                                    }
+                                }
                             }
                             _ => Self::natural_color_with_optics(
                                 h,
@@ -1044,6 +1106,12 @@ impl WorldSimulation {
                 ),
                 "travel" => hist.tile_colors_rgb_with_optics(
                     "travel",
+                    true,
+                    selected_tile,
+                    Some(&self.optics),
+                ),
+                "metallurgy" => hist.tile_colors_rgb_with_optics(
+                    "metallurgy",
                     true,
                     selected_tile,
                     Some(&self.optics),

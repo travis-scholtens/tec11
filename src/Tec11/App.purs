@@ -4859,6 +4859,10 @@ mkApp = do
                                           , children: [ R.text "Nations & Diplomacy" ]
                                           }
                                       , R.option
+                                          { value: "metallurgy"
+                                          , children: [ R.text "Metallurgy (Stone / Bronze / Iron)" ]
+                                          }
+                                      , R.option
                                           { value: "travel"
                                           , children: [ R.text "Travel Routes & Sea Lanes" ]
                                           }
@@ -5068,6 +5072,10 @@ mkApp = do
                                       , R.option
                                           { value: "nations"
                                           , children: [ R.text "Nations" ]
+                                          }
+                                      , R.option
+                                          { value: "metallurgy"
+                                          , children: [ R.text "Metallurgy & Ores" ]
                                           }
                                       , R.option
                                           { value: "travel"
