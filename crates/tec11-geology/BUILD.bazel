@@ -19,6 +19,7 @@ rust_library(
         "src/racination.rs",
         "src/rivers.rs",
         "src/rock.rs",
+        "src/sky_vantage.rs",
         "src/split_sandbox.rs",
         "src/sun_sky.rs",
         "src/tectonics.rs",

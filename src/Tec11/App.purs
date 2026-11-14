@@ -14,6 +14,12 @@ import React.Basic.DOM.Events (capture_, targetValue)
 import React.Basic.Events (handler)
 import React.Basic.Hooks (Component, JSX, component, useEffect, useEffectOnce, useState')
 import React.Basic.Hooks as React
+import Tec11.SkyVantage
+  ( DemographicShareItem
+  , TileViewInfo
+  , defaultTileViewInfo
+  , renderTileSkyAndVantageBox
+  )
 
 data Screen
   = MainMenu
@@ -177,13 +183,6 @@ type TerrainInfo =
   , selectedReport :: String
   }
 
-type DemographicShareItem =
-  { id :: Int
-  , name :: String
-  , popText :: String
-  , percentText :: String
-  }
-
 type StateViewInfo =
   { hasState :: Boolean
   , stateId :: Int
@@ -202,27 +201,6 @@ type StateViewInfo =
   , tradePartners :: Array String
   , conflicts :: Array String
   , waterRoutes :: Array String
-  }
-
-type TileViewInfo =
-  { hasTile :: Boolean
-  , displayIdx :: Int
-  , stateId :: Int
-  , title :: String
-  , locationSummary :: String
-  , populationSummary :: String
-  , technology :: String
-  , nationalities :: Array DemographicShareItem
-  , languages :: Array DemographicShareItem
-  , flora :: Array String
-  , fauna :: Array String
-  , skyYear :: Int
-  , skyDay :: Int
-  , skyDaysPerYear :: Int
-  , skyLatLonSummary :: String
-  , skyAnimated :: Boolean
-  , vantageBearingSummary :: String
-  , vantageNeighborSummary :: String
   }
 
 type LexiconEntryItem =
@@ -274,28 +252,6 @@ defaultStateViewInfo =
   , tradePartners: []
   , conflicts: []
   , waterRoutes: []
-  }
-
-defaultTileViewInfo :: TileViewInfo
-defaultTileViewInfo =
-  { hasTile: false
-  , displayIdx: -1
-  , stateId: -1
-  , title: ""
-  , locationSummary: ""
-  , populationSummary: ""
-  , technology: ""
-  , nationalities: []
-  , languages: []
-  , flora: []
-  , fauna: []
-  , skyYear: 0
-  , skyDay: 0
-  , skyDaysPerYear: 365
-  , skyLatLonSummary: ""
-  , skyAnimated: true
-  , vantageBearingSummary: ""
-  , vantageNeighborSummary: ""
   }
 
 defaultLanguageDetailInfo :: LanguageDetailInfo
@@ -635,10 +591,6 @@ foreign import selectInspectorLanguage :: Int -> Effect Unit
 foreign import selectInspectorNation :: Int -> Effect Unit
 foreign import closeInspectorLanguage :: Effect Unit
 foreign import closeInspectorNation :: Effect Unit
-foreign import setTileSkyYear :: Int -> Effect Unit
-foreign import setTileSkyDay :: Int -> Effect Unit
-foreign import toggleTileSkyAnimation :: Effect Unit
-foreign import stepTileVantageDirection :: Int -> Effect Unit
 foreign import toggleStratigraphySideZoom :: Effect Unit
 
 renderStratigraphySideViewBox :: JSX
@@ -907,268 +859,6 @@ renderNationDetailCard nat activeLangId =
               , children: [ R.text "Languages Spoken (click language for lexicon):" ]
               }
           , renderDemographicPills nat.spokenLanguages activeLangId selectInspectorLanguage "None"
-          ]
-      }
-
-renderTileSkyAndVantageBox :: TileViewInfo -> JSX
-renderTileSkyAndVantageBox tile =
-  if not tile.hasTile then
-    React.empty
-  else
-    R.div
-      { id: "tile-sky-box"
-      , style:
-          R.css
-            { marginTop: "8px"
-            , paddingTop: "7px"
-            , borderTop: "1px solid #334155"
-            }
-      , children:
-          [ R.div
-              { style:
-                  R.css
-                    { display: "flex"
-                    , justifyContent: "space-between"
-                    , alignItems: "center"
-                    , marginBottom: "4px"
-                    }
-              , children:
-                  [ R.div
-                      { style: R.css { fontSize: "0.76rem", fontWeight: "700", color: "#fde047" }
-                      , children:
-                          [ R.text
-                              ( "Local Sky & Vantage ("
-                                  <> tile.skyLatLonSummary
-                                  <> ")"
-                              )
-                          ]
-                      }
-                  , R.button
-                      { id: "tile-sky-anim-btn"
-                      , className: "action-btn secondary"
-                      , style: R.css { padding: "1px 8px", fontSize: "0.72rem", width: "auto" }
-                      , onClick: capture_ toggleTileSkyAnimation
-                      , children:
-                          [ R.text (if tile.skyAnimated then "⏸ Pause Sky" else "▶ Animate Sky") ]
-                      }
-                  ]
-              }
-          , R.div
-              { style:
-                  R.css
-                    { display: "flex"
-                    , alignItems: "center"
-                    , justifyContent: "space-between"
-                    , gap: "8px"
-                    , marginBottom: "5px"
-                    }
-              , children:
-                  [ R.label
-                      { style: R.css { fontSize: "0.74rem", color: "#cbd5e1", whiteSpace: "nowrap" }
-                      , children: [ R.text "Year (orbital cycle):" ]
-                      }
-                  , R.input
-                      { id: "tile-sky-year-input"
-                      , type: "number"
-                      , min: "0"
-                      , step: "1"
-                      , value: show tile.skyYear
-                      , style:
-                          R.css
-                            { width: "86px"
-                            , padding: "2px 6px"
-                            , fontSize: "0.76rem"
-                            , background: "#0f172a"
-                            , color: "#f8fafc"
-                            , border: "1px solid #475569"
-                            , borderRadius: "4px"
-                            }
-                      , onChange:
-                          handler targetValue \mv -> case mv >>= Int.fromString of
-                            Just y -> setTileSkyYear (max 0 y)
-                            Nothing -> pure unit
-                      }
-                  ]
-              }
-          , R.div
-              { style: R.css { marginBottom: "6px" }
-              , children:
-                  [ R.div
-                      { style:
-                          R.css
-                            { display: "flex"
-                            , justifyContent: "space-between"
-                            , fontSize: "0.73rem"
-                            , color: "#cbd5e1"
-                            , marginBottom: "2px"
-                            }
-                      , children:
-                          [ R.span
-                              { id: "tile-sky-day-label"
-                              , children:
-                                  [ R.text
-                                      ( "Day in Year: Day "
-                                          <> show tile.skyDay
-                                          <> " / "
-                                          <> show (max 1 (tile.skyDaysPerYear - 1))
-                                      )
-                                  ]
-                              }
-                          , R.span
-                              { id: "tile-sky-time-label"
-                              , style: R.css { color: "#93c5fd" }
-                              , children: [ R.text "Sun · Moons · Planets · Stars" ]
-                              }
-                          ]
-                      }
-                  , R.input
-                      { id: "tile-sky-day-slider"
-                      , type: "range"
-                      , min: "0"
-                      , max: show (max 1 (tile.skyDaysPerYear - 1))
-                      , step: "1"
-                      , value: show tile.skyDay
-                      , style: R.css { width: "100%", cursor: "pointer" }
-                      , onChange:
-                          handler targetValue \mv -> case mv >>= Int.fromString of
-                            Just d -> setTileSkyDay (max 0 d)
-                            Nothing -> pure unit
-                      }
-                  ]
-              }
-          , R.div
-              { style:
-                  R.css
-                    { display: "flex"
-                    , flexDirection: "row"
-                    , gap: "8px"
-                    , alignItems: "flex-end"
-                    }
-              , children:
-                  [ R.div
-                      { style: R.css { flex: "1 1 0", minWidth: "0" }
-                      , children:
-                          [ R.div
-                              { style:
-                                  R.css
-                                    { fontSize: "0.70rem"
-                                    , color: "#94a3b8"
-                                    , textAlign: "center"
-                                    , height: "20px"
-                                    , lineHeight: "20px"
-                                    , marginBottom: "3px"
-                                    , whiteSpace: "nowrap"
-                                    , overflow: "hidden"
-                                    , textOverflow: "ellipsis"
-                                    }
-                              , children: [ R.text "Overhead Sky Dome" ]
-                              }
-                          , R.canvas
-                              { id: "tile-sky-canvas"
-                              , style:
-                                  R.css
-                                    { width: "100%"
-                                    , height: "224px"
-                                    , display: "block"
-                                    , borderRadius: "6px"
-                                    , border: "1px solid #334155"
-                                    , background: "#040914"
-                                    }
-                              }
-                          ]
-                      }
-                  , R.div
-                      { style: R.css { flex: "0 0 200px", width: "200px" }
-                      , children:
-                          [ R.div
-                              { style:
-                                  R.css
-                                    { display: "flex"
-                                    , alignItems: "center"
-                                    , justifyContent: "space-between"
-                                    , gap: "4px"
-                                    , height: "20px"
-                                    , marginBottom: "3px"
-                                    }
-                              , children:
-                                  [ R.button
-                                      { id: "tile-vantage-prev-btn"
-                                      , className: "action-btn secondary"
-                                      , style:
-                                          R.css
-                                            { padding: "0px 7px"
-                                            , height: "20px"
-                                            , lineHeight: "18px"
-                                            , fontSize: "0.70rem"
-                                            , width: "auto"
-                                            , minWidth: "24px"
-                                            }
-                                      , onClick: capture_ (stepTileVantageDirection (-1))
-                                      , children: [ R.text "◀" ]
-                                      }
-                                  , R.span
-                                      { id: "tile-vantage-dir-label"
-                                      , style:
-                                          R.css
-                                            { fontSize: "0.69rem"
-                                            , fontWeight: "700"
-                                            , color: "#bae6fd"
-                                            , textAlign: "center"
-                                            , whiteSpace: "nowrap"
-                                            , overflow: "hidden"
-                                            , textOverflow: "ellipsis"
-                                            , flex: "1"
-                                            }
-                                      , children: [ R.text tile.vantageBearingSummary ]
-                                      }
-                                  , R.button
-                                      { id: "tile-vantage-next-btn"
-                                      , className: "action-btn secondary"
-                                      , style:
-                                          R.css
-                                            { padding: "0px 7px"
-                                            , height: "20px"
-                                            , lineHeight: "18px"
-                                            , fontSize: "0.70rem"
-                                            , width: "auto"
-                                            , minWidth: "24px"
-                                            }
-                                      , onClick: capture_ (stepTileVantageDirection 1)
-                                      , children: [ R.text "▶" ]
-                                      }
-                                  ]
-                              }
-                          , R.canvas
-                              { id: "tile-vantage-canvas"
-                              , style:
-                                  R.css
-                                    { width: "200px"
-                                    , height: "224px"
-                                    , display: "block"
-                                    , borderRadius: "6px"
-                                    , border: "1px solid #334155"
-                                    , background: "#040914"
-                                    }
-                              }
-                          ]
-                      }
-                  ]
-              }
-          , R.div
-              { id: "tile-vantage-summary-label"
-              , style:
-                  R.css
-                    { fontSize: "0.71rem"
-                    , color: "#cbd5e1"
-                    , marginTop: "4px"
-                    }
-              , children: [ R.text tile.vantageNeighborSummary ]
-              }
-          , R.div
-              { style: R.css { fontSize: "0.69rem", color: "#94a3b8", marginTop: "2px" }
-              , children:
-                  [ R.text "Gold: Sun | Silver: Moons | Colored: Planets | Cyan: Constellations | Vantage: 100° FOV, Zenith (+90°) to Horizon" ]
-              }
           ]
       }
 

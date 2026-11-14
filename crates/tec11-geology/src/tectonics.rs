@@ -1703,7 +1703,7 @@ impl TectonicsSimulation {
     pub fn inspect_tile_structured(
         &self,
         tile_idx: usize,
-    ) -> Option<crate::history::TileInspectionView> {
+    ) -> Option<crate::sky_vantage::TileInspectionView> {
         let tile = self.tiles.get(tile_idx)?;
         let home_star = crate::sun_sky::HomeStar::sol();
         let optics = crate::sun_sky::PlanetaryOptics::compute(
@@ -1741,9 +1741,9 @@ impl TectonicsSimulation {
                 crate::world::koeppen_climate_name(k_code)
             )
         };
-        crate::history::build_coarse_tile_inspection_view(
+        crate::sky_vantage::build_coarse_tile_inspection_view(
             tile_idx,
-            crate::history::CoarseTileSkyParams {
+            crate::sky_vantage::CoarseTileSkyParams {
                 grid: &self.grid,
                 adjacency: &self.adjacency,
                 tiles: &self.tiles,

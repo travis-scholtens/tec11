@@ -13,6 +13,7 @@ pub mod profile;
 pub mod racination;
 pub mod rivers;
 pub mod rock;
+pub mod sky_vantage;
 pub mod split_sandbox;
 pub mod sun_sky;
 pub mod tectonics;
@@ -22,10 +23,16 @@ pub mod world;
 
 pub use erosion_sandbox::ErosionSandbox;
 pub use history::{
-    build_coarse_tile_inspection_view, CoarseTileSkyParams, Community, ConceptKey,
-    DemographicShareItem, HistorySimulation, LanguageDetailView, LanguageRecord, LexiconEntryView,
-    NationDetailView, StateInspectionView, StatePair, StateRecord, StateTopology,
-    TileInspectionView, TravelRoute, TravelRouteKind, TravelRouteStatus, ZoomedMapPolygon,
+    Community, ConceptKey, HistorySimulation, LanguageDetailView, LanguageRecord, LexiconEntryView,
+    NationDetailView, StateInspectionView, StatePair, StateRecord, StateTopology, TravelRoute,
+    TravelRouteKind, TravelRouteStatus, ZoomedMapPolygon,
+};
+pub use sky_vantage::{
+    build_celestial_sky_view, build_coarse_tile_inspection_view,
+    build_uniform_fine_tile_inspection_view, format_share_percent, format_thousands_compact,
+    CoarseTileSkyParams, DemographicShareItem, TileInspectionView, TileLiveEnvironment,
+    TileSkyConstellation, TileSkyMoon, TileSkyPlanet, TileSkyView, TileVantageNeighbor,
+    TileVantageSample, TileVantageView, UniformFineTileSkyParams,
 };
 pub use language::{
     a_mutate, apheresize, apocopate, break_vowels, i_mutate, open_consonants, sonorize_consonants,

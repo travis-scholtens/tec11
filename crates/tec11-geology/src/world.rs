@@ -731,7 +731,7 @@ impl WorldSimulation {
     pub fn inspect_tile_structured(
         &self,
         tile_idx: usize,
-    ) -> Option<crate::history::TileInspectionView> {
+    ) -> Option<crate::sky_vantage::TileInspectionView> {
         match &self.stage {
             WorldStageState::Tectonics(tec) => {
                 let tile = tec.tiles().get(tile_idx)?;
@@ -749,9 +749,9 @@ impl WorldSimulation {
                         koeppen_climate_name(k_code)
                     )
                 };
-                crate::history::build_coarse_tile_inspection_view(
+                crate::sky_vantage::build_coarse_tile_inspection_view(
                     tile_idx,
-                    crate::history::CoarseTileSkyParams {
+                    crate::sky_vantage::CoarseTileSkyParams {
                         grid: tec.grid(),
                         adjacency: tec.adjacency(),
                         tiles: tec.tiles(),
@@ -827,9 +827,9 @@ impl WorldSimulation {
                 } else {
                     ("Uninhabited".to_string(), "Prehistory".to_string())
                 };
-                crate::history::build_coarse_tile_inspection_view(
+                crate::sky_vantage::build_coarse_tile_inspection_view(
                     tile_idx,
-                    crate::history::CoarseTileSkyParams {
+                    crate::sky_vantage::CoarseTileSkyParams {
                         grid: pre.grid(),
                         adjacency: pre.adjacency(),
                         tiles: pre.tiles(),
