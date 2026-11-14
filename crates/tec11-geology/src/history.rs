@@ -1308,6 +1308,7 @@ pub struct HistorySimulation {
     fine_adj: std::sync::Arc<Vec<Vec<usize>>>,
     coarse_elevs: Vec<f32>,
     coarse_koeppen: Vec<u8>,
+    coarse_rocks: Vec<BTreeSet<u32>>,
     coarse_workable_minerals: Vec<BTreeSet<u32>>,
     coarse_export_minerals: Vec<BTreeSet<u32>>,
     fine_primary_coarse: Vec<usize>,
@@ -1431,6 +1432,7 @@ impl HistorySimulation {
             fine_adj,
             coarse_elevs,
             coarse_koeppen: Vec::new(),
+            coarse_rocks: Vec::new(),
             coarse_workable_minerals: Vec::new(),
             coarse_export_minerals: Vec::new(),
             fine_primary_coarse: vec![0; num_fine],
@@ -1469,17 +1471,22 @@ impl HistorySimulation {
         self.prehistory.tiles_mut()
     }
 
-    /// Recompute cached per-coarse-tile workable and exportable mineral concept sets from stratigraphy.
+    /// Recompute cached per-coarse-tile surface rock, workable mineral, and exportable mineral concept sets.
     pub fn refresh_mineral_caches(&mut self) {
         let geo_tiles = self.prehistory.tiles();
-        self.coarse_workable_minerals = geo_tiles
-            .iter()
-            .map(|tg| Self::surface_rock_and_mineral_concepts(tg, 0.5).1)
-            .collect();
-        self.coarse_export_minerals = geo_tiles
-            .iter()
-            .map(|tg| Self::exportable_mineral_concepts(tg, 0.5))
-            .collect();
+        let n = geo_tiles.len();
+        let mut rocks_vec = Vec::with_capacity(n);
+        let mut workable_vec = Vec::with_capacity(n);
+        let mut export_vec = Vec::with_capacity(n);
+        for tg in geo_tiles {
+            let (rocks, workable, exported) = Self::tile_rock_and_mineral_caches(tg, 0.5);
+            rocks_vec.push(rocks);
+            workable_vec.push(workable);
+            export_vec.push(exported);
+        }
+        self.coarse_rocks = rocks_vec;
+        self.coarse_workable_minerals = workable_vec;
+        self.coarse_export_minerals = export_vec;
     }
 
     fn initialize_terrain_and_polities(&mut self) {
@@ -1853,20 +1860,19 @@ impl HistorySimulation {
                     lang.coin_concept(ConceptKey::Constellation(c_idx), &mut temp_rng);
                 }
                 // Coin words for surface-accessible rocks and minerals in the state's territory
-                let geo_tiles = self.prehistory.tiles();
                 let mut seen_coarse_init: BTreeSet<usize> = BTreeSet::new();
                 for &f_idx in tiles {
                     let c = self.fine_primary_coarse[f_idx];
                     if !seen_coarse_init.insert(c) {
                         continue;
                     }
-                    if let Some(tile_geo) = geo_tiles.get(c) {
-                        let (rock_ids, mineral_ids) =
-                            Self::surface_rock_and_mineral_concepts(tile_geo, 0.5);
-                        for r_id in rock_ids {
+                    if let Some(rock_ids) = self.coarse_rocks.get(c) {
+                        for &r_id in rock_ids {
                             lang.coin_concept(ConceptKey::Rock(r_id), &mut temp_rng);
                         }
-                        for m_id in mineral_ids {
+                    }
+                    if let Some(mineral_ids) = self.coarse_workable_minerals.get(c) {
+                        for &m_id in mineral_ids {
                             lang.coin_concept(ConceptKey::Mineral(m_id), &mut temp_rng);
                         }
                     }
@@ -3348,18 +3354,19 @@ impl HistorySimulation {
         }
     }
 
-    fn surface_rock_and_mineral_concepts(
+    fn tile_rock_and_mineral_caches(
         tile: &crate::tile::TileGeology,
         max_depth_km: f32,
-    ) -> (BTreeSet<u32>, BTreeSet<u32>) {
-        use crate::tile::WORKABLE_GRADE;
+    ) -> (BTreeSet<u32>, BTreeSet<u32>, BTreeSet<u32>) {
+        use crate::tile::{MineralKind, WORKABLE_GRADE};
         let mut rocks = BTreeSet::new();
         let mut minerals = BTreeSet::new();
+        let mut exported = BTreeSet::new();
 
         let elev = tile.elevation();
         // Only consider land tiles (or very shallow submarine)
         if elev < -0.5 {
-            return (rocks, minerals);
+            return (rocks, minerals, exported);
         }
 
         let mut depth_from_surface = 0.0f32;
@@ -3415,33 +3422,22 @@ impl HistorySimulation {
             depth_from_surface += layer.thickness;
         }
 
-        // Derive workable mineral & gemstone concepts across both layers and contact interfaces:
+        // Derive workable and exportable mineral & gemstone concepts in a single `O(L_top)` pass:
         // Sparse `Trace` flecks (`< WORKABLE_GRADE`) are too minor to support local mining/lexicon naming.
-        for (mk, (max_grade, abundance)) in tile.accessible_mineral_abundances(max_depth_km) {
+        for (mk, (max_grade, abundance)) in
+            tile.accessible_mineral_abundances_with_elev(max_depth_km, elev)
+        {
             let min_abund = if mk.is_bulk_bedded() { 0.020 } else { 0.005 };
             if max_grade >= WORKABLE_GRADE && abundance >= min_abund {
                 if let Some(cid) = Self::mineral_kind_to_concept_id(mk) {
                     minerals.insert(cid);
                 }
             }
-        }
 
-        (rocks, minerals)
-    }
-
-    fn exportable_mineral_concepts(
-        tile: &crate::tile::TileGeology,
-        max_depth_km: f32,
-    ) -> BTreeSet<u32> {
-        use crate::tile::{MineralKind, WORKABLE_GRADE};
-        let mut exported = BTreeSet::new();
-        if tile.elevation() < -0.5 {
-            return exported;
-        }
-        // Foreign trade networks export strategic metals & precious gems from workable lodes/placers,
-        // and bulk industrial/evaporite minerals from genuinely rich mining districts (excluding ubiquitous quartz/flint):
-        for (mk, (max_grade, abundance)) in tile.accessible_mineral_abundances(max_depth_km) {
-            if matches!(mk, MineralKind::Quartz | MineralKind::Flint | MineralKind::Graphite) {
+            if matches!(
+                mk,
+                MineralKind::Quartz | MineralKind::Flint | MineralKind::Graphite
+            ) {
                 continue;
             }
             let is_exportable = if mk.is_bulk_bedded()
@@ -3458,7 +3454,8 @@ impl HistorySimulation {
                 }
             }
         }
-        exported
+
+        (rocks, minerals, exported)
     }
 
     /// Accumulate concepts across co-resident communities, trade partners, rivals, and recursive trade imports,
@@ -3639,22 +3636,21 @@ impl HistorySimulation {
                 }
 
                 // Surface-accessible rocks and minerals on tiles where this language is spoken
-                let tiles = self.prehistory.tiles();
                 let mut seen_coarse: BTreeSet<usize> = BTreeSet::new();
                 for &f_idx in ltiles {
                     let c_idx = self.fine_primary_coarse[f_idx];
                     if !seen_coarse.insert(c_idx) {
                         continue; // already scanned this coarse tile
                     }
-                    if let Some(tile_geo) = tiles.get(c_idx) {
-                        let (rock_ids, mineral_ids) =
-                            Self::surface_rock_and_mineral_concepts(tile_geo, 0.5);
-                        for rid in rock_ids {
+                    if let Some(rock_ids) = self.coarse_rocks.get(c_idx) {
+                        for &rid in rock_ids {
                             concepts
                                 .entry(ConceptKey::Rock(rid))
                                 .or_insert(Some(lang_id));
                         }
-                        for mid in mineral_ids {
+                    }
+                    if let Some(mineral_ids) = self.coarse_workable_minerals.get(c_idx) {
+                        for &mid in mineral_ids {
                             concepts
                                 .entry(ConceptKey::Mineral(mid))
                                 .or_insert(Some(lang_id));

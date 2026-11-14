@@ -784,7 +784,7 @@ impl WorldSimulation {
         let mut depth_from_surface = 0.0f32;
         for (idx, layer) in tile.layers.iter().enumerate().rev() {
             let r = &layer.rock;
-            let deposits = tile.derive_layer_deposits(idx, depth_from_surface);
+            let deposits = tile.derive_layer_deposits_with_elev(idx, depth_from_surface, elev);
             depth_from_surface += layer.thickness;
             let dep_suffix = if deposits.is_empty() {
                 String::new()
@@ -800,7 +800,8 @@ impl WorldSimulation {
                 r.toughness
             ));
             if idx > 0 {
-                let intf = tile.derive_interface_occurrences(idx - 1, depth_from_surface);
+                let intf =
+                    tile.derive_interface_occurrences_with_elev(idx - 1, depth_from_surface, elev);
                 if !intf.is_empty() {
                     let labels: Vec<&str> = intf.iter().map(|o| o.label.as_str()).collect();
                     lines.push(format!(
@@ -900,7 +901,7 @@ impl WorldSimulation {
                                     )
                                 } else {
                                     use crate::tile::{MineralKind, WORKABLE_GRADE};
-                                    let mins = tiles[t].accessible_mineral_abundances(0.5);
+                                    let mins = tiles[t].accessible_mineral_abundances_with_elev(0.5, h);
                                     let workable = |mk: MineralKind| {
                                         mins.get(&mk)
                                             .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.006)
@@ -985,7 +986,7 @@ impl WorldSimulation {
                                     )
                                 } else {
                                     use crate::tile::{MineralKind, WORKABLE_GRADE};
-                                    let mins = tiles[t].accessible_mineral_abundances(0.5);
+                                    let mins = tiles[t].accessible_mineral_abundances_with_elev(0.5, h);
                                     let workable = |mk: MineralKind| {
                                         mins.get(&mk)
                                             .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.006)

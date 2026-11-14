@@ -1652,7 +1652,7 @@ impl TectonicsSimulation {
             if let Some(s) = r.salinity {
                 attrs.push(format!("salt: {s:.2}"));
             }
-            let deposits = tile.derive_layer_deposits(idx, depth_from_surface);
+            let deposits = tile.derive_layer_deposits_with_elev(idx, depth_from_surface, elev);
             depth_from_surface += layer.thickness;
             let dep_suffix = if deposits.is_empty() {
                 String::new()
@@ -1666,7 +1666,8 @@ impl TectonicsSimulation {
                 attrs.join(", ")
             ));
             if idx > 0 {
-                let intf = tile.derive_interface_occurrences(idx - 1, depth_from_surface);
+                let intf =
+                    tile.derive_interface_occurrences_with_elev(idx - 1, depth_from_surface, elev);
                 if !intf.is_empty() {
                     let labels: Vec<&str> = intf.iter().map(|o| o.label.as_str()).collect();
                     lines.push(format!(

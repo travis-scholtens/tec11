@@ -1017,6 +1017,16 @@ impl TileGeology {
     /// Deterministically evaluate continuous `[0.0, 1.0]` precious and semi-precious gemstone
     /// grades in `self.layers[layer_idx]` at `depth_from_surface_km` (`0.0` = absent).
     pub fn derive_layer_gems(&self, layer_idx: usize, depth_from_surface_km: f32) -> LayerGems {
+        self.derive_layer_gems_with_elev(layer_idx, depth_from_surface_km, self.elevation())
+    }
+
+    /// `O(1)` variant of `derive_layer_gems` using a precomputed `surface_elev_km`.
+    pub fn derive_layer_gems_with_elev(
+        &self,
+        layer_idx: usize,
+        depth_from_surface_km: f32,
+        surface_elev_km: f32,
+    ) -> LayerGems {
         let Some(l) = self.layers.get(layer_idx) else {
             return LayerGems::default();
         };
@@ -1138,7 +1148,7 @@ impl TileGeology {
 
         // 7. Turquoise: shallow arid supergene oxidation zone over Cu-rich intermediate/felsic host
         let turquoise = if depth_from_surface_km < 0.5
-            && self.elevation() > 0.15
+            && surface_elev_km > 0.15
             && !is_bif
             && s >= 0.20
             && sal >= 0.12
@@ -1153,7 +1163,7 @@ impl TileGeology {
 
         // 8. Precious Opal: shallow arid silica-gel weathering in fine clastics or felsic volcanics
         let opal = if depth_from_surface_km < 0.45
-            && self.elevation() > 0.05
+            && surface_elev_km > 0.05
             && !is_bif
             && q >= 0.22
             && sal >= 0.18
@@ -1184,6 +1194,16 @@ impl TileGeology {
         layer_idx: usize,
         depth_from_surface_km: f32,
     ) -> Vec<DepositOccurrence> {
+        self.derive_layer_occurrences_with_elev(layer_idx, depth_from_surface_km, self.elevation())
+    }
+
+    /// `O(1)` variant of `derive_layer_occurrences` using a precomputed `surface_elev_km`.
+    pub fn derive_layer_occurrences_with_elev(
+        &self,
+        layer_idx: usize,
+        depth_from_surface_km: f32,
+        surface_elev_km: f32,
+    ) -> Vec<DepositOccurrence> {
         let Some(l) = self.layers.get(layer_idx) else {
             return Vec::new();
         };
@@ -1196,7 +1216,8 @@ impl TileGeology {
         let s = r.sulfidity.unwrap_or(0.0);
         let sal = r.salinity.unwrap_or(0.0);
         let calc = r.calcity.unwrap_or(0.0);
-        let gems = self.derive_layer_gems(layer_idx, depth_from_surface_km);
+        let gems =
+            self.derive_layer_gems_with_elev(layer_idx, depth_from_surface_km, surface_elev_km);
 
         // 1. Carbon / Coal / Graphite / Primary Diamonds:
         if r.kind == RockKind::Igneous && r.felsity <= 0.35 {
@@ -1423,7 +1444,7 @@ impl TileGeology {
                 RockKind::Sedimentary => {
                     let clast = r.clasticity.unwrap_or(2.0);
                     let is_proximal_terrestrial =
-                        self.elevation() > 0.05 && clast <= 1.08 && calc < 0.30;
+                        surface_elev_km > 0.05 && clast <= 1.08 && calc < 0.30;
                     // Native gold (19.3 g/cm^3) and cassiterite (7.0 g/cm^3) lag in steep,
                     // high-relief mountain/piedmont streams (`mountainosity_norm >= 0.28`),
                     // whereas flat zero-relief plateaus and plains accumulate ordinary quartz sand.
@@ -1970,6 +1991,16 @@ impl TileGeology {
         lower_idx: usize,
         contact_depth_km: f32,
     ) -> Vec<DepositOccurrence> {
+        self.derive_interface_occurrences_with_elev(lower_idx, contact_depth_km, self.elevation())
+    }
+
+    /// `O(1)` variant of `derive_interface_occurrences` using a precomputed `surface_elev_km`.
+    pub fn derive_interface_occurrences_with_elev(
+        &self,
+        lower_idx: usize,
+        contact_depth_km: f32,
+        surface_elev_km: f32,
+    ) -> Vec<DepositOccurrence> {
         let (Some(low), Some(up)) = (self.layers.get(lower_idx), self.layers.get(lower_idx + 1)) else {
             return Vec::new();
         };
@@ -2192,12 +2223,16 @@ impl TileGeology {
         if up.rock.kind == RockKind::Sedimentary
             && matches!(low.rock.kind, RockKind::Metamorphic | RockKind::Igneous)
             && low.rock.toughness >= 0.55
-            && self.elevation() > -0.1
+            && surface_elev_km > -0.1
             && up.rock.clasticity.unwrap_or(2.0) <= 1.15
             && up.rock.calcity.unwrap_or(0.0) < 0.30
             && contact_depth_km <= 3.0
         {
-            let base_occ = self.derive_layer_occurrences(lower_idx, contact_depth_km);
+            let base_occ = self.derive_layer_occurrences_with_elev(
+                lower_idx,
+                contact_depth_km,
+                surface_elev_km,
+            );
             let mut heavy_mins: BTreeMap<MineralKind, f32> = BTreeMap::new();
             for occ in &base_occ {
                 for &(mk, mg) in &occ.minerals {
@@ -2216,7 +2251,11 @@ impl TileGeology {
                 }
             }
             // Also concentrate basal pay-streak if the overlying gravel itself hosts alluvial placer gold/tin:
-            for occ in self.derive_layer_occurrences(lower_idx + 1, (contact_depth_km - up.thickness).max(0.0)) {
+            for occ in self.derive_layer_occurrences_with_elev(
+                lower_idx + 1,
+                (contact_depth_km - up.thickness).max(0.0),
+                surface_elev_km,
+            ) {
                 for &(mk, mg) in &occ.minerals {
                     if matches!(mk, MineralKind::Gold | MineralKind::Tin) {
                         let e = heavy_mins.entry(mk).or_insert(0.0);
@@ -2250,15 +2289,38 @@ impl TileGeology {
     /// Deterministically derive human-readable mineral deposit, coal seam, ore vein, and
     /// structural feature descriptions hosted inside `self.layers[layer_idx]`.
     pub fn derive_layer_deposits(&self, layer_idx: usize, depth_from_surface_km: f32) -> Vec<String> {
+        self.derive_layer_deposits_with_elev(layer_idx, depth_from_surface_km, self.elevation())
+    }
+
+    /// `O(1)` variant of `derive_layer_deposits` using a precomputed `surface_elev_km`.
+    pub fn derive_layer_deposits_with_elev(
+        &self,
+        layer_idx: usize,
+        depth_from_surface_km: f32,
+        surface_elev_km: f32,
+    ) -> Vec<String> {
+        let occs =
+            self.derive_layer_occurrences_with_elev(layer_idx, depth_from_surface_km, surface_elev_km);
+        self.layer_deposits_from_occurrences(
+            layer_idx,
+            depth_from_surface_km,
+            surface_elev_km,
+            &occs,
+        )
+    }
+
+    fn layer_deposits_from_occurrences(
+        &self,
+        layer_idx: usize,
+        depth_from_surface_km: f32,
+        surface_elev_km: f32,
+        occs: &[DepositOccurrence],
+    ) -> Vec<String> {
         let Some(l) = self.layers.get(layer_idx) else {
             return Vec::new();
         };
         let r = &l.rock;
-        let mut deposits: Vec<String> = self
-            .derive_layer_occurrences(layer_idx, depth_from_surface_km)
-            .into_iter()
-            .map(|occ| occ.label)
-            .collect();
+        let mut deposits: Vec<String> = occs.iter().map(|occ| occ.label.clone()).collect();
 
         // Barren ultramafic kimberlite pipe (mantle peridot/xenoliths without gem diamonds):
         if r.kind == RockKind::Igneous
@@ -2271,7 +2333,7 @@ impl TileGeology {
         // Near-surface karst caverns in high-calcity carbonate rocks:
         if r.calcity.unwrap_or(0.0) >= 0.72
             && depth_from_surface_km < 2.5
-            && self.elevation() > 0.0
+            && surface_elev_km > 0.0
         {
             deposits.push("Karst Limestone Caverns & Aquifer".to_string());
         }
@@ -2282,6 +2344,15 @@ impl TileGeology {
     /// Aggregate `(max_grade, total_accessible_abundance)` for every `MineralKind` across both
     /// rock layers and layer-to-layer contact interfaces within `0.0..max_depth_km` of the surface.
     pub fn accessible_mineral_abundances(&self, max_depth_km: f32) -> BTreeMap<MineralKind, (f32, f32)> {
+        self.accessible_mineral_abundances_with_elev(max_depth_km, self.elevation())
+    }
+
+    /// `O(L_top)` variant of `accessible_mineral_abundances` using a precomputed `surface_elev_km`.
+    pub fn accessible_mineral_abundances_with_elev(
+        &self,
+        max_depth_km: f32,
+        surface_elev_km: f32,
+    ) -> BTreeMap<MineralKind, (f32, f32)> {
         let mut map: BTreeMap<MineralKind, (f32, f32)> = BTreeMap::new();
         if max_depth_km <= 0.0 || self.layers.is_empty() {
             return map;
@@ -2295,7 +2366,7 @@ impl TileGeology {
             let accessible_frac =
                 ((max_depth_km - depth_top).min(layer.thickness) / layer.thickness.max(1e-5))
                     .clamp(0.0, 1.0);
-            for occ in self.derive_layer_occurrences(idx, depth_top) {
+            for occ in self.derive_layer_occurrences_with_elev(idx, depth_top, surface_elev_km) {
                 let eff_thick = occ.thickness_km * accessible_frac;
                 for (mk, mg) in occ.minerals {
                     let entry = map.entry(mk).or_insert((0.0, 0.0));
@@ -2307,7 +2378,9 @@ impl TileGeology {
             let depth_bot = depth_top + layer.thickness;
             // Check contact interface at the base of this layer (`idx - 1` below, `idx` above):
             if idx > 0 && depth_bot <= max_depth_km + 0.05 {
-                for occ in self.derive_interface_occurrences(idx - 1, depth_bot) {
+                for occ in
+                    self.derive_interface_occurrences_with_elev(idx - 1, depth_bot, surface_elev_km)
+                {
                     for (mk, mg) in occ.minerals {
                         let entry = map.entry(mk).or_insert((0.0, 0.0));
                         entry.0 = entry.0.max(mg);
@@ -2363,9 +2436,15 @@ impl TileGeology {
         // Iterate from surface (top layer, `top_down_idx = 0`) down to Moho (bottom layer):
         for (top_down_idx, (idx, layer)) in self.layers.iter().enumerate().rev().enumerate() {
             let cur_bot = cur_top - layer.thickness;
-            let occs = self.derive_layer_occurrences(idx, depth_from_surface);
+            let occs =
+                self.derive_layer_occurrences_with_elev(idx, depth_from_surface, surface_elev);
             let occs_json: Vec<String> = occs.iter().map(occ_to_json).collect();
-            let deposits = self.derive_layer_deposits(idx, depth_from_surface);
+            let deposits = self.layer_deposits_from_occurrences(
+                idx,
+                depth_from_surface,
+                surface_elev,
+                &occs,
+            );
             let deps_json: Vec<String> = deposits
                 .iter()
                 .map(|d| format!("\"{}\"", d.replace('\\', "\\\\").replace('"', "\\\"")))
@@ -2394,7 +2473,11 @@ impl TileGeology {
 
             let contact_depth = depth_from_surface + layer.thickness;
             if idx > 0 {
-                let intf_occs = self.derive_interface_occurrences(idx - 1, contact_depth);
+                let intf_occs = self.derive_interface_occurrences_with_elev(
+                    idx - 1,
+                    contact_depth,
+                    surface_elev,
+                );
                 if !intf_occs.is_empty() {
                     let zone_km = intf_occs
                         .iter()
