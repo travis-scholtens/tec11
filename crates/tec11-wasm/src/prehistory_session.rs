@@ -101,6 +101,21 @@ impl WasmPrehistorySession {
         self.sim.population_overlay_colors()
     }
 
+    pub fn inspect_tile(&self, tile_idx: usize) -> String {
+        self.sim.inspect_tile(tile_idx)
+    }
+
+    pub fn inspect_tile_stratigraphy_json(&self, tile_idx: usize) -> String {
+        self.sim.inspect_tile_stratigraphy_json(tile_idx)
+    }
+
+    pub fn inspect_tile_structured_json(&self, tile_idx: usize) -> String {
+        self.sim
+            .inspect_tile_structured(tile_idx)
+            .map(|v| v.to_json())
+            .unwrap_or_else(|| "{\"hasTile\":false}".to_string())
+    }
+
     pub fn mesh_positions(&self) -> Vec<f32> {
         build_mesh_positions(self.sim.grid())
     }

@@ -1161,6 +1161,10 @@ impl PrehistorySimulation {
         self.glaciation
     }
 
+    pub fn radius_km(&self) -> f64 {
+        self.radius_km
+    }
+
     pub fn spin(&self) -> f64 {
         self.spin
     }
@@ -1326,6 +1330,170 @@ impl PrehistorySimulation {
             }
         }
         out
+    }
+
+    pub fn inspect_tile(&self, tile_idx: usize) -> String {
+        let Some(tile) = self.tiles.get(tile_idx) else {
+            return String::new();
+        };
+        let elev = tile.elevation();
+        let koeppen = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
+        let mut lines = vec![format!(
+            "Coarse Tile #{tile_idx} | Elevation: {elev:+.2} km | Climate: {}",
+            crate::world::koeppen_climate_name(koeppen)
+        )];
+        if let Some(top) = tile.layers.last() {
+            lines.push(format!(
+                "Surface Rock: {} ({}, {:.1} km)",
+                top.rock.name,
+                top.rock.kind.code(),
+                top.thickness
+            ));
+        }
+        if let Some(&hid) = self.populated.get(&tile_idx) {
+            let is_ag = self.agricultural_heritages.contains(&hid);
+            let is_riv = self.rivergoing_heritages.contains(&hid);
+            let is_sea = self.seafaring_heritages.contains(&hid);
+            let has_river = self.river_tiles.get(tile_idx).copied().unwrap_or(false);
+            let is_coastal = self
+                .adjacency
+                .get(tile_idx)
+                .is_some_and(|nbs| nbs.iter().any(|&nb| self.tiles[nb].elevation() <= 0.0));
+            let pop_k = crate::population::tile_population_thousands_with_water_tech(
+                koeppen,
+                is_ag,
+                is_riv && has_river,
+                is_sea && is_coastal,
+            );
+            let mut tech = Vec::new();
+            if is_ag {
+                tech.push("Agricultural");
+            }
+            if is_riv {
+                tech.push("Rivergoing");
+            }
+            if is_sea {
+                tech.push("Seafaring");
+            }
+            if tech.is_empty() {
+                tech.push("Paleolithic");
+            }
+            lines.push(format!(
+                "Population: {:.1}K ({}) | Heritage #{hid}",
+                pop_k,
+                tech.join(" · ")
+            ));
+        } else if elev > 0.0 {
+            lines.push("Population: Uninhabited Land".to_string());
+        } else {
+            lines.push("Marine Basin".to_string());
+        }
+        lines.join("\n")
+    }
+
+    pub fn inspect_tile_stratigraphy_json(&self, tile_idx: usize) -> String {
+        let Some(tile) = self.tiles.get(tile_idx) else {
+            return "{\"hasColumn\":false}".to_string();
+        };
+        tile.to_stratigraphy_json(tile_idx, None)
+    }
+
+    pub fn inspect_tile_structured(
+        &self,
+        tile_idx: usize,
+    ) -> Option<crate::history::TileInspectionView> {
+        let tile = self.tiles.get(tile_idx)?;
+        let home_star = crate::sun_sky::HomeStar::sol();
+        let optics = crate::sun_sky::PlanetaryOptics::compute(
+            &home_star,
+            crate::sun_sky::AtmosphereType::EarthLikeN2O2,
+        );
+        let mut sys_rng = Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95);
+        let ecliptic_pole = [0.0, -0.398, 0.917];
+        let mut solar_system = crate::sun_sky::generate_solar_system_with_rng(
+            &mut sys_rng,
+            &home_star,
+            ecliptic_pole,
+            true,
+        );
+        crate::sun_sky::substitute_simulated_planet(
+            &mut solar_system,
+            &home_star,
+            self.radius_km() as f32,
+            self.land_percent(),
+            1,
+            ecliptic_pole,
+        );
+        let constellations = crate::sun_sky::generate_default_constellations(42);
+        let elev = tile.elevation();
+        let koeppen = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
+        let loc_summary = if elev <= 0.0 {
+            format!("Marine Basin | Bathymetry: {elev:.2} km")
+        } else {
+            format!(
+                "{} | Elevation: +{elev:.2} km",
+                crate::world::koeppen_climate_name(koeppen)
+            )
+        };
+        let (pop_summary, tech_str) = if let Some(&hid) = self.populated.get(&tile_idx) {
+            let is_ag = self.agricultural_heritages.contains(&hid);
+            let is_riv = self.rivergoing_heritages.contains(&hid);
+            let is_sea = self.seafaring_heritages.contains(&hid);
+            let has_river = self.river_tiles.get(tile_idx).copied().unwrap_or(false);
+            let is_coastal = self
+                .adjacency
+                .get(tile_idx)
+                .is_some_and(|nbs| nbs.iter().any(|&nb| self.tiles[nb].elevation() <= 0.0));
+            let pop_k = crate::population::tile_population_thousands_with_water_tech(
+                koeppen,
+                is_ag,
+                is_riv && has_river,
+                is_sea && is_coastal,
+            );
+            let mut tech = Vec::new();
+            if is_ag {
+                tech.push("Agricultural");
+            }
+            if is_riv {
+                tech.push("Rivergoing");
+            }
+            if is_sea {
+                tech.push("Seafaring");
+            }
+            if tech.is_empty() {
+                tech.push("Paleolithic");
+            }
+            (format!("{pop_k:.1}K (Heritage #{hid})"), tech.join(" · "))
+        } else {
+            ("Uninhabited".to_string(), "Prehistory".to_string())
+        };
+        crate::history::build_coarse_tile_inspection_view(
+            tile_idx,
+            crate::history::CoarseTileSkyParams {
+                grid: &self.grid,
+                adjacency: &self.adjacency,
+                tiles: &self.tiles,
+                koeppen_ids: &self.tile_koeppen,
+                tile_life: &self.tile_life,
+                river_tiles: Some(&self.river_tiles),
+                radius_km: self.radius_km(),
+                day_hours: 24.0 / self.spin.max(0.1),
+                tilt_deg: self.tilt_deg,
+                has_atmosphere: true,
+                has_life: true,
+                current_year: 0,
+                moon_count: 1,
+                home_star: &home_star,
+                optics: &optics,
+                solar_system: &solar_system,
+                constellations: &constellations,
+                title: format!("Coarse Tile #{tile_idx}"),
+                location_summary: loc_summary,
+                population_summary: pop_summary,
+                technology: tech_str,
+                stratigraphy_json: self.inspect_tile_stratigraphy_json(tile_idx),
+            },
+        )
     }
 }
 

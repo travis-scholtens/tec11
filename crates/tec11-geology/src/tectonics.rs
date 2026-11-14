@@ -349,6 +349,18 @@ impl TectonicsSimulation {
         &self.grid
     }
 
+    pub fn adjacency(&self) -> &[Vec<usize>] {
+        &self.adjacency
+    }
+
+    pub fn radius_km(&self) -> f64 {
+        if self.radius_km > 0.0 {
+            self.radius_km
+        } else {
+            PangeaWorld::planet_radius_km(self.grid.size)
+        }
+    }
+
     pub(crate) fn take_parts_for_prehistory(
         &mut self,
     ) -> (
@@ -1686,6 +1698,82 @@ impl TectonicsSimulation {
             return "{\"hasColumn\":false}".to_string();
         };
         tile.to_stratigraphy_json(tile_idx, None)
+    }
+
+    pub fn inspect_tile_structured(
+        &self,
+        tile_idx: usize,
+    ) -> Option<crate::history::TileInspectionView> {
+        let tile = self.tiles.get(tile_idx)?;
+        let home_star = crate::sun_sky::HomeStar::sol();
+        let optics = crate::sun_sky::PlanetaryOptics::compute(
+            &home_star,
+            crate::sun_sky::AtmosphereType::EarthLikeN2O2,
+        );
+        let mut sys_rng = Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95 ^ (self.grid.size as u64));
+        let ecliptic_pole = [0.0, -0.398, 0.917];
+        let mut solar_system = crate::sun_sky::generate_solar_system_with_rng(
+            &mut sys_rng,
+            &home_star,
+            ecliptic_pole,
+            true,
+        );
+        crate::sun_sky::substitute_simulated_planet(
+            &mut solar_system,
+            &home_star,
+            self.radius_km() as f32,
+            self.land_percent(),
+            self.moon_count,
+            ecliptic_pole,
+        );
+        let constellations = crate::sun_sky::generate_default_constellations(42);
+        let elev = tile.elevation();
+        let has_atm = self.has_atmosphere();
+        let has_life = self.has_life();
+        let loc_summary = if !has_atm {
+            format!("Pre-atmosphere Crust | Elevation: {elev:+.2} km")
+        } else if elev <= 0.0 {
+            format!("Marine Basin | Bathymetry: {elev:.2} km")
+        } else {
+            let k_code = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
+            format!(
+                "{} | Elevation: +{elev:.2} km",
+                crate::world::koeppen_climate_name(k_code)
+            )
+        };
+        crate::history::build_coarse_tile_inspection_view(
+            tile_idx,
+            crate::history::CoarseTileSkyParams {
+                grid: &self.grid,
+                adjacency: &self.adjacency,
+                tiles: &self.tiles,
+                koeppen_ids: &self.tile_koeppen,
+                tile_life: &self.tile_life,
+                river_tiles: None,
+                radius_km: self.radius_km(),
+                day_hours: self.current_day_hours(),
+                tilt_deg: self.current_tilt_deg(),
+                has_atmosphere: has_atm,
+                has_life,
+                current_year: 0,
+                moon_count: self.moon_count,
+                home_star: &home_star,
+                optics: &optics,
+                solar_system: &solar_system,
+                constellations: &constellations,
+                title: format!("Coarse Tile #{tile_idx}"),
+                location_summary: loc_summary,
+                population_summary: "Pre-human Geological Epoch".to_string(),
+                technology: if has_life {
+                    "Biosphere".to_string()
+                } else if has_atm {
+                    "Hydrosphere".to_string()
+                } else {
+                    "Hadean".to_string()
+                },
+                stratigraphy_json: self.inspect_tile_stratigraphy_json(tile_idx),
+            },
+        )
     }
 
     fn refresh_climate_fields(&mut self) {

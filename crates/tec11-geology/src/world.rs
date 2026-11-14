@@ -6,9 +6,9 @@ use crate::population::tile_population_thousands_with_water_tech;
 use crate::prehistory::PrehistorySimulation;
 use crate::racination::Heritage;
 use crate::sun_sky::{
-    format_solar_system_summary, generate_solar_system_with_rng, sample_atmosphere_with_rng,
-    sample_home_star_with_rng, substitute_simulated_planet, AtmosphereType, HomeStar,
-    PlanetaryOptics, SolarSystemPlanet,
+    format_solar_system_summary, generate_default_constellations, generate_solar_system_with_rng,
+    sample_atmosphere_with_rng, sample_home_star_with_rng, substitute_simulated_planet,
+    AtmosphereType, Constellation, HomeStar, PlanetaryOptics, SolarSystemPlanet,
 };
 use crate::tectonics::TectonicsSimulation;
 use crate::tile::TileGeology;
@@ -167,6 +167,7 @@ pub struct WorldSimulation {
     atmosphere: AtmosphereType,
     optics: PlanetaryOptics,
     solar_system: Vec<SolarSystemPlanet>,
+    constellations: Vec<Constellation>,
     home_planet_index: usize,
     rng: Pcg64Mcg,
 }
@@ -207,6 +208,7 @@ impl WorldSimulation {
             params.moon_count,
             ecliptic_pole,
         );
+        let constellations = generate_default_constellations(seed);
         let mut sim = Self {
             params,
             stage: WorldStageState::Tectonics(tec),
@@ -220,6 +222,7 @@ impl WorldSimulation {
             atmosphere,
             optics,
             solar_system,
+            constellations,
             home_planet_index,
             rng: Pcg64Mcg::from_seed_u64(seed.wrapping_add(1000)),
         };
@@ -359,6 +362,7 @@ impl WorldSimulation {
             params.moon_count,
             ecliptic_pole,
         );
+        self.constellations = generate_default_constellations(seed);
         self.params = params;
         let mut tec = TectonicsSimulation::new_with_full_params(
             params.grid_size,
@@ -463,10 +467,11 @@ impl WorldSimulation {
                     crate::profile::span(crate::profile::ProfilePhase::HistInitPrehistoryCopy);
                 pre.take_for_history()
             };
-            let mut hist = HistorySimulation::from_prehistory_with_system(
+            let mut hist = HistorySimulation::from_prehistory_with_sky(
                 pre_copy,
                 self.params.moon_count,
                 self.solar_system.clone(),
+                self.constellations.clone(),
                 sub_seed as u128,
             );
             hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
@@ -728,8 +733,129 @@ impl WorldSimulation {
         tile_idx: usize,
     ) -> Option<crate::history::TileInspectionView> {
         match &self.stage {
+            WorldStageState::Tectonics(tec) => {
+                let tile = tec.tiles().get(tile_idx)?;
+                let elev = tile.elevation();
+                let has_atm = tec.has_atmosphere();
+                let has_life = tec.has_life();
+                let loc_summary = if !has_atm {
+                    format!("Pre-atmosphere Crust | Elevation: {elev:+.2} km")
+                } else if elev <= 0.0 {
+                    format!("Marine Basin | Bathymetry: {elev:.2} km")
+                } else {
+                    let k_code = tec.tile_koeppen_ids().get(tile_idx).copied().unwrap_or(0);
+                    format!(
+                        "{} | Elevation: +{elev:.2} km",
+                        koeppen_climate_name(k_code)
+                    )
+                };
+                crate::history::build_coarse_tile_inspection_view(
+                    tile_idx,
+                    crate::history::CoarseTileSkyParams {
+                        grid: tec.grid(),
+                        adjacency: tec.adjacency(),
+                        tiles: tec.tiles(),
+                        koeppen_ids: tec.tile_koeppen_ids(),
+                        tile_life: tec.tile_life(),
+                        river_tiles: None,
+                        radius_km: tec.radius_km(),
+                        day_hours: tec.current_day_hours(),
+                        tilt_deg: tec.current_tilt_deg(),
+                        has_atmosphere: has_atm,
+                        has_life,
+                        current_year: 0,
+                        moon_count: self.params.moon_count,
+                        home_star: &self.home_star,
+                        optics: &self.optics,
+                        solar_system: &self.solar_system,
+                        constellations: &self.constellations,
+                        title: format!("Coarse Tile #{tile_idx}"),
+                        location_summary: loc_summary,
+                        population_summary: "Pre-human Geological Epoch".to_string(),
+                        technology: if has_life {
+                            "Biosphere".to_string()
+                        } else if has_atm {
+                            "Hydrosphere".to_string()
+                        } else {
+                            "Hadean".to_string()
+                        },
+                        stratigraphy_json: tec.inspect_tile_stratigraphy_json(tile_idx),
+                    },
+                )
+            }
+            WorldStageState::Prehistory(pre) => {
+                let tile = pre.tiles().get(tile_idx)?;
+                let elev = tile.elevation();
+                let koeppen = pre.tile_koeppen_ids().get(tile_idx).copied().unwrap_or(0);
+                let loc_summary = if elev <= 0.0 {
+                    format!("Marine Basin | Bathymetry: {elev:.2} km")
+                } else {
+                    format!(
+                        "{} | Elevation: +{elev:.2} km",
+                        koeppen_climate_name(koeppen)
+                    )
+                };
+                let (pop_summary, tech_str) = if let Some(&hid) = pre.populated().get(&tile_idx) {
+                    let is_ag = pre.agricultural_heritages().contains(&hid);
+                    let is_riv = pre.rivergoing_heritages().contains(&hid);
+                    let is_sea = pre.seafaring_heritages().contains(&hid);
+                    let has_river = pre.river_tiles().get(tile_idx).copied().unwrap_or(false);
+                    let is_coastal = pre
+                        .adjacency()
+                        .get(tile_idx)
+                        .is_some_and(|nbs| nbs.iter().any(|&nb| pre.tiles()[nb].elevation() <= 0.0));
+                    let pop_k = tile_population_thousands_with_water_tech(
+                        koeppen,
+                        is_ag,
+                        is_riv && has_river,
+                        is_sea && is_coastal,
+                    );
+                    let mut tech = Vec::new();
+                    if is_ag {
+                        tech.push("Agricultural");
+                    }
+                    if is_riv {
+                        tech.push("Rivergoing");
+                    }
+                    if is_sea {
+                        tech.push("Seafaring");
+                    }
+                    if tech.is_empty() {
+                        tech.push("Paleolithic");
+                    }
+                    (format!("{pop_k:.1}K (Heritage #{hid})"), tech.join(" · "))
+                } else {
+                    ("Uninhabited".to_string(), "Prehistory".to_string())
+                };
+                crate::history::build_coarse_tile_inspection_view(
+                    tile_idx,
+                    crate::history::CoarseTileSkyParams {
+                        grid: pre.grid(),
+                        adjacency: pre.adjacency(),
+                        tiles: pre.tiles(),
+                        koeppen_ids: pre.tile_koeppen_ids(),
+                        tile_life: pre.tile_life(),
+                        river_tiles: Some(pre.river_tiles()),
+                        radius_km: pre.radius_km(),
+                        day_hours: 24.0 / pre.spin().max(0.1),
+                        tilt_deg: pre.tilt_deg(),
+                        has_atmosphere: true,
+                        has_life: true,
+                        current_year: 0,
+                        moon_count: self.params.moon_count,
+                        home_star: &self.home_star,
+                        optics: &self.optics,
+                        solar_system: &self.solar_system,
+                        constellations: &self.constellations,
+                        title: format!("Coarse Tile #{tile_idx}"),
+                        location_summary: loc_summary,
+                        population_summary: pop_summary,
+                        technology: tech_str,
+                        stratigraphy_json: tile.to_stratigraphy_json(tile_idx, None),
+                    },
+                )
+            }
             WorldStageState::History(hist) => hist.inspect_tile_structured(tile_idx),
-            _ => None,
         }
     }
 
@@ -1248,6 +1374,9 @@ impl WorldSimulation {
                 }
                 hist.set_solar_system(self.solar_system.clone());
                 hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
+                if !hist.constellations().is_empty() {
+                    self.constellations = hist.constellations().to_vec();
+                }
                 if let Some(pre_base) = &hist_proto.prehistory_base {
                     self.tectonics_ticks = pre_base.tectonics_ticks;
                     self.prehistory_ticks = pre_base.prehistory_ticks;
@@ -1345,5 +1474,83 @@ mod tests {
             assert!(world.atmosphere_id() <= 5);
             assert_eq!(world.atmosphere_id(), world.atmosphere().id());
         }
+    }
+
+    #[test]
+    fn test_world_coarse_tile_sky_and_vantage_across_all_stages() {
+        let params = WorldCreateParams {
+            grid_size: 4,
+            day_hours: 18,
+            tilt_deg: 26,
+            land_pct: 32,
+            atm_dt_myr: 10,
+            life_dt_myr: 5,
+            people_dt_myr: 5,
+            moon_count: 2,
+            moon_mass: 1.0,
+            moon_dist_radii: 60,
+            meteor_freq: 0.5,
+        };
+        let mut world = WorldSimulation::new(params, 123);
+        assert_eq!(world.stage_index(), 0);
+
+        // 1. Airless early Tectonics stage (tick 0, before atm_dt_myr):
+        let tec_airless = world
+            .inspect_tile_structured(0)
+            .expect("Stage 0 airless coarse tile should inspect");
+        assert!(!tec_airless.sky.has_atmosphere);
+        assert_eq!(tec_airless.sky.moons.len(), 2);
+        assert!(!tec_airless.sky.constellations.is_empty());
+        assert!(tec_airless.vantage.obs_is_coarse);
+        assert!(tec_airless.vantage.obs_is_land);
+        assert!((5..=6).contains(&tec_airless.vantage.neighbors.len()));
+        assert!(tec_airless.vantage.samples.is_empty());
+        let stage0_constellations: Vec<(u32, f32, f32)> = tec_airless
+            .sky
+            .constellations
+            .iter()
+            .map(|c| (c.index, c.ra_deg, c.dec_deg))
+            .collect();
+
+        // 2. Step until atmosphere forms in Stage 0:
+        world.step();
+        world.step();
+        let tec_atm = world
+            .inspect_tile_structured(0)
+            .expect("Stage 0 atmospheric coarse tile should inspect");
+        assert!(tec_atm.sky.has_atmosphere);
+        assert!(tec_atm.vantage.obs_is_coarse);
+        assert!(tec_atm.vantage.samples.is_empty());
+
+        // 3. Advance to Stage 1 (Prehistory — still un-subdivided coarse grid):
+        world.advance_stage();
+        assert_eq!(world.stage_index(), 1);
+        let pre_view = world
+            .inspect_tile_structured(0)
+            .expect("Stage 1 Prehistory coarse tile should inspect");
+        assert!(pre_view.sky.has_atmosphere);
+        assert!(pre_view.vantage.obs_is_coarse);
+        assert!((5..=6).contains(&pre_view.vantage.neighbors.len()));
+        assert!(pre_view.vantage.samples.is_empty());
+
+        // 4. Advance to Stage 2 (History — subdivided land + coarse ocean):
+        world.advance_stage();
+        assert_eq!(world.stage_index(), 2);
+        let hist_view = world
+            .inspect_tile_structured(0)
+            .expect("Stage 2 History fine tile should inspect");
+        assert!(hist_view.sky.has_atmosphere);
+        assert!(!hist_view.vantage.obs_is_coarse);
+        assert!(!hist_view.vantage.samples.is_empty());
+        let stage2_constellations: Vec<(u32, f32, f32)> = hist_view
+            .sky
+            .constellations
+            .iter()
+            .map(|c| (c.index, c.ra_deg, c.dec_deg))
+            .collect();
+        assert_eq!(
+            stage0_constellations, stage2_constellations,
+            "World constellations should remain consistent from Stage 0 through Stage 2"
+        );
     }
 }

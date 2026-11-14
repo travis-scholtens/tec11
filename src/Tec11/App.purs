@@ -91,6 +91,7 @@ type TectonicsInfo =
   , hasLife :: Boolean
   , isRunning :: Boolean
   , selectedTileReport :: String
+  , tileView :: TileViewInfo
   }
 
 type RiversInfo =
@@ -146,6 +147,8 @@ type PrehistoryInfo =
   , populationText :: String
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
+  , selectedReport :: String
+  , tileView :: TileViewInfo
   }
 
 type LanguageWordItem =
@@ -218,6 +221,8 @@ type TileViewInfo =
   , skyDaysPerYear :: Int
   , skyLatLonSummary :: String
   , skyAnimated :: Boolean
+  , vantageBearingSummary :: String
+  , vantageNeighborSummary :: String
   }
 
 type LexiconEntryItem =
@@ -289,6 +294,8 @@ defaultTileViewInfo =
   , skyDaysPerYear: 365
   , skyLatLonSummary: ""
   , skyAnimated: true
+  , vantageBearingSummary: ""
+  , vantageNeighborSummary: ""
   }
 
 defaultLanguageDetailInfo :: LanguageDetailInfo
@@ -631,6 +638,7 @@ foreign import closeInspectorNation :: Effect Unit
 foreign import setTileSkyYear :: Int -> Effect Unit
 foreign import setTileSkyDay :: Int -> Effect Unit
 foreign import toggleTileSkyAnimation :: Effect Unit
+foreign import stepTileVantageDirection :: Int -> Effect Unit
 foreign import toggleStratigraphySideZoom :: Effect Unit
 
 renderStratigraphySideViewBox :: JSX
@@ -902,6 +910,268 @@ renderNationDetailCard nat activeLangId =
           ]
       }
 
+renderTileSkyAndVantageBox :: TileViewInfo -> JSX
+renderTileSkyAndVantageBox tile =
+  if not tile.hasTile then
+    React.empty
+  else
+    R.div
+      { id: "tile-sky-box"
+      , style:
+          R.css
+            { marginTop: "8px"
+            , paddingTop: "7px"
+            , borderTop: "1px solid #334155"
+            }
+      , children:
+          [ R.div
+              { style:
+                  R.css
+                    { display: "flex"
+                    , justifyContent: "space-between"
+                    , alignItems: "center"
+                    , marginBottom: "4px"
+                    }
+              , children:
+                  [ R.div
+                      { style: R.css { fontSize: "0.76rem", fontWeight: "700", color: "#fde047" }
+                      , children:
+                          [ R.text
+                              ( "Local Sky & Vantage ("
+                                  <> tile.skyLatLonSummary
+                                  <> ")"
+                              )
+                          ]
+                      }
+                  , R.button
+                      { id: "tile-sky-anim-btn"
+                      , className: "action-btn secondary"
+                      , style: R.css { padding: "1px 8px", fontSize: "0.72rem", width: "auto" }
+                      , onClick: capture_ toggleTileSkyAnimation
+                      , children:
+                          [ R.text (if tile.skyAnimated then "⏸ Pause Sky" else "▶ Animate Sky") ]
+                      }
+                  ]
+              }
+          , R.div
+              { style:
+                  R.css
+                    { display: "flex"
+                    , alignItems: "center"
+                    , justifyContent: "space-between"
+                    , gap: "8px"
+                    , marginBottom: "5px"
+                    }
+              , children:
+                  [ R.label
+                      { style: R.css { fontSize: "0.74rem", color: "#cbd5e1", whiteSpace: "nowrap" }
+                      , children: [ R.text "Year (orbital cycle):" ]
+                      }
+                  , R.input
+                      { id: "tile-sky-year-input"
+                      , type: "number"
+                      , min: "0"
+                      , step: "1"
+                      , value: show tile.skyYear
+                      , style:
+                          R.css
+                            { width: "86px"
+                            , padding: "2px 6px"
+                            , fontSize: "0.76rem"
+                            , background: "#0f172a"
+                            , color: "#f8fafc"
+                            , border: "1px solid #475569"
+                            , borderRadius: "4px"
+                            }
+                      , onChange:
+                          handler targetValue \mv -> case mv >>= Int.fromString of
+                            Just y -> setTileSkyYear (max 0 y)
+                            Nothing -> pure unit
+                      }
+                  ]
+              }
+          , R.div
+              { style: R.css { marginBottom: "6px" }
+              , children:
+                  [ R.div
+                      { style:
+                          R.css
+                            { display: "flex"
+                            , justifyContent: "space-between"
+                            , fontSize: "0.73rem"
+                            , color: "#cbd5e1"
+                            , marginBottom: "2px"
+                            }
+                      , children:
+                          [ R.span
+                              { id: "tile-sky-day-label"
+                              , children:
+                                  [ R.text
+                                      ( "Day in Year: Day "
+                                          <> show tile.skyDay
+                                          <> " / "
+                                          <> show (max 1 (tile.skyDaysPerYear - 1))
+                                      )
+                                  ]
+                              }
+                          , R.span
+                              { id: "tile-sky-time-label"
+                              , style: R.css { color: "#93c5fd" }
+                              , children: [ R.text "Sun · Moons · Planets · Stars" ]
+                              }
+                          ]
+                      }
+                  , R.input
+                      { id: "tile-sky-day-slider"
+                      , type: "range"
+                      , min: "0"
+                      , max: show (max 1 (tile.skyDaysPerYear - 1))
+                      , step: "1"
+                      , value: show tile.skyDay
+                      , style: R.css { width: "100%", cursor: "pointer" }
+                      , onChange:
+                          handler targetValue \mv -> case mv >>= Int.fromString of
+                            Just d -> setTileSkyDay (max 0 d)
+                            Nothing -> pure unit
+                      }
+                  ]
+              }
+          , R.div
+              { style:
+                  R.css
+                    { display: "flex"
+                    , flexDirection: "row"
+                    , gap: "8px"
+                    , alignItems: "flex-end"
+                    }
+              , children:
+                  [ R.div
+                      { style: R.css { flex: "1 1 0", minWidth: "0" }
+                      , children:
+                          [ R.div
+                              { style:
+                                  R.css
+                                    { fontSize: "0.70rem"
+                                    , color: "#94a3b8"
+                                    , textAlign: "center"
+                                    , height: "20px"
+                                    , lineHeight: "20px"
+                                    , marginBottom: "3px"
+                                    , whiteSpace: "nowrap"
+                                    , overflow: "hidden"
+                                    , textOverflow: "ellipsis"
+                                    }
+                              , children: [ R.text "Overhead Sky Dome" ]
+                              }
+                          , R.canvas
+                              { id: "tile-sky-canvas"
+                              , style:
+                                  R.css
+                                    { width: "100%"
+                                    , height: "224px"
+                                    , display: "block"
+                                    , borderRadius: "6px"
+                                    , border: "1px solid #334155"
+                                    , background: "#040914"
+                                    }
+                              }
+                          ]
+                      }
+                  , R.div
+                      { style: R.css { flex: "0 0 200px", width: "200px" }
+                      , children:
+                          [ R.div
+                              { style:
+                                  R.css
+                                    { display: "flex"
+                                    , alignItems: "center"
+                                    , justifyContent: "space-between"
+                                    , gap: "4px"
+                                    , height: "20px"
+                                    , marginBottom: "3px"
+                                    }
+                              , children:
+                                  [ R.button
+                                      { id: "tile-vantage-prev-btn"
+                                      , className: "action-btn secondary"
+                                      , style:
+                                          R.css
+                                            { padding: "0px 7px"
+                                            , height: "20px"
+                                            , lineHeight: "18px"
+                                            , fontSize: "0.70rem"
+                                            , width: "auto"
+                                            , minWidth: "24px"
+                                            }
+                                      , onClick: capture_ (stepTileVantageDirection (-1))
+                                      , children: [ R.text "◀" ]
+                                      }
+                                  , R.span
+                                      { id: "tile-vantage-dir-label"
+                                      , style:
+                                          R.css
+                                            { fontSize: "0.69rem"
+                                            , fontWeight: "700"
+                                            , color: "#bae6fd"
+                                            , textAlign: "center"
+                                            , whiteSpace: "nowrap"
+                                            , overflow: "hidden"
+                                            , textOverflow: "ellipsis"
+                                            , flex: "1"
+                                            }
+                                      , children: [ R.text tile.vantageBearingSummary ]
+                                      }
+                                  , R.button
+                                      { id: "tile-vantage-next-btn"
+                                      , className: "action-btn secondary"
+                                      , style:
+                                          R.css
+                                            { padding: "0px 7px"
+                                            , height: "20px"
+                                            , lineHeight: "18px"
+                                            , fontSize: "0.70rem"
+                                            , width: "auto"
+                                            , minWidth: "24px"
+                                            }
+                                      , onClick: capture_ (stepTileVantageDirection 1)
+                                      , children: [ R.text "▶" ]
+                                      }
+                                  ]
+                              }
+                          , R.canvas
+                              { id: "tile-vantage-canvas"
+                              , style:
+                                  R.css
+                                    { width: "200px"
+                                    , height: "224px"
+                                    , display: "block"
+                                    , borderRadius: "6px"
+                                    , border: "1px solid #334155"
+                                    , background: "#040914"
+                                    }
+                              }
+                          ]
+                      }
+                  ]
+              }
+          , R.div
+              { id: "tile-vantage-summary-label"
+              , style:
+                  R.css
+                    { fontSize: "0.71rem"
+                    , color: "#cbd5e1"
+                    , marginTop: "4px"
+                    }
+              , children: [ R.text tile.vantageNeighborSummary ]
+              }
+          , R.div
+              { style: R.css { fontSize: "0.69rem", color: "#94a3b8", marginTop: "2px" }
+              , children:
+                  [ R.text "Gold: Sun | Silver: Moons | Colored: Planets | Cyan: Constellations | Vantage: 100° FOV, Zenith (+90°) to Horizon" ]
+              }
+          ]
+      }
+
 renderHistoryTwoLevelInspector
   :: StateViewInfo
   -> TileViewInfo
@@ -1113,146 +1383,7 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                       { style: R.css { marginTop: "8px" }
                       , children: [ renderStratigraphySideViewBox ]
                       }
-                  , R.div
-                      { id: "tile-sky-box"
-                      , style:
-                          R.css
-                            { marginTop: "8px"
-                            , paddingTop: "7px"
-                            , borderTop: "1px solid #334155"
-                            }
-                      , children:
-                          [ R.div
-                              { style:
-                                  R.css
-                                    { display: "flex"
-                                    , justifyContent: "space-between"
-                                    , alignItems: "center"
-                                    , marginBottom: "4px"
-                                    }
-                              , children:
-                                  [ R.div
-                                      { style: R.css { fontSize: "0.76rem", fontWeight: "700", color: "#fde047" }
-                                      , children:
-                                          [ R.text
-                                              ( "Local 2D Sky View ("
-                                                  <> tile.skyLatLonSummary
-                                                  <> ")"
-                                              )
-                                          ]
-                                      }
-                                  , R.button
-                                      { id: "tile-sky-anim-btn"
-                                      , className: "action-btn secondary"
-                                      , style: R.css { padding: "1px 8px", fontSize: "0.72rem" }
-                                      , onClick: capture_ toggleTileSkyAnimation
-                                      , children:
-                                          [ R.text (if tile.skyAnimated then "⏸ Pause Sky" else "▶ Animate Sky") ]
-                                      }
-                                  ]
-                              }
-                          , R.div
-                              { style:
-                                  R.css
-                                    { display: "flex"
-                                    , alignItems: "center"
-                                    , justifyContent: "space-between"
-                                    , gap: "8px"
-                                    , marginBottom: "5px"
-                                    }
-                              , children:
-                                  [ R.label
-                                      { style: R.css { fontSize: "0.74rem", color: "#cbd5e1", whiteSpace: "nowrap" }
-                                      , children: [ R.text "Year (0 = start of history):" ]
-                                      }
-                                  , R.input
-                                      { id: "tile-sky-year-input"
-                                      , type: "number"
-                                      , min: "0"
-                                      , step: "1"
-                                      , value: show tile.skyYear
-                                      , style:
-                                          R.css
-                                            { width: "86px"
-                                            , padding: "2px 6px"
-                                            , fontSize: "0.76rem"
-                                            , background: "#0f172a"
-                                            , color: "#f8fafc"
-                                            , border: "1px solid #475569"
-                                            , borderRadius: "4px"
-                                            }
-                                      , onChange:
-                                          handler targetValue \mv -> case mv >>= Int.fromString of
-                                            Just y -> setTileSkyYear (max 0 y)
-                                            Nothing -> pure unit
-                                      }
-                                  ]
-                              }
-                          , R.div
-                              { style: R.css { marginBottom: "5px" }
-                              , children:
-                                  [ R.div
-                                      { style:
-                                          R.css
-                                            { display: "flex"
-                                            , justifyContent: "space-between"
-                                            , fontSize: "0.73rem"
-                                            , color: "#cbd5e1"
-                                            , marginBottom: "2px"
-                                            }
-                                      , children:
-                                          [ R.span
-                                              { id: "tile-sky-day-label"
-                                              , children:
-                                                  [ R.text
-                                                      ( "Day in Year: Day "
-                                                          <> show tile.skyDay
-                                                          <> " / "
-                                                          <> show (max 1 (tile.skyDaysPerYear - 1))
-                                                      )
-                                                  ]
-                                              }
-                                          , R.span
-                                              { id: "tile-sky-time-label"
-                                              , style: R.css { color: "#93c5fd" }
-                                              , children: [ R.text "Sun · Moons · Planets · Stars" ]
-                                              }
-                                          ]
-                                      }
-                                  , R.input
-                                      { id: "tile-sky-day-slider"
-                                      , type: "range"
-                                      , min: "0"
-                                      , max: show (max 1 (tile.skyDaysPerYear - 1))
-                                      , step: "1"
-                                      , value: show tile.skyDay
-                                      , style: R.css { width: "100%", cursor: "pointer" }
-                                      , onChange:
-                                          handler targetValue \mv -> case mv >>= Int.fromString of
-                                            Just d -> setTileSkyDay (max 0 d)
-                                            Nothing -> pure unit
-                                      }
-                                  ]
-                              }
-                          , R.canvas
-                              { id: "tile-sky-canvas"
-                              , style:
-                                  R.css
-                                    { width: "100%"
-                                    , height: "230px"
-                                    , display: "block"
-                                    , borderRadius: "6px"
-                                    , border: "1px solid #334155"
-                                    , background: "#040914"
-                                    }
-                              }
-                          , R.div
-                              { style: R.css { fontSize: "0.70rem", color: "#94a3b8", marginTop: "3px" }
-                              , children:
-                                  [ R.text "Gold arc: Sun path | Silver arcs: Moon paths & phases | Colored arcs: Planet paths | Cyan lines: Constellations & star paths" ]
-                              }
-                          ]
-                      }
+                  , renderTileSkyAndVantageBox tile
                   ]
               }
           else
@@ -1338,6 +1469,7 @@ mkApp = do
       , hasLife: false
       , isRunning: false
       , selectedTileReport: "Click any tile on the globe to inspect its rock layers."
+      , tileView: defaultTileViewInfo
       }
 
     -- Rivers mode state (`hmin` slider 0..100 -> 0.0..10.0 km, `pmin` slider 0..100 -> 0.0..3.0)
@@ -1400,6 +1532,8 @@ mkApp = do
       , populationText: "0"
       , isRunning: false
       , hasSavedPlanet: false
+      , selectedReport: "Click any coarse tile on the globe to inspect its stratigraphy, climate, population, and local sky & vantage."
+      , tileView: defaultTileViewInfo
       }
 
     -- Language mode state
@@ -2841,7 +2975,7 @@ mkApp = do
                       ]
                   }
               , R.div
-                  { className: "sidebar-column tectonics-sidebar"
+                  { className: "sidebar-column tectonics-sidebar history-inspector-sidebar"
                   , children:
                       [ R.div
                           { className: "button-row"
@@ -2899,7 +3033,7 @@ mkApp = do
                           , children:
                               [ R.label
                                   { className: "control-label"
-                                  , children: [ R.text "Selection (Stratigraphy)" ]
+                                  , children: [ R.text "Selection (Stratigraphy, Sky & Local Vantage)" ]
                                   }
                               , renderStratigraphySideViewBox
                               , R.pre
@@ -2907,6 +3041,7 @@ mkApp = do
                                   , className: "tile-details-box"
                                   , children: [ R.text tectonicsInfo.selectedTileReport ]
                                   }
+                              , renderTileSkyAndVantageBox tectonicsInfo.tileView
                               ]
                           }
                       , R.div
@@ -4092,7 +4227,7 @@ mkApp = do
                           , children:
                               [ R.canvas
                                   { id: "sphere-canvas"
-                                  , className: "sphere-canvas"
+                                  , className: "sphere-canvas interactive-canvas"
                                   }
                               ]
                           }
@@ -4114,6 +4249,22 @@ mkApp = do
                                   , className: "rotation-label"
                                   , children: [ R.text (show rotationDeg <> "°") ]
                                   }
+                              ]
+                          }
+                      , R.div
+                          { className: "control-group"
+                          , children:
+                              [ R.label
+                                  { className: "control-label"
+                                  , children: [ R.text "Coarse Tile Details (Stratigraphy, Population & Local Sky)" ]
+                                  }
+                              , renderStratigraphySideViewBox
+                              , R.div
+                                  { id: "prehistory-details-box"
+                                  , className: "tile-details-box"
+                                  , children: [ R.text prehistoryInfo.selectedReport ]
+                                  }
+                              , renderTileSkyAndVantageBox prehistoryInfo.tileView
                               ]
                           }
                       ]
@@ -4670,7 +4821,7 @@ mkApp = do
                       ]
                   }
               , R.div
-                  { className: "sidebar-column tectonics-sidebar"
+                  { className: "sidebar-column tectonics-sidebar history-inspector-sidebar"
                   , children:
                       [ R.div
                           { className: "button-row"
@@ -4900,7 +5051,7 @@ mkApp = do
                       ]
                   }
               , R.div
-                  { className: "sidebar-column tectonics-sidebar"
+                  { className: "sidebar-column tectonics-sidebar history-inspector-sidebar"
                   , children:
                       [ R.div
                           { className: "button-row"
@@ -5119,6 +5270,7 @@ mkApp = do
                                             , className: "tile-details-box"
                                             , children: [ R.text worldInfo.selectedReport ]
                                             }
+                                        , renderTileSkyAndVantageBox worldInfo.tileView
                                         ]
                                     }
                               ]
