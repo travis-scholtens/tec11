@@ -135,6 +135,170 @@ impl Rock {
             },
         }
     }
+
+    /// True for distinct event marker units (ultramafic kimberlite pipes, shocked impact hornfels,
+    /// and impact breccia conglomerates) that should not be absorbed into ordinary host layers.
+    #[inline]
+    pub fn is_special_event_layer(&self) -> bool {
+        (self.kind == RockKind::Igneous && self.name == "basalt" && self.felsity <= 0.35)
+            || (self.kind == RockKind::Metamorphic
+                && self.name == "hornfels"
+                && (0.82..=0.94).contains(&self.toughness))
+            || (self.kind == RockKind::Sedimentary
+                && self
+                    .clasticity
+                    .is_some_and(|c| (c - 0.4213).abs() < 1e-3))
+    }
+
+    /// True when two rocks share the same kind, lithological name, event-marker status, and
+    /// nearly indistinguishable continuous compositional properties (`<= 0.015` tolerance).
+    #[inline]
+    pub fn is_nearly_identical(&self, other: &Self) -> bool {
+        if self.kind != other.kind
+            || self.name != other.name
+            || self.is_special_event_layer() != other.is_special_event_layer()
+        {
+            return false;
+        }
+        if (self.felsity - other.felsity).abs() > 0.015
+            || (self.toughness - other.toughness).abs() > 0.015
+        {
+            return false;
+        }
+        #[inline]
+        fn opt_close(a: Option<f32>, b: Option<f32>) -> bool {
+            let va = a.unwrap_or(0.0);
+            let vb = b.unwrap_or(0.0);
+            (a.is_some() == b.is_some() || va.max(vb) <= 0.005) && (va - vb).abs() <= 0.015
+        }
+        if !opt_close(self.calcity, other.calcity)
+            || !opt_close(self.bogginess, other.bogginess)
+            || !opt_close(self.quartzity, other.quartzity)
+            || !opt_close(self.sulfidity, other.sulfidity)
+            || !opt_close(self.salinity, other.salinity)
+        {
+            return false;
+        }
+        match (self.clasticity, other.clasticity) {
+            (Some(ca), Some(cb)) => (ca - cb).abs() <= 0.05 * ca.max(cb).max(1.0),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    /// Combine two rock layers via thickness-weighted property averaging while preserving
+    /// `Rock` kind/name/serialization invariants.
+    pub fn blend_weighted(a: &Self, t_a: f32, b: &Self, t_b: f32) -> Self {
+        let total = (t_a + t_b).max(1e-7);
+        let wa = (t_a / total).clamp(0.0, 1.0);
+        let wb = 1.0 - wa;
+        let dom = if t_a >= t_b { a } else { b };
+
+        #[inline]
+        fn blend_opt(oa: Option<f32>, wa: f32, ob: Option<f32>, wb: f32) -> Option<f32> {
+            if oa.is_none() && ob.is_none() {
+                return None;
+            }
+            let v = wa * oa.unwrap_or(0.0) + wb * ob.unwrap_or(0.0);
+            if v > 1e-5 {
+                Some(v)
+            } else if oa.is_some() && ob.is_some() {
+                Some(0.0)
+            } else {
+                None
+            }
+        }
+
+        let felsity = wa * a.felsity + wb * b.felsity;
+        let quartzity = blend_opt(a.quartzity, wa, b.quartzity, wb);
+        let sulfidity = blend_opt(a.sulfidity, wa, b.sulfidity, wb);
+        // Keep igneous mantle-carbon (`bogginess`) separate from sedimentary/metamorphic organic carbon:
+        let bogginess = if a.kind == b.kind
+            || (a.kind != RockKind::Igneous && b.kind != RockKind::Igneous)
+        {
+            blend_opt(a.bogginess, wa, b.bogginess, wb)
+        } else {
+            dom.bogginess
+        };
+
+        match dom.kind {
+            RockKind::Igneous => {
+                let is_intrusive = matches!(dom.name, "gabbro" | "andesite" | "granite");
+                let mut r = if is_intrusive {
+                    Self::intrusive(felsity)
+                } else {
+                    Self::extrusive(felsity)
+                };
+                r.quartzity = quartzity;
+                r.sulfidity = sulfidity;
+                r.bogginess = bogginess;
+                r
+            }
+            RockKind::Sedimentary => {
+                let clasticity = match (a.clasticity, b.clasticity) {
+                    (Some(ca), Some(cb)) => (wa * ca + wb * cb).max(1e-6),
+                    (Some(ca), None) => ca.max(1e-6),
+                    (None, Some(cb)) => cb.max(1e-6),
+                    (None, None) => 1.0,
+                };
+                let calcity = blend_opt(a.calcity, wa, b.calcity, wb);
+                let salinity = blend_opt(a.salinity, wa, b.salinity, wb);
+                let toughness = if dom.is_special_event_layer() {
+                    dom.toughness
+                } else {
+                    0.0
+                };
+                let name = if calcity.unwrap_or(0.0) > 0.99 {
+                    "chalk"
+                } else if calcity.unwrap_or(0.0) > 0.75 {
+                    "limestone"
+                } else {
+                    let grain = 1e-3 / clasticity;
+                    if grain < 4e-6 {
+                        "claystone"
+                    } else if grain < 60e-6 {
+                        "siltstone"
+                    } else if grain < 2e-3 {
+                        "sandstone"
+                    } else {
+                        "conglomerate"
+                    }
+                };
+                Self {
+                    kind: RockKind::Sedimentary,
+                    name,
+                    felsity,
+                    toughness,
+                    clasticity: Some(clasticity),
+                    calcity,
+                    bogginess,
+                    quartzity,
+                    sulfidity,
+                    salinity,
+                }
+            }
+            RockKind::Metamorphic => {
+                let toughness = if a.kind == RockKind::Metamorphic && b.kind == RockKind::Metamorphic
+                {
+                    wa * a.toughness + wb * b.toughness
+                } else {
+                    dom.toughness
+                };
+                Self {
+                    kind: RockKind::Metamorphic,
+                    name: dom.name,
+                    felsity,
+                    toughness,
+                    clasticity: None,
+                    calcity: blend_opt(a.calcity, wa, b.calcity, wb),
+                    bogginess,
+                    quartzity,
+                    sulfidity,
+                    salinity: blend_opt(a.salinity, wa, b.salinity, wb),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -181,6 +181,8 @@ impl TileGeology {
     pub const MAX_HEIGHT: f32 = 10.0;
     pub const MIN_THICKNESS: f32 = 4.0;
     pub const MAX_THICKNESS: f32 = 75.0;
+    pub const MAX_LAYERS: usize = 64;
+    pub const MICRO_LAYER_KM: f32 = 0.002;
     pub const IMPACT_BRECCIA_CLASTICITY: f32 = 0.4213;
 
     /// Continental column initialized with a base crust of 9 km + surface relief `h`.
@@ -306,47 +308,135 @@ impl TileGeology {
     /// Enforce `MAX_THICKNESS` (`75 km`) and `MAX_HEIGHT` (`10 km`) (`Tile.limit` in `tile.py:62-81`),
     /// without clamping negative ocean bathymetry to `0`.
     pub fn limit(&mut self) {
-        let mut shrunk = 0.0f32;
-        while self.thickness() > Self::MAX_THICKNESS && !self.layers.is_empty() {
-            let dt = self.thickness() - Self::MAX_THICKNESS;
-            let l = self.layers.remove(0);
-            let dlt = dt.min(l.thickness);
-            if dlt < l.thickness {
-                self.layers.insert(
-                    0,
-                    RockLayer {
-                        rock: l.rock,
-                        thickness: l.thickness - dlt,
-                    },
-                );
+        let mut cur_thick = self.thickness();
+        if cur_thick > Self::MAX_THICKNESS && !self.layers.is_empty() {
+            let mut rem_excess = cur_thick - Self::MAX_THICKNESS;
+            let mut drop_count = 0usize;
+            while drop_count < self.layers.len() && rem_excess > 0.0 {
+                let lt = self.layers[drop_count].thickness;
+                if rem_excess >= lt {
+                    rem_excess -= lt;
+                    drop_count += 1;
+                } else {
+                    self.layers[drop_count].thickness -= rem_excess;
+                    rem_excess = 0.0;
+                    break;
+                }
             }
-            shrunk += dlt;
+            let shrunk = (cur_thick - Self::MAX_THICKNESS) - rem_excess;
+            if drop_count > 0 {
+                self.layers.drain(0..drop_count);
+            }
+            cur_thick -= shrunk;
+            self.bottom += shrunk;
         }
 
-        self.bottom += shrunk;
-
-        let de = self.elevation() - Self::MAX_HEIGHT;
+        let de = (self.bottom + cur_thick) - Self::MAX_HEIGHT;
         if de > 0.0 {
             self.bottom -= de;
         }
 
         if self.bottom > 0.0 {
-            self.bottom = -self.thickness();
+            self.bottom = -cur_thick;
         }
     }
 
-    /// Merge adjacent identical rock layers and remove zero-thickness layers (`Tile.compact` in `tile.py:87-96`).
+    /// Merge adjacent nearly-identical rock beds, absorb sub-2-meter same-kind micro-laminae,
+    /// and bound total column stratigraphic units (`Tile.compact` in `tile.py:87-96`).
     pub fn compact(&mut self) {
-        self.layers.retain(|l| l.thickness > 1e-6);
-        let mut i = 0;
-        while i + 1 < self.layers.len() {
-            if self.layers[i].rock == self.layers[i + 1].rock {
-                let next_t = self.layers.remove(i + 1).thickness;
-                self.layers[i].thickness += next_t;
-            } else {
-                i += 1;
-            }
+        if self.layers.is_empty() {
+            return;
         }
+
+        // Pass 1 (`O(L)`): drop sub-centimeter dust (`<= 1e-5 km`) and merge adjacent beds
+        // of the same lithology whose continuous properties are within tolerance.
+        let mut pass1: Vec<RockLayer> = Vec::with_capacity(self.layers.len());
+        for layer in self.layers.drain(..) {
+            if layer.thickness <= 1e-5 {
+                continue;
+            }
+            if let Some(prev) = pass1.last_mut() {
+                if prev.rock == layer.rock {
+                    prev.thickness += layer.thickness;
+                    continue;
+                }
+                if prev.rock.is_nearly_identical(&layer.rock) {
+                    prev.rock =
+                        Rock::blend_weighted(&prev.rock, prev.thickness, &layer.rock, layer.thickness);
+                    prev.thickness += layer.thickness;
+                    continue;
+                }
+            }
+            pass1.push(layer);
+        }
+
+        if pass1.len() <= 1 {
+            self.layers = pass1;
+            return;
+        }
+
+        // Pass 2 (`O(L)`): absorb ultra-thin (`< 2 m`) micro-laminae produced by tectonic
+        // `merge_layers` tie-slicing or partial erosion into an adjacent layer of the same `RockKind`,
+        // while preserving thin veneers of a different `RockKind` (e.g., fresh sediment on granite)
+        // and special event markers (kimberlites, impact craters).
+        let mut pass2: Vec<RockLayer> = Vec::with_capacity(pass1.len());
+        for layer in pass1 {
+            if let Some(prev) = pass2.last_mut() {
+                let same_kind = prev.rock.kind == layer.rock.kind;
+                let either_micro =
+                    prev.thickness < Self::MICRO_LAYER_KM || layer.thickness < Self::MICRO_LAYER_KM;
+                let neither_special =
+                    !prev.rock.is_special_event_layer() && !layer.rock.is_special_event_layer();
+                if same_kind && either_micro && neither_special {
+                    prev.rock =
+                        Rock::blend_weighted(&prev.rock, prev.thickness, &layer.rock, layer.thickness);
+                    prev.thickness += layer.thickness;
+                    continue;
+                }
+            }
+            pass2.push(layer);
+        }
+
+        // Pass 3: enforce `MAX_LAYERS` cap so poly-orogenic tie-alternation never fragments a column
+        // into thousands of sub-millimeter alternating slivers.
+        while pass2.len() > Self::MAX_LAYERS {
+            let mut best_idx = 0usize;
+            let mut best_score = f32::INFINITY;
+            for i in 0..(pass2.len() - 1) {
+                let a = &pass2[i];
+                let b = &pass2[i + 1];
+                let mut score = a.thickness.min(b.thickness);
+                if a.rock.kind == b.rock.kind {
+                    score *= 0.25;
+                }
+                if a.rock.is_special_event_layer() || b.rock.is_special_event_layer() {
+                    score *= 20.0;
+                }
+                if score < best_score {
+                    best_score = score;
+                    best_idx = i;
+                }
+            }
+            let right = pass2.remove(best_idx + 1);
+            let left = &mut pass2[best_idx];
+            left.rock = Rock::blend_weighted(&left.rock, left.thickness, &right.rock, right.thickness);
+            left.thickness += right.thickness;
+        }
+
+        // Final quick linear pass in case Pass 2/3 made two neighbors newly nearly-identical:
+        let mut out: Vec<RockLayer> = Vec::with_capacity(pass2.len());
+        for layer in pass2 {
+            if let Some(prev) = out.last_mut() {
+                if prev.rock == layer.rock || prev.rock.is_nearly_identical(&layer.rock) {
+                    prev.rock =
+                        Rock::blend_weighted(&prev.rock, prev.thickness, &layer.rock, layer.thickness);
+                    prev.thickness += layer.thickness;
+                    continue;
+                }
+            }
+            out.push(layer);
+        }
+        self.layers = out;
     }
 
     pub fn transform(&mut self, layers: Vec<RockLayer>) {
@@ -435,18 +525,21 @@ impl TileGeology {
             }
         }
 
-        // Compact adjacent identical layers and drop zero-thickness layers
-        let mut i = 0;
-        while i + 1 < output.len() {
-            if output[i].1 <= 1e-6 {
-                output.remove(i);
-            } else if output[i].0 == output[i + 1].0 {
-                let next_t = output.remove(i + 1).1;
-                output[i].1 += next_t;
-            } else {
-                i += 1;
+        // Compact adjacent identical layers and drop zero-thickness layers in O(N)
+        let mut compacted: Vec<(R, f32)> = Vec::with_capacity(output.len());
+        for (r, t) in output {
+            if t <= 1e-6 {
+                continue;
             }
+            if let Some(prev) = compacted.last_mut() {
+                if prev.0 == r {
+                    prev.1 += t;
+                    continue;
+                }
+            }
+            compacted.push((r, t));
         }
+        let mut output = compacted;
 
         output.reverse();
         let mountainosity =
@@ -2861,5 +2954,94 @@ mod tests {
         let &(max_au_grade, total_au_abund) = acc.get(&MineralKind::Gold).expect("accessible gold");
         assert!(max_au_grade >= WORKABLE_GRADE);
         assert!(total_au_abund > 0.01);
+    }
+
+    #[test]
+    fn test_compact_coalesces_micro_and_nearly_identical_layers_while_preserving_events() {
+        let mut s1 = Rock {
+            kind: RockKind::Sedimentary,
+            name: "sandstone",
+            felsity: 0.60,
+            toughness: 0.0,
+            clasticity: Some(1.0),
+            calcity: None,
+            bogginess: None,
+            quartzity: Some(0.200),
+            sulfidity: None,
+            salinity: None,
+        };
+        let mut s2 = s1.clone();
+        s2.quartzity = Some(0.208); // Within 0.015 tolerance -> coalesces
+
+        let mut kimberlite = Rock::extrusive(0.28);
+        kimberlite.bogginess = Some(0.18);
+
+        let mut tile = TileGeology {
+            bottom: -10.0,
+            mountainosity: 0.0,
+            subduction: 0.0,
+            intrusion: None,
+            impact_scar: 0.0,
+            layers: vec![
+                RockLayer {
+                    rock: Rock::intrusive(0.70),
+                    thickness: 8.0,
+                },
+                // Thin fresh sedimentary veneer on granite (different RockKind -> preserved!)
+                RockLayer {
+                    rock: s1.clone(),
+                    thickness: 0.0012,
+                },
+                RockLayer {
+                    rock: s2,
+                    thickness: 1.0,
+                },
+                RockLayer {
+                    rock: kimberlite,
+                    thickness: 0.18,
+                },
+            ],
+        };
+        let orig_thick = tile.thickness();
+        tile.compact();
+        assert!((tile.thickness() - orig_thick).abs() < 1e-4);
+        assert_eq!(tile.layers.len(), 3); // granite + coalesced sandstone + kimberlite pipe
+        assert!(tile.layers.last().unwrap().rock.is_special_event_layer());
+
+        // Stress-test 500 alternating sub-millimeter slivers -> bounded to <= MAX_LAYERS
+        s1.quartzity = Some(0.10);
+        let lim = Rock {
+            kind: RockKind::Sedimentary,
+            name: "limestone",
+            felsity: 0.50,
+            toughness: 0.0,
+            clasticity: Some(50.0),
+            calcity: Some(0.85),
+            bogginess: None,
+            quartzity: None,
+            sulfidity: None,
+            salinity: None,
+        };
+        let mut fragmented = TileGeology {
+            bottom: -10.0,
+            mountainosity: 0.0,
+            subduction: 0.0,
+            intrusion: None,
+            impact_scar: 0.0,
+            layers: (0..500)
+                .map(|i| RockLayer {
+                    rock: if i % 2 == 0 {
+                        Rock::extrusive(0.48)
+                    } else {
+                        lim.clone()
+                    },
+                    thickness: 0.02,
+                })
+                .collect(),
+        };
+        let frag_thick = fragmented.thickness();
+        fragmented.compact();
+        assert!(fragmented.layers.len() <= TileGeology::MAX_LAYERS);
+        assert!((fragmented.thickness() - frag_thick).abs() < 1e-3);
     }
 }
