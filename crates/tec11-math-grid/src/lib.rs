@@ -12,7 +12,9 @@ pub use noise::{simplex3, snoise3};
 pub use point_tree::PointTree;
 pub use rng::Pcg64Mcg;
 pub use terrain::{
-    DisplayFace, DisplayFaceSource, DisplayMesh, FineParentage, SubdividedTerrainGrid,
+    classify_fine_parentage, compute_fine_land_elevation, route_coarse_rivers_on_fine_grid,
+    DisplayFace, DisplayFaceSource, DisplayMesh, FineParentage, FullSphereFineGrid,
+    SubdividedTerrainGrid,
 };
 pub use vec3::{
     cross, dist2, dot, great_circle_distance, length, normal, rotate, squared_length, Vec3, Vec3Key,

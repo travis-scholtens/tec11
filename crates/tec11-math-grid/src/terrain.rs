@@ -19,6 +19,204 @@ pub enum FineParentage {
     },
 }
 
+impl FineParentage {
+    /// Interpolate a coarse-tile scalar field onto this fine cell (`terrainmethod.py:19-35`).
+    #[inline]
+    pub fn interpolate(&self, coarse_values: &[f32]) -> f32 {
+        match *self {
+            FineParentage::CoarseFace(c) => coarse_values[c],
+            FineParentage::CoarseVertex([c0, c1, c2]) => {
+                (coarse_values[c0] + coarse_values[c1] + coarse_values[c2]) / 3.0
+            }
+            FineParentage::CoarseEdge {
+                primary_coarse,
+                flanking_coarse_vertices: [v1, v2],
+            } => {
+                let v1_avg =
+                    (coarse_values[v1[0]] + coarse_values[v1[1]] + coarse_values[v1[2]]) / 3.0;
+                let v2_avg =
+                    (coarse_values[v2[0]] + coarse_values[v2[1]] + coarse_values[v2[2]]) / 3.0;
+                (coarse_values[primary_coarse] + v1_avg + v2_avg) / 3.0
+            }
+        }
+    }
+
+    /// Primary coarse parent index (for `CoarseVertex`, returns the first land parent if any, else `cs[0]`).
+    #[inline]
+    pub fn primary_coarse_tile(&self, coarse_elevations: &[f32]) -> usize {
+        match *self {
+            FineParentage::CoarseFace(c) => c,
+            FineParentage::CoarseEdge { primary_coarse, .. } => primary_coarse,
+            FineParentage::CoarseVertex(cs) => cs
+                .into_iter()
+                .find(|&c| coarse_elevations[c] > 0.0)
+                .unwrap_or(cs[0]),
+        }
+    }
+}
+
+/// Shared classification of `FineParentage` and `coarse_to_fine_children` for any `N + 2` fine grid
+/// (partial land-only `SubdividedTerrainGrid` or uniform global `FullSphereFineGrid`) given `coarse` (`N`)
+/// and `level1` (`N + 1`, with `level1.vertices` intact).
+pub fn classify_fine_parentage(
+    coarse: &SphericalGrid,
+    level1: &SphericalGrid,
+    fine_grid: &SphericalGrid,
+) -> (Vec<FineParentage>, Vec<Vec<usize>>) {
+    let num_coarse = coarse.faces.len();
+    let resolve_coarse_vertex = |vkey: &Vec3Key| -> [usize; 3] {
+        let cfs = &coarse.vertices[vkey];
+        [
+            coarse.face_index[&Vec3Key::from_vec3(cfs[0])],
+            coarse.face_index[&Vec3Key::from_vec3(cfs[1])],
+            coarse.face_index[&Vec3Key::from_vec3(cfs[2])],
+        ]
+    };
+
+    let mut coarse_to_fine_children = vec![Vec::new(); num_coarse];
+    let parentage: Vec<FineParentage> = fine_grid
+        .faces
+        .iter()
+        .enumerate()
+        .map(|(fine_idx, &(f_vec, _))| {
+            let f_key = Vec3Key::from_vec3(f_vec);
+            if let Some(&c_idx) = coarse.face_index.get(&f_key) {
+                coarse_to_fine_children[c_idx].push(fine_idx);
+                FineParentage::CoarseFace(c_idx)
+            } else if coarse.vertices.contains_key(&f_key) {
+                let c_triple = resolve_coarse_vertex(&f_key);
+                for &c_idx in &c_triple {
+                    coarse_to_fine_children[c_idx].push(fine_idx);
+                }
+                FineParentage::CoarseVertex(c_triple)
+            } else {
+                // Edge face: vertex of `level1` between 3 `level1` faces,
+                // exactly 1 of which is in `coarse.faces` and 2 of which are in `coarse.vertices`.
+                let l1_faces = &level1.vertices[&f_key];
+                let primary_coarse = l1_faces
+                    .iter()
+                    .find_map(|&pf| coarse.face_index.get(&Vec3Key::from_vec3(pf)).copied())
+                    .unwrap_or(0);
+                let flanking: Vec<[usize; 3]> = l1_faces
+                    .iter()
+                    .filter_map(|&pf| {
+                        let pf_key = Vec3Key::from_vec3(pf);
+                        coarse
+                            .vertices
+                            .contains_key(&pf_key)
+                            .then(|| resolve_coarse_vertex(&pf_key))
+                    })
+                    .collect();
+                let flanking_coarse_vertices = match flanking.as_slice() {
+                    [f0, f1, ..] => [*f0, *f1],
+                    [f0] => [*f0, *f0],
+                    [] => [[primary_coarse; 3], [primary_coarse; 3]],
+                };
+                coarse_to_fine_children[primary_coarse].push(fine_idx);
+                FineParentage::CoarseEdge {
+                    primary_coarse,
+                    flanking_coarse_vertices,
+                }
+            }
+        })
+        .collect();
+
+    (parentage, coarse_to_fine_children)
+}
+
+/// Shared 7-octave Simplex fractal land elevation synthesis (`terrainmethod.py:36-38`).
+#[inline]
+pub fn compute_fine_land_elevation(pos: Vec3, clamped_base_elev_km: f32, norm_mount: f32) -> f32 {
+    let noise = snoise3(pos[0], pos[1], pos[2], 7, 0.85);
+    clamped_base_elev_km + norm_mount * noise
+}
+
+/// Shared coarse-to-fine river routing across any `N + 2` fine grid (`terrainmethod.py:41-86`).
+/// When `coarse_is_land` is `Some(mask)`, ocean mouths are identified via `!mask[next_coarse]`
+/// (needed on `FullSphereFineGrid` where ocean coarse centers also exist in `fine_grid.face_index`).
+pub fn route_coarse_rivers_on_fine_grid(
+    coarse: &SphericalGrid,
+    coarse_rivers: &[Vec<usize>],
+    coarse_is_land: Option<&[bool]>,
+    fine_grid: &SphericalGrid,
+    fine_adj: &[Vec<usize>],
+    coarse_to_fine_children: &[Vec<usize>],
+    fine_elevations: &[f32],
+) -> Vec<Vec<usize>> {
+    coarse_rivers
+        .iter()
+        .filter_map(|r| {
+            let &first_coarse = r.first()?;
+            if let Some(land_mask) = coarse_is_land {
+                if !land_mask.get(first_coarse).copied().unwrap_or(false) {
+                    return None;
+                }
+            }
+            let start_key = Vec3Key::from_vec3(coarse.faces[first_coarse].0);
+            let &start_fine = fine_grid.face_index.get(&start_key)?;
+            let route = (0..r.len()).fold(vec![start_fine], |mut route, i| {
+                let c_curr = r[i];
+                let pool_curr = &coarse_to_fine_children[c_curr];
+                if pool_curr.is_empty() {
+                    return route;
+                }
+                let Some(&next_coarse) = r.get(i + 1) else {
+                    return route;
+                };
+                let next_center = coarse.faces[next_coarse].0;
+                let next_key = Vec3Key::from_vec3(next_center);
+                let next_is_land = coarse_is_land
+                    .map(|m| m.get(next_coarse).copied().unwrap_or(false))
+                    .unwrap_or(true);
+
+                let mut allowed: BTreeSet<usize> = pool_curr.iter().copied().collect();
+                let target_fine = if next_is_land {
+                    if let Some(&next_center_fine) = fine_grid.face_index.get(&next_key) {
+                        allowed.extend(coarse_to_fine_children[next_coarse].iter().copied());
+                        next_center_fine
+                    } else {
+                        *pool_curr
+                            .iter()
+                            .min_by(|&&a, &&b| {
+                                let da = dist2(fine_grid.faces[a].0, next_center);
+                                let db = dist2(fine_grid.faces[b].0, next_center);
+                                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .unwrap_or(&start_fine)
+                    }
+                } else {
+                    // `next_coarse` is an ocean tile: route to the coastal fine face in `pool_curr`
+                    // closest to `next_center`.
+                    *pool_curr
+                        .iter()
+                        .min_by(|&&a, &&b| {
+                            let da = dist2(fine_grid.faces[a].0, next_center);
+                            let db = dist2(fine_grid.faces[b].0, next_center);
+                            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .unwrap_or(&start_fine)
+                };
+
+                let cur = *route.last().unwrap();
+                for s in find_shortest_fine_segment(
+                    cur,
+                    target_fine,
+                    &allowed,
+                    fine_adj,
+                    &fine_grid.faces,
+                    fine_elevations,
+                ) {
+                    if route.last().copied() != Some(s) {
+                        route.push(s);
+                    }
+                }
+                route
+            });
+            Some(route)
+        })
+        .collect()
+}
+
 /// Source of a polygon in the composite sphere mesh (`terrainsimulation.py:84-94`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayFaceSource {
@@ -78,8 +276,6 @@ impl SubdividedTerrainGrid {
         let level1_land_faces: Vec<Vec3> = level1.faces.iter().map(|&(f, _)| f).collect();
 
         // Complete boundary vertices in `level1` (`grid.py:115-121`):
-        // If any vertex of `p` in `level1` has fewer than 3 adjacent faces in `level1`,
-        // `p` was a vertex in `coarse`, so populate all 3 coarse faces meeting at `p` into `level1`.
         for &p in &level1_land_faces {
             let p_key = Vec3Key::from_vec3(p);
             let p_idx = level1.face_index[&p_key];
@@ -106,66 +302,9 @@ impl SubdividedTerrainGrid {
         terrain_grid.vertices.clear();
         let num_fine = terrain_grid.faces.len();
 
-        let resolve_coarse_vertex = |vkey: &Vec3Key| -> [usize; 3] {
-            let cfs = &coarse.vertices[vkey];
-            [
-                coarse.face_index[&Vec3Key::from_vec3(cfs[0])],
-                coarse.face_index[&Vec3Key::from_vec3(cfs[1])],
-                coarse.face_index[&Vec3Key::from_vec3(cfs[2])],
-            ]
-        };
+        let (parentage, coarse_to_fine_children) =
+            classify_fine_parentage(coarse, &level1, &terrain_grid);
 
-        // Classify `FineParentage` and `coarse_to_fine_children` (`terrainmethod.py:19-28, 59-74`).
-        let mut coarse_to_fine_children = vec![Vec::new(); num_coarse];
-        let parentage: Vec<FineParentage> = terrain_grid
-            .faces
-            .iter()
-            .enumerate()
-            .map(|(fine_idx, &(f_vec, _))| {
-                let f_key = Vec3Key::from_vec3(f_vec);
-                if let Some(&c_idx) = coarse.face_index.get(&f_key) {
-                    coarse_to_fine_children[c_idx].push(fine_idx);
-                    FineParentage::CoarseFace(c_idx)
-                } else if coarse.vertices.contains_key(&f_key) {
-                    let c_triple = resolve_coarse_vertex(&f_key);
-                    for &c_idx in &c_triple {
-                        coarse_to_fine_children[c_idx].push(fine_idx);
-                    }
-                    FineParentage::CoarseVertex(c_triple)
-                } else {
-                    // Edge face: vertex of `level1` between 3 `level1` faces,
-                    // exactly 1 of which is in `coarse.faces` and 2 of which are in `coarse.vertices`.
-                    let l1_faces = &level1.vertices[&f_key];
-                    let primary_coarse = l1_faces
-                        .iter()
-                        .find_map(|&pf| coarse.face_index.get(&Vec3Key::from_vec3(pf)).copied())
-                        .unwrap_or(0);
-                    let flanking: Vec<[usize; 3]> = l1_faces
-                        .iter()
-                        .filter_map(|&pf| {
-                            let pf_key = Vec3Key::from_vec3(pf);
-                            coarse
-                                .vertices
-                                .contains_key(&pf_key)
-                                .then(|| resolve_coarse_vertex(&pf_key))
-                        })
-                        .collect();
-                    let flanking_coarse_vertices = match flanking.as_slice() {
-                        [f0, f1, ..] => [*f0, *f1],
-                        [f0] => [*f0, *f0],
-                        [] => [[primary_coarse; 3], [primary_coarse; 3]],
-                    };
-                    coarse_to_fine_children[primary_coarse].push(fine_idx);
-                    FineParentage::CoarseEdge {
-                        primary_coarse,
-                        flanking_coarse_vertices,
-                    }
-                }
-            })
-            .collect();
-
-        // Clamped non-negative coarse elevations (`Tile.elevation` in `tile.py:81`) and normalized
-        // mountainosities (`min(20.0, m) / 20.0` in `tile.py:292`) for terrain interpolation.
         let clamped_elevs: Vec<f32> = coarse_elevations.iter().map(|&e| e.max(0.0)).collect();
         let norm_mounts: Vec<f32> = coarse_mountainosities
             .iter()
@@ -241,8 +380,7 @@ impl SubdividedTerrainGrid {
                 let base_elev = grid.interpolate_coarse(fine_idx, &clamped_elevs);
                 let mount = grid.interpolate_coarse(fine_idx, &norm_mounts);
                 let f = grid.terrain_grid.faces[fine_idx].0;
-                let noise = snoise3(f[0], f[1], f[2], 7, 0.85);
-                base_elev + mount * noise
+                compute_fine_land_elevation(f, base_elev, mount)
             })
             .collect();
 
@@ -252,102 +390,30 @@ impl SubdividedTerrainGrid {
     /// Interpolate a coarse-tile scalar field onto `fine_idx` (`terrainmethod.py:19-35`).
     #[inline]
     pub fn interpolate_coarse(&self, fine_idx: usize, coarse_values: &[f32]) -> f32 {
-        match self.parentage[fine_idx] {
-            FineParentage::CoarseFace(c) => coarse_values[c],
-            FineParentage::CoarseVertex([c0, c1, c2]) => {
-                (coarse_values[c0] + coarse_values[c1] + coarse_values[c2]) / 3.0
-            }
-            FineParentage::CoarseEdge {
-                primary_coarse,
-                flanking_coarse_vertices: [v1, v2],
-            } => {
-                let v1_avg =
-                    (coarse_values[v1[0]] + coarse_values[v1[1]] + coarse_values[v1[2]]) / 3.0;
-                let v2_avg =
-                    (coarse_values[v2[0]] + coarse_values[v2[1]] + coarse_values[v2[2]]) / 3.0;
-                (coarse_values[primary_coarse] + v1_avg + v2_avg) / 3.0
-            }
-        }
+        self.parentage[fine_idx].interpolate(coarse_values)
     }
 
     /// Primary coarse parent index for `fine_idx` (for `CoarseVertex`, returns the first elevated parent).
     #[inline]
     pub fn primary_coarse_tile(&self, fine_idx: usize, coarse_elevations: &[f32]) -> usize {
-        match self.parentage[fine_idx] {
-            FineParentage::CoarseFace(c) => c,
-            FineParentage::CoarseEdge { primary_coarse, .. } => primary_coarse,
-            FineParentage::CoarseVertex(cs) => cs
-                .into_iter()
-                .find(|&c| coarse_elevations[c] > 0.0)
-                .unwrap_or(cs[0]),
-        }
+        self.parentage[fine_idx].primary_coarse_tile(coarse_elevations)
     }
 
     /// Route coarse rivers across the subdivided terrain grid (`terrainmethod.py:41-86`).
-    /// Each coarse transition `r[i] -> r[i + 1]` routes deterministically from the center fine face
-    /// of `r[i]` to the center fine face of `r[i + 1]` (or the coastal mouth fine face adjacent to
-    /// the ocean tile `r.last()`) along the shortest monotonic descent path, so tributaries that
-    /// join at a coarse tile converge at its center fine face and never cross or braid.
     pub fn route_rivers(
         &self,
         coarse: &SphericalGrid,
         coarse_rivers: &[Vec<usize>],
     ) -> Vec<Vec<usize>> {
-        coarse_rivers
-            .iter()
-            .filter_map(|r| {
-                let &first_coarse = r.first()?;
-                let start_key = Vec3Key::from_vec3(coarse.faces[first_coarse].0);
-                let &start_fine = self.terrain_grid.face_index.get(&start_key)?;
-                let route = (0..r.len()).fold(vec![start_fine], |mut route, i| {
-                    let c_curr = r[i];
-                    let pool_curr = &self.coarse_to_fine_children[c_curr];
-                    if pool_curr.is_empty() {
-                        return route;
-                    }
-                    let Some(&next_coarse) = r.get(i + 1) else {
-                        return route;
-                    };
-                    let next_center = coarse.faces[next_coarse].0;
-                    let next_key = Vec3Key::from_vec3(next_center);
-
-                    let mut allowed: BTreeSet<usize> = pool_curr.iter().copied().collect();
-                    let target_fine = if let Some(&next_center_fine) =
-                        self.terrain_grid.face_index.get(&next_key)
-                    {
-                        allowed.extend(self.coarse_to_fine_children[next_coarse].iter().copied());
-                        next_center_fine
-                    } else {
-                        // `next_coarse` is an un-subdivided ocean tile: route to the coastal fine face
-                        // in `pool_curr` closest to `next_center`.
-                        *pool_curr
-                            .iter()
-                            .min_by(|&&a, &&b| {
-                                let da = dist2(self.terrain_grid.faces[a].0, next_center);
-                                let db = dist2(self.terrain_grid.faces[b].0, next_center);
-                                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                            })
-                            .unwrap_or(&start_fine)
-                    };
-
-                    let cur = *route.last().unwrap();
-                    for s in find_shortest_fine_segment(
-                        cur,
-                        target_fine,
-                        &allowed,
-                        &self.terrain_adj,
-                        &self.terrain_grid.faces,
-                        &self.fine_elevations,
-                    ) {
-                        if route.last().copied() != Some(s) {
-                            route.push(s);
-                        }
-                    }
-                    route
-                });
-                Some(route)
-            })
-            .collect()
+        route_coarse_rivers_on_fine_grid(
+            coarse,
+            coarse_rivers,
+            None,
+            &self.terrain_grid,
+            &self.terrain_adj,
+            &self.coarse_to_fine_children,
+            &self.fine_elevations,
+        )
     }
 
     /// Build Three.js triangulated sphere geometry (`positions`, `normals`, `vertex_face_ids`)
@@ -393,6 +459,154 @@ impl SubdividedTerrainGrid {
             normals,
             vertex_face_ids,
         }
+    }
+}
+
+/// Uniform global 2-level (`coarse.size + 2`) spherical fine grid subdividing **both** land and
+/// ocean bathymetry (`65,612` tiles at `~88 km` on `size = 6` Earth) while sharing `FineParentage`,
+/// 7-octave Simplex land topography, and river routing with [`SubdividedTerrainGrid`].
+#[derive(Clone, Debug)]
+pub struct FullSphereFineGrid {
+    pub coarse_size: u32,
+    pub grid: SphericalGrid,
+    pub adjacency: Vec<Vec<usize>>,
+    pub parentage: Vec<FineParentage>,
+    pub coarse_to_fine_children: Vec<Vec<usize>>,
+    /// Signed elevation in kilometers (`> 0.0` subaerial land, `<= 0.0` continental shelf / abyssal ocean).
+    pub fine_elevations_km: Vec<f32>,
+    /// Solid bed elevation $z_b$ in meters (`fine_elevations_km * 1000.0`) for shallow-water & storm-surge PDEs.
+    pub fine_bed_m: Vec<f32>,
+    /// Normalized mountainosity in `[0.0, 1.0]` for rough-terrain drag, orographic lift, and vantage crags.
+    pub fine_mountainosity_norm: Vec<f32>,
+    /// Primary coarse parent tile index (`0..coarse.faces.len()`) for stratigraphy, rock, and Köppen lookup.
+    pub primary_coarse: Vec<usize>,
+    /// Coarse land mask (`coarse_elevations_km[c] > 0.0`) used for river mouth detection.
+    pub coarse_is_land: Vec<bool>,
+}
+
+impl FullSphereFineGrid {
+    /// Subdivide the entire sphere uniformly from `coarse` (`N`) to `N + 2`, preserving exact
+    /// interior land elevation parity with [`SubdividedTerrainGrid`] while synthesizing smooth
+    /// continental shelves (`-18 m .. -220 m`), slopes, and multi-octave seafloor bathymetry.
+    pub fn from_coarse(
+        coarse: &SphericalGrid,
+        coarse_elevations_km: &[f32],
+        coarse_mountainosities: &[f32],
+    ) -> Self {
+        let num_coarse = coarse.faces.len();
+        assert_eq!(num_coarse, coarse_elevations_km.len());
+        assert_eq!(num_coarse, coarse_mountainosities.len());
+
+        let level1 = coarse.subdivide();
+        let mut grid = level1.subdivide();
+        let adjacency = grid.adjacency();
+        grid.vertices.clear();
+        let num_fine = grid.faces.len();
+
+        let (parentage, coarse_to_fine_children) =
+            classify_fine_parentage(coarse, &level1, &grid);
+
+        let coarse_is_land: Vec<bool> = coarse_elevations_km.iter().map(|&e| e > 0.0).collect();
+        let coarse_land_indicator: Vec<f32> = coarse_is_land
+            .iter()
+            .map(|&is_l| if is_l { 1.0 } else { 0.0 })
+            .collect();
+        let clamped_land_elevs: Vec<f32> = coarse_elevations_km.iter().map(|&e| e.max(0.0)).collect();
+        let ocean_depths_km: Vec<f32> = coarse_elevations_km
+            .iter()
+            .map(|&e| {
+                if e > 0.0 {
+                    0.0
+                } else if e < -0.001 {
+                    e
+                } else {
+                    // Fallback abyssal depth if an un-bathymetric ocean tile was clamped to 0.0
+                    -3.6
+                }
+            })
+            .collect();
+        let norm_mounts: Vec<f32> = coarse_mountainosities
+            .iter()
+            .map(|&m| m.clamp(0.0, 20.0) / 20.0)
+            .collect();
+
+        let mut fine_elevations_km = Vec::with_capacity(num_fine);
+        let mut fine_bed_m = Vec::with_capacity(num_fine);
+        let mut fine_mountainosity_norm = Vec::with_capacity(num_fine);
+        let mut primary_coarse = Vec::with_capacity(num_fine);
+
+        for fine_idx in 0..num_fine {
+            let p = &parentage[fine_idx];
+            let pos = grid.faces[fine_idx].0;
+            let land_weight = p.interpolate(&coarse_land_indicator);
+            let land_base_km = p.interpolate(&clamped_land_elevs);
+            let ocean_base_km = p.interpolate(&ocean_depths_km);
+            let mount_norm = p.interpolate(&norm_mounts).clamp(0.0, 1.0);
+            let prim_c = p.primary_coarse_tile(coarse_elevations_km);
+
+            let elev_km = if land_weight >= 0.999 {
+                // Pure interior land: bit-for-bit identical to `SubdividedTerrainGrid`!
+                compute_fine_land_elevation(pos, land_base_km, mount_norm)
+            } else if land_weight >= 0.5 {
+                // Land-dominated coastal plain / headland: matches `SubdividedTerrainGrid` land formula,
+                // allowing low-lying coastal marshes (+1m..+40m) for realistic tidal/surge wetting.
+                let raw_land = compute_fine_land_elevation(pos, land_base_km, mount_norm);
+                raw_land.max(0.0015)
+            } else if land_weight > 1e-5 {
+                // Ocean-dominated coastal margin (`0 < land_weight < 0.5`): realistic continental shelf
+                // (`-15 m .. -220 m`) sloping toward the continental rise (`ocean_base_km`).
+                let s = (1.0 - 2.0 * land_weight).clamp(0.0, 1.0);
+                let shelf_noise = snoise3(pos[0] * 2.1, pos[1] * 2.1, pos[2] * 2.1, 4, 0.65);
+                let shelf_km = -0.015 - 0.145 * s + 0.22 * ocean_base_km * s * s + 0.012 * shelf_noise;
+                shelf_km.clamp(-4.5, -0.006)
+            } else {
+                // Open ocean basin: interpolated bathymetry + 5-octave abyssal hill / seamount relief,
+                // strictly submerged (`<= -20 m`) so phantom islands never appear in open ocean.
+                let bathy_noise = snoise3(pos[0] * 1.4, pos[1] * 1.4, pos[2] * 1.4, 5, 0.72);
+                let relief_amp = 0.075 + 0.34 * mount_norm;
+                (ocean_base_km + relief_amp * bathy_noise).clamp(-9.5, -0.020)
+            };
+
+            fine_elevations_km.push(elev_km);
+            fine_bed_m.push(elev_km * 1000.0);
+            fine_mountainosity_norm.push(mount_norm);
+            primary_coarse.push(prim_c);
+        }
+
+        Self {
+            coarse_size: coarse.size,
+            grid,
+            adjacency,
+            parentage,
+            coarse_to_fine_children,
+            fine_elevations_km,
+            fine_bed_m,
+            fine_mountainosity_norm,
+            primary_coarse,
+            coarse_is_land,
+        }
+    }
+
+    #[inline]
+    pub fn interpolate_coarse(&self, fine_idx: usize, coarse_values: &[f32]) -> f32 {
+        self.parentage[fine_idx].interpolate(coarse_values)
+    }
+
+    /// Route coarse rivers onto the uniform `coarse + 2` fine grid, terminating at coastal mouths.
+    pub fn route_rivers(
+        &self,
+        coarse: &SphericalGrid,
+        coarse_rivers: &[Vec<usize>],
+    ) -> Vec<Vec<usize>> {
+        route_coarse_rivers_on_fine_grid(
+            coarse,
+            coarse_rivers,
+            Some(&self.coarse_is_land),
+            &self.grid,
+            &self.adjacency,
+            &self.coarse_to_fine_children,
+            &self.fine_elevations_km,
+        )
     }
 }
 
@@ -456,7 +670,6 @@ mod tests {
         let mut elevs = vec![-4.0f32; n];
         let mut mounts = vec![0.0f32; n];
 
-        // Create a small connected continent of 8 tiles with a mountain peak
         elevs[0] = 6.5;
         mounts[0] = 12.0;
         for &nb in &coarse.adjacency()[0] {
@@ -469,7 +682,6 @@ mod tests {
         assert_eq!(sub.terrain_grid.faces.len(), sub.fine_elevations.len());
         assert!(sub.display_faces.len() > n);
 
-        // Route a coarse river from peak tile 0 through one neighbor to an ocean neighbor
         let n1 = coarse.adjacency()[0][0];
         let ocean_nb = coarse.adjacency()[n1]
             .iter()
@@ -479,5 +691,68 @@ mod tests {
         let routes = sub.route_rivers(&coarse, &[vec![0, n1, ocean_nb]]);
         assert_eq!(routes.len(), 1);
         assert!(routes[0].len() >= 3);
+    }
+
+    #[test]
+    fn test_full_sphere_fine_grid_counts_land_parity_shelves_and_rivers() {
+        let coarse = SphericalGrid::with_size(4);
+        let n = coarse.faces.len();
+        let mut elevs = vec![-4.2f32; n];
+        let mut mounts = vec![1.5f32; n];
+
+        elevs[0] = 5.2;
+        mounts[0] = 14.0;
+        for &nb in &coarse.adjacency()[0] {
+            elevs[nb] = 1.8;
+            mounts[nb] = 5.0;
+        }
+
+        let sub = SubdividedTerrainGrid::from_coarse(&coarse, &elevs, &mounts);
+        let full = FullSphereFineGrid::from_coarse(&coarse, &elevs, &mounts);
+
+        // Size 4 + 2 = Size 6 -> 7,292 fine cells across the full sphere
+        assert_eq!(full.grid.size, 6);
+        assert_eq!(full.grid.faces.len(), 7292);
+        assert_eq!(full.fine_elevations_km.len(), 7292);
+        assert_eq!(full.fine_bed_m.len(), 7292);
+
+        // Interior coarse tile 0 is surrounded purely by land neighbors -> all 7 interior fine faces
+        // (center + 6 CoarseEdge) and all 6 CoarseVertex faces around tile 0 must match `SubdividedTerrainGrid` bit-for-bit!
+        for &full_fine_idx in &full.coarse_to_fine_children[0] {
+            let f_key = Vec3Key::from_vec3(full.grid.faces[full_fine_idx].0);
+            let sub_fine_idx = sub.terrain_grid.face_index[&f_key];
+            assert_eq!(
+                full.fine_elevations_km[full_fine_idx],
+                sub.fine_elevations[sub_fine_idx],
+                "Interior fine land cell must match SubdividedTerrainGrid exactly"
+            );
+        }
+
+        // Verify continental shelf cells (-250 m .. -5 m) and deep abyssal ocean cells (<-2000 m) both exist
+        let shelf_count = full
+            .fine_bed_m
+            .iter()
+            .filter(|&&z| (-250.0..=-5.0).contains(&z))
+            .count();
+        let abyssal_count = full.fine_bed_m.iter().filter(|&&z| z < -2500.0).count();
+        assert!(shelf_count > 10, "Expected continental shelf cells around island continent");
+        assert!(abyssal_count > 5000, "Expected deep ocean basin cells");
+
+        // Verify river routing produces valid connected path from peak center to coastal mouth
+        let n1 = coarse.adjacency()[0][0];
+        let ocean_nb = coarse.adjacency()[n1]
+            .iter()
+            .copied()
+            .find(|&u| elevs[u] <= 0.0)
+            .unwrap();
+        let full_routes = full.route_rivers(&coarse, &[vec![0, n1, ocean_nb]]);
+        assert_eq!(full_routes.len(), 1);
+        assert!(full_routes[0].len() >= 3);
+        for pair in full_routes[0].windows(2) {
+            assert!(
+                full.adjacency[pair[0]].contains(&pair[1]),
+                "Fine river steps must be edge-adjacent"
+            );
+        }
     }
 }

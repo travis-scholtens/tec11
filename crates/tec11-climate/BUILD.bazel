@@ -6,6 +6,7 @@ rust_library(
     name = "tec11_climate",
     srcs = [
         "src/earth_data.rs",
+        "src/fv_geom.rs",
         "src/koeppen.rs",
         "src/lib.rs",
         "src/model.rs",
