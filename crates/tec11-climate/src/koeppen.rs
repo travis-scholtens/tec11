@@ -161,17 +161,22 @@ fn koeppen_code(
             .map(|&i| ps[i])
             .fold(f64::NEG_INFINITY, f64::max);
 
-        if min_warm_p < max_cold_p / 10.0 {
-            if is_c {
-                KoeppenCode::Cw
-            } else {
-                KoeppenCode::Dw
-            }
-        } else if min_cold_p < (30.0 * month_to_season).min(max_warm_p / 3.0) {
+        let dry_winter = min_cold_p < max_warm_p / 10.0;
+        let dry_summer = min_warm_p < (30.0 * month_to_season).min(max_cold_p / 3.0);
+        let warm_tot: f64 = warm_half.iter().map(|&i| ps[i]).sum();
+        let cold_tot: f64 = cold_half.iter().map(|&i| ps[i]).sum();
+
+        if dry_summer && (!dry_winter || warm_tot < cold_tot) {
             if is_c {
                 KoeppenCode::Cs
             } else {
                 KoeppenCode::Ds
+            }
+        } else if dry_winter {
+            if is_c {
+                KoeppenCode::Cw
+            } else {
+                KoeppenCode::Dw
             }
         } else if is_c {
             KoeppenCode::Cf
@@ -204,5 +209,22 @@ mod tests {
         let ts = [26.0; 8];
         let ps = [225.0; 8];
         assert_eq!(classify_from_seasonal_c_mm(&ts, &ps), KoeppenCode::Af);
+    }
+
+    #[test]
+    fn dry_summer_and_dry_winter_subtypes_match_warm_and_cold_halves() {
+        // Mediterranean profile: warm dry summer (min_warm = 15 mm < 45 mm & < 180/3), mild wet winter:
+        let ts_c = [8.0, 10.0, 15.0, 22.0, 26.0, 23.0, 16.0, 11.0];
+        let ps_med = [180.0, 150.0, 120.0, 35.0, 15.0, 25.0, 110.0, 160.0];
+        assert_eq!(classify_from_seasonal_c_mm(&ts_c, &ps_med), KoeppenCode::Cs);
+
+        // Monsoon-influenced temperate profile: wet warm summer (max_warm = 240 mm), dry cold winter (min_cold = 12 mm < 24):
+        let ps_monsoon = [12.0, 20.0, 50.0, 180.0, 240.0, 200.0, 80.0, 18.0];
+        assert_eq!(classify_from_seasonal_c_mm(&ts_c, &ps_monsoon), KoeppenCode::Cw);
+
+        // Continental counterparts (`min_t < -3 °C`):
+        let ts_d = [-12.0, -8.0, 4.0, 16.0, 21.0, 17.0, 5.0, -6.0];
+        assert_eq!(classify_from_seasonal_c_mm(&ts_d, &ps_med), KoeppenCode::Ds);
+        assert_eq!(classify_from_seasonal_c_mm(&ts_d, &ps_monsoon), KoeppenCode::Dw);
     }
 }
