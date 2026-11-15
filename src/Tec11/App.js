@@ -2250,7 +2250,7 @@ export const mountLifeformsView =
     }
 
     const view = createBaseSphereView(canvas, false);
-    const glaciation = 1.0 - glaciationSlider / 100.0;
+    const glaciation = glaciationSlider / 100.0;
     view.session = new WasmLifeformsSession(glaciation);
     view.attribute = attribute;
     view.seasonSlider = seasonSlider;
@@ -2341,7 +2341,7 @@ export const setLifeformsSeason = (seasonSlider) => (setLifeformsInfo) => () => 
 
 export const setLifeformsGlaciation = (glaciationSlider) => (setLifeformsInfo) => () => {
   if (!activeView || !activeView.session) return;
-  const glaciation = 1.0 - glaciationSlider / 100.0;
+  const glaciation = glaciationSlider / 100.0;
   activeView.session.set_glaciation(glaciation);
   activeView.selectedSpeciesId = -1;
   activeView.speciesPresenceMask = null;
