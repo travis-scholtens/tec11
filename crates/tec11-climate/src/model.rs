@@ -551,12 +551,20 @@ impl ClimateModel {
                         ins
                     };
                     let temp = base_t + glacial_dt + 0.06 * sst_inf;
-                    let conv =
-                        (((lat * 2.0 * c_f64 + self.tilt_deg * season_val) * PI / 180.0).cos()
-                            + 1.0)
-                            / 2.0;
-                    let precip =
-                        ((self.seabased[v] + conv + 0.12 * sst_inf) * glacial_p_scale).clamp(0.0, 1.0);
+                    let cell_shift_deg = (0.32 * self.tilt_deg).min(30.0 / c_f64);
+                    let lat_eff = lat + cell_shift_deg * season_val;
+                    let conv = ((lat_eff * 2.0 * c_f64 * PI / 180.0).cos() + 1.0) / 2.0;
+                    let advected = 0.5 * (self.seabased[v] + self.seabased[v].sqrt());
+                    let sst_uplift = if sst_inf >= 0.0 {
+                        0.32 * sst_inf
+                    } else {
+                        0.26 * sst_inf
+                    };
+                    let thermal_conv = (0.18 + 0.42 * advected) * (ins - 0.60).max(0.0);
+                    let uplift =
+                        (0.06 + 0.94 * conv + thermal_conv + sst_uplift).clamp(0.03, 1.25);
+                    let moisture = 0.31 + 0.95 * advected + 0.10 * sst_inf.max(0.0);
+                    let precip = (uplift * moisture * glacial_p_scale).clamp(0.0, 1.0);
 
                     sun_vec.push(ins as f32);
                     temp_vec.push(temp as f32);
@@ -741,19 +749,21 @@ mod tests {
         }
 
         // Ocean tiles should be the majority (~5181 of 7292), and major terrestrial
-        // Köppen groups (Tropical Af/Am/Aw, Arid BS/BW, Temperate Cf, Continental Df, Polar ET/EF)
-        // must all be populated.
+        // Köppen groups (Tropical Af/Am/Aw, Arid BS/BW, Temperate Cf/Cs/Cw, Continental Df, Polar ET/EF)
+        // must all be populated at realistic planetary proportions.
         assert!(counts[KoeppenCode::Ocean as usize] > 5000);
         assert!(counts[KoeppenCode::Af as usize] > 100);
+        assert!(counts[KoeppenCode::Am as usize] + counts[KoeppenCode::Aw as usize] > 50);
         assert!(
             counts[KoeppenCode::Af as usize]
                 + counts[KoeppenCode::Am as usize]
                 + counts[KoeppenCode::Aw as usize]
                 > 200
         );
-        assert!(counts[KoeppenCode::BS as usize] > 50);
-        assert!(counts[KoeppenCode::BW as usize] > 25);
+        assert!(counts[KoeppenCode::BS as usize] > 200);
+        assert!(counts[KoeppenCode::BW as usize] > 150);
         assert!(counts[KoeppenCode::Cf as usize] > 200);
+        assert!(counts[KoeppenCode::Cs as usize] + counts[KoeppenCode::Cw as usize] > 10);
         assert!(counts[KoeppenCode::Df as usize] > 200);
         assert!(counts[KoeppenCode::ET as usize] + counts[KoeppenCode::EF as usize] > 50);
     }
