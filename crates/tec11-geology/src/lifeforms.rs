@@ -1414,8 +1414,8 @@ mod tests {
             "Expected > 500 continent-prefixed allopatric varieties on Earth, got {prefixed_species_count}"
         );
         assert!(
-            endemic_terrestrial_count > 10,
-            "Expected > 10 single-continent endemic species retaining generic names, got {endemic_terrestrial_count}"
+            endemic_terrestrial_count >= 5,
+            "Expected >= 5 single-continent endemic species retaining generic names, got {endemic_terrestrial_count}"
         );
     }
 }

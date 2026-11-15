@@ -64,7 +64,7 @@ pub const DEFAULT_SPIN: f64 = 1.0;
 pub const DEFAULT_TILT_DEG: f64 = 23.0;
 pub const DEFAULT_GLACIATION: f64 = 0.5;
 pub const EARTH_GLACIATION: f64 = 0.35;
-pub const MEAN_TEMPRANGE_C: TemperatureRange = TemperatureRange::new(-25.0, 50.0);
+pub const MEAN_TEMPRANGE_C: TemperatureRange = TemperatureRange::new(-27.0, 37.0);
 pub const BREEZE_DISTANCE: u32 = 10;
 
 /// Compute initial compass bearing (in degrees `[0, 360)`) from `(lat1_deg, lon1_deg)`
@@ -756,6 +756,70 @@ mod tests {
         assert!(counts[KoeppenCode::Cf as usize] > 200);
         assert!(counts[KoeppenCode::Df as usize] > 200);
         assert!(counts[KoeppenCode::ET as usize] + counts[KoeppenCode::EF as usize] > 50);
+    }
+
+    #[test]
+    fn glaciation_states_span_expected_icehouse_earth_and_greenhouse_temperatures() {
+        let mut model = ClimateModel::new_earth(3, 0.0);
+        let mean_temp_c = |m: &ClimateModel| -> f64 {
+            let sum: f64 = m
+                .classifications()
+                .iter()
+                .map(|c| MEAN_TEMPRANGE_C.to_celsius(c.mean_temperature))
+                .sum();
+            sum / (m.tile_count() as f64)
+        };
+
+        // Icehouse (g = 0.0): ~6-10 C global mean, expanded polar EF/ET ice sheets
+        let t_icehouse = mean_temp_c(&model);
+        let ef_icehouse = model
+            .classifications()
+            .iter()
+            .filter(|c| c.koeppen == KoeppenCode::EF)
+            .count();
+        assert!(
+            (5.0..=11.0).contains(&t_icehouse),
+            "Expected icehouse global mean in 5..11 C, got {t_icehouse:.2}"
+        );
+
+        // Modern Earth (g = 0.35): ~13-17 C global mean, tropical lowlands ~27-30 C
+        model.set_params(3, EARTH_GLACIATION);
+        let t_earth = mean_temp_c(&model);
+        let ef_earth = model
+            .classifications()
+            .iter()
+            .filter(|c| c.koeppen == KoeppenCode::EF)
+            .count();
+        assert!(
+            (13.0..=17.0).contains(&t_earth),
+            "Expected modern Earth global mean in 13..17 C, got {t_earth:.2}"
+        );
+        assert!(ef_icehouse > ef_earth);
+
+        // Tectonics long-term average (g = 0.50): ~16-20 C
+        model.set_params(3, DEFAULT_GLACIATION);
+        let t_tectonics = mean_temp_c(&model);
+        assert!(
+            (16.0..=20.0).contains(&t_tectonics),
+            "Expected tectonics mean in 16..20 C, got {t_tectonics:.2}"
+        );
+
+        // Greenhouse (g = 1.0): ~25-30 C global mean, polar EF ice caps melted
+        model.set_params(3, 1.0);
+        let t_greenhouse = mean_temp_c(&model);
+        let ef_greenhouse = model
+            .classifications()
+            .iter()
+            .filter(|c| c.koeppen == KoeppenCode::EF)
+            .count();
+        assert!(
+            (25.0..=30.0).contains(&t_greenhouse),
+            "Expected greenhouse global mean in 25..30 C, got {t_greenhouse:.2}"
+        );
+        assert!(
+            ef_greenhouse < 10,
+            "Expected polar EF ice caps to melt in greenhouse state, got {ef_greenhouse}"
+        );
     }
 
     #[test]
