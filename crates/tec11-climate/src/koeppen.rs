@@ -133,11 +133,10 @@ fn koeppen_code(
             KoeppenCode::BS
         }
     } else if min_t >= 18.0 {
-        if ps.iter().all(|&p| p >= 60.0 * month_to_season) {
+        let min_p = ps.iter().copied().fold(f64::INFINITY, f64::min);
+        if min_p >= 60.0 * month_to_season {
             KoeppenCode::Af
-        } else if ps.iter().any(|&p| {
-            (100.0 - tot / 25.0) * month_to_season <= p && p < 60.0 * month_to_season
-        }) {
+        } else if min_p >= (100.0 - tot / 25.0) * month_to_season {
             KoeppenCode::Am
         } else {
             KoeppenCode::Aw
@@ -226,5 +225,18 @@ mod tests {
         let ts_d = [-12.0, -8.0, 4.0, 16.0, 21.0, 17.0, 5.0, -6.0];
         assert_eq!(classify_from_seasonal_c_mm(&ts_d, &ps_med), KoeppenCode::Ds);
         assert_eq!(classify_from_seasonal_c_mm(&ts_d, &ps_monsoon), KoeppenCode::Dw);
+    }
+
+    #[test]
+    fn tropical_monsoon_checks_driest_season_rather_than_any_season() {
+        let ts = [25.0, 26.0, 28.0, 29.0, 27.0, 26.0, 25.0, 24.0];
+        // Total = 1250 mm -> `100 - 1250/25 = 50 mm/mo` = `75 mm` per 1/8-year season (`< 90 mm` Af threshold).
+        // Savanna with a bone-dry season (`0 mm`) AND a shoulder season (`80 mm` in `[75, 90)`) must be `Aw`, not `Am`:
+        let ps_savanna = [0.0, 10.0, 80.0, 320.0, 360.0, 300.0, 150.0, 30.0];
+        assert_eq!(classify_from_seasonal_c_mm(&ts, &ps_savanna), KoeppenCode::Aw);
+
+        // True monsoon where even the driest season (`78 mm`) exceeds `75 mm` (`< 90 mm`) must be `Am`:
+        let ps_monsoon = [78.0, 82.0, 110.0, 240.0, 280.0, 230.0, 140.0, 90.0];
+        assert_eq!(classify_from_seasonal_c_mm(&ts, &ps_monsoon), KoeppenCode::Am);
     }
 }
