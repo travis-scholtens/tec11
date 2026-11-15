@@ -1,4 +1,4 @@
-use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M, MEAN_TEMPRANGE_C};
+use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M, MEAN_TEMPRANGE_C};
 use tec11_math_grid::SphericalGrid;
 use tec11_proto::PlanetSnapshotExt;
 
@@ -73,7 +73,8 @@ impl ErosionSandbox {
             }
         }
 
-        let climate_model = ClimateModel::new_for_tectonics(grid.clone(), 3, 1.0, 23.0);
+        let mut climate_model = ClimateModel::new_for_tectonics(grid.clone(), 3, 1.0, 23.0);
+        climate_model.set_glaciation_only(EARTH_GLACIATION);
         let mut sim = Self {
             grid,
             adjacency,

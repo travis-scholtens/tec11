@@ -1216,7 +1216,7 @@ mkApp = do
     -- Climate mode state
     climateAttribute /\ setClimateAttributeState <- useState' "koeppen"
     climateSeason /\ setClimateSeasonState <- useState' 0
-    climateGlaciation /\ setClimateGlaciationState <- useState' 50
+    climateGlaciation /\ setClimateGlaciationState <- useState' 35
     climateCells /\ setClimateCellsState <- useState' 3
     climateInfo /\ setClimateInfo <- useState'
       { planetName: "Earth (ETOPO2)"
@@ -1254,7 +1254,7 @@ mkApp = do
     -- Lifeforms mode state
     lifeformsAttribute /\ setLifeformsAttributeState <- useState' "life"
     lifeformsSeason /\ setLifeformsSeasonState <- useState' 0
-    lifeformsGlaciation /\ setLifeformsGlaciationState <- useState' 50
+    lifeformsGlaciation /\ setLifeformsGlaciationState <- useState' 35
     lifeformsInfo /\ setLifeformsInfo <- useState'
       { planetName: "Earth (ETOPO2)"
       , tileCount: 7292
@@ -1294,7 +1294,7 @@ mkApp = do
       , tileCount: 7292
       , ticks: 0
       , kyr: 0
-      , glaciationPct: 50
+      , glaciationPct: 35
       , races: 0
       , agRaces: 0
       , populatedCount: 0
@@ -1540,7 +1540,7 @@ mkApp = do
 
     -- Global Coupled Weather & Storm Surge on Full-Sphere Coarse+2 Grid state (`WeatherScreen`)
     weatherAtmId /\ setWeatherAtmId <- useState' 0
-    weatherGlaciationPct /\ setWeatherGlaciationPct <- useState' 50
+    weatherGlaciationPct /\ setWeatherGlaciationPct <- useState' 35
     weatherMoonCount /\ setWeatherMoonCount <- useState' 1
     weatherMoonMassTenths /\ setWeatherMoonMassTenths <- useState' 10
     weatherMoonDistRadii /\ setWeatherMoonDistRadii <- useState' 60
@@ -2830,7 +2830,9 @@ mkApp = do
                               [ R.button
                                   { id: "climate-earth-btn"
                                   , className: "action-btn secondary"
-                                  , onClick: capture_ (loadEarthIntoClimate setClimateInfo)
+                                  , onClick: capture_ do
+                                      setClimateGlaciationState 35
+                                      loadEarthIntoClimate setClimateInfo
                                   , children: [ R.text "Earth" ]
                                   }
                               , R.button
@@ -3844,7 +3846,9 @@ mkApp = do
                               [ R.button
                                   { id: "lifeforms-earth-btn"
                                   , className: "action-btn secondary"
-                                  , onClick: capture_ (loadEarthIntoLifeforms setLifeformsInfo)
+                                  , onClick: capture_ do
+                                      setLifeformsGlaciationState 35
+                                      loadEarthIntoLifeforms setLifeformsInfo
                                   , children: [ R.text "Earth" ]
                                   }
                               , R.button
@@ -7433,7 +7437,9 @@ mkApp = do
                               [ R.button
                                   { id: "weather-earth-btn"
                                   , className: "action-btn secondary"
-                                  , onClick: capture_ (loadEarthIntoWeather setWeatherInfo)
+                                  , onClick: capture_ do
+                                      setWeatherGlaciationPct 35
+                                      loadEarthIntoWeather setWeatherInfo
                                   , children: [ R.text "Use Earth" ]
                                   }
                               , R.button

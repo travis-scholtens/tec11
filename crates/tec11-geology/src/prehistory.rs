@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::PI;
 
-use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
+use tec11_climate::{ClimateModel, DEFAULT_GLACIATION, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
@@ -302,13 +302,14 @@ impl PrehistorySimulation {
         }
 
         let groups = build_continent_groups_from_elevations(&tiles, &adjacency);
-        let climate_model = ClimateModel::new_for_tectonics_with_adjacency(
+        let mut climate_model = ClimateModel::new_for_tectonics_with_adjacency(
             grid.clone(),
             adjacency.clone(),
             3,
             1.0,
             23.0,
         );
+        climate_model.set_glaciation_only(EARTH_GLACIATION);
         let radius_km = PangeaWorld::planet_radius_km(6);
 
         let mut sim = Self {
@@ -320,7 +321,7 @@ impl PrehistorySimulation {
             tectonics_ticks: 0,
             prehistory_ticks: 0,
             glaciation_tick: 0,
-            glaciation: 0.5,
+            glaciation: EARTH_GLACIATION,
             tiles,
             groups,
             climate_model,
@@ -441,7 +442,7 @@ impl PrehistorySimulation {
                 .cos()
                 / 2.0
         } else {
-            0.5
+            self.glaciation
         };
         let mut climate_model = std::mem::replace(&mut self.climate_model, ClimateModel::empty());
         climate_model.reset_for_stage(cells, spin, tilt_deg, glaciation);
@@ -484,16 +485,21 @@ impl PrehistorySimulation {
     }
 
     pub fn reset(&mut self) {
+        let initial_glaciation = if self.is_custom {
+            DEFAULT_GLACIATION
+        } else {
+            EARTH_GLACIATION
+        };
         self.prehistory_ticks = 0;
         self.glaciation_tick = 0;
-        self.glaciation = 0.5;
+        self.glaciation = initial_glaciation;
         self.populated.clear();
         self.heritages.clear();
         self.agricultural_heritages.clear();
         self.rivergoing_heritages.clear();
         self.seafaring_heritages.clear();
         self.next_heritage_id = 0;
-        self.climate_model.set_glaciation_only(0.5);
+        self.climate_model.set_glaciation_only(initial_glaciation);
         self.refresh_climate_and_rivers();
     }
 

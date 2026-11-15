@@ -1,4 +1,4 @@
-use tec11_climate::{MoistBaroclinicSolver, WeatherInitConfig};
+use tec11_climate::{MoistBaroclinicSolver, WeatherInitConfig, EARTH_GLACIATION};
 use tec11_math_grid::FineParentage;
 
 use crate::sky_vantage::{
@@ -18,7 +18,14 @@ pub struct WeatherSandbox {
 
 impl WeatherSandbox {
     pub fn new_earth() -> Self {
-        Self::from_base(FinePlanetBase::new_earth(), 0, 0.5, 1, 1.0, 60.27)
+        Self::from_base(
+            FinePlanetBase::new_earth(),
+            0,
+            EARTH_GLACIATION as f32,
+            1,
+            1.0,
+            60.27,
+        )
     }
 
     pub fn from_base(
@@ -172,7 +179,14 @@ impl WeatherSandbox {
         let mc = self.solver.tides.moon_count();
         let mm = self.solver.tides.primary_mass_lunar();
         let md = self.solver.tides.primary_dist_radii();
-        *self = Self::from_base(FinePlanetBase::new_earth(), atm, 0.5, mc, mm, md);
+        *self = Self::from_base(
+            FinePlanetBase::new_earth(),
+            atm,
+            EARTH_GLACIATION as f32,
+            mc,
+            mm,
+            md,
+        );
     }
 
     pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {

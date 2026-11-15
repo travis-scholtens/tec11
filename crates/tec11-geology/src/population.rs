@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
+use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{dot, Pcg64Mcg, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
@@ -1089,7 +1089,8 @@ impl PopulationSandbox {
             }
         }
 
-        let climate_model = ClimateModel::new_for_tectonics(grid.clone(), 3, 1.0, 23.0);
+        let mut climate_model = ClimateModel::new_for_tectonics(grid.clone(), 3, 1.0, 23.0);
+        climate_model.set_glaciation_only(EARTH_GLACIATION);
         let mut s = Self {
             grid,
             adjacency,

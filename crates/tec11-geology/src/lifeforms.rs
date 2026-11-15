@@ -1,4 +1,4 @@
-use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M, MEAN_TEMPRANGE_C};
+use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M, MEAN_TEMPRANGE_C};
 use tec11_math_grid::{normal, PointTree, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
@@ -1068,7 +1068,7 @@ impl LifeformsSandbox {
     }
 
     pub fn load_earth(&mut self) {
-        *self = Self::new_earth(self.climate_model.glaciation());
+        *self = Self::new_earth(EARTH_GLACIATION);
     }
 
     pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_lifeforms_sandbox_earth() {
-        let sim = LifeformsSandbox::new_earth(0.5);
+        let sim = LifeformsSandbox::new_earth(EARTH_GLACIATION);
         assert_eq!(sim.tile_count(), 7292);
         assert!(
             sim.settled_animal_count() > 200,
@@ -1321,7 +1321,7 @@ mod tests {
 
     #[test]
     fn test_trophic_food_web_and_apex_predator_competition() {
-        let sim = LifeformsSandbox::new_earth(0.5);
+        let sim = LifeformsSandbox::new_earth(EARTH_GLACIATION);
         let bio = &sim.biosphere;
         let level_1 = bio.species.iter().filter(|s| s.trophic_level == 1).count();
         let level_2 = bio.species.iter().filter(|s| s.trophic_level == 2).count();
@@ -1366,7 +1366,7 @@ mod tests {
 
     #[test]
     fn test_allopatric_continental_varieties() {
-        let sim = LifeformsSandbox::new_earth(0.5);
+        let sim = LifeformsSandbox::new_earth(EARTH_GLACIATION);
         let bio = &sim.biosphere;
         assert!(
             bio.geography.continents.len() >= 4,

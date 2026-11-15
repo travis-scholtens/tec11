@@ -1,4 +1,4 @@
-use tec11_climate::ClimateModel;
+use tec11_climate::{ClimateModel, EARTH_GLACIATION};
 use tec11_math_grid::SphericalGrid;
 use tec11_proto::{GeologicalTileExt, PlanetSnapshotExt};
 use wasm_bindgen::prelude::*;
@@ -23,9 +23,9 @@ impl WasmClimateSession {
         }
     }
 
-    /// Reset to the default Earth (`ETOPO2`) planet while preserving `cells` and `glaciation`.
+    /// Reset to the default Earth (`ETOPO2`) planet at `EARTH_GLACIATION` while preserving `cells`.
     pub fn load_earth(&mut self) {
-        self.model = ClimateModel::new_earth(self.model.cells(), self.model.glaciation());
+        self.model = ClimateModel::new_earth(self.model.cells(), EARTH_GLACIATION);
         self.custom_geoticks = None;
         self.custom_land_percent = None;
     }

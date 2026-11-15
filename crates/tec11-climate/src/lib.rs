@@ -13,8 +13,8 @@ pub use weather::{saturation_column_vapor_kgm2, MoistBaroclinicSolver, WeatherIn
 pub use koeppen::{classify_tile, KoeppenCode, TileClimateClassification};
 pub use model::{
     bearing_deg, insolation, nominal_cells_for_spin, wind_direction_deg, ClimateModel,
-    DownwindLink, SeasonalSnapshot, TemperatureRange, BREEZE_DISTANCE, DEFAULT_SEASONS,
-    DEFAULT_SPIN, DEFAULT_TILT_DEG, MEAN_TEMPRANGE_C,
+    DownwindLink, SeasonalSnapshot, TemperatureRange, BREEZE_DISTANCE, DEFAULT_GLACIATION,
+    DEFAULT_SEASONS, DEFAULT_SPIN, DEFAULT_TILT_DEG, EARTH_GLACIATION, MEAN_TEMPRANGE_C,
 };
 pub use ocean::{
     solve_ocean_circulation, solve_seasonal_ocean_circulation,
