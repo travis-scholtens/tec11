@@ -739,10 +739,16 @@ mod tests {
         }
 
         // Ocean tiles should be the majority (~5181 of 7292), and major terrestrial
-        // Köppen groups (Tropical Aw, Arid BS/BW, Temperate Cf, Continental Df, Polar ET/EF)
+        // Köppen groups (Tropical Af/Am/Aw, Arid BS/BW, Temperate Cf, Continental Df, Polar ET/EF)
         // must all be populated.
         assert!(counts[KoeppenCode::Ocean as usize] > 5000);
-        assert!(counts[KoeppenCode::Aw as usize] > 200);
+        assert!(counts[KoeppenCode::Af as usize] > 100);
+        assert!(
+            counts[KoeppenCode::Af as usize]
+                + counts[KoeppenCode::Am as usize]
+                + counts[KoeppenCode::Aw as usize]
+                > 200
+        );
         assert!(counts[KoeppenCode::BS as usize] > 100);
         assert!(counts[KoeppenCode::BW as usize] > 100);
         assert!(counts[KoeppenCode::Cf as usize] > 200);

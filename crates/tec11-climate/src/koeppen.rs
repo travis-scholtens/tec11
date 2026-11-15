@@ -120,6 +120,9 @@ fn koeppen_code(
     tot: f64,
 ) -> KoeppenCode {
     let n_f64 = ps.len() as f64;
+    // `ps` holds per-season totals (`tot / n` on average), whereas Köppen thresholds
+    // (`60 mm`, `100 - tot/25 mm`, `30 mm`) are monthly (`1/12` of a year).
+    let month_to_season = 12.0 / n_f64;
     let min_t = ts.iter().copied().fold(f64::INFINITY, f64::min);
     let max_t = ts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
@@ -130,12 +133,11 @@ fn koeppen_code(
             KoeppenCode::BS
         }
     } else if min_t >= 18.0 {
-        if ps.iter().all(|&p| p >= 60.0 * n_f64) {
+        if ps.iter().all(|&p| p >= 60.0 * month_to_season) {
             KoeppenCode::Af
-        } else if ps
-            .iter()
-            .any(|&p| (100.0 - tot / 25.0) * n_f64 <= p && p < 60.0 * n_f64)
-        {
+        } else if ps.iter().any(|&p| {
+            (100.0 - tot / 25.0) * month_to_season <= p && p < 60.0 * month_to_season
+        }) {
             KoeppenCode::Am
         } else {
             KoeppenCode::Aw
@@ -165,7 +167,7 @@ fn koeppen_code(
             } else {
                 KoeppenCode::Dw
             }
-        } else if min_cold_p < (30.0 * n_f64).min(max_warm_p / 3.0) {
+        } else if min_cold_p < (30.0 * month_to_season).min(max_warm_p / 3.0) {
             if is_c {
                 KoeppenCode::Cs
             } else {
@@ -180,5 +182,27 @@ fn koeppen_code(
         KoeppenCode::ET
     } else {
         KoeppenCode::EF
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper that converts physical seasonal temperatures (°C) and seasonal precipitations (mm)
+    /// into normalized `rts` and `rps` inputs for `classify_tile`.
+    fn classify_from_seasonal_c_mm(ts_c: &[f64], ps_mm: &[f64]) -> KoeppenCode {
+        let range = TemperatureRange::new(0.0, 1.0);
+        let n = ps_mm.len() as f64;
+        let rps: Vec<f64> = ps_mm.iter().map(|&p| p * n / 1800.0).collect();
+        classify_tile(1.0, ts_c, &rps, range, true).koeppen
+    }
+
+    #[test]
+    fn eight_season_wet_equatorial_tile_classifies_as_af() {
+        // Uniform 26 °C and 225 mm per 1/8-year season (1800 mm/yr = 150 mm/month >= 60 mm/month):
+        let ts = [26.0; 8];
+        let ps = [225.0; 8];
+        assert_eq!(classify_from_seasonal_c_mm(&ts, &ps), KoeppenCode::Af);
     }
 }
