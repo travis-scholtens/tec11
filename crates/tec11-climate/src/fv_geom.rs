@@ -476,6 +476,31 @@ impl FiniteVolumeSphereGeom {
         }
     }
 
+    /// Computes conservative spherical relative vorticity $\zeta_i = (\hat{\mathbf{k}} \cdot \nabla \times \mathbf{u})_i$
+    /// via Stokes' theorem $\zeta_i = \frac{1}{A_i}\sum_{e \in \partial i} s_{e,i} l_e (\mathbf{u}_e \cdot (\hat{\mathbf{k}} \times \mathbf{n}_e))$,
+    /// automatically capturing spherical metric curvature $\frac{u\tan\phi}{R}$ and guaranteeing $\sum_i A_i \zeta_i \equiv 0$.
+    pub fn curl_from_cell_vectors(
+        &self,
+        u_east: &[f32],
+        v_north: &[f32],
+        scratch_edge_tan: &mut [f32],
+        out_zeta: &mut [f32],
+    ) {
+        debug_assert_eq!(u_east.len(), self.num_cells);
+        debug_assert_eq!(v_north.len(), self.num_cells);
+        debug_assert_eq!(scratch_edge_tan.len(), self.edges.len());
+        debug_assert_eq!(out_zeta.len(), self.num_cells);
+
+        for (e_idx, e) in self.edges.iter().enumerate() {
+            let l = e.left as usize;
+            let r = e.right as usize;
+            let vt_l = -u_east[l] * e.ny_left + v_north[l] * e.nx_left;
+            let vt_r = -u_east[r] * e.ny_right + v_north[r] * e.nx_right;
+            scratch_edge_tan[e_idx] = 0.5 * (vt_l + vt_r);
+        }
+        self.divergence_from_edge_flux(scratch_edge_tan, out_zeta);
+    }
+
     /// Converts local `(u_east, v_north)` velocity at `cell` into 3D `SphericalGrid` `[vx, vy, vz]`.
     #[inline]
     pub fn local_uv_to_xyz(&self, cell: usize, u_east: f32, v_north: f32) -> [f32; 3] {
@@ -559,6 +584,37 @@ mod tests {
         assert!(
             max_err < 0.25,
             "expected accurate solid-body zonal reconstruction, got max_err={max_err} m/s"
+        );
+
+        // 4. Stokes relative vorticity recovers exact planetary curl (2 * U0 / R) * sin(lat)
+        // for solid-body rotation and sums to zero globally.
+        let mut scratch_tan = vec![0.0_f32; geom.edges.len()];
+        let mut zeta = vec![0.0_f32; geom.num_cells];
+        geom.curl_from_cell_vectors(&rec_u, &rec_v, &mut scratch_tan, &mut zeta);
+
+        let zeta_global: f64 = zeta
+            .iter()
+            .zip(geom.areas_m2.iter())
+            .map(|(&z, &a)| (z as f64) * (a as f64))
+            .sum();
+        let zeta_scale: f64 = zeta
+            .iter()
+            .zip(geom.areas_m2.iter())
+            .map(|(&z, &a)| (z.abs() as f64) * (a as f64))
+            .sum();
+        assert!(
+            zeta_global.abs() / zeta_scale < 1e-6,
+            "expected zero global vorticity integral, got integral={zeta_global}, scale={zeta_scale}"
+        );
+
+        let mut max_zeta_err = 0.0_f32;
+        for i in 0..geom.num_cells {
+            let expected_z = ((2.0 * u0 / radius_m) as f32) * geom.sin_lat[i];
+            max_zeta_err = max_zeta_err.max((zeta[i] - expected_z).abs());
+        }
+        assert!(
+            max_zeta_err < 1.5e-6,
+            "expected accurate solid-body curl, got max_zeta_err={max_zeta_err}"
         );
     }
 }

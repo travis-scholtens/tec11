@@ -104,6 +104,12 @@ $$
 
    where $d_{i,e} = R \arccos(\hat{\mathbf{x}}_i \cdot \hat{\mathbf{x}}_e) \approx \frac{1}{2} d_e$ is the distance from cell center $i$ to edge midpoint $e$.
 
+   - **Exact Conservative Spherical Relative Vorticity** (Stokes' theorem on $\Omega_i$, satisfying $\sum_i A_i \zeta_i \equiv 0$ identically and naturally capturing the spherical metric curvature term $\frac{u\tan\phi}{R}$):
+
+$$
+\zeta_i = (\nabla \times \mathbf{u})_i = \frac{1}{A_i} \sum_{e \in \partial\Omega_i} s_{i,e}\, l_e\, (\mathbf{u}_e \cdot \hat{\mathbf{t}}_e), \qquad \hat{\mathbf{t}}_e = \hat{\mathbf{x}}_e \times \hat{\mathbf{n}}_e
+$$
+
 ---
 
 ### 3.2 Global Barotropic Laplace Tidal & Storm Surge Equations (`tides.rs`)
@@ -181,58 +187,42 @@ $$
 
 Because $\mathbf{G}_2 - \mathbf{G}_1 = -\Delta\Pi_{12} \nabla\bar{\theta}_{12}$, any equator-to-pole or land–ocean horizontal temperature gradient $\nabla\theta$ automatically drives vertical wind shear $\mathbf{u}_2 - \mathbf{u}_1 = \frac{\Delta\Pi_{12}}{f}\hat{\mathbf{k}} \times \nabla\bar{\theta}_{12}$ (**thermal wind balance**). When vertical shear exceeds the two-layer Phillips [1956] baroclinic criticality threshold over the Rossby radius of deformation $L_D = \frac{\sqrt{\Delta\Pi_{12} \Delta\theta_{\text{vert}}}}{|f|} \approx 700\text{–}1000\text{ km}$ ($\sim 8\text{–}11$ fine grid cells!), synoptic waves spontaneously amplify into **migrating extratropical lows, highs, and sharp warm/cold fronts**.
 
-#### 2. Continuity, Vertical Velocity ($\omega$), and Momentum Equations
-Column mass conservation ties surface pressure tendency $\partial_t \delta p_s$ and mid-tropospheric vertical mass flux $W_{1\to 2}$ (`kg m⁻² s⁻¹`, positive upward) to horizontal wind divergence:
+#### 2. Continuity, Vertical Velocity ($W_{1\to 2}$), Vector-Invariant RK3 Dynamics & Scale-Aware Rhines Eddy Closure
+Dry-mass continuity evolves surface pressure anomaly $\delta p_s$ conservatively (projected to zero global area mean $\sum_i A_i \delta p_{s,i} \equiv 0$) and diagnoses mid-tropospheric vertical velocity $W_{1\to 2} = \frac{1}{2}(\nabla\cdot\mathbf{u}_2 - \nabla\cdot\mathbf{u}_1)$ [Lorenz, 1960]:
 
 $$
-\frac{\partial \delta p_s}{\partial t} = -g \Big( \nabla \cdot (m_1 \mathbf{u}_1) + \nabla \cdot (m_2 \mathbf{u}_2) \Big), \qquad W_{1\to 2} = -\nabla \cdot (m_1 \mathbf{u}_1) - \frac{1}{2g}\frac{\partial \delta p_s}{\partial t} = \frac{1}{2}\Big(\nabla \cdot (m_2 \mathbf{u}_2) - \nabla \cdot (m_1 \mathbf{u}_1)\Big)
+\frac{\partial \delta p_s}{\partial t} = -\frac{\Delta p_{\text{col}}}{2}\Big(\nabla\cdot\mathbf{u}_1 + \nabla\cdot\mathbf{u}_2\Big)
 $$
 
-Horizontal momentum in layers $k \in \{1, 2\}$ evolves via:
+Horizontal momentum and potential temperature in layers $k \in \{1, 2\}$ are integrated with a **3-stage Wicker–Skamarock RK3 scheme** [Wicker & Skamarock, 2002] in **spherical vector-invariant form** [Ringler et al., 2010]:
 
 $$
-\frac{\partial \mathbf{u}_1}{\partial t} + (\mathbf{u}_1 \cdot \nabla)\mathbf{u}_1 + f\,\hat{\mathbf{k}} \times \mathbf{u}_1 = \mathbf{G}_1 - C_{D,i}\frac{\rho_a |\mathbf{u}_1|\mathbf{u}_1}{m_1} + \frac{M_{\text{conv}} + W_{1\to 2}^-}{m_1}(\mathbf{u}_2 - \mathbf{u}_1) - \nu_4 \nabla^4 \mathbf{u}_1
+\frac{\partial \mathbf{u}_k}{\partial t} = (\zeta_k + f)\,\hat{\mathbf{k}} \times \mathbf{u}_k - \nabla\big(\Phi_k + K_k\big) + \mathbf{F}_{\text{EP},k} + \mathbf{F}_{\text{drag/mix},k} + \nu_{\text{div}}\nabla(\nabla\cdot\mathbf{u}_k) + \nu_2 \nabla^2\mathbf{u}_k
 $$
 
-$$
-\frac{\partial \mathbf{u}_2}{\partial t} + (\mathbf{u}_2 \cdot \nabla)\mathbf{u}_2 + f\,\hat{\mathbf{k}} \times \mathbf{u}_2 = \mathbf{G}_2 + \frac{M_{\text{conv}} + W_{1\to 2}^+}{m_2}(\mathbf{u}_1 - \mathbf{u}_2) - r_{\text{top}}\mathbf{u}_2 - \nu_4 \nabla^4 \mathbf{u}_2
-$$
+where $K_k = \frac{1}{2}|\mathbf{u}_k|^2$ is kinetic energy, $\zeta_k = (\nabla\times\mathbf{u}_k)$ is Stokes relative vorticity, and adiabatic static-stability cooling/warming $-W_{1\to 2} S_{\text{stab}}$ links vertical motion to $\partial_t\theta_k$.
 
-where $C_{D,i} = C_{D,0}(1 + 2.5\,\text{mountainosity\_norm}_i)$ represents topographic roughness drag, $M_{\text{conv}}$ is cumulus momentum mixing, and $-\nu_4 \nabla^4 \mathbf{u}_k = -\nu_4 \nabla^2(\nabla^2 \mathbf{u}_k)$ is scale-selective 4th-order hyperviscosity [Skamarock et al., 2012] that damps $2\Delta x$ grid noise while leaving synoptic cyclones and jets undamped.
-
-#### 3. Diurnal + Seasonal Grey-Atmosphere Radiative Transfer & Surface Energy Balance
-At simulated day $D$ and hour $H$, the subsolar unit vector $\hat{\mathbf{s}}(t)$ is computed from orbital longitude $\lambda_{\odot}(t)$ and axial obliquity $\varepsilon = \text{tilt\_deg}$:
+- **Principled Multi-Cell Rhines / Eliassen–Palm Subgrid Baroclinic Eddy Closure ($\mathbf{F}_{\text{EP},k}$)** [Rhines, 1975; Held & Larichev, 1996; Vallis, 2017]:
+  On coarse interactive grids where the Rossby deformation radius $L_D = \frac{c_{\text{bc}}}{2|\Omega|}$ is only partially resolved ($\chi_{\text{sg}} = (1 + (0.65 L_D / \Delta x)^2)^{-1}$), unresolved transient baroclinic eddies converge westerly momentum into baroclinic storm-track jets according to the dimensionless planetary Rhines index:
 
 $$
-\cos\zeta_i(t) = \max\!\big(0,\; \hat{\mathbf{x}}_i \cdot \hat{\mathbf{s}}(t)\big), \qquad S_{\text{inc},i}(t) = S_0 \left(\frac{L_{\star}}{L_{\odot}}\right)\left(\frac{1\text{ AU}}{a_{\text{orb}}}\right)^2 \cos\zeta_i(t)
+\tilde{s} = \frac{|\Omega|\,R}{11.33\,c_{\text{bc}}}, \qquad m_{\text{eddy}} = \lfloor \tilde{s} + 0.25 \rfloor, \qquad N_{\text{cells}} = 2\,m_{\text{eddy}} + 1 \in \{1, 3, 5, 7, \dots\}
 $$
 
-Following SPEEDY [Molteni, 2003], shortwave transmission accounts for cloud albedo $\alpha_{\text{cld}} = \min(0.68, 0.50 c_{\text{low}} + 0.25 c_{\text{high}})$ and surface albedo $\alpha_{\text{surf},i}$ (dynamically blending ocean Fresnel albedo `0.06`, sea ice `0.65`, bare rock felsity albedo `0.14–0.32`, vegetation canopy `0.12–0.18`, and fresh snowpack $\alpha_{\text{snow}} = 0.78$ via $1 - e^{-\text{snow\_m}/0.05}$). Longwave cooling uses a two-band grey emissivity ($\epsilon_1, \epsilon_2$) scaled by `AtmosphereType` optical depth $\tau_{\text{LW}}$ (modulated by `glaciation` and water-vapor feedback):
+  Slow rotators ($\tilde{s} < 0.75$, $m_{\text{eddy}} = 0$) exhibit a pure **1-cell** Held–Hou Hadley circulation ($\mathbf{F}_{\text{EP}} \equiv \mathbf{0}$), whereas Earth-like ($24\text{ h} \to 3\text{ cells}$) and faster rotators ($12\text{ h} \to 5\text{ cells}$, $8\text{ h} \to 7\text{ cells}$) naturally develop alternating easterly/westerly zonal wind belts while identically conserving global axial angular momentum ($\sum_i A_i a_{\text{EP},i}\cos\phi_i \equiv 0$).
 
-$$
-C_{\text{surf},i} \frac{\partial T_{\text{skin},i}}{\partial t} = (1 - \alpha_{\text{cld}})(1 - \alpha_{\text{surf},i}) S_{\text{inc},i} + \epsilon_{\text{atm}} \sigma_{\text{SB}} T_1^4 - \sigma_{\text{SB}} T_{\text{skin},i}^4 - F_{\text{SH},i} - F_{\text{LH},i} - F_{\text{melt},i} + \frac{T_{\text{clim},i} - T_{\text{skin},i}}{\tau_{\text{deep}}}
-$$
+#### 3. Exact Daily/Annual Solar Geometry, Radiative-Convective Equilibrium & Surface Albedo
+At simulated day $D$ and hour $H$, instantaneous solar zenith cosine $\cos\zeta_i(t) = \max(0, \hat{\mathbf{x}}_i \cdot \hat{\mathbf{s}}(t))$ is paired with exact sunrise-hour-angle daily-mean insolation $\overline{\mu}_{24\text{h}}(\phi_i, \delta) = \frac{1}{\pi}(h_0 \sin\phi_i\sin\delta + \cos\phi_i\cos\delta\sin h_0)$ (guaranteeing zero 24-hour diurnal drift) and exact 16-point orbital-mean insolation $\overline{\mu}_{\text{ann}}(\phi_i, \varepsilon)$ for arbitrary axial tilt $\varepsilon \in [0^\circ, 89^\circ]$. Column radiative-convective equilibrium follows North & Coakley [1979] with `glaciation` mapped continuously from icehouse (`0.0`) to greenhouse (`1.0`, modern Earth $\approx 0.35$), distinguishing canopy-masked seasonal snow ($\alpha \approx 0.46$) from perennial continental ice sheets ($> 0.55\text{ m}$ SWE, $\alpha \approx 0.76$).
 
-Because $C_{\text{surf}}$ is $\sim 40\times$ larger over the ocean mixed layer than over dry continental rock/sand, daytime solar heating creates coastal thermal pressure gradients that naturally generate **afternoon onshore sea breezes, nighttime offshore land breezes, afternoon continental convection, and seasonal monsoons**.
-
-#### 4. Moist Thermodynamics, Convection, Tropical Cyclones (`WISHE`) & Orographic Precipitation
+#### 4. Moist Thermodynamics, Sundqvist Condensation, `WISHE` & Orographic Rain Shadows
 Saturation specific humidity follows Bolton's [1980] Magnus–Tetens Clausius–Clapeyron formula:
 
 $$
 e_s(T) = 611.2 \exp\!\left(\frac{17.67\,(T - 273.15)}{T - 29.65}\right)\text{ Pa}, \qquad q_{\text{sat}}(T, p) = \frac{0.622\, e_s(T)}{\max(p - 0.378\, e_s(T),\; 1000\text{ Pa})}
 $$
 
-- **Surface Evaporation & WISHE Feedback** [Emanuel, 1986; Rotunno & Emanuel, 1987]:
-
-$$
-E_i = \rho_a C_E \, \beta_{\text{wet},i} \, \sqrt{|\mathbf{u}_{1,i}|^2 + w_{\text{gust}}^2}\,\max\!\big(0,\; q_{\text{sat}}(T_{\text{skin},i}, p_{s,i}) - q_{1,i}\big)
-$$
-
-  where $\beta_{\text{wet},i} = 1$ over ice-free ocean/inundated tiles and $\beta_{\text{wet},i} = 0.15 + 0.85 w_{\text{soil},i}$ over vegetated/wet land. Over warm tropical oceans ($T_{\text{skin}} \gtrsim 299.6\text{ K} = 26.5^\circ\text{C}$) away from the equator ($|f| > f_{\min}$), rising wind speed $|\mathbf{u}_1|$ amplifies $E_i$, feeding moist-convective latent heating that deepens the warm-core surface low $\delta p_s < 0$ (**WISHE hurricane spin-up**).
-- **Moist-Convective Mass Flux & Latent Heat (`mcRSW` / SPEEDY)** [Molteni, 2003; Bouchut et al., 2009; Rostami & Zeitlin, 2018]:
-  Equivalent potential temperature $\theta_{e,1} = \theta_1 \exp\!\left(\frac{L_v q_1}{c_p T_1}\right)$ is compared against upper-layer saturation $\theta_{2}^* = \theta_2 \exp\!\left(\frac{L_v q_{\text{sat}}(T_2, p_2)}{c_p T_2}\right)$. When conditional instability ($\theta_{e,1} > \theta_2^*$) coincides with boundary-layer moisture ($R\!H_1 > 0.65$) or low-level convergence ($W_{1\to 2} > 0$), convective condensation $\dot{q}_{\text{conv}}$ releases latent heat $\frac{L_v}{c_p \Pi_k}\dot{q}_{\text{conv}}$ into the column and drives upward convective mass flux $M_{\text{conv}}$, concentrating cyclonic potential vorticity along **cold/warm fronts** and **tropical cyclone cores**.
-- **Orographic & Large-Scale Condensation**:
-  Upslope flow $\mathbf{u}_1 \cdot \nabla z_s > 0$ cools air adiabatically; any vapor exceeding $q_{\text{sat}}(T_1, p_1)$ condenses into cloud water $q_c$, which auto-converts (Kessler-style threshold + Bergeron–Findeisen ice efficiency) into **rain** ($T_1 > 273.15\text{ K}$) or **snowfall** ($T_1 \le 273.15\text{ K}$), depleting $q_v$ so air descending leeward slopes ($\mathbf{u}_1 \cdot \nabla z_s < 0$) creates realistic **rain shadows** and warm dry **Foehn/Chinook winds**.
+- **Bulk Aerodynamic Evaporation & Canopy Recycling**: Aerodynamic roughness differentiates smooth ocean ($C_E \sim 1.1\times 10^{-6}$) from vegetated/rough continents ($C_E \sim 2.1\times 10^{-6}$), sustaining continental moisture recycling and **WISHE** tropical cyclone intensification over warm oceans.
+- **Moist-Neutral Deep Convection & Sundqvist Fractional Condensation** [Sundqvist, 1978; Molteni, 2003]: Subgrid condensation initiates above $R\!H_{\text{crit}}$ (`0.78` over rough land, `0.84` over ocean) with a ~36-hour synoptic moisture residence time, enhanced by upslope orographic ascent ($\mathbf{u}_1\cdot\nabla z_s > 0$), suppressed by leeward Foehn descent ($\mathbf{u}_1\cdot\nabla z_s < 0$), and converted to rain/snow via Kessler + Bergeron–Findeisen cold-cloud microphysics.
 - **Positive-Definite Semi-Lagrangian / Upwind Transport** [Robert, 1981; Staniforth & Côté, 1991]:
   Scalar fields $(\theta_1, \theta_2, q_v, q_c)$ are transported using mass-consistent upwind / quasi-monotone Semi-Lagrangian interpolation with positivity clamping ($q_v, q_c \ge 0$).
 

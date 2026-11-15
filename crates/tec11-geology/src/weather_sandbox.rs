@@ -101,8 +101,8 @@ impl WeatherSandbox {
             };
         }
 
-        // Match `ClimateModel` / `PrehistorySimulation` convention: `0.0` = icehouse, `1.0` = greenhouse:
-        let glac_offset_c = 12.0 * (glaciation.clamp(0.0, 1.0) - 0.5);
+        // Match `weather::glaciation_temp_offset_c`: `0.0` = icehouse, `~0.35` = modern Earth, `1.0` = greenhouse:
+        let glac_offset_c = 14.0 * (glaciation.clamp(0.0, 1.0) - 0.35);
         let mut base_sst_c = Vec::with_capacity(nf);
         let mut init_soil_moisture = Vec::with_capacity(nf);
         let mut init_snow_depth_m = Vec::with_capacity(nf);
@@ -129,7 +129,7 @@ impl WeatherSandbox {
                 let t_annual_est_c =
                     28.5 - 48.0 * sin_phi * sin_phi - 6.5 * elev_km + glac_offset_c;
                 let alpine_snow_m = if t_annual_est_c < -2.0 {
-                    ((-2.0 - t_annual_est_c) * 0.04).clamp(0.0, 1.20)
+                    ((-2.0 - t_annual_est_c) * 0.015).clamp(0.0, 0.06)
                 } else {
                     0.0
                 };
