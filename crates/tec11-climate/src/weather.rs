@@ -464,16 +464,14 @@ impl MoistBaroclinicSolver {
                     (1.0 - snow_frac) * veg_alb + snow_frac * 0.76
                 };
 
-                // Instantaneous absorbed shortwave vs daily-mean radiative target:
-                // Normalized diurnal anomaly `(cos_z - daily_mean_cos_z)` drives realistic `+6..+13 C`
-                // afternoon land warming and nighttime cooling while keeping multi-day climate anchored!
+                // Instantaneous absorbed shortwave vs exact 24-hour daily-mean solar zenith cosine:
+                // Zero-mean diurnal anomaly `(cos_z - daily_mean_mu)` drives realistic `+6..+13 C`
+                // afternoon land warming and nighttime cooling without biasing winter or polar night!
                 let cos_lat = geom.cos_lat[i];
-                let approx_daily_mu = (0.318 * cos_lat * (1.0 - sin_dec * sin_dec).sqrt()
-                    + 0.5 * (sin_phi * sin_dec).max(0.0))
-                .clamp(0.02, 0.45);
+                let daily_mu = exact_daily_mean_cos_z(sin_phi, cos_lat, sin_dec);
                 let sw_trans = 1.0 - 0.56 * cloud_tot;
                 let diurnal_sw_wm2 =
-                    1361.0 * self.solar_luminosity * (1.0 - surf_albedo) * sw_trans * (cos_z - approx_daily_mu);
+                    1361.0 * self.solar_luminosity * (1.0 - surf_albedo) * sw_trans * (cos_z - daily_mu);
                 let cloud_lw_trap_wm2 = 42.0 * cloud_tot - 28.0 * (surf_albedo - 0.20);
 
                 if is_ocean {
@@ -1012,6 +1010,21 @@ fn apply_biharmonic_smoothing(
     }
 }
 
+/// Exact 24-hour mean of $\max(0, \cos z) = \max(0, \sin\phi\sin\delta + \cos\phi\cos\delta\cos H)$
+/// integrated over hour angle $H \in [-\pi, \pi]$ via sunrise/sunset half-day angle $h_0$.
+#[inline]
+fn exact_daily_mean_cos_z(sin_phi: f32, cos_phi: f32, sin_dec: f32) -> f32 {
+    let cos_dec = (1.0 - sin_dec * sin_dec).max(0.0).sqrt();
+    let denom = cos_phi * cos_dec;
+    if denom <= 1.0e-6 {
+        return (sin_phi * sin_dec).max(0.0);
+    }
+    let arg = (-sin_phi * sin_dec / denom).clamp(-1.0, 1.0);
+    let h0 = arg.acos();
+    let sin_h0 = (1.0 - arg * arg).max(0.0).sqrt();
+    (std::f32::consts::FRAC_1_PI * (h0 * sin_phi * sin_dec + denom * sin_h0)).max(0.0)
+}
+
 /// Bolton (1980) Clausius–Clapeyron saturation column water vapor ($\text{kg m}^{-2}$)
 /// as a function of lower-tropospheric temperature `t_k` (K) and surface elevation `zs_m` (m).
 #[inline]
@@ -1129,5 +1142,34 @@ mod tests {
             max_surge > 0.12,
             "expected positive coastal storm surge under deep cyclone pressure drop, got {max_surge} m"
         );
+    }
+
+    #[test]
+    fn test_exact_daily_mean_cos_z_has_zero_diurnal_bias_at_all_latitudes_and_seasons() {
+        for &dec_deg in &[-23.44_f32, 0.0, 23.44] {
+            let dec = dec_deg.to_radians();
+            let sin_dec = dec.sin();
+            let cos_dec = dec.cos();
+            for lat_step in -89..=89 {
+                let phi = (lat_step as f32).to_radians();
+                let sin_phi = phi.sin();
+                let cos_phi = phi.cos();
+                let analytic = exact_daily_mean_cos_z(sin_phi, cos_phi, sin_dec);
+
+                let n_samples = 720;
+                let mut sum = 0.0_f32;
+                for k in 0..n_samples {
+                    let h = -std::f32::consts::PI
+                        + 2.0 * std::f32::consts::PI * ((k as f32 + 0.5) / (n_samples as f32));
+                    let cos_z = (sin_phi * sin_dec + cos_phi * cos_dec * h.cos()).max(0.0);
+                    sum += cos_z;
+                }
+                let numeric = sum / (n_samples as f32);
+                assert!(
+                    (analytic - numeric).abs() < 1.0e-4,
+                    "daily mean cos_z mismatch at lat={lat_step} dec={dec_deg}: analytic={analytic} vs numeric={numeric}"
+                );
+            }
+        }
     }
 }
