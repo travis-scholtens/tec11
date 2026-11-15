@@ -126,7 +126,15 @@ fn koeppen_code(
     let min_t = ts.iter().copied().fold(f64::INFINITY, f64::min);
     let max_t = ts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
-    if tot <= thr {
+    // Polar Group E (`max_t <= 10 °C`) takes precedence over Arid Group B (Peel et al. 2007, Table 1)
+    // so cold dry tundra / polar desert tiles are never misclassified as `BW` or `BS`.
+    if max_t <= 10.0 {
+        if max_t >= 0.0 {
+            KoeppenCode::ET
+        } else {
+            KoeppenCode::EF
+        }
+    } else if tot <= thr {
         if tot <= thr / 2.0 {
             KoeppenCode::BW
         } else {
@@ -141,7 +149,7 @@ fn koeppen_code(
         } else {
             KoeppenCode::Aw
         }
-    } else if max_t > 10.0 {
+    } else {
         let is_c = min_t >= -3.0;
         let min_warm_p = warm_half
             .iter()
@@ -182,10 +190,6 @@ fn koeppen_code(
         } else {
             KoeppenCode::Df
         }
-    } else if max_t >= 0.0 {
-        KoeppenCode::ET
-    } else {
-        KoeppenCode::EF
     }
 }
 
@@ -238,5 +242,14 @@ mod tests {
         // True monsoon where even the driest season (`78 mm`) exceeds `75 mm` (`< 90 mm`) must be `Am`:
         let ps_monsoon = [78.0, 82.0, 110.0, 240.0, 280.0, 230.0, 140.0, 90.0];
         assert_eq!(classify_from_seasonal_c_mm(&ts, &ps_monsoon), KoeppenCode::Am);
+    }
+
+    #[test]
+    fn polar_group_takes_precedence_over_arid_threshold() {
+        // Cold subpolar tundra (`mean_t = +3 °C`, `max_t = +7 °C <= 10 °C`) with summer-concentrated
+        // 150 mm/yr precip (`thr = 3*20 + 280 = 340 mm > 150 mm`) must be `ET`, not `BW`:
+        let ts = [-1.0, 0.0, 2.0, 6.0, 7.0, 6.0, 3.0, 1.0];
+        let ps = [5.0, 5.0, 10.0, 35.0, 45.0, 30.0, 15.0, 5.0];
+        assert_eq!(classify_from_seasonal_c_mm(&ts, &ps), KoeppenCode::ET);
     }
 }
