@@ -290,7 +290,8 @@ impl MoistBaroclinicSolver {
 
         let sun_dir = self.tides.subsolar_unit_xyz(0.0);
         let sin_dec = sun_dir[2] as f32;
-        let glac_offset_c = 12.0 * (0.5 - self.glaciation);
+        // Match `ClimateModel` / `PrehistorySimulation` convention: `0.0` = icehouse (`-6 °C`), `1.0` = greenhouse (`+6 °C`):
+        let glac_offset_c = 12.0 * (self.glaciation - 0.5);
         let p_hpa_base = self.p_ref_pa * 0.01;
 
         self.ps_anom_pa.fill(0.0);
@@ -406,7 +407,8 @@ impl MoistBaroclinicSolver {
     pub fn step_hour(&mut self, geom: &FiniteVolumeSphereGeom) {
         let dt = DT_WEATHER_S;
         let inv_sub = 1.0 / (WEATHER_SUBSTEPS_PER_HOUR as f32);
-        let glac_offset_c = 12.0 * (0.5 - self.glaciation);
+        // Match `ClimateModel` / `PrehistorySimulation` convention: `0.0` = icehouse (`-6 °C`), `1.0` = greenhouse (`+6 °C`):
+        let glac_offset_c = 12.0 * (self.glaciation - 0.5);
 
         // Scale-selective 4th-order hyperviscosity coefficient `nu4` tuned to grid spacing `d_mean`:
         let d_mean = geom.mean_edge_dist_m.max(10_000.0);
@@ -1171,5 +1173,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_glaciation_convention_matches_icehouse_zero_to_greenhouse_one() {
+        let grid = SphericalGrid::with_size(3);
+        let adj = grid.adjacency();
+        let geom = FiniteVolumeSphereGeom::new(&grid, &adj, 6_371_000.0, 24.0);
+        let n = geom.num_cells;
+        let bed_m = vec![200.0_f32; n];
+        let mount = vec![0.1_f32; n];
+        let is_river = vec![false; n];
+        let base_sst = vec![20.0_f32; n];
+        let soil = vec![0.5_f32; n];
+        let snow = vec![0.0_f32; n];
+
+        let make_solver = |glaciation: f32| {
+            MoistBaroclinicSolver::new(
+                &grid,
+                &adj,
+                &geom,
+                WeatherInitConfig {
+                    bed_m: &bed_m,
+                    mountainosity_norm: &mount,
+                    is_river: &is_river,
+                    base_sst_c: &base_sst,
+                    init_soil_moisture: &soil,
+                    init_snow_depth_m: &snow,
+                    day_hours: 24.0,
+                    tilt_deg: 23.44,
+                    days_per_year: 365.25,
+                    home_init_angle_rad: 0.0,
+                    solar_tide_factor: 1.0,
+                    solar_luminosity: 1.0,
+                    glaciation,
+                    atmosphere_id: 0,
+                    moon_count: 1,
+                    primary_mass_lunar: 1.0,
+                    primary_dist_radii: 60.27,
+                },
+            )
+        };
+
+        let mut icehouse = make_solver(0.0);
+        let mut greenhouse = make_solver(1.0);
+        icehouse.step_hour(&geom);
+        greenhouse.step_hour(&geom);
+
+        let mean_ice: f32 = icehouse.tsurf_c.iter().sum::<f32>() / (n as f32);
+        let mean_green: f32 = greenhouse.tsurf_c.iter().sum::<f32>() / (n as f32);
+        assert!(
+            mean_green > mean_ice + 8.0,
+            "expected greenhouse (1.0) warmer than icehouse (0.0), got greenhouse={mean_green:.2} vs icehouse={mean_ice:.2}"
+        );
     }
 }

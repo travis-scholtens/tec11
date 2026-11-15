@@ -101,7 +101,8 @@ impl WeatherSandbox {
             };
         }
 
-        let glac_offset_c = 12.0 * (0.5 - glaciation.clamp(0.0, 1.0));
+        // Match `ClimateModel` / `PrehistorySimulation` convention: `0.0` = icehouse, `1.0` = greenhouse:
+        let glac_offset_c = 12.0 * (glaciation.clamp(0.0, 1.0) - 0.5);
         let mut base_sst_c = Vec::with_capacity(nf);
         let mut init_soil_moisture = Vec::with_capacity(nf);
         let mut init_snow_depth_m = Vec::with_capacity(nf);
