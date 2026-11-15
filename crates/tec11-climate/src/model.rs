@@ -526,7 +526,7 @@ impl ClimateModel {
     fn refresh_seasons_and_classifications(&mut self, has_life: bool) {
         let n = self.tile_count();
         let glacial_dt = 0.15 * (self.glaciation - 0.5) / 0.5;
-        let glacial_dp = 0.2 * (0.5 - self.glaciation) / 0.5;
+        let glacial_p_scale = 1.0 + 0.25 * (self.glaciation - 0.5) / 0.5;
         let c_f64 = self.cells as f64;
         let templimits = MEAN_TEMPRANGE_C;
 
@@ -556,7 +556,7 @@ impl ClimateModel {
                             + 1.0)
                             / 2.0;
                     let precip =
-                        (self.seabased[v] + conv + glacial_dp + 0.12 * sst_inf).clamp(0.0, 1.0);
+                        ((self.seabased[v] + conv + 0.12 * sst_inf) * glacial_p_scale).clamp(0.0, 1.0);
 
                     sun_vec.push(ins as f32);
                     temp_vec.push(temp as f32);
@@ -769,9 +769,24 @@ mod tests {
                 .sum();
             sum / (m.tile_count() as f64)
         };
+        let mean_precip = |m: &ClimateModel| -> f64 {
+            let sum: f64 = m
+                .classifications()
+                .iter()
+                .map(|c| c.mean_precipitation)
+                .sum();
+            sum / (m.tile_count() as f64)
+        };
+        let arid_count = |m: &ClimateModel| -> usize {
+            m.classifications()
+                .iter()
+                .filter(|c| matches!(c.koeppen, KoeppenCode::BS | KoeppenCode::BW))
+                .count()
+        };
 
-        // Icehouse (g = 0.0): ~6-10 C global mean, expanded polar EF/ET ice sheets
+        // Icehouse (g = 0.0): ~6-10 C global mean, expanded polar EF/ET ice sheets, drier hydroclimate
         let t_icehouse = mean_temp_c(&model);
+        let p_icehouse = mean_precip(&model);
         let ef_icehouse = model
             .classifications()
             .iter()
@@ -781,10 +796,12 @@ mod tests {
             (5.0..=11.0).contains(&t_icehouse),
             "Expected icehouse global mean in 5..11 C, got {t_icehouse:.2}"
         );
+        assert!(arid_count(&model) > 50);
 
         // Modern Earth (g = 0.35): ~13-17 C global mean, tropical lowlands ~27-30 C
         model.set_params(3, EARTH_GLACIATION);
         let t_earth = mean_temp_c(&model);
+        let p_earth = mean_precip(&model);
         let ef_earth = model
             .classifications()
             .iter()
@@ -795,18 +812,22 @@ mod tests {
             "Expected modern Earth global mean in 13..17 C, got {t_earth:.2}"
         );
         assert!(ef_icehouse > ef_earth);
+        assert!(p_earth > p_icehouse);
 
         // Tectonics long-term average (g = 0.50): ~16-20 C
         model.set_params(3, DEFAULT_GLACIATION);
         let t_tectonics = mean_temp_c(&model);
+        let p_tectonics = mean_precip(&model);
         assert!(
             (16.0..=20.0).contains(&t_tectonics),
             "Expected tectonics mean in 16..20 C, got {t_tectonics:.2}"
         );
+        assert!(p_tectonics > p_earth);
 
-        // Greenhouse (g = 1.0): ~25-30 C global mean, polar EF ice caps melted
+        // Greenhouse (g = 1.0): ~25-30 C global mean, polar EF ice caps melted, wetter global hydroclimate
         model.set_params(3, 1.0);
         let t_greenhouse = mean_temp_c(&model);
+        let p_greenhouse = mean_precip(&model);
         let ef_greenhouse = model
             .classifications()
             .iter()
@@ -820,6 +841,8 @@ mod tests {
             ef_greenhouse < 10,
             "Expected polar EF ice caps to melt in greenhouse state, got {ef_greenhouse}"
         );
+        assert!(p_greenhouse > p_tectonics);
+        assert!(arid_count(&model) > 50);
     }
 
     #[test]
