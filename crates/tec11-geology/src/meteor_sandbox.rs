@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
+use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M, MEAN_TEMPRANGE_C};
 use tec11_math_grid::{dot, Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
@@ -579,12 +579,12 @@ impl MeteorSandbox {
             .collect();
         self.climate_model.update_for_tectonics(&land_elevs, true);
 
-        let cooling_norm = self.current_cooling_c / 75.0;
+        let cooling_norm = self.current_cooling_c / (MEAN_TEMPRANGE_C.span() as f32);
         for (v, c) in self.climate_model.classifications().iter().enumerate() {
             let base_tn = c.mean_temperature as f32;
-            let base_temp_c = base_tn * 75.0 - 20.0;
+            let base_temp_c = MEAN_TEMPRANGE_C.to_celsius(base_tn as f64) as f32;
             let cooled_tn = (base_tn - cooling_norm).clamp(0.0, 1.0);
-            let temp_c = cooled_tn * 75.0 - 20.0;
+            let temp_c = MEAN_TEMPRANGE_C.to_celsius(cooled_tn as f64) as f32;
             self.tile_temp_norm[v] = cooled_tn;
             self.tile_temp_c[v] = temp_c;
             self.tile_precip_norm[v] =

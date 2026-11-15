@@ -1,4 +1,4 @@
-use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
+use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M, MEAN_TEMPRANGE_C};
 use tec11_math_grid::SphericalGrid;
 use tec11_proto::PlanetSnapshotExt;
 
@@ -142,7 +142,7 @@ impl ErosionSandbox {
             tile_life[v] = if c.life { 1.0 } else { 0.0 };
             let tn = c.mean_temperature as f32;
             tile_temp_norm[v] = tn;
-            tile_temp_c[v] = tn * 75.0 - 20.0;
+            tile_temp_c[v] = MEAN_TEMPRANGE_C.to_celsius(tn as f64) as f32;
             tile_precip_norm[v] = c.mean_precipitation as f32;
         }
 

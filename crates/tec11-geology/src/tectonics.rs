@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::PI;
 
-use tec11_climate::ClimateModel;
+use tec11_climate::{ClimateModel, MEAN_TEMPRANGE_C};
 use tec11_math_grid::{
     cross, dot, length, normal, rotate, GreatCircleArc, Pcg64Mcg, PointTree, SphericalGrid, Vec3,
 };
@@ -1793,8 +1793,7 @@ impl TectonicsSimulation {
             self.tile_life[v] = if c.life { 1.0 } else { 0.0 };
             let temp_norm = c.mean_temperature as f32;
             self.tile_temp_norm[v] = temp_norm;
-            // Convert normalized temperature to Celsius using Tectonics temprange (-20..55 C at glaciation 0.5)
-            self.tile_temp_c[v] = temp_norm * 75.0 - 20.0;
+            self.tile_temp_c[v] = MEAN_TEMPRANGE_C.to_celsius(temp_norm as f64) as f32;
             self.tile_precip_norm[v] = c.mean_precipitation as f32;
         }
     }

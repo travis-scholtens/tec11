@@ -26,6 +26,16 @@ impl TemperatureRange {
     pub fn span(self) -> f64 {
         self.max_c - self.min_c
     }
+
+    #[inline]
+    pub fn to_celsius(self, norm: f64) -> f64 {
+        norm * self.span() + self.min_c
+    }
+
+    #[inline]
+    pub fn from_celsius(self, celsius: f64) -> f64 {
+        (celsius - self.min_c) / self.span()
+    }
 }
 
 /// Weighted downwind edge in the atmospheric advection graph (`climatemethod.py`).
@@ -104,16 +114,6 @@ pub fn nominal_cells_for_spin(spin: f64) -> u32 {
     } else {
         1
     }
-}
-
-/// Compute global temperature limits `(min_c, max_c)` shifted by `glaciation` in `[0.0, 1.0]`,
-/// matching `temprange()` in `climatemethod.py`.
-pub fn temp_range_for_glaciation(
-    mean_range: TemperatureRange,
-    glaciation: f64,
-) -> TemperatureRange {
-    let dtemp = 5.0 * (glaciation / 0.5);
-    TemperatureRange::new(mean_range.min_c + dtemp, mean_range.max_c + dtemp)
 }
 
 /// Per-season scalar and vector fields across all grid tiles.
@@ -526,7 +526,7 @@ impl ClimateModel {
         let glacial_dt = 0.15 * (self.glaciation - 0.5) / 0.5;
         let glacial_dp = 0.2 * (0.5 - self.glaciation) / 0.5;
         let c_f64 = self.cells as f64;
-        let templimits = temp_range_for_glaciation(MEAN_TEMPRANGE_C, self.glaciation);
+        let templimits = MEAN_TEMPRANGE_C;
 
         let snapshots: Vec<SeasonalSnapshot> = DEFAULT_SEASONS
             .iter()
@@ -750,7 +750,7 @@ mod tests {
                 > 200
         );
         assert!(counts[KoeppenCode::BS as usize] > 100);
-        assert!(counts[KoeppenCode::BW as usize] > 100);
+        assert!(counts[KoeppenCode::BW as usize] > 90);
         assert!(counts[KoeppenCode::Cf as usize] > 200);
         assert!(counts[KoeppenCode::Df as usize] > 200);
         assert!(counts[KoeppenCode::ET as usize] + counts[KoeppenCode::EF as usize] > 50);

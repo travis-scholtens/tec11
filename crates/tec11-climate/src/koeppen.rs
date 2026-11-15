@@ -65,9 +65,8 @@ pub fn classify_tile(
 ) -> TileClimateClassification {
     let n = rts.len();
     let n_f64 = n as f64;
-    let span = templimits.span();
 
-    let ts: Vec<f64> = rts.iter().map(|&c| c * span + templimits.min_c).collect();
+    let ts: Vec<f64> = rts.iter().map(|&c| templimits.to_celsius(c)).collect();
     let ps: Vec<f64> = rps.iter().map(|&c| c * 1800.0 / n_f64).collect();
 
     let base_thr = (ts.iter().sum::<f64>() / n_f64) * 20.0;

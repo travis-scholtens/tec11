@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
+use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M, MEAN_TEMPRANGE_C};
 use tec11_math_grid::{dot, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
@@ -336,7 +336,7 @@ impl MoonSandbox {
             self.tile_life[v] = if c.life { 1.0 } else { 0.0 };
             let tn = c.mean_temperature as f32;
             self.tile_temp_norm[v] = tn;
-            self.tile_temp_c[v] = tn * 75.0 - 20.0;
+            self.tile_temp_c[v] = MEAN_TEMPRANGE_C.to_celsius(tn as f64) as f32;
             self.tile_precip_norm[v] = c.mean_precipitation as f32;
         }
 

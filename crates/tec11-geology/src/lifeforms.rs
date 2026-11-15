@@ -1,4 +1,4 @@
-use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M};
+use tec11_climate::{ClimateModel, EARTH_SIZE6_ELEVATIONS_M, MEAN_TEMPRANGE_C};
 use tec11_math_grid::{normal, PointTree, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
@@ -358,7 +358,7 @@ fn extract_json_str<'a>(json_str: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn normalize_temp(celsius_range: ValueRange) -> ValueRange {
-    celsius_range.map(|c| (c + 25.0) / 75.0)
+    celsius_range.map(|c| MEAN_TEMPRANGE_C.from_celsius(c as f64) as f32)
 }
 
 fn normalize_precip(cm_range: ValueRange) -> ValueRange {
