@@ -50,6 +50,8 @@ type TileViewInfo =
   , skyAnimated :: Boolean
   , vantageBearingSummary :: String
   , vantageNeighborSummary :: String
+  , stratigraphySummary :: String
+  , stratigraphyLines :: Array String
   }
 
 defaultTileViewInfo :: TileViewInfo
@@ -72,6 +74,8 @@ defaultTileViewInfo =
   , skyAnimated: true
   , vantageBearingSummary: ""
   , vantageNeighborSummary: ""
+  , stratigraphySummary: ""
+  , stratigraphyLines: []
   }
 
 data SkyClockMode

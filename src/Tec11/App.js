@@ -3182,6 +3182,8 @@ function emptyTileView() {
     skyAnimated: true,
     vantageBearingSummary: "",
     vantageNeighborSummary: "",
+    stratigraphySummary: "",
+    stratigraphyLines: [],
   };
 }
 

@@ -2229,6 +2229,43 @@ export function applyParsedTileToView(view, parsedTile) {
     view.selectedStateId = parsedTile.stateId;
   }
 
+  let stratigraphySummary = "";
+  const stratigraphyLines = [];
+  if (strat && strat.hasColumn && Array.isArray(strat.layers) && strat.layers.length > 0) {
+    const elevKm = typeof strat.elevationKm === "number" ? strat.elevationKm : 0.0;
+    const thickKm = typeof strat.thicknessKm === "number" ? strat.thicknessKm : 0.0;
+    const scar = typeof strat.impactScar === "number" ? strat.impactScar : 0.0;
+    const scarNote =
+      scar >= 0.65
+        ? " · Impact Crater Basin"
+        : scar >= 0.35
+          ? " · Impact Ejecta Rim"
+          : "";
+    stratigraphySummary = `Crust: ${thickKm.toFixed(1)} km | Elev: ${elevKm >= 0 ? "+" : ""}${elevKm.toFixed(2)} km | ${strat.layers.length} layers (surface → Moho)${scarNote}`;
+    const interfaces = Array.isArray(strat.interfaces) ? strat.interfaces : [];
+    for (let i = 0; i < strat.layers.length; i++) {
+      const l = strat.layers[i];
+      const dispName =
+        l.kind === "I" && typeof l.felsity === "number" && l.felsity <= 0.35
+          ? "kimberlite"
+          : l.name || "rock";
+      const thick = typeof l.thicknessKm === "number" ? l.thicknessKm.toFixed(2) : "0.00";
+      const fels = typeof l.felsity === "number" ? l.felsity.toFixed(2) : "0.50";
+      const tough = typeof l.toughness === "number" ? l.toughness.toFixed(2) : "0.00";
+      const deps = Array.isArray(l.deposits) && l.deposits.length > 0 ? ` → ${l.deposits.join(" + ")}` : "";
+      stratigraphyLines.push(
+        `• ${dispName} (${thick} km, ${l.kind || "I"}, felsity ${fels}, tough ${tough})${deps}`
+      );
+      for (let ii = 0; ii < interfaces.length; ii++) {
+        const intf = interfaces[ii];
+        if (intf && intf.upperLayerIdx === i && Array.isArray(intf.deposits) && intf.deposits.length > 0) {
+          const dKm = typeof intf.depthKm === "number" ? intf.depthKm.toFixed(2) : "0.00";
+          stratigraphyLines.push(`┄ Interface (${dKm} km): ${intf.deposits.join(" + ")}`);
+        }
+      }
+    }
+  }
+
   return {
     hasTile: true,
     displayIdx: parsedTile.displayIdx ?? view.selectedTileIdx,
@@ -2248,6 +2285,8 @@ export function applyParsedTileToView(view, parsedTile) {
     skyAnimated: view.tileSkyAnimated !== false,
     vantageBearingSummary: vSum.bearingSummary,
     vantageNeighborSummary: vSum.neighborSummary,
+    stratigraphySummary,
+    stratigraphyLines,
   };
 }
 

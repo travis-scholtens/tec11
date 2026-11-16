@@ -1158,7 +1158,45 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                       }
                   , R.div
                       { style: R.css { marginTop: "8px" }
-                      , children: [ renderStratigraphySideViewBox ]
+                      , children:
+                          [ renderStratigraphySideViewBox
+                          , if Array.null tile.stratigraphyLines then
+                              React.empty
+                            else
+                              R.div
+                                { id: "history-stratigraphy-layers-box"
+                                , style:
+                                    R.css
+                                      { marginTop: "4px"
+                                      , marginBottom: "6px"
+                                      , padding: "6px 8px"
+                                      , borderRadius: "5px"
+                                      , border: "1px solid #334155"
+                                      , backgroundColor: "rgba(15, 23, 42, 0.72)"
+                                      , fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+                                      , fontSize: "0.71rem"
+                                      , lineHeight: "1.38"
+                                      , color: "#e2e8f0"
+                                      }
+                                , children:
+                                    [ R.div
+                                        { style: R.css { fontWeight: "700", color: "#38bdf8", marginBottom: "3px" }
+                                        , children: [ R.text tile.stratigraphySummary ]
+                                        }
+                                    , R.div
+                                        { children:
+                                            map
+                                              ( \line ->
+                                                  R.div
+                                                    { style: R.css { color: "#cbd5e1", paddingLeft: "2px" }
+                                                    , children: [ R.text line ]
+                                                    }
+                                              )
+                                              tile.stratigraphyLines
+                                        }
+                                    ]
+                                }
+                          ]
                       }
                   , renderTileSkyAndVantageBox tile
                   ]
