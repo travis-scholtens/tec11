@@ -5,8 +5,6 @@ use tec11_math_grid::SphericalGrid;
 use crate::fv_geom::FiniteVolumeSphereGeom;
 use crate::tides::{AtmosphericTideForcing, LaplaceTidalSolver};
 
-const WEATHER_SUBSTEPS_PER_HOUR: usize = 10;
-const DT_WEATHER_S: f32 = 3600.0 / (WEATHER_SUBSTEPS_PER_HOUR as f32);
 const METEOGRAM_HOURS: usize = 48;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -73,6 +71,9 @@ pub struct MoistBaroclinicSolver {
     /// Downstream fine-cell receiver (`u32::MAX` if sink/ocean) + topological order high -> low.
     downstream_cell: Vec<u32>,
     topo_order: Vec<u32>,
+    min_edge_dist_m: f32,
+    n_phys_steps_per_hour: usize,
+    n_dyn_per_phys: usize,
 
     solar_luminosity: f32,
     glaciation: f32,
@@ -277,8 +278,10 @@ impl MoistBaroclinicSolver {
             atmo_alb_term.push(0.42 * (0.20 + 0.12 * slant_scatter) * atmo_atten);
         }
 
+        let mut min_edge_dist_m = f32::MAX;
         let mut edge_drag = Vec::with_capacity(ne);
         for e in &geom.edges {
+            min_edge_dist_m = min_edge_dist_m.min(e.center_dist_m);
             let l = e.left as usize;
             let r = e.right as usize;
             let mount = 0.5 * (cfg.mountainosity_norm[l] + cfg.mountainosity_norm[r]);
@@ -298,6 +301,20 @@ impl MoistBaroclinicSolver {
                 ext_q_weight,
             });
         }
+        if !min_edge_dist_m.is_finite() || min_edge_dist_m < 1_000.0 {
+            min_edge_dist_m = geom.mean_edge_dist_m.max(10_000.0);
+        }
+
+        // Scale-aware Wicker–Skamarock fast/slow operator splitting:
+        // - Outer radiative/moist-physics/transport steps (`n_phys_steps_per_hour`: `2` on size <= 6
+        //   Earth, `3` on size 7..8 Earth, scaling automatically for smaller/finer planets).
+        // - Inner 3-stage RK3 fast acoustic/gravity-wave substeps (`n_dyn_per_phys`, satisfying
+        //   `dt_dyn <= 0.65 * d_min / c_fast` across all grid sizes and planetary radii).
+        let dt_phys_max = (0.0185 * min_edge_dist_m).clamp(180.0, 1800.0);
+        let n_phys_steps_per_hour = ((3600.0 / dt_phys_max).ceil() as usize).clamp(2, 20);
+        let dt_phys_s = 3600.0 / (n_phys_steps_per_hour as f32);
+        let dt_dyn_max = (0.65 * min_edge_dist_m / 68.0).max(60.0);
+        let n_dyn_per_phys = ((dt_phys_s / dt_dyn_max).ceil() as usize).clamp(2, 8);
 
         let mut solver = Self {
             num_cells: n,
@@ -317,6 +334,9 @@ impl MoistBaroclinicSolver {
             init_snow_depth_m: cfg.init_snow_depth_m.to_vec(),
             downstream_cell,
             topo_order: land_indices,
+            min_edge_dist_m,
+            n_phys_steps_per_hour,
+            n_dyn_per_phys,
             solar_luminosity: cfg.solar_luminosity.clamp(0.2, 4.0),
             glaciation: cfg.glaciation.clamp(0.0, 1.0),
             atmosphere_id: cfg.atmosphere_id,
@@ -544,14 +564,19 @@ impl MoistBaroclinicSolver {
     /// Advances the coupled 2-layer moist baroclinic atmosphere, land hydrology, and dynamic
     /// tides + storm surge by `1 hour`.
     pub fn step_hour(&mut self, geom: &FiniteVolumeSphereGeom) {
-        let dt = DT_WEATHER_S;
-        let inv_sub = 1.0 / (WEATHER_SUBSTEPS_PER_HOUR as f32);
+        let n_phys = self.n_phys_steps_per_hour;
+        let n_dyn = self.n_dyn_per_phys;
+        let dt = 3600.0 / (n_phys as f32);
+        let dt_dyn = dt / (n_dyn as f32);
+        let dt_ratio_360 = dt * (1.0 / 360.0);
         let glac_offset_c = glaciation_temp_offset_c(self.glaciation);
 
         // Scale-selective 4th-order hyperviscosity & C-grid divergence damping tuned to `d_mean`:
         let d_mean = geom.mean_edge_dist_m.max(10_000.0);
-        let nu_div = 0.016 * d_mean * d_mean / dt;
-        let nu4_scalar = 0.0020 * d_mean.powi(4) / dt;
+        let d_min = self.min_edge_dist_m.max(5_000.0);
+        let nu_div = 0.016 * d_mean * d_mean / dt_dyn;
+        // Preserve hourly biharmonic damping while respecting pentagon forward-Euler stability (`< 0.012 * d^4`):
+        let dt_nu4 = (0.020 / (n_phys as f32)).min(0.0068) * d_mean.powi(4);
 
         // Hydrostatic sigma-coordinate & external-mode constants:
         // Integrating upward from surface `sigma = 1.0` (`Pi_s = 1.000`) to `sigma_1 = 0.78` (`Pi_1 = 0.931`)
@@ -594,7 +619,10 @@ impl MoistBaroclinicSolver {
             };
         }
 
-        for sub in 0..WEATHER_SUBSTEPS_PER_HOUR {
+        let evap_step_cap = 0.25 * dt_ratio_360;
+        let conv_frac_cap = (0.20 * dt_ratio_360).min(0.48);
+
+        for sub in 0..n_phys {
             let sub_offset_s = ((sub as f64) + 0.5) * (dt as f64);
             let sun_dir_f64 = self.tides.subsolar_unit_xyz(sub_offset_s);
             let sun_dir = [
@@ -702,7 +730,7 @@ impl MoistBaroclinicSolver {
                 let evap_base = if is_ocean { 1.42e-6 } else { 0.96e-6 };
                 let evap_coeff = evap_base * (1.3 + 0.42 * wspd) * wet_frac;
                 let evap_kgm2 =
-                    (evap_coeff * (q_eq_cap - self.qv_kgm2[i]).max(0.0) * dt).min(0.25);
+                    (evap_coeff * (q_eq_cap - self.qv_kgm2[i]).max(0.0) * dt).min(evap_step_cap);
                 self.qv_kgm2[i] += evap_kgm2;
                 if !is_ocean && evap_kgm2 > 0.0 {
                     let soil_draw_share = if self.is_river[i] && wet_frac > 1e-5 {
@@ -818,7 +846,7 @@ impl MoistBaroclinicSolver {
             // 2. Scale-aware subgrid Eliassen-Palm baroclinic eddy closure (Rhines 1975):
             let mean_dth_stab = (mean_th2 - mean_th1).clamp(14.0, 60.0);
             let c_bc = (0.25 * delta_exner * mean_dth_stab).sqrt();
-            let kappa_eddy_max = compute_subgrid_ep_eddy_forcing(
+            let kappa_eddy_raw = compute_subgrid_ep_eddy_forcing(
                 geom,
                 c_bc,
                 d_mean,
@@ -826,124 +854,138 @@ impl MoistBaroclinicSolver {
                 sin_dec,
                 &mut self.scratch_ep_east,
             );
+            let kappa_eddy_max = kappa_eddy_raw.min(0.11 * d_min * d_min / dt);
             for (e_idx, e) in geom.edges.iter().enumerate() {
                 self.scratch_ep_edge[e_idx] = 0.5
                     * (self.scratch_ep_east[e.left as usize] * e.nx_left
                         + self.scratch_ep_east[e.right as usize] * e.nx_right);
             }
 
-            // 3. 3-stage Wicker-Skamarock RK3 vector-invariant 2-layer primitive dynamical core:
-            self.rk_u1_0.copy_from_slice(&self.u1_edge);
-            self.rk_u2_0.copy_from_slice(&self.u2_edge);
-            self.rk_ps_0.copy_from_slice(&self.ps_anom_pa);
-            self.rk_th1_0.copy_from_slice(&self.theta1_k);
-            self.rk_th2_0.copy_from_slice(&self.theta2_k);
+            // 3. Fast 3-stage Wicker-Skamarock RK3 vector-invariant 2-layer dynamical core:
+            for _dyn_step in 0..n_dyn {
+                self.rk_u1_0.copy_from_slice(&self.u1_edge);
+                self.rk_u2_0.copy_from_slice(&self.u2_edge);
+                self.rk_ps_0.copy_from_slice(&self.ps_anom_pa);
+                self.rk_th1_0.copy_from_slice(&self.theta1_k);
+                self.rk_th2_0.copy_from_slice(&self.theta2_k);
 
-            for stage_dt in [dt / 3.0, 0.5 * dt, dt] {
-                geom.reconstruct_and_div_2layer(
-                    &self.u1_edge,
-                    &self.u2_edge,
-                    &mut self.u1_east,
-                    &mut self.v1_north,
-                    &mut self.scratch_div1,
-                    &mut self.u2_east,
-                    &mut self.v2_north,
-                    &mut self.scratch_div2,
-                );
-                geom.curl_2layer(
-                    &self.u1_east,
-                    &self.v1_north,
-                    &self.u2_east,
-                    &self.v2_north,
-                    &mut self.scratch_edge_flux,
-                    &mut self.scratch_edge_flux2,
-                    &mut self.scratch_zeta1,
-                    &mut self.scratch_zeta2,
-                );
+                for (stage_idx, stage_dt) in [dt_dyn / 3.0, 0.5 * dt_dyn, dt_dyn]
+                    .into_iter()
+                    .enumerate()
+                {
+                    geom.reconstruct_and_div_2layer(
+                        &self.u1_edge,
+                        &self.u2_edge,
+                        &mut self.u1_east,
+                        &mut self.v1_north,
+                        &mut self.scratch_div1,
+                        &mut self.u2_east,
+                        &mut self.v2_north,
+                        &mut self.scratch_div2,
+                    );
+                    // Slowly evolving relative vorticity is evaluated once on Stage 1 per RK3 step,
+                    // while fast gravity-wave divergence, geopotential, and Coriolis update every stage:
+                    if stage_idx == 0 {
+                        geom.curl_2layer(
+                            &self.u1_east,
+                            &self.v1_north,
+                            &self.u2_east,
+                            &self.v2_north,
+                            &mut self.scratch_edge_flux,
+                            &mut self.scratch_edge_flux2,
+                            &mut self.scratch_zeta1,
+                            &mut self.scratch_zeta2,
+                        );
+                    }
 
-                for i in 0..self.num_cells {
-                    // Lorenz (1960) upward interface velocity `W_{1->2} = 0.5 * (div2 - div1)`:
-                    self.scratch_w12[i] = 0.5 * (self.scratch_div2[i] - self.scratch_div1[i]);
+                    for i in 0..self.num_cells {
+                        // Lorenz (1960) upward interface velocity `W_{1->2} = 0.5 * (div2 - div1)`:
+                        self.scratch_w12[i] = 0.5 * (self.scratch_div2[i] - self.scratch_div1[i]);
 
-                    let dth1 = self.theta1_k[i] - mean_th1;
-                    let dth2 = self.theta2_k[i] - mean_th2;
-                    let p_term = self.ps_anom_pa[i] * inv_rho_air;
-                    let ke1 = 0.5
-                        * (self.u1_east[i] * self.u1_east[i]
-                            + self.v1_north[i] * self.v1_north[i]);
-                    let ke2 = 0.5
-                        * (self.u2_east[i] * self.u2_east[i]
-                            + self.v2_north[i] * self.v2_north[i]);
+                        let dth1 = self.theta1_k[i] - mean_th1;
+                        let dth2 = self.theta2_k[i] - mean_th2;
+                        let p_term = self.ps_anom_pa[i] * inv_rho_air;
+                        let ke1 = 0.5
+                            * (self.u1_east[i] * self.u1_east[i]
+                                + self.v1_north[i] * self.v1_north[i]);
+                        let ke2 = 0.5
+                            * (self.u2_east[i] * self.u2_east[i]
+                                + self.v2_north[i] * self.v2_north[i]);
 
-                    let phi1 = p_term + alpha_therm1 * dth1;
-                    let phi2 = phi1 + 0.5 * delta_exner * (dth1 + dth2);
-                    self.scratch_phi1[i] = phi1 + ke1;
-                    self.scratch_phi2[i] = phi2 + ke2;
-                }
+                        let phi1 = p_term + alpha_therm1 * dth1;
+                        let phi2 = phi1 + 0.5 * delta_exner * (dth1 + dth2);
+                        self.scratch_phi1[i] = phi1 + ke1;
+                        self.scratch_phi2[i] = phi2 + ke2;
+                    }
 
-                for (e_idx, e) in geom.edges.iter().enumerate() {
-                    let l = e.left as usize;
-                    let r = e.right as usize;
-                    let u1_cur = self.u1_edge[e_idx];
-                    let u2_cur = self.u2_edge[e_idx];
-                    let w12_e = 0.5 * (self.scratch_w12[l] + self.scratch_w12[r]);
-                    let ep_edge = self.scratch_ep_edge[e_idx];
-                    let drag = self.edge_drag[e_idx];
-                    let fl = geom.coriolis_f[l];
-                    let fr = geom.coriolis_f[r];
+                    for (e_idx, e) in geom.edges.iter().enumerate() {
+                        let l = e.left as usize;
+                        let r = e.right as usize;
+                        let u1_cur = self.u1_edge[e_idx];
+                        let u2_cur = self.u2_edge[e_idx];
+                        let w12_e = 0.5 * (self.scratch_w12[l] + self.scratch_w12[r]);
+                        let ep_edge = self.scratch_ep_edge[e_idx];
+                        let drag = self.edge_drag[e_idx];
+                        let fl = geom.coriolis_f[l];
+                        let fr = geom.coriolis_f[r];
 
-                    // Layer 1 vector-invariant momentum: `(zeta1 + f) k x u1 - grad(Phi1 + K1)`:
-                    let dbern1_dn =
-                        (self.scratch_phi1[r] - self.scratch_phi1[l]) * e.inv_center_dist_m;
-                    let av1_l = fl + self.scratch_zeta1[l];
-                    let av1_r = fr + self.scratch_zeta1[r];
-                    let rot1 = 0.5
-                        * (av1_l * (e.nx_left * self.v1_north[l] - e.ny_left * self.u1_east[l])
-                            + av1_r
-                                * (e.nx_right * self.v1_north[r] - e.ny_right * self.u1_east[r]));
-                    let du21 = u2_cur - u1_cur;
-                    let vert_mom1 = ((-w12_e).max(0.0) + 6.5e-7) * du21;
-                    let div_damp1 =
-                        nu_div * (self.scratch_div1[r] - self.scratch_div1[l]) * e.inv_center_dist_m;
+                        // Layer 1 vector-invariant momentum: `(zeta1 + f) k x u1 - grad(Phi1 + K1)`:
+                        let dbern1_dn =
+                            (self.scratch_phi1[r] - self.scratch_phi1[l]) * e.inv_center_dist_m;
+                        let av1_l = fl + self.scratch_zeta1[l];
+                        let av1_r = fr + self.scratch_zeta1[r];
+                        let rot1 = 0.5
+                            * (av1_l * (e.nx_left * self.v1_north[l] - e.ny_left * self.u1_east[l])
+                                + av1_r
+                                    * (e.nx_right * self.v1_north[r]
+                                        - e.ny_right * self.u1_east[r]));
+                        let du21 = u2_cur - u1_cur;
+                        let vert_mom1 = ((-w12_e).max(0.0) + 6.5e-7) * du21;
+                        let div_damp1 = nu_div
+                            * (self.scratch_div1[r] - self.scratch_div1[l])
+                            * e.inv_center_dist_m;
 
-                    let drag1 = drag.r_ekman + drag.quad_drag1 * u1_cur.abs();
-                    let rhs1 = rot1 - dbern1_dn + vert_mom1 + div_damp1 + 0.35 * ep_edge;
-                    self.u1_edge[e_idx] = ((self.rk_u1_0[e_idx] + stage_dt * rhs1)
-                        / (1.0 + stage_dt * drag1))
-                        .clamp(-60.0, 60.0);
+                        let drag1 = drag.r_ekman + drag.quad_drag1 * u1_cur.abs();
+                        let rhs1 = rot1 - dbern1_dn + vert_mom1 + div_damp1 + 0.35 * ep_edge;
+                        self.u1_edge[e_idx] = ((self.rk_u1_0[e_idx] + stage_dt * rhs1)
+                            / (1.0 + stage_dt * drag1))
+                            .clamp(-60.0, 60.0);
 
-                    // Layer 2 vector-invariant momentum: `(zeta2 + f) k x u2 - grad(Phi2 + K2)`:
-                    let dbern2_dn =
-                        (self.scratch_phi2[r] - self.scratch_phi2[l]) * e.inv_center_dist_m;
-                    let av2_l = fl + self.scratch_zeta2[l];
-                    let av2_r = fr + self.scratch_zeta2[r];
-                    let rot2 = 0.5
-                        * (av2_l * (e.nx_left * self.v2_north[l] - e.ny_left * self.u2_east[l])
-                            + av2_r
-                                * (e.nx_right * self.v2_north[r] - e.ny_right * self.u2_east[r]));
-                    let vert_mom2 = -(w12_e.max(0.0) + 6.5e-7) * du21;
-                    let div_damp2 =
-                        nu_div * (self.scratch_div2[r] - self.scratch_div2[l]) * e.inv_center_dist_m;
-                    let r_upper = drag.r_upper_base + 2.0e-7 * u2_cur.abs();
-                    let rhs2 = rot2 - dbern2_dn + vert_mom2 + div_damp2 + 1.35 * ep_edge;
-                    self.u2_edge[e_idx] = ((self.rk_u2_0[e_idx] + stage_dt * rhs2)
-                        / (1.0 + stage_dt * r_upper))
-                        .clamp(-110.0, 110.0);
-                }
+                        // Layer 2 vector-invariant momentum: `(zeta2 + f) k x u2 - grad(Phi2 + K2)`:
+                        let dbern2_dn =
+                            (self.scratch_phi2[r] - self.scratch_phi2[l]) * e.inv_center_dist_m;
+                        let av2_l = fl + self.scratch_zeta2[l];
+                        let av2_r = fr + self.scratch_zeta2[r];
+                        let rot2 = 0.5
+                            * (av2_l * (e.nx_left * self.v2_north[l] - e.ny_left * self.u2_east[l])
+                                + av2_r
+                                    * (e.nx_right * self.v2_north[r]
+                                        - e.ny_right * self.u2_east[r]));
+                        let vert_mom2 = -(w12_e.max(0.0) + 6.5e-7) * du21;
+                        let div_damp2 = nu_div
+                            * (self.scratch_div2[r] - self.scratch_div2[l])
+                            * e.inv_center_dist_m;
+                        let r_upper = drag.r_upper_base + 2.0e-7 * u2_cur.abs();
+                        let rhs2 = rot2 - dbern2_dn + vert_mom2 + div_damp2 + 1.35 * ep_edge;
+                        self.u2_edge[e_idx] = ((self.rk_u2_0[e_idx] + stage_dt * rhs2)
+                            / (1.0 + stage_dt * r_upper))
+                            .clamp(-110.0, 110.0);
+                    }
 
-                for i in 0..self.num_cells {
-                    let col_div = 0.5 * (self.scratch_div1[i] + self.scratch_div2[i]);
-                    self.ps_anom_pa[i] = (self.rk_ps_0[i]
-                        - stage_dt * rho_air * c_ext_sq * col_div)
-                        .clamp(-9500.0, 6500.0);
+                    for i in 0..self.num_cells {
+                        let col_div = 0.5 * (self.scratch_div1[i] + self.scratch_div2[i]);
+                        self.ps_anom_pa[i] = (self.rk_ps_0[i]
+                            - stage_dt * rho_air * c_ext_sq * col_div)
+                            .clamp(-9500.0, 6500.0);
 
-                    // Lorenz static-stability adiabatic cooling on ascent (`w12 > 0`) & warming on subsidence (`w12 < 0`):
-                    let dtheta_stab = (self.theta2_k[i] - self.theta1_k[i]).clamp(12.0, 65.0);
-                    let adiab_dth = -0.5 * dtheta_stab * self.scratch_w12[i];
-                    self.theta1_k[i] =
-                        (self.rk_th1_0[i] + stage_dt * adiab_dth).clamp(195.0, 345.0);
-                    self.theta2_k[i] =
-                        (self.rk_th2_0[i] + stage_dt * adiab_dth).clamp(215.0, 385.0);
+                        // Lorenz static-stability adiabatic cooling on ascent (`w12 > 0`) & warming on subsidence (`w12 < 0`):
+                        let dtheta_stab = (self.theta2_k[i] - self.theta1_k[i]).clamp(12.0, 65.0);
+                        let adiab_dth = -0.5 * dtheta_stab * self.scratch_w12[i];
+                        self.theta1_k[i] =
+                            (self.rk_th1_0[i] + stage_dt * adiab_dth).clamp(195.0, 345.0);
+                        self.theta2_k[i] =
+                            (self.rk_th2_0[i] + stage_dt * adiab_dth).clamp(215.0, 385.0);
+                    }
                 }
             }
 
@@ -961,9 +1003,13 @@ impl MoistBaroclinicSolver {
                 let qsat = qsat_with_elev_base(t1_k, self.qsat_elev_base[i]).max(0.2);
                 self.scratch_phi1[i] = (self.qv_kgm2[i] / qsat).clamp(0.0, 1.5);
             }
+            let mut max_u_abs = 1.0_f32;
             for (e_idx, e) in geom.edges.iter().enumerate() {
-                let u_col = 0.5 * (self.u1_edge[e_idx] + self.u2_edge[e_idx]);
-                let u_bc = 0.5 * (self.u1_edge[e_idx] - self.u2_edge[e_idx]);
+                let ue1 = self.u1_edge[e_idx];
+                let ue2 = self.u2_edge[e_idx];
+                max_u_abs = max_u_abs.max(ue1.abs()).max(ue2.abs());
+                let u_col = 0.5 * (ue1 + ue2);
+                let u_bc = 0.5 * (ue1 - ue2);
                 let rh_up = if u_col + 0.5 * u_bc >= 0.0 {
                     self.scratch_phi1[e.left as usize]
                 } else {
@@ -975,20 +1021,24 @@ impl MoistBaroclinicSolver {
             }
 
             // 4. Conservative upwind finite-volume advection of (theta1, theta2) and (qv, qc):
-            advect_scalar_upwind_2layer(
-                geom,
-                &self.u1_edge,
-                &self.u2_edge,
-                &self.scratch_div1,
-                &self.scratch_div2,
-                dt,
-                &mut self.theta1_k,
-                &mut self.theta2_k,
-                &mut self.scratch_edge_flux,
-                &mut self.scratch_edge_flux2,
-                &mut self.scratch_lap_a,
-                &mut self.scratch_lap_b,
-            );
+            let n_adv_sub = ((dt * max_u_abs / (0.62 * d_min)).ceil() as usize).clamp(1, 6);
+            let dt_adv = dt / (n_adv_sub as f32);
+            for _ in 0..n_adv_sub {
+                advect_scalar_upwind_2layer(
+                    geom,
+                    &self.u1_edge,
+                    &self.u2_edge,
+                    &self.scratch_div1,
+                    &self.scratch_div2,
+                    dt_adv,
+                    &mut self.theta1_k,
+                    &mut self.theta2_k,
+                    &mut self.scratch_edge_flux,
+                    &mut self.scratch_edge_flux2,
+                    &mut self.scratch_lap_a,
+                    &mut self.scratch_lap_b,
+                );
+            }
             advect_tracer_flux_limited_2layer(
                 geom,
                 &self.scratch_moist_edge,
@@ -1045,7 +1095,7 @@ impl MoistBaroclinicSolver {
             // Scale-selective biharmonic (-nu4 * nabla^4) hyperdiffusion on (theta1, theta2):
             apply_biharmonic_smoothing_2layer(
                 geom,
-                dt * nu4_scalar,
+                dt_nu4,
                 &mut self.theta1_k,
                 &mut self.theta2_k,
                 &mut self.scratch_lap_a,
@@ -1112,7 +1162,7 @@ impl MoistBaroclinicSolver {
                         * (dt / 3600.0);
                     conv_cond = ((self.qv_kgm2[i] - (conv_rh_min - 0.03) * qsat_eff).max(0.0)
                         * rate)
-                        .min(self.qv_kgm2[i] * 0.20);
+                        .min(self.qv_kgm2[i] * conv_frac_cap);
                 }
                 let conv_precip_mm = 0.68 * conv_cond;
                 let conv_detrain = conv_cond - conv_precip_mm;
@@ -1191,10 +1241,8 @@ impl MoistBaroclinicSolver {
                     self.snow_depth_m[i] = 0.0;
                 }
 
-                // Update cloud fractions for rendering:
-                self.cloud_low[i] = (self.cloud_low[i]
-                    + ((self.qc_kgm2[i] / 1.15).sqrt().clamp(0.0, 1.0)) * inv_sub)
-                    .min(1.0);
+                // Update cloud fractions for subsequent substeps:
+                self.cloud_low[i] = ((self.qc_kgm2[i] / 1.25).sqrt()).clamp(0.0, 1.0);
             }
         }
 
