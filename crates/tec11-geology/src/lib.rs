@@ -69,7 +69,10 @@ pub use sun_sky::{
     GalacticSkyBackdrop, GalacticVantage, GalaxyType, HomeStar, PlanetKind, PlanetaryOptics,
     ReconstructedSkyEnvironment, SolarSystemPlanet, SunSandbox,
 };
-pub use tectonics::{LithosphericGroup, TectonicsSimulation};
+pub use tectonics::{
+    classify_submarine_tile, LithosphericGroup, MantleHotspot, OceanicSubductionArc,
+    SpreadingRidgeArc, TectonicsSimulation,
+};
 pub use terrain::TerrainSandbox;
 pub use tides_sandbox::{FinePlanetBase, TidesSandbox};
 pub use tile::TileGeology;

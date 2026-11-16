@@ -801,7 +801,10 @@ impl WorldSimulation {
                 let loc_summary = if !has_atm {
                     format!("Pre-atmosphere Crust | Elevation: {elev:+.2} km")
                 } else if elev <= 0.0 {
-                    format!("Marine Basin | Bathymetry: {elev:.2} km")
+                    format!(
+                        "{} | Bathymetry: {elev:.2} km",
+                        crate::tectonics::classify_submarine_tile(tile)
+                    )
                 } else {
                     let k_code = tec.tile_koeppen_ids().get(tile_idx).copied().unwrap_or(0);
                     format!(
@@ -854,7 +857,10 @@ impl WorldSimulation {
                 let elev = tile.elevation();
                 let koeppen = pre.tile_koeppen_ids().get(tile_idx).copied().unwrap_or(0);
                 let loc_summary = if elev <= 0.0 {
-                    format!("Marine Basin | Bathymetry: {elev:.2} km")
+                    format!(
+                        "{} | Bathymetry: {elev:.2} km",
+                        crate::tectonics::classify_submarine_tile(tile)
+                    )
                 } else {
                     format!(
                         "{} | Elevation: +{elev:.2} km",

@@ -202,6 +202,8 @@ mod tests {
                     }),
                     age_ticks: 4,
                 }],
+                hotspots: Vec::new(),
+                oceanic_arcs: Vec::new(),
             })),
             environment: None,
         };

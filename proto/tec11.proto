@@ -76,6 +76,19 @@ message SpreadingRidgeArc {
   uint32 age_ticks = 4;
 }
 
+message MantleHotspot {
+  Vec3 pos = 1;
+  Vec3 drift = 2;
+  float flux_km_per_tick = 3;
+}
+
+message OceanicSubductionArc {
+  Vec3 start = 1;
+  Vec3 end = 2;
+  Vec3 overriding_normal = 3;
+  float convergence_speed = 4;
+}
+
 // --- Composable Tile Messages by Stage ---
 
 // 1. Base geological tile (used in Tectonics; climate/ocean/Koeppen are derived on load)
@@ -101,6 +114,8 @@ message TectonicsStage {
   repeated GeologicalTile tiles = 5;     // Stored in canonical TileId order (0..num_tiles)
   repeated LithosphericGroup groups = 6;
   repeated SpreadingRidgeArc ridges = 7;
+  repeated MantleHotspot hotspots = 8;
+  repeated OceanicSubductionArc oceanic_arcs = 9;
 }
 
 // --- Stage 2: Prehistory ---

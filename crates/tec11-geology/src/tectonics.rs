@@ -31,6 +31,53 @@ pub struct SpreadingRidgeArc {
     pub age_ticks: u32,
 }
 
+/// Deep-mantle thermal plume generating ocean-island basalt (`OIB`) swells and advecting seamount/guyot chains.
+#[derive(Clone, Debug)]
+pub struct MantleHotspot {
+    pub pos: Vec3,
+    pub drift: Vec3,
+    pub flux_km_per_tick: f32,
+}
+
+/// Intra-oceanic convergent subduction zone pairing a deep ocean trench (`-overriding_normal` side)
+/// with a buoyant calc-alkaline island-arc ridge (`+overriding_normal` side).
+#[derive(Clone, Debug)]
+pub struct OceanicSubductionArc {
+    pub start: Vec3,
+    pub end: Vec3,
+    pub overriding_normal: Vec3,
+    pub convergence_speed: f32,
+}
+
+/// Classify a submarine `TileGeology` column (`elevation <= 0.0`) into its geological ocean-floor landform.
+pub fn classify_submarine_tile(tile: &TileGeology) -> &'static str {
+    let elev = tile.elevation();
+    let thick = tile.thickness();
+    let mount = tile.mountainosity;
+    let top_fels = tile.top_felsity();
+    let has_reef_cap = tile
+        .layers
+        .last()
+        .is_some_and(|l| l.rock.kind == RockKind::Sedimentary && l.rock.calcity.unwrap_or(0.0) >= 0.70);
+    if elev < -5.55 {
+        "Oceanic Subduction Trench"
+    } else if thick >= 7.2 && top_fels >= 0.54 {
+        "Submarine Island-Arc Ridge"
+    } else if thick >= 6.4 && has_reef_cap && elev >= -1.8 {
+        "Submerged Coral Atoll / Guyot"
+    } else if thick >= 6.4 && mount >= 1.2 {
+        "Active Volcanic Seamount"
+    } else if thick >= 6.0 {
+        "Submarine Seamount / Guyot"
+    } else if elev >= -1.6 {
+        "Continental Shelf"
+    } else if elev >= -3.6 {
+        "Mid-Ocean Spreading Ridge"
+    } else {
+        "Abyssal Marine Basin"
+    }
+}
+
 #[derive(Clone, Debug)]
 struct TileMovement {
     sources: Vec<TileSourceColumn>,
@@ -60,6 +107,8 @@ pub struct TectonicsSimulation {
     tiles: Vec<TileGeology>,
     groups: Vec<LithosphericGroup>,
     ridges: Vec<SpreadingRidgeArc>,
+    hotspots: Vec<MantleHotspot>,
+    oceanic_arcs: Vec<OceanicSubductionArc>,
     climate_model: ClimateModel,
     tile_koeppen: Vec<u8>,
     tile_life: Vec<f32>,
@@ -183,6 +232,13 @@ impl TectonicsSimulation {
             })
             .collect();
 
+        let hotspots = Self::generate_initial_hotspots(
+            &grid,
+            &pangea.tiles,
+            dp,
+            seed ^ 0x484F_5453_504F_5431,
+        );
+
         let climate_model = ClimateModel::new_for_tectonics_with_adjacency(
             grid.clone(),
             adjacency.clone(),
@@ -212,6 +268,8 @@ impl TectonicsSimulation {
             tiles: pangea.tiles,
             groups,
             ridges,
+            hotspots,
+            oceanic_arcs: Vec::new(),
             climate_model,
             tile_koeppen: vec![0; n],
             tile_life: vec![0.0; n],
@@ -232,6 +290,404 @@ impl TectonicsSimulation {
         sim.climate_model
             .set_spin_and_tilt_for_tectonics(sim.current_spin(), sim.current_tilt_deg());
         sim
+    }
+
+    #[inline]
+    fn quantize_vec3_f32(v: Vec3) -> Vec3 {
+        [
+            v[0] as f32 as f64,
+            v[1] as f32 as f64,
+            v[2] as f32 as f64,
+        ]
+    }
+
+    fn generate_initial_hotspots(
+        grid: &SphericalGrid,
+        tiles: &[TileGeology],
+        dp: f64,
+        seed: u64,
+    ) -> Vec<MantleHotspot> {
+        let n = grid.faces.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let target_count = ((n as f64 / 1200.0).round() as usize).clamp(2, 8);
+        let mut rng = Pcg64Mcg::from_seed_u64(seed);
+        let mut out = Vec::with_capacity(target_count);
+        let ocean_indices: Vec<usize> = (0..n).filter(|&i| tiles[i].elevation() <= 0.0).collect();
+
+        for idx in 0..target_count {
+            let prefer_ocean = idx * 3 < target_count * 2 && !ocean_indices.is_empty();
+            let mut chosen = grid.faces[0].0;
+            for attempt in 0..48 {
+                let t = if prefer_ocean && attempt < 36 {
+                    ocean_indices[(rng.next_u64() as usize) % ocean_indices.len()]
+                } else {
+                    (rng.next_u64() as usize) % n
+                };
+                let cand = grid.faces[t].0;
+                let min_cos = if attempt < 28 { 0.68 } else { 0.88 };
+                if out.iter().all(|h: &MantleHotspot| dot(h.pos, cand) < min_cos) {
+                    chosen = cand;
+                    break;
+                }
+                chosen = cand;
+            }
+            let z = rng.uniform(-1.0, 1.0);
+            let phi = rng.uniform(0.0, 2.0 * PI);
+            let r = (1.0 - z * z).sqrt();
+            let rand_dir = [r * phi.cos(), r * phi.sin(), z];
+            let tang = normal(cross(chosen, rand_dir));
+            let wander = 0.055 * dp;
+            let drift = Self::quantize_vec3_f32([
+                tang[0] * wander,
+                tang[1] * wander,
+                tang[2] * wander,
+            ]);
+            let flux = rng.uniform(4.4, 6.8) as f32;
+            out.push(MantleHotspot {
+                pos: Self::quantize_vec3_f32(chosen),
+                drift,
+                flux_km_per_tick: flux,
+            });
+        }
+        out
+    }
+
+    pub fn hotspots(&self) -> &[MantleHotspot] {
+        &self.hotspots
+    }
+
+    pub fn oceanic_arcs(&self) -> &[OceanicSubductionArc] {
+        &self.oceanic_arcs
+    }
+
+    /// Water-loaded Airy isostatic buoyancy lift (in km) produced by crustal rock layers above
+    /// the standard `5.0 km` MORB oceanic crust baseline (`(ρ_m - ρ_c) / (ρ_m - ρ_w) ≈ 0.20..0.27`).
+    pub fn ocean_excess_buoyancy_km(tile: &TileGeology) -> f32 {
+        let mut baseline_rem = 5.0f32;
+        let mut buoyancy = 0.0f32;
+        for layer in &tile.layers {
+            let t = layer.thickness;
+            if t <= 0.0 {
+                continue;
+            }
+            if baseline_rem >= t {
+                baseline_rem -= t;
+                continue;
+            }
+            let excess_t = t - baseline_rem;
+            baseline_rem = 0.0;
+            let f = layer.rock.felsity.clamp(0.25, 0.90);
+            let c_iso = if layer.rock.kind == RockKind::Sedimentary {
+                0.24
+            } else {
+                0.13 + 0.18 * f
+            };
+            buoyancy += excess_t * c_iso;
+        }
+        buoyancy
+    }
+
+    /// Extract crustal `RockLayer`s above the bottom `5.0 km` MORB baseline, scaled by `scale`.
+    fn extract_ocean_excess_layers(tile: &TileGeology, scale: f32) -> Vec<RockLayer> {
+        if scale <= 1e-4 {
+            return Vec::new();
+        }
+        let mut baseline_rem = 5.0f32;
+        let mut out = Vec::new();
+        for layer in &tile.layers {
+            let t = layer.thickness;
+            if t <= 0.0 {
+                continue;
+            }
+            if baseline_rem >= t {
+                baseline_rem -= t;
+                continue;
+            }
+            let excess_t = (t - baseline_rem) * scale;
+            baseline_rem = 0.0;
+            if excess_t > 0.005 {
+                out.push(RockLayer {
+                    rock: layer.rock.clone(),
+                    thickness: excess_t,
+                });
+            }
+        }
+        out
+    }
+
+    /// Compute kinematic oceanic plate drift velocities `v_ocean[v]` for all ocean tiles from
+    /// active spreading ridges, attached passive continental margins, and background mantle return flow.
+    fn compute_ocean_velocities(&self, in_new_continent: &[bool], tile_vel: &[Vec3]) -> Vec<Vec3> {
+        let n = self.tiles.len();
+        let mut v_ocean = vec![[0.0, 0.0, 0.0]; n];
+        let ridge_arcs: Vec<(GreatCircleArc, Vec3, f64)> = self
+            .ridges
+            .iter()
+            .map(|r| {
+                let maturity = ((r.age_ticks as f64) / 6.0).clamp(0.35, 1.0);
+                (GreatCircleArc::new(r.start, r.end), r.velocity, maturity)
+            })
+            .collect();
+
+        let target_speed = 0.74 * self.dp;
+        let fallback_pole = normal([0.21, -0.34, 0.916]);
+
+        for v in 0..n {
+            if in_new_continent[v] {
+                v_ocean[v] = tile_vel[v];
+                continue;
+            }
+            let p_v = self.grid.faces[v].0;
+            let mut sum_dir = [0.0, 0.0, 0.0];
+            let mut sum_w = 0.0f64;
+
+            for &(ref arc, r_vel, maturity) in &ridge_arcs {
+                let d_km = arc.distance_to_point(p_v) * self.radius_km;
+                if d_km > 5200.0 {
+                    continue;
+                }
+                let w = maturity * (-d_km / 2200.0).exp();
+                let side = if dot(p_v, arc.circle.plane) >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let push_raw = [
+                    arc.circle.plane[0] * side + r_vel[0] * 0.35,
+                    arc.circle.plane[1] * side + r_vel[1] * 0.35,
+                    arc.circle.plane[2] * side + r_vel[2] * 0.35,
+                ];
+                let proj = dot(push_raw, p_v);
+                let tang = normal([
+                    push_raw[0] - proj * p_v[0],
+                    push_raw[1] - proj * p_v[1],
+                    push_raw[2] - proj * p_v[2],
+                ]);
+                sum_dir[0] += tang[0] * w;
+                sum_dir[1] += tang[1] * w;
+                sum_dir[2] += tang[2] * w;
+                sum_w += w;
+            }
+
+            // Blend with attached passive-margin continent velocity when directly off a trailing coast:
+            for &nb in &self.adjacency[v] {
+                if in_new_continent[nb] {
+                    let vn = tile_vel[nb];
+                    let vn_len = length(vn);
+                    if vn_len > 1e-9 {
+                        let p_nb = self.grid.faces[nb].0;
+                        let d_hat = normal([p_v[0] - p_nb[0], p_v[1] - p_nb[1], p_v[2] - p_nb[2]]);
+                        let ct = dot(vn, d_hat) / vn_len;
+                        if ct <= 0.15 {
+                            let proj = dot(vn, p_v);
+                            let tang = normal([
+                                vn[0] - proj * p_v[0],
+                                vn[1] - proj * p_v[1],
+                                vn[2] - proj * p_v[2],
+                            ]);
+                            sum_dir[0] += tang[0] * 0.65;
+                            sum_dir[1] += tang[1] * 0.65;
+                            sum_dir[2] += tang[2] * 0.65;
+                            sum_w += 0.65;
+                        }
+                    }
+                }
+            }
+
+            let dir = if sum_w > 0.04 && length(sum_dir) > 1e-8 {
+                let proj = dot(sum_dir, p_v);
+                normal([
+                    sum_dir[0] - proj * p_v[0],
+                    sum_dir[1] - proj * p_v[1],
+                    sum_dir[2] - proj * p_v[2],
+                ])
+            } else {
+                let bg = cross(fallback_pole, p_v);
+                if length(bg) > 1e-8 {
+                    normal(bg)
+                } else {
+                    normal(cross([1.0, 0.0, 0.0], p_v))
+                }
+            };
+            v_ocean[v] = [
+                dir[0] * target_speed,
+                dir[1] * target_speed,
+                dir[2] * target_speed,
+            ];
+        }
+        v_ocean
+    }
+
+    /// Roll back active intra-oceanic subduction zones, retire zones overridden by continents or
+    /// whose oceanic convergence has reversed, and initiate new zones at open-ocean convergence fronts.
+    fn update_oceanic_subduction_arcs(&mut self, in_new_continent: &[bool], v_ocean: &[Vec3]) {
+        let n = self.tiles.len();
+        if n < 100 {
+            return;
+        }
+        // 1. Slow trench rollback toward the subducting plate (`-overriding_normal`):
+        let rollback = 0.15 * self.dp;
+        for arc in &mut self.oceanic_arcs {
+            let mid = normal([
+                arc.start[0] + arc.end[0],
+                arc.start[1] + arc.end[1],
+                arc.start[2] + arc.end[2],
+            ]);
+            let rb_vel = [
+                -arc.overriding_normal[0] * rollback,
+                -arc.overriding_normal[1] * rollback,
+                -arc.overriding_normal[2] * rollback,
+            ];
+            let axis = normal(cross(mid, rb_vel));
+            if length(axis) > 1e-9 && rollback > 1e-9 {
+                arc.start = Self::quantize_vec3_f32(rotate(arc.start, axis, rollback));
+                arc.end = Self::quantize_vec3_f32(rotate(arc.end, axis, rollback));
+                let new_mid = normal([
+                    arc.start[0] + arc.end[0],
+                    arc.start[1] + arc.end[1],
+                    arc.start[2] + arc.end[2],
+                ]);
+                let raw_n = rotate(arc.overriding_normal, axis, rollback);
+                let proj = dot(raw_n, new_mid);
+                arc.overriding_normal = Self::quantize_vec3_f32(normal([
+                    raw_n[0] - proj * new_mid[0],
+                    raw_n[1] - proj * new_mid[1],
+                    raw_n[2] - proj * new_mid[2],
+                ]));
+            }
+        }
+
+        // 2. Retire arcs overridden by continents or where convergence across the trench ceased:
+        self.oceanic_arcs.retain(|arc| {
+            let mid = normal([
+                arc.start[0] + arc.end[0],
+                arc.start[1] + arc.end[1],
+                arc.start[2] + arc.end[2],
+            ]);
+            let s_in = in_new_continent[self.tree.nearest(arc.start)];
+            let m_in = in_new_continent[self.tree.nearest(mid)];
+            let e_in = in_new_continent[self.tree.nearest(arc.end)];
+            if (s_in as u8 + m_in as u8 + e_in as u8) >= 2 {
+                return false;
+            }
+            let step_ang = (240.0 / self.radius_km).clamp(0.04, 0.25);
+            let sub_pt = normal([
+                mid[0] - step_ang * arc.overriding_normal[0],
+                mid[1] - step_ang * arc.overriding_normal[1],
+                mid[2] - step_ang * arc.overriding_normal[2],
+            ]);
+            let ovr_pt = normal([
+                mid[0] + step_ang * arc.overriding_normal[0],
+                mid[1] + step_ang * arc.overriding_normal[1],
+                mid[2] + step_ang * arc.overriding_normal[2],
+            ]);
+            let t_sub = self.tree.nearest(sub_pt);
+            let t_ovr = self.tree.nearest(ovr_pt);
+            if in_new_continent[t_sub] || in_new_continent[t_ovr] {
+                return false;
+            }
+            let rel_v = [
+                v_ocean[t_sub][0] - v_ocean[t_ovr][0],
+                v_ocean[t_sub][1] - v_ocean[t_ovr][1],
+                v_ocean[t_sub][2] - v_ocean[t_ovr][2],
+            ];
+            let conv = dot(rel_v, arc.overriding_normal);
+            conv > -0.08 * self.dp
+        });
+
+        // 3. Initiate a new intra-oceanic subduction arc where open-ocean convergence or shear peaks:
+        let max_arcs = ((n as f64 / 2000.0).round() as usize).clamp(1, 5);
+        if self.oceanic_arcs.len() >= max_arcs {
+            return;
+        }
+        let ridge_arcs: Vec<GreatCircleArc> = self
+            .ridges
+            .iter()
+            .map(|r| GreatCircleArc::new(r.start, r.end))
+            .collect();
+        let existing_arcs: Vec<GreatCircleArc> = self
+            .oceanic_arcs
+            .iter()
+            .map(|a| GreatCircleArc::new(a.start, a.end))
+            .collect();
+
+        let near_land: Vec<bool> = (0..n)
+            .map(|u| {
+                in_new_continent[u]
+                    || self.adjacency[u].iter().any(|&nb| {
+                        in_new_continent[nb]
+                            || self.adjacency[nb].iter().any(|&nb2| in_new_continent[nb2])
+                    })
+            })
+            .collect();
+
+        let min_ridge_km = (580.0_f64).min(0.28 * self.radius_km);
+        let min_arc_km = (720.0_f64).min(0.34 * self.radius_km);
+        let mut best_cand: Option<(usize, Vec3, f64)> = None;
+
+        for u in 0..n {
+            if near_land[u] {
+                continue;
+            }
+            let pu = self.grid.faces[u].0;
+            if ridge_arcs
+                .iter()
+                .any(|ra| ra.distance_to_point(pu) * self.radius_km < min_ridge_km)
+            {
+                continue;
+            }
+            if existing_arcs
+                .iter()
+                .any(|ea| ea.distance_to_point(pu) * self.radius_km < min_arc_km)
+            {
+                continue;
+            }
+            for &v in &self.adjacency[u] {
+                if v <= u || near_land[v] {
+                    continue;
+                }
+                let pv = self.grid.faces[v].0;
+                let d_uv = normal([pv[0] - pu[0], pv[1] - pu[1], pv[2] - pu[2]]);
+                let rel_v = [
+                    v_ocean[u][0] - v_ocean[v][0],
+                    v_ocean[u][1] - v_ocean[v][1],
+                    v_ocean[u][2] - v_ocean[v][2],
+                ];
+                let conv = dot(rel_v, d_uv);
+                let shear_vec = cross(rel_v, d_uv);
+                let shear = length(shear_vec);
+                let score = conv + 0.35 * shear;
+                if score > 0.22 * self.dp
+                    && best_cand.as_ref().map_or(true, |&(_, _, bs)| score > bs)
+                {
+                    let proj = dot(d_uv, pu);
+                    let ovr_n = normal([
+                        d_uv[0] - proj * pu[0],
+                        d_uv[1] - proj * pu[1],
+                        d_uv[2] - proj * pu[2],
+                    ]);
+                    best_cand = Some((u, ovr_n, score));
+                }
+            }
+        }
+
+        if let Some((center_u, ovr_n, score)) = best_cand {
+            let p_mid = self.grid.faces[center_u].0;
+            if length(ovr_n) > 1e-8 {
+                let half_len_rad = (680.0 / self.radius_km).clamp(0.11, 0.30);
+                let start = Self::quantize_vec3_f32(rotate(p_mid, ovr_n, -half_len_rad));
+                let end = Self::quantize_vec3_f32(rotate(p_mid, ovr_n, half_len_rad));
+                let conv_norm = ((score / self.dp.max(1e-6)) * 0.85).clamp(0.45, 1.30) as f32;
+                self.oceanic_arcs.push(OceanicSubductionArc {
+                    start,
+                    end,
+                    overriding_normal: Self::quantize_vec3_f32(ovr_n),
+                    convergence_speed: conv_norm,
+                });
+            }
+        }
     }
 
     /// Tidal amplitude multiplier for `moon_count` moons in a 2:1 Laplace mean-motion
@@ -822,8 +1278,137 @@ impl TectonicsSimulation {
             }
         }
 
+        // 1b. Kinematic oceanic drift, intra-oceanic subduction arc rollback/initiation, and
+        //     advection of thickened oceanic crust (seamounts, guyots, atolls, and submarine island arcs):
+        let v_ocean = self.compute_ocean_velocities(&in_new_continent, &tile_vel);
+        self.update_oceanic_subduction_arcs(&in_new_continent, &v_ocean);
+
+        let sub_arcs: Vec<(GreatCircleArc, Vec3, f32)> = self
+            .oceanic_arcs
+            .iter()
+            .map(|a| {
+                (
+                    GreatCircleArc::new(a.start, a.end),
+                    a.overriding_normal,
+                    a.convergence_speed,
+                )
+            })
+            .collect();
+
+        let mut advected_ocean_excess: Vec<Vec<RockLayer>> = vec![Vec::new(); n];
+        let mut advected_ocean_mount = vec![0.0f32; n];
+        let mut accreted_onto_continent: Vec<Vec<RockLayer>> = vec![Vec::new(); n];
+        let rollback_speed = 0.15 * self.dp;
+
+        for s in 0..n {
+            if old_continental[s] {
+                continue;
+            }
+            let src_tile = &self.tiles[s];
+            if src_tile.thickness() <= 5.05 && src_tile.mountainosity <= 0.05 {
+                continue;
+            }
+            // Do not carry unweathered oceanic impact-breccia piles endlessly across basins:
+            if src_tile.impact_scar == 0.0 && src_tile.stratigraphic_impact_signature() > 0.0 {
+                continue;
+            }
+            let p_s = self.grid.faces[s].0;
+
+            // Check if `s` sits in the trench or overriding volcanic belt of an `OceanicSubductionArc`:
+            let mut arc_zone: Option<(usize, f64)> = None;
+            for (ai, &(ref gca, ovr_n, _)) in sub_arcs.iter().enumerate() {
+                let d_km = gca.distance_to_point(p_s) * self.radius_km;
+                if d_km <= 340.0 {
+                    let sign = if dot(p_s, gca.circle.plane) >= 0.0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    let signed_km = sign * d_km;
+                    let _ = ovr_n;
+                    if arc_zone.map_or(true, |(_, prev)| d_km < prev.abs()) {
+                        arc_zone = Some((ai, signed_km));
+                    }
+                }
+            }
+
+            if let Some((ai, signed_km)) = arc_zone {
+                let ovr_n = sub_arcs[ai].1;
+                if (-220.0..35.0).contains(&signed_km) {
+                    // Subducting oceanic trench: incoming seamounts & marine sediments are scraped off
+                    // the downgoing slab onto the overriding island-arc front (~175 km across the trench):
+                    let step_ang = ((175.0 - signed_km).max(90.0) / self.radius_km).clamp(0.03, 0.22);
+                    let axis = normal(cross(p_s, ovr_n));
+                    let dest = if length(axis) > 1e-9 {
+                        self.tree.nearest(rotate(p_s, axis, step_ang))
+                    } else {
+                        s
+                    };
+                    let scraped = Self::extract_ocean_excess_layers(src_tile, 0.60);
+                    if in_new_continent[dest] {
+                        accreted_onto_continent[dest].extend(scraped);
+                    } else {
+                        advected_ocean_excess[dest].extend(scraped);
+                        advected_ocean_mount[dest] += src_tile.mountainosity * 0.45;
+                    }
+                    continue;
+                } else if (35.0..=340.0).contains(&signed_km) {
+                    // Overriding island-arc belt: moves coherently with slow trench rollback so
+                    // calc-alkaline arc crust piles up until Airy buoyancy lifts it to/above sea level:
+                    let rb_vel = [
+                        -ovr_n[0] * rollback_speed,
+                        -ovr_n[1] * rollback_speed,
+                        -ovr_n[2] * rollback_speed,
+                    ];
+                    let axis = normal(cross(p_s, rb_vel));
+                    let dest = if length(axis) > 1e-9 && rollback_speed > 1e-9 {
+                        self.tree.nearest(rotate(p_s, axis, rollback_speed))
+                    } else {
+                        s
+                    };
+                    let kept = Self::extract_ocean_excess_layers(src_tile, 0.97);
+                    if in_new_continent[dest] {
+                        accreted_onto_continent[dest].extend(kept);
+                    } else {
+                        advected_ocean_excess[dest].extend(kept);
+                        advected_ocean_mount[dest] =
+                            advected_ocean_mount[dest].max(src_tile.mountainosity * 0.88);
+                    }
+                    continue;
+                }
+            }
+
+            // Open-ocean plate drift: advect seamount/guyot column along `v_ocean[s]`:
+            let vo = v_ocean[s];
+            let speed = length(vo);
+            let dest = if speed > 1e-9 {
+                let axis = normal(cross(p_s, vo));
+                if length(axis) > 1e-9 {
+                    self.tree.nearest(rotate(p_s, axis, speed))
+                } else {
+                    s
+                }
+            } else {
+                s
+            };
+            if in_new_continent[dest] {
+                let scraped = Self::extract_ocean_excess_layers(src_tile, 0.55);
+                accreted_onto_continent[dest].extend(scraped);
+            } else {
+                let drifted = Self::extract_ocean_excess_layers(src_tile, 0.94);
+                advected_ocean_excess[dest].extend(drifted);
+                // Wave planation & submarine flank slumping erode drifted cones into flat-topped guyots:
+                let decayed_m = if dest == s {
+                    src_tile.mountainosity * 0.84
+                } else {
+                    src_tile.mountainosity * 0.72
+                };
+                advected_ocean_mount[dest] = advected_ocean_mount[dest].max(decayed_m);
+            }
+        }
+
         // 2. Apply tile movements, directional leading-edge subduction uplift, and accretionary
-        //    sediment scraping.
+        //    sediment + seamount/island-arc terrane scraping.
         let mut collisions: BTreeMap<(usize, usize), usize> = BTreeMap::new();
 
         for (dest, movements) in new_movements {
@@ -859,9 +1444,8 @@ impl TectonicsSimulation {
                 0.0
             };
 
-            // Scrape off any marine sedimentary layers from the overridden ocean tile
-            // before replacing it with the advancing continental column (Accretionary Wedge),
-            // and preserve the overridden ocean floor's basalt/VMS composition for subduction underplating.
+            // Scrape off marine sedimentary layers AND any overridden oceanic seamount / island-arc
+            // terrane layers before replacing `dest` with the advancing continental column:
             let mut scraped_sediments: Vec<RockLayer> = Vec::new();
             let mut subducted_seafloor = self.tiles[dest]
                 .layers
@@ -885,6 +1469,23 @@ impl TectonicsSimulation {
                         scraped_sediments.push(l.clone());
                     }
                 }
+                // Also accrete up to 0.85 km of overridden seamount/arc volcanic edifice into the wedge:
+                let mut terrane_rem = 0.85f32;
+                for mut tl in Self::extract_ocean_excess_layers(&self.tiles[dest], 0.30)
+                    .into_iter()
+                    .chain(std::mem::take(&mut accreted_onto_continent[dest]))
+                {
+                    if tl.rock.kind == RockKind::Sedimentary {
+                        continue;
+                    }
+                    if terrane_rem <= 0.02 {
+                        break;
+                    }
+                    let take = tl.thickness.min(terrane_rem);
+                    tl.thickness = take;
+                    terrane_rem -= take;
+                    scraped_sediments.push(tl);
+                }
                 if had_marine_sed {
                     let existing_c = subducted_seafloor.bogginess.unwrap_or(0.0);
                     subducted_seafloor.bogginess =
@@ -897,7 +1498,14 @@ impl TectonicsSimulation {
             self.tiles[dest].merge_sources_owned(group_sources);
 
             for sed in scraped_sediments {
+                let is_igneous_terrane = sed.rock.kind != RockKind::Sedimentary;
+                let st = sed.thickness;
                 self.tiles[dest].deposit(sed);
+                if is_igneous_terrane {
+                    // Subduction uplift is already accounted for in `raw_build`; compensate root so
+                    // accreted terranes enrich Cordilleran stratigraphy without double-counting elevation:
+                    self.tiles[dest].isostasize(-st);
+                }
             }
 
             if raw_build > 0.0 {
@@ -924,12 +1532,8 @@ impl TectonicsSimulation {
         drop(_span_adv);
         let _span_ridge = crate::profile::span(crate::profile::ProfilePhase::TecRidgeAndOceanBathymetry);
 
-        // 3. Mid-ocean spreading ridge advection, retirement, and dynamic ocean floor bathymetry:
-        //    - Advect active spreading ridges by their parent drift velocity and retire overridden ones.
-        //    - Compute Parsons & Sclater thermal subsidence (-2.5 km ridge axis -> -5.5 km abyssal plain
-        //      over 2,600 km) from active spreading ridges.
-        //    - Evaluate coastal ocean tiles directionally: active convergent trenches (cos_theta > 0.35)
-        //      flex downward to -5.5..-6.8 km, while passive/trailing shelves sit at -1.15 km.
+        // 3. Mid-ocean ridges, mantle hotspot plumes, intra-oceanic subduction arcs, and
+        //    water-loaded Airy-isostatic ocean bathymetry:
         for ridge in &mut self.ridges {
             let speed = length(ridge.velocity);
             if speed > 1e-9 {
@@ -962,7 +1566,137 @@ impl TectonicsSimulation {
             !(s_in && m_in && e_in)
         });
 
-        let active_arcs: Vec<(GreatCircleArc, f64)> = self
+        // 3a. Rebuild each ocean tile's advected column (`5.0 km` MORB seafloor + advected seamount/arc layers):
+        for v in 0..n {
+            if in_new_continent[v] {
+                continue;
+            }
+            let preserved_scar = if old_continental[v] {
+                0.0
+            } else {
+                self.tiles[v].impact_scar
+            };
+            let mut base_tile = TileGeology::empty_ocean_with_depth(Rock::seafloor(), -4.5);
+            base_tile.impact_scar = preserved_scar;
+            let mut excess_sum = 0.0f32;
+            for mut layer in std::mem::take(&mut advected_ocean_excess[v]) {
+                if excess_sum >= 24.0 {
+                    break;
+                }
+                let take = layer.thickness.min(24.0 - excess_sum);
+                if take > 0.005 {
+                    layer.thickness = take;
+                    base_tile.layers.push(layer);
+                    excess_sum += take;
+                }
+            }
+            base_tile.mountainosity = advected_ocean_mount[v].clamp(0.0, 14.0);
+            base_tile.compact();
+            self.tiles[v] = base_tile;
+        }
+
+        // 3b. Mantle Hotspot Plume Volcanism (Ocean-Island Basalt shield edifices + continental flood traps):
+        for hotspot in &mut self.hotspots {
+            let d_speed = length(hotspot.drift);
+            if d_speed > 1e-9 {
+                let axis = normal(cross(hotspot.pos, hotspot.drift));
+                if length(axis) > 1e-9 {
+                    let next_p = Self::quantize_vec3_f32(rotate(hotspot.pos, axis, d_speed));
+                    let next_d = rotate(hotspot.drift, axis, d_speed);
+                    let proj = dot(next_d, next_p);
+                    let tang = normal([
+                        next_d[0] - proj * next_p[0],
+                        next_d[1] - proj * next_p[1],
+                        next_d[2] - proj * next_p[2],
+                    ]);
+                    hotspot.pos = next_p;
+                    hotspot.drift = Self::quantize_vec3_f32([
+                        tang[0] * d_speed,
+                        tang[1] * d_speed,
+                        tang[2] * d_speed,
+                    ]);
+                }
+            }
+            let h_tile = self.tree.nearest(hotspot.pos);
+            let flux = hotspot.flux_km_per_tick;
+            let mut oib = Rock::extrusive(0.44);
+            oib.sulfidity = Some(0.10);
+            if !in_new_continent[h_tile] {
+                let cur_excess = (self.tiles[h_tile].thickness() - 5.0).max(0.0);
+                let add_main = (flux * ((22.0 - cur_excess) / 18.0).clamp(0.20, 1.0)).max(0.0);
+                if add_main > 0.05 {
+                    self.tiles[h_tile].layers.push(RockLayer {
+                        rock: oib.clone(),
+                        thickness: add_main,
+                    });
+                    self.tiles[h_tile].mountainosity =
+                        (self.tiles[h_tile].mountainosity + 4.4).min(14.0);
+                    self.tiles[h_tile].compact();
+                }
+                let flank_add = 0.22 * flux;
+                for &nb in &self.adjacency[h_tile] {
+                    if !in_new_continent[nb] && self.tiles[nb].thickness() < 16.0 {
+                        self.tiles[nb].layers.push(RockLayer {
+                            rock: oib.clone(),
+                            thickness: flank_add,
+                        });
+                        self.tiles[nb].mountainosity =
+                            (self.tiles[nb].mountainosity + 0.85).min(10.0);
+                        self.tiles[nb].compact();
+                    }
+                }
+            } else if self.tiles[h_tile].thickness() < 32.0
+                && self.tiles[h_tile].impact_signature() < 0.05
+                && (self.geoticks + (h_tile as u32)) % 8 == 0
+            {
+                // Occasional Flood Basalt / Large Igneous Province trap eruption through thin continental crust:
+                let trap_t = (0.14 * flux).clamp(0.15, 0.75);
+                self.tiles[h_tile].deposit(RockLayer {
+                    rock: oib,
+                    thickness: trap_t,
+                });
+                self.tiles[h_tile].isostasize(-trap_t);
+            }
+        }
+
+        // 3c. Intra-Oceanic Subduction Arc Magmatism (calc-alkaline andesite/dacite + porphyry Cu-Au):
+        for &(ref gca, _, conv_speed) in &sub_arcs {
+            let mut arc_rock = Rock::intrusive(0.58); // "andesite"
+            arc_rock.sulfidity = Some(0.22);
+            arc_rock.quartzity = Some(0.15);
+            for v in 0..n {
+                if in_new_continent[v] {
+                    continue;
+                }
+                let p_v = self.grid.faces[v].0;
+                let d_km = gca.distance_to_point(p_v) * self.radius_km;
+                if !(50.0..=320.0).contains(&d_km) {
+                    continue;
+                }
+                if dot(p_v, gca.circle.plane) <= 0.0 {
+                    continue; // Subducting trench side — no arc magmatism
+                }
+                // Bell-shaped magmatic front peaking ~175 km behind the trench axis:
+                let u = ((d_km - 175.0) / 135.0).clamp(-1.0, 1.0);
+                let profile = (1.0 - u * u).max(0.0) as f32;
+                let cur_excess = (self.tiles[v].thickness() - 5.0).max(0.0);
+                let taper = ((24.0 - cur_excess) / 18.0).clamp(0.15, 1.0);
+                let add_arc = 2.05 * profile * conv_speed * taper;
+                if add_arc > 0.05 {
+                    self.tiles[v].layers.push(RockLayer {
+                        rock: arc_rock.clone(),
+                        thickness: add_arc,
+                    });
+                    self.tiles[v].mountainosity =
+                        (self.tiles[v].mountainosity + 2.2 * profile).min(15.0);
+                    self.tiles[v].subduction = self.tiles[v].subduction.max(0.55 * profile);
+                    self.tiles[v].compact();
+                }
+            }
+        }
+
+        // 3d. Water-loaded Airy-isostatic ocean bathymetry + emergent island-arc / ridge-plume graduation:
+        let active_ridges: Vec<(GreatCircleArc, f64)> = self
             .ridges
             .iter()
             .map(|r| {
@@ -970,6 +1704,10 @@ impl TectonicsSimulation {
                 (GreatCircleArc::new(r.start, r.end), maturity)
             })
             .collect();
+
+        let mut cur_land_count = in_new_continent.iter().filter(|&&b| b).count();
+        let max_land_count = ((n as f64) * 0.46) as usize;
+        let mut newly_emergent: Vec<usize> = Vec::new();
 
         for v in 0..n {
             if in_new_continent[v] {
@@ -979,7 +1717,7 @@ impl TectonicsSimulation {
             let p_v = self.grid.faces[v].0;
             let mut z_ridge = -5.5f64;
             let mut ridge_vent_intensity = 0.0f32;
-            for &(ref arc, maturity) in &active_arcs {
+            for &(ref arc, maturity) in &active_ridges {
                 let d_km = arc.distance_to_point(p_v) * self.radius_km;
                 let u = (d_km / 2600.0).clamp(0.0, 1.0);
                 let z_arc = -5.5 + maturity * 3.0 * (1.0 - u.sqrt());
@@ -990,6 +1728,37 @@ impl TectonicsSimulation {
                     let vent = (maturity * (1.0 - d_km / 650.0)) as f32;
                     if vent > ridge_vent_intensity {
                         ridge_vent_intensity = vent;
+                    }
+                }
+            }
+
+            // Dynamic thermal plume swell (~1.35 km uplift over active hotspot heads, subsiding downstream):
+            let mut z_plume_swell = 0.0f64;
+            for hotspot in &self.hotspots {
+                let ang = dot(p_v, hotspot.pos).clamp(-1.0, 1.0).acos();
+                let d_km = ang * self.radius_km;
+                let swell_r = (380.0_f64).max(0.10 * self.radius_km);
+                if d_km < swell_r {
+                    let q = 1.0 - d_km / swell_r;
+                    z_plume_swell = z_plume_swell.max(1.35 * q * q);
+                }
+            }
+
+            // Intra-oceanic subduction trench flexural depression on subducting side (`-250..+35 km`):
+            let mut z_intra_trench = 0.0f64;
+            for &(ref gca, _, conv_speed) in &sub_arcs {
+                let d_km = gca.distance_to_point(p_v) * self.radius_km;
+                if d_km <= 250.0 {
+                    let signed_km = if dot(p_v, gca.circle.plane) >= 0.0 {
+                        d_km
+                    } else {
+                        -d_km
+                    };
+                    if (-250.0..=35.0).contains(&signed_km) {
+                        let u = ((signed_km + 65.0) / 170.0).clamp(-1.0, 1.0);
+                        let dep =
+                            1.35 * (1.0 - u * u).max(0.0) * (conv_speed as f64).clamp(0.4, 1.2);
+                        z_intra_trench = z_intra_trench.max(dep);
                     }
                 }
             }
@@ -1023,34 +1792,76 @@ impl TectonicsSimulation {
                 }
             }
 
-            let target_elev = if !has_cont_nb {
-                z_ridge as f32
+            let open_base = (z_ridge + z_plume_swell - z_intra_trench).clamp(-6.8, -1.05);
+            let buoyancy_km = Self::ocean_excess_buoyancy_km(&self.tiles[v]);
+
+            let raw_elev = if !has_cont_nb {
+                (open_base as f32) + buoyancy_km
             } else if cos_theta_max > 0.35 && max_sub > 0.0 {
                 // Active convergent subduction trench ahead of an advancing continental margin:
                 let trench_deflection = 1.35 * cos_theta_max * max_sub.clamp(0.25, 1.2);
-                (z_ridge - trench_deflection).clamp(-6.8, -4.8) as f32
+                ((z_ridge - trench_deflection).clamp(-6.8, -4.8) as f32) + 0.35 * buoyancy_km
             } else if cos_theta_max <= 0.15 {
                 // Passive / trailing continental shelf:
-                -1.15f32
+                -1.15f32 + 0.45 * buoyancy_km
             } else {
-                // Oblique coastal margin: smooth transition between passive shelf and open ocean / ridge depth:
+                // Oblique coastal margin: smooth transition between passive shelf and open ocean:
                 let w = ((cos_theta_max - 0.15) / 0.20).clamp(0.0, 1.0);
-                ((-1.15 * (1.0 - w)) + z_ridge * w) as f32
+                (((-1.15 * (1.0 - w)) + open_base * w) as f32) + 0.65 * buoyancy_km
             };
 
-            if old_continental[v]
-                || self.tiles[v].elevation() > 0.0
-                || (self.tiles[v].impact_scar == 0.0
-                    && self.tiles[v].stratigraphic_impact_signature() > 0.0)
-            {
-                self.tiles[v] = TileGeology::empty_ocean_with_depth(Rock::seafloor(), target_elev);
+            // Physical emergence test (pure elevation + accumulated crustal thickness — no age timer):
+            // Only thicken-crust mature island arcs or ridge-centered volcanic plateaus (`>= 19.5 km` crust)
+            // breach `0.0 km` on the coarse grid, provided doing so doesn't enclose a tiny ocean pinhole.
+            let can_emerge = raw_elev > 0.08
+                && self.tiles[v].thickness() >= 19.5
+                && cur_land_count < max_land_count
+                && self.adjacency[v]
+                    .iter()
+                    .filter(|&&nb| !in_new_continent[nb])
+                    .count()
+                    >= 3;
+
+            if can_emerge {
+                let em_elev = raw_elev.clamp(0.10, 1.35);
+                self.tiles[v].bottom = em_elev - self.tiles[v].thickness();
+                newly_emergent.push(v);
+                cur_land_count += 1;
             } else {
-                self.tiles[v].bottom = target_elev.min(-0.15) - self.tiles[v].thickness();
+                let sub_elev = raw_elev.clamp(-6.85, -0.08);
+                self.tiles[v].bottom = sub_elev - self.tiles[v].thickness();
+
+                // Darwinian coral-atoll reef limestone cap on shallow tropical/subtropical seamounts & arcs:
+                if self.has_atmosphere()
+                    && self.has_life()
+                    && (-0.95..=-0.08).contains(&sub_elev)
+                    && self.tiles[v].thickness() >= 7.0
+                    && self.tile_temp_c[v] >= 19.0
+                {
+                    let reef = Rock {
+                        kind: RockKind::Sedimentary,
+                        name: "limestone",
+                        felsity: 0.45,
+                        toughness: 0.0,
+                        clasticity: Some(1.0),
+                        calcity: Some(0.88),
+                        bogginess: Some(0.05),
+                        quartzity: None,
+                        sulfidity: None,
+                        salinity: None,
+                    };
+                    self.tiles[v].layers.push(RockLayer {
+                        rock: reef,
+                        thickness: 0.05,
+                    });
+                    self.tiles[v].compact();
+                    self.tiles[v].bottom = sub_elev - self.tiles[v].thickness();
+                }
             }
 
             // Black-smoker hydrothermal venting at active mid-ocean spreading ridge axes
             // precipitates Volcanogenic Massive Sulfide (VMS) lenses and siliceous sinter caps:
-            if ridge_vent_intensity > 0.01 {
+            if ridge_vent_intensity > 0.01 && !can_emerge {
                 if let Some(top_igneous) = self.tiles[v]
                     .layers
                     .iter_mut()
@@ -1065,6 +1876,108 @@ impl TectonicsSimulation {
                         .clamp(0.0, 0.30);
                     top_igneous.rock.sulfidity = Some(s);
                     top_igneous.rock.quartzity = Some(q);
+                }
+            }
+        }
+
+        // 3e. Graduate newly emergent volcanic plateaus & mature island arcs into `LithosphericGroup`s
+        //     (skipping any candidate whose emergence would trap a 1..=3 tile interior ocean pinhole):
+        if !newly_emergent.is_empty() {
+            for &cand in &newly_emergent {
+                in_new_continent[cand] = true;
+            }
+            // Verify no 1..=3 tile ocean pinhole was created; revert any offending candidate to -0.08 km:
+            let mut visited_oc = vec![false; n];
+            let mut revert_tiles = Vec::new();
+            for start in 0..n {
+                if visited_oc[start] || in_new_continent[start] {
+                    continue;
+                }
+                let mut comp = Vec::new();
+                let mut q = std::collections::VecDeque::new();
+                visited_oc[start] = true;
+                q.push_back(start);
+                while let Some(u) = q.pop_front() {
+                    comp.push(u);
+                    for &nb in &self.adjacency[u] {
+                        if !visited_oc[nb] && !in_new_continent[nb] {
+                            visited_oc[nb] = true;
+                            q.push_back(nb);
+                        }
+                    }
+                }
+                if comp.len() <= 3 {
+                    for &hole in &comp {
+                        for &nb in &self.adjacency[hole] {
+                            if newly_emergent.contains(&nb) {
+                                revert_tiles.push(nb);
+                            }
+                        }
+                    }
+                }
+            }
+            for &rv in &revert_tiles {
+                in_new_continent[rv] = false;
+                self.tiles[rv].bottom = -0.08 - self.tiles[rv].thickness();
+            }
+            newly_emergent.retain(|v| in_new_continent[*v]);
+
+            let em_set: BTreeSet<usize> = newly_emergent.iter().copied().collect();
+            let mut handled = BTreeSet::new();
+            for &start in &newly_emergent {
+                if handled.contains(&start) {
+                    continue;
+                }
+                let mut comp = Vec::new();
+                let mut q = std::collections::VecDeque::new();
+                handled.insert(start);
+                q.push_back(start);
+                while let Some(u) = q.pop_front() {
+                    comp.push(u);
+                    for &nb in &self.adjacency[u] {
+                        if em_set.contains(&nb) && !handled.contains(&nb) {
+                            handled.insert(nb);
+                            q.push_back(nb);
+                        }
+                    }
+                }
+                // Attach to adjacent existing continent group if touching one; otherwise form an island-arc microplate:
+                let mut adj_g: Option<usize> = None;
+                for &u in &comp {
+                    for &nb in &self.adjacency[u] {
+                        if !em_set.contains(&nb) && !overlapping[nb].is_empty() {
+                            adj_g = Some(overlapping[nb][0]);
+                            break;
+                        }
+                    }
+                    if adj_g.is_some() {
+                        break;
+                    }
+                }
+                if let Some(g_idx) = adj_g {
+                    for &u in &comp {
+                        if !self.groups[g_idx].tiles.contains(&u) {
+                            self.groups[g_idx].tiles.push(u);
+                        }
+                        overlapping[u].push(g_idx);
+                    }
+                } else {
+                    let mut sv = [0.0, 0.0, 0.0];
+                    for &u in &comp {
+                        sv[0] += v_ocean[u][0];
+                        sv[1] += v_ocean[u][1];
+                        sv[2] += v_ocean[u][2];
+                    }
+                    let inv = 1.0 / (comp.len() as f64);
+                    let g_vel = Self::quantize_vec3_f32([sv[0] * inv, sv[1] * inv, sv[2] * inv]);
+                    let new_g = self.groups.len();
+                    for &u in &comp {
+                        overlapping[u].push(new_g);
+                    }
+                    self.groups.push(LithosphericGroup {
+                        tiles: comp,
+                        velocity: g_vel,
+                    });
                 }
             }
         }
@@ -1339,9 +2252,9 @@ impl TectonicsSimulation {
         }
 
         let _span_meta = crate::profile::span(crate::profile::ProfilePhase::TecMetamorphismAndRifting);
-        // 7. Random plutonic intrusions and contact metamorphism (`planetsimulation.py:325-329`).
+        // 7. Random plutonic intrusions and contact metamorphism on continental arcs (`planetsimulation.py:325-329`).
         for t in 0..n {
-            if self.tiles[t].subduction > 0.0 && self.rng.next_f64() < 0.1 {
+            if in_new_continent[t] && self.tiles[t].subduction > 0.0 && self.rng.next_f64() < 0.1 {
                 let silica = self.rng.gauss(0.85, 0.15).clamp(0.0, 1.0) as f32;
                 self.tiles[t].intrude(Rock::intrusive(silica));
                 let transformed =
@@ -1622,6 +2535,13 @@ impl TectonicsSimulation {
         lines.push(format!(
             "Tile #{tile_idx} ({kind_str}) | Elev: {elev:+.2} km | Crust: {thick:.1} km{koeppen_str}"
         ));
+        if elev <= 0.0 {
+            lines.push(format!(
+                "Submarine Landform: {} | Relief: {:.0}%",
+                classify_submarine_tile(tile),
+                tile.mountainosity_norm() * 100.0
+            ));
+        }
         if tile.subduction > 0.0 {
             lines.push(format!(
                 "Active Subduction: {:.2} km | Mountainosity: {:.0}%",
@@ -1766,7 +2686,7 @@ impl TectonicsSimulation {
         let loc_summary = if !has_atm {
             format!("Pre-atmosphere Crust | Elevation: {elev:+.2} km")
         } else if elev <= 0.0 {
-            format!("Marine Basin | Bathymetry: {elev:.2} km")
+            format!("{} | Bathymetry: {elev:.2} km", classify_submarine_tile(tile))
         } else {
             let k_code = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
             format!(
@@ -1906,6 +2826,47 @@ impl TectonicsSimulation {
             })
             .collect();
 
+        let proto_hotspots: Vec<tec11_proto::MantleHotspot> = self
+            .hotspots
+            .iter()
+            .map(|h| tec11_proto::MantleHotspot {
+                pos: Some(tec11_proto::Vec3 {
+                    x: h.pos[0] as f32,
+                    y: h.pos[1] as f32,
+                    z: h.pos[2] as f32,
+                }),
+                drift: Some(tec11_proto::Vec3 {
+                    x: h.drift[0] as f32,
+                    y: h.drift[1] as f32,
+                    z: h.drift[2] as f32,
+                }),
+                flux_km_per_tick: h.flux_km_per_tick,
+            })
+            .collect();
+
+        let proto_oceanic_arcs: Vec<tec11_proto::OceanicSubductionArc> = self
+            .oceanic_arcs
+            .iter()
+            .map(|a| tec11_proto::OceanicSubductionArc {
+                start: Some(tec11_proto::Vec3 {
+                    x: a.start[0] as f32,
+                    y: a.start[1] as f32,
+                    z: a.start[2] as f32,
+                }),
+                end: Some(tec11_proto::Vec3 {
+                    x: a.end[0] as f32,
+                    y: a.end[1] as f32,
+                    z: a.end[2] as f32,
+                }),
+                overriding_normal: Some(tec11_proto::Vec3 {
+                    x: a.overriding_normal[0] as f32,
+                    y: a.overriding_normal[1] as f32,
+                    z: a.overriding_normal[2] as f32,
+                }),
+                convergence_speed: a.convergence_speed,
+            })
+            .collect();
+
         let env_out = self.saved_environment.as_ref().map(|e| {
             let mut env = e.clone();
             env.has_atmosphere = self.has_atmosphere();
@@ -1932,6 +2893,8 @@ impl TectonicsSimulation {
                     tiles: proto_tiles,
                     groups: proto_groups,
                     ridges: proto_ridges,
+                    hotspots: proto_hotspots,
+                    oceanic_arcs: proto_oceanic_arcs,
                 },
             )),
             environment: env_out,
@@ -1957,6 +2920,8 @@ impl TectonicsSimulation {
             tiles,
             mut groups,
             ridges,
+            hotspots,
+            oceanic_arcs,
             geoticks,
             atmosphere_ticks_remaining,
             life_ticks_remaining,
@@ -2002,6 +2967,34 @@ impl TectonicsSimulation {
                         }
                     })
                     .collect();
+                let hotspots: Vec<MantleHotspot> = tec
+                    .hotspots
+                    .iter()
+                    .map(|ph| {
+                        let p = ph.pos.unwrap_or_default();
+                        let d = ph.drift.unwrap_or_default();
+                        MantleHotspot {
+                            pos: [p.x as f64, p.y as f64, p.z as f64],
+                            drift: [d.x as f64, d.y as f64, d.z as f64],
+                            flux_km_per_tick: ph.flux_km_per_tick,
+                        }
+                    })
+                    .collect();
+                let oceanic_arcs: Vec<OceanicSubductionArc> = tec
+                    .oceanic_arcs
+                    .iter()
+                    .map(|pa| {
+                        let s = pa.start.unwrap_or_default();
+                        let e = pa.end.unwrap_or_default();
+                        let on = pa.overriding_normal.unwrap_or_default();
+                        OceanicSubductionArc {
+                            start: [s.x as f64, s.y as f64, s.z as f64],
+                            end: [e.x as f64, e.y as f64, e.z as f64],
+                            overriding_normal: [on.x as f64, on.y as f64, on.z as f64],
+                            convergence_speed: pa.convergence_speed,
+                        }
+                    })
+                    .collect();
                 let total_target = if tec.people_ticks_remaining > 0 {
                     tec.people_ticks_remaining
                 } else {
@@ -2011,6 +3004,8 @@ impl TectonicsSimulation {
                     tiles,
                     groups,
                     ridges,
+                    hotspots,
+                    oceanic_arcs,
                     tec.tectonics_ticks,
                     tec.atmosphere_ticks_remaining,
                     tec.life_ticks_remaining,
@@ -2045,6 +3040,8 @@ impl TectonicsSimulation {
                 (
                     tiles,
                     groups,
+                    Vec::new(),
+                    Vec::new(),
                     Vec::new(),
                     pre.tectonics_ticks,
                     0,
@@ -2081,6 +3078,8 @@ impl TectonicsSimulation {
                 (
                     tiles,
                     groups,
+                    Vec::new(),
+                    Vec::new(),
                     Vec::new(),
                     pre.tectonics_ticks,
                     0,
@@ -2205,6 +3204,8 @@ impl TectonicsSimulation {
             tiles,
             groups,
             ridges,
+            hotspots,
+            oceanic_arcs,
             climate_model,
             tile_koeppen: vec![0; n],
             tile_life: vec![0.0; n],
@@ -2342,6 +3343,7 @@ mod tests {
         let mut min_ocean = f32::INFINITY;
         let mut max_ocean = f32::NEG_INFINITY;
         let mut non_coastal_above_abyssal = 0usize;
+        let mut open_ocean_seamount_or_arc = 0usize;
         for v in 0..n {
             let elev = sim.tiles()[v].elevation();
             if elev <= 0.0 {
@@ -2351,16 +3353,19 @@ mod tests {
                     .iter()
                     .any(|&nb| sim.tiles()[nb].elevation() > 0.0);
                 if !has_land_nb {
-                    // Open-ocean tiles (not adjacent to a continent) must follow ridge-to-abyssal
-                    // thermal subsidence [-5.5, -2.5] km and never retain deep trench scars (< -5.6 km).
+                    // Open-ocean tiles span intra-oceanic trenches [-6.85, -5.5], ridge-to-abyssal
+                    // thermal subsidence [-5.5, -2.5], and buoyant seamount / island-arc ridges (-2.5, -0.05].
                     assert!(
-                        (-5.6..=-2.4).contains(&elev),
+                        (-6.9..=-0.05).contains(&elev),
                         "Open-ocean tile {} has out-of-range elevation {} km",
                         v,
                         elev
                     );
                     if elev > -4.5 {
                         non_coastal_above_abyssal += 1;
+                    }
+                    if sim.tiles()[v].thickness() > 6.0 && elev > -3.8 {
+                        open_ocean_seamount_or_arc += 1;
                     }
                 }
             }
@@ -2371,14 +3376,19 @@ mod tests {
             min_ocean
         );
         assert!(
-            max_ocean <= -0.15 && max_ocean > -1.5,
-            "Expected passive continental shelf in (-1.5, -0.15], got {}",
+            max_ocean <= -0.05 && max_ocean > -1.5,
+            "Expected passive continental shelf or shallow seamount in (-1.5, -0.05], got {}",
             max_ocean
         );
         assert!(
             non_coastal_above_abyssal > 20,
-            "Expected active mid-ocean ridges to elevate open-ocean tiles above abyssal plain, got {}",
+            "Expected active mid-ocean ridges and seamounts to elevate open-ocean tiles above abyssal plain, got {}",
             non_coastal_above_abyssal
+        );
+        assert!(
+            open_ocean_seamount_or_arc >= 3,
+            "Expected mantle hotspots and intra-oceanic arcs to build thickened submarine seamount/arc tiles, got {}",
+            open_ocean_seamount_or_arc
         );
     }
 
@@ -2759,5 +3769,56 @@ mod tests {
                 assert_eq!(la.rock.salinity, lb.rock.salinity);
             }
         }
+    }
+
+    #[test]
+    fn test_mantle_hotspots_seamount_trails_and_oceanic_arcs_isostasy() {
+        let mut sim = TectonicsSimulation::new(5, 28.0, 1337);
+        assert!(!sim.hotspots().is_empty(), "Expected active mantle hotspots");
+
+        for _ in 0..32 {
+            sim.step();
+        }
+
+        // 1. Verify advecting submarine seamount/guyot trails (`thickness > 6.2 km` in open ocean):
+        let seamount_tiles: Vec<usize> = (0..sim.tile_count())
+            .filter(|&v| {
+                let t = &sim.tiles()[v];
+                t.elevation() <= 0.0
+                    && t.thickness() > 6.2
+                    && sim.adjacency[v].iter().all(|&nb| sim.tiles()[nb].elevation() <= 0.0)
+            })
+            .collect();
+        assert!(
+            seamount_tiles.len() >= 6,
+            "Expected advecting submarine seamount trails + arc ridges (>= 6 open-ocean tiles), got {}",
+            seamount_tiles.len()
+        );
+
+        // 2. Verify intra-oceanic subduction arcs generate intermediate/andesitic (`felsity >= 0.55`) submarine arc crust:
+        let has_arc_crust = (0..sim.tile_count()).any(|v| {
+            let t = &sim.tiles()[v];
+            t.elevation() <= 0.0
+                && t.thickness() > 6.5
+                && t.layers
+                    .iter()
+                    .any(|l| l.rock.kind == RockKind::Igneous && l.rock.felsity >= 0.55)
+        });
+        assert!(
+            has_arc_crust,
+            "Expected intra-oceanic subduction arcs to build intermediate/andesitic submarine arc crust"
+        );
+
+        // 3. Verify water-loaded Airy isostasy: thicker submarine volcanic crust floats higher than 5 km abyssal floor:
+        let mean_seamount_elev: f32 = seamount_tiles
+            .iter()
+            .map(|&v| sim.tiles()[v].elevation())
+            .sum::<f32>()
+            / (seamount_tiles.len() as f32);
+        assert!(
+            mean_seamount_elev > -4.2,
+            "Expected thickened seamount/arc crust to sit above abyssal plain via Airy buoyancy, got mean {:.2} km",
+            mean_seamount_elev
+        );
     }
 }
