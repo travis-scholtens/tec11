@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use tec11_math_grid::{SphericalGrid, Vec3};
+use tec11_math_grid::SphericalGrid;
 
 use crate::fv_geom::FiniteVolumeSphereGeom;
 use crate::tides::{AtmosphericTideForcing, LaplaceTidalSolver};
@@ -15,6 +15,14 @@ struct MeteogramSample {
     slp_tenths_hpa: i16,
     precip_hundredths_mm: u16,
     wind_tenths_mps: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct StaticEdgeDrag {
+    r_ekman: f32,
+    quad_drag1: f32,
+    r_upper_base: f32,
+    ext_q_weight: f32,
 }
 
 /// Initialization inputs derived from coarse `ClimateModel` and fine `FullSphereFineGrid` terrain.
@@ -47,8 +55,12 @@ pub struct WeatherInitConfig<'a> {
 #[derive(Clone, Debug)]
 pub struct MoistBaroclinicSolver {
     num_cells: usize,
-    unit_centers: Vec<Vec3>,
+    unit_centers: Vec<[f32; 3]>,
     surf_elev_m: Vec<f32>,
+    qsat_elev_base: Vec<f32>,
+    atmo_alb_term: Vec<f32>,
+    extratrop_theta_weight: Vec<f32>,
+    edge_drag: Vec<StaticEdgeDrag>,
     surf_gx: Vec<f32>,
     surf_gy: Vec<f32>,
     mountainosity_norm: Vec<f32>,
@@ -128,6 +140,11 @@ pub struct MoistBaroclinicSolver {
     meteogram_history: VecDeque<Vec<MeteogramSample>>,
 
     // Reusable scratch arrays for allocation-free substeps:
+    scratch_daily_mu: Vec<f32>,
+    scratch_pot_sst_c: Vec<f32>,
+    scratch_sea_ice_frac: Vec<f32>,
+    scratch_runoff_m: Vec<f32>,
+    scratch_accum_m3s: Vec<f32>,
     scratch_phi1: Vec<f32>,
     scratch_phi2: Vec<f32>,
     scratch_div1: Vec<f32>,
@@ -136,14 +153,17 @@ pub struct MoistBaroclinicSolver {
     scratch_zeta2: Vec<f32>,
     scratch_w12: Vec<f32>,
     scratch_ep_east: Vec<f32>,
+    scratch_ep_edge: Vec<f32>,
     scratch_edge_flux: Vec<f32>,
+    scratch_edge_flux2: Vec<f32>,
     scratch_moist_edge: Vec<f32>,
     scratch_lap_a: Vec<f32>,
     scratch_lap_b: Vec<f32>,
+    scratch_lap_c: Vec<f32>,
+    scratch_lap_d: Vec<f32>,
     scratch_gx: Vec<f32>,
     scratch_gy: Vec<f32>,
-    scratch_u_next: Vec<f32>,
-    scratch_u2_next: Vec<f32>,
+    scratch_u2_col: Vec<f32>,
     rk_u1_0: Vec<f32>,
     rk_u2_0: Vec<f32>,
     rk_ps_0: Vec<f32>,
@@ -172,16 +192,30 @@ impl MoistBaroclinicSolver {
         let n = geom.num_cells;
         let ne = geom.edges.len();
 
-        let unit_centers: Vec<Vec3> = grid
+        let unit_centers: Vec<[f32; 3]> = grid
             .faces
             .iter()
             .map(|&(p, _)| {
                 let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt().max(1e-12);
-                [p[0] / len, p[1] / len, p[2] / len]
+                [
+                    (p[0] / len) as f32,
+                    (p[1] / len) as f32,
+                    (p[2] / len) as f32,
+                ]
             })
             .collect();
 
         let surf_elev_m: Vec<f32> = cfg.bed_m.iter().map(|&zb| zb.max(0.0)).collect();
+        let qsat_elev_base: Vec<f32> = surf_elev_m
+            .iter()
+            .map(|&zs| 9.2 * (-zs / 2400.0).exp())
+            .collect();
+        let extratrop_theta_weight: Vec<f32> = geom
+            .sin_lat
+            .iter()
+            .map(|&s| ((s.abs() - 0.28) / 0.35).clamp(0.0, 1.0))
+            .collect();
+
         let mut surf_gx = vec![0.0_f32; n];
         let mut surf_gy = vec![0.0_f32; n];
         geom.gradient_scalar(&surf_elev_m, &mut surf_gx, &mut surf_gy);
@@ -234,18 +268,45 @@ impl MoistBaroclinicSolver {
         let (p_ref_pa, greenhouse_offset_k) = atmosphere_thermo_params(cfg.atmosphere_id);
 
         let mut annual_mu = Vec::with_capacity(n);
+        let mut atmo_alb_term = Vec::with_capacity(n);
         for i in 0..n {
-            annual_mu.push(orbital_annual_mean_cos_z(
-                geom.sin_lat[i],
-                geom.cos_lat[i],
-                cfg.tilt_deg,
-            ));
+            let amu = orbital_annual_mean_cos_z(geom.sin_lat[i], geom.cos_lat[i], cfg.tilt_deg);
+            annual_mu.push(amu);
+            let atmo_atten = (-surf_elev_m[i] / 4800.0).exp();
+            let slant_scatter = (1.0 - (amu * 2.85).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            atmo_alb_term.push(0.42 * (0.20 + 0.12 * slant_scatter) * atmo_atten);
+        }
+
+        let mut edge_drag = Vec::with_capacity(ne);
+        for e in &geom.edges {
+            let l = e.left as usize;
+            let r = e.right as usize;
+            let mount = 0.5 * (cfg.mountainosity_norm[l] + cfg.mountainosity_norm[r]);
+            let land_share = 0.5
+                * ((if cfg.bed_m[l] > 0.0 { 1.0 } else { 0.0 })
+                    + (if cfg.bed_m[r] > 0.0 { 1.0 } else { 0.0 }));
+            let r_land = 1.28e-5 * (1.0 + 1.85 * mount);
+            let r_ekman = 0.95e-5 + land_share * (r_land - 0.95e-5);
+            let quad_drag1 = 1.1e-6 * (1.0 + land_share * mount);
+            let r_upper_base = 4.5e-7 + 9.0e-7 * mount;
+            let sin_m = 0.5 * (geom.sin_lat[l].abs() + geom.sin_lat[r].abs());
+            let ext_q_weight = ((sin_m - 0.36) / 0.30).clamp(0.0, 1.0);
+            edge_drag.push(StaticEdgeDrag {
+                r_ekman,
+                quad_drag1,
+                r_upper_base,
+                ext_q_weight,
+            });
         }
 
         let mut solver = Self {
             num_cells: n,
             unit_centers,
             surf_elev_m,
+            qsat_elev_base,
+            atmo_alb_term,
+            extratrop_theta_weight,
+            edge_drag,
             surf_gx,
             surf_gy,
             mountainosity_norm: cfg.mountainosity_norm.to_vec(),
@@ -290,6 +351,11 @@ impl MoistBaroclinicSolver {
             tau_east_pa: vec![0.0; n],
             tau_north_pa: vec![0.0; n],
             meteogram_history: VecDeque::with_capacity(METEOGRAM_HOURS + 1),
+            scratch_daily_mu: vec![0.0; n],
+            scratch_pot_sst_c: vec![0.0; n],
+            scratch_sea_ice_frac: vec![0.0; n],
+            scratch_runoff_m: vec![0.0; n],
+            scratch_accum_m3s: vec![0.0; n],
             scratch_phi1: vec![0.0; n],
             scratch_phi2: vec![0.0; n],
             scratch_div1: vec![0.0; n],
@@ -298,14 +364,17 @@ impl MoistBaroclinicSolver {
             scratch_zeta2: vec![0.0; n],
             scratch_w12: vec![0.0; n],
             scratch_ep_east: vec![0.0; n],
+            scratch_ep_edge: vec![0.0; ne],
             scratch_edge_flux: vec![0.0; ne],
+            scratch_edge_flux2: vec![0.0; ne],
             scratch_moist_edge: vec![0.0; ne],
             scratch_lap_a: vec![0.0; n],
             scratch_lap_b: vec![0.0; n],
+            scratch_lap_c: vec![0.0; n],
+            scratch_lap_d: vec![0.0; n],
             scratch_gx: vec![0.0; n],
             scratch_gy: vec![0.0; n],
-            scratch_u_next: vec![0.0; ne],
-            scratch_u2_next: vec![0.0; ne],
+            scratch_u2_col: vec![0.0; ne],
             rk_u1_0: vec![0.0; ne],
             rk_u2_0: vec![0.0; ne],
             rk_ps_0: vec![0.0; n],
@@ -496,12 +565,44 @@ impl MoistBaroclinicSolver {
 
         self.rain_mm_hr.fill(0.0);
         self.snow_mm_hr.fill(0.0);
-        let mut hourly_runoff_m = vec![0.0_f32; self.num_cells];
+        self.scratch_runoff_m.fill(0.0);
+
+        // Solar declination shifts < 0.004 deg over 1 hour; precompute daily-mean insolation,
+        // seasonal SST potential, and open-ocean sea-ice fraction once per hour:
+        let mid_sun = self.tides.subsolar_unit_xyz(1800.0);
+        let sin_dec_hr = mid_sun[2] as f32;
+        let cos_dec_hr = (1.0 - sin_dec_hr * sin_dec_hr).max(0.0).sqrt();
+        let sst_const_offset = glac_offset_c + 0.65 * self.greenhouse_offset_k;
+        let bed_slice = self.tides.bed_m();
+        for i in 0..self.num_cells {
+            let d_mu = exact_daily_mean_cos_z_with_cos_dec(
+                geom.sin_lat[i],
+                geom.cos_lat[i],
+                sin_dec_hr,
+                cos_dec_hr,
+            );
+            self.scratch_daily_mu[i] = d_mu;
+            let pot_sst = self.base_sst_c[i]
+                + 18.0 * self.solar_luminosity * (d_mu - self.annual_mu[i])
+                + sst_const_offset;
+            self.scratch_pot_sst_c[i] = pot_sst;
+            self.scratch_sea_ice_frac[i] = if bed_slice[i] < 0.0 || self.tides.is_inundated_land(i)
+            {
+                ((-1.8 - pot_sst) / 4.2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
 
         for sub in 0..WEATHER_SUBSTEPS_PER_HOUR {
             let sub_offset_s = ((sub as f64) + 0.5) * (dt as f64);
-            let sun_dir = self.tides.subsolar_unit_xyz(sub_offset_s);
-            let sin_dec = sun_dir[2] as f32;
+            let sun_dir_f64 = self.tides.subsolar_unit_xyz(sub_offset_s);
+            let sun_dir = [
+                sun_dir_f64[0] as f32,
+                sun_dir_f64[1] as f32,
+                sun_dir_f64[2] as f32,
+            ];
+            let sin_dec = sun_dir[2];
 
             // Compute global & tropical/polar mean theta1, theta2 for anomalies and baroclinic index:
             let mut sum_th1 = 0.0_f64;
@@ -537,29 +638,21 @@ impl MoistBaroclinicSolver {
             // 1. Diurnal shortwave + Budyko-Sellers OLR + air-surface sensible/latent fluxes:
             for i in 0..self.num_cells {
                 let p = self.unit_centers[i];
-                let cos_z = ((p[0] * sun_dir[0] + p[1] * sun_dir[1] + p[2] * sun_dir[2]) as f32)
-                    .max(0.0);
+                let cos_z = (p[0] * sun_dir[0] + p[1] * sun_dir[1] + p[2] * sun_dir[2]).max(0.0);
+                let cos_z_sqrt = cos_z.sqrt();
                 let is_ocean = self.tides.bed_m()[i] < 0.0 || self.tides.is_inundated_land(i);
                 let zs = self.surf_elev_m[i];
-                let sin_phi = geom.sin_lat[i];
-                let cos_lat = geom.cos_lat[i];
+                let qsat_base = self.qsat_elev_base[i];
 
-                // Exact zero-mean diurnal solar anomaly `(cos_z - daily_mu)` + daily-mean insolation `daily_mu`:
-                let daily_mu = exact_daily_mean_cos_z(sin_phi, cos_lat, sin_dec);
+                let daily_mu = self.scratch_daily_mu[i];
                 let annual_mu = self.annual_mu[i];
-                let pot_sst_c = self.base_sst_c[i]
-                    + 18.0 * self.solar_luminosity * (daily_mu - annual_mu)
-                    + glac_offset_c
-                    + 0.65 * self.greenhouse_offset_k;
-                let sea_ice_frac = if is_ocean {
-                    ((-1.8 - pot_sst_c) / 4.2).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
+                let pot_sst_c = self.scratch_pot_sst_c[i];
+                let sea_ice_frac = self.scratch_sea_ice_frac[i];
 
                 let cloud_tot = (self.cloud_low[i] + 0.55 * self.cloud_high[i]).clamp(0.0, 1.0);
                 let surf_albedo = if is_ocean {
-                    let open_alb = 0.06 + 0.14 * (1.0 - cos_z).powi(3);
+                    let omc = 1.0 - cos_z;
+                    let open_alb = 0.06 + 0.14 * omc * omc * omc;
                     (1.0 - sea_ice_frac) * open_alb + sea_ice_frac * 0.62
                 } else {
                     let sm0 = self.soil_moisture[i].clamp(0.0, 1.0);
@@ -583,23 +676,20 @@ impl MoistBaroclinicSolver {
 
                 let wspd = self.wind1_speed_mps[i];
 
-                // Bulk aerodynamic ocean evaporation (capped by trade-wind / subtropical subsidence
-                // inversion so horse-latitude marine columns equilibrate around ~60% column RH rather
-                // than 135% of Layer-1 saturation) & stomatal canopy transpiration over land:
                 let t_evap_k = if is_ocean {
                     self.tsurf_c[i] + 273.15
                 } else {
                     0.60 * (self.tsurf_c[i] + 273.15) + 0.40 * (self.theta1_k[i] - 0.0065 * zs)
                 };
-                let qsat_surf = saturation_column_vapor_kgm2(t_evap_k, zs);
+                let qsat_surf = qsat_with_elev_base(t_evap_k, qsat_base);
                 let sm = self.soil_moisture[i].clamp(0.0, 1.0);
                 let beta_sm = ((sm - 0.10) / 0.55).clamp(0.0, 1.0);
                 let beta_et = beta_sm * (0.35 + 0.65 * beta_sm);
-                let rad_et_gate = 0.15 + 1.05 * cos_z.sqrt();
+                let rad_et_gate = 0.15 + 1.05 * cos_z_sqrt;
                 let wet_frac = if is_ocean {
                     1.0 - 0.78 * sea_ice_frac
                 } else if self.is_river[i] {
-                    (beta_et * rad_et_gate).max(0.45 * (0.35 + 0.85 * cos_z.sqrt()))
+                    (beta_et * rad_et_gate).max(0.45 * (0.35 + 0.85 * cos_z_sqrt))
                 } else {
                     beta_et * rad_et_gate
                 };
@@ -615,7 +705,6 @@ impl MoistBaroclinicSolver {
                     (evap_coeff * (q_eq_cap - self.qv_kgm2[i]).max(0.0) * dt).min(0.25);
                 self.qv_kgm2[i] += evap_kgm2;
                 if !is_ocean && evap_kgm2 > 0.0 {
-                    // River-channel open-water evaporation draws from routed river flow rather than hillslope soil:
                     let soil_draw_share = if self.is_river[i] && wet_frac > 1e-5 {
                         ((beta_et * rad_et_gate) / wet_frac).clamp(0.0, 1.0)
                     } else {
@@ -625,17 +714,16 @@ impl MoistBaroclinicSolver {
                         (self.soil_moisture[i] - (evap_kgm2 * soil_draw_share) / 300.0).max(0.0);
                 }
 
-                let rad_surf_c = radiative_equilibrium_surface_c(
+                let rad_surf_c = radiative_equilibrium_surface_c_fast(
                     daily_mu,
                     annual_mu,
                     surf_albedo,
+                    self.atmo_alb_term[i],
                     self.solar_luminosity,
                     glac_offset_c,
                     self.greenhouse_offset_k,
                     zs,
                 );
-                // Penman-Monteith Bowen-ratio partitioning: dry surfaces convert absorbed insolation into
-                // sensible heat rather than latent evapotranspiration, warming arid ergs and pre-monsoon plains:
                 let bowen_arid_bonus_c = if is_ocean {
                     0.0
                 } else {
@@ -645,10 +733,9 @@ impl MoistBaroclinicSolver {
                 let local_eq_c = rad_surf_c + bowen_arid_bonus_c;
 
                 if is_ocean {
-                    // Open ocean mixed layer equilibrates to full greenhouse shift; below `-1.8 °C`,
-                    // sea ice forms a bright (`albedo = 0.62`) insulating lid whose skin cools radiatively:
                     let t_air_surf_c = (self.theta1_k[i] + 4.5) - 273.15;
-                    let ice_eq_c = (0.45 * rad_surf_c + 0.30 * t_air_surf_c + 0.25 * (-1.8)).min(0.0);
+                    let ice_eq_c =
+                        (0.45 * rad_surf_c + 0.30 * t_air_surf_c + 0.25 * (-1.8)).min(0.0);
                     let target_sst = (1.0 - sea_ice_frac) * pot_sst_c.clamp(-1.8, 42.0)
                         + sea_ice_frac * ice_eq_c;
                     let c_ocean = (1.0 - sea_ice_frac) * 4.2e6 + sea_ice_frac * 3.4e5;
@@ -657,9 +744,6 @@ impl MoistBaroclinicSolver {
                         + ((target_sst - self.tsurf_c[i]) / tau_ocean_s) * dt;
                     self.tsurf_c[i] = (self.tsurf_c[i] + d_ts).clamp(-45.0, 42.0);
                 } else {
-                    // Land surface energy balance couples local radiative-Bowen equilibrium with advected
-                    // lower-tropospheric air mass `theta1_k` (so maritime west coasts stay mild in
-                    // winter while continental interiors experience full seasonal extremes!):
                     let t_air_surf_c = (self.theta1_k[i] - 0.0065 * zs + 4.5) - 273.15;
                     let w_air = (0.34 + 0.028 * wspd).clamp(0.34, 0.62);
                     let coupled_target_c = (1.0 - w_air) * local_eq_c + w_air * t_air_surf_c;
@@ -680,14 +764,12 @@ impl MoistBaroclinicSolver {
                     (0.00125 + 0.00025 * wspd) * (1.0 + 0.35 * self.mountainosity_norm[i])
                 };
                 let t1_amb_k = (self.theta1_k[i] - 0.0065 * zs).clamp(195.0, 330.0);
-                let qsat_amb = saturation_column_vapor_kgm2(t1_amb_k, zs).max(0.2);
+                let qsat_amb = qsat_with_elev_base(t1_amb_k, qsat_base).max(0.2);
                 let rh_amb = (self.qv_kgm2[i] / qsat_amb).clamp(0.0, 1.5);
 
-                // Charney (1975) clear-sky arid radiative cooling over bare desert ergs (`cover < 0.22`),
-                // whereas vegetated continents in their dry season retain pre-monsoon sensible warmth
-                // so monsoon thermal troughs pull ocean moisture deep inland:
                 let cover_col =
-                    (0.72 * self.init_soil_moisture[i] + 0.28 * self.soil_moisture[i]).clamp(0.0, 1.0);
+                    (0.72 * self.init_soil_moisture[i] + 0.28 * self.soil_moisture[i])
+                        .clamp(0.0, 1.0);
                 let bare_erg = ((0.30 - cover_col) / 0.16).clamp(0.0, 1.0);
                 let dry_ir_cool_k = if is_ocean {
                     0.0
@@ -712,8 +794,6 @@ impl MoistBaroclinicSolver {
                 let tau_rad1 = 1.0 / (10.0 * 86400.0);
                 let tau_rad2 = 1.0 / (6.5 * 86400.0);
 
-                // Deep dry convective boundary layers (`rh_amb < 0.45`) over arid land partition sensible
-                // heat exchange across both layers symmetrically (no diurnal rectifier drift):
                 let dry_cbl_mix = if is_ocean {
                     0.06
                 } else {
@@ -746,6 +826,11 @@ impl MoistBaroclinicSolver {
                 sin_dec,
                 &mut self.scratch_ep_east,
             );
+            for (e_idx, e) in geom.edges.iter().enumerate() {
+                self.scratch_ep_edge[e_idx] = 0.5
+                    * (self.scratch_ep_east[e.left as usize] * e.nx_left
+                        + self.scratch_ep_east[e.right as usize] * e.nx_right);
+            }
 
             // 3. 3-stage Wicker-Skamarock RK3 vector-invariant 2-layer primitive dynamical core:
             self.rk_u1_0.copy_from_slice(&self.u1_edge);
@@ -755,24 +840,26 @@ impl MoistBaroclinicSolver {
             self.rk_th2_0.copy_from_slice(&self.theta2_k);
 
             for stage_dt in [dt / 3.0, 0.5 * dt, dt] {
-                geom.reconstruct_cell_vectors(&self.u1_edge, &mut self.u1_east, &mut self.v1_north);
-                geom.reconstruct_cell_vectors(&self.u2_edge, &mut self.u2_east, &mut self.v2_north);
-
-                geom.curl_from_cell_vectors(
+                geom.reconstruct_and_div_2layer(
+                    &self.u1_edge,
+                    &self.u2_edge,
+                    &mut self.u1_east,
+                    &mut self.v1_north,
+                    &mut self.scratch_div1,
+                    &mut self.u2_east,
+                    &mut self.v2_north,
+                    &mut self.scratch_div2,
+                );
+                geom.curl_2layer(
                     &self.u1_east,
                     &self.v1_north,
-                    &mut self.scratch_edge_flux,
-                    &mut self.scratch_zeta1,
-                );
-                geom.curl_from_cell_vectors(
                     &self.u2_east,
                     &self.v2_north,
                     &mut self.scratch_edge_flux,
+                    &mut self.scratch_edge_flux2,
+                    &mut self.scratch_zeta1,
                     &mut self.scratch_zeta2,
                 );
-
-                geom.divergence_from_edge_flux(&self.u1_edge, &mut self.scratch_div1);
-                geom.divergence_from_edge_flux(&self.u2_edge, &mut self.scratch_div2);
 
                 for i in 0..self.num_cells {
                     // Lorenz (1960) upward interface velocity `W_{1->2} = 0.5 * (div2 - div1)`:
@@ -800,57 +887,49 @@ impl MoistBaroclinicSolver {
                     let u1_cur = self.u1_edge[e_idx];
                     let u2_cur = self.u2_edge[e_idx];
                     let w12_e = 0.5 * (self.scratch_w12[l] + self.scratch_w12[r]);
-                    let ep_edge = 0.5
-                        * (self.scratch_ep_east[l] * e.nx_left
-                            + self.scratch_ep_east[r] * e.nx_right);
-                    let mount = 0.5 * (self.mountainosity_norm[l] + self.mountainosity_norm[r]);
+                    let ep_edge = self.scratch_ep_edge[e_idx];
+                    let drag = self.edge_drag[e_idx];
+                    let fl = geom.coriolis_f[l];
+                    let fr = geom.coriolis_f[r];
 
                     // Layer 1 vector-invariant momentum: `(zeta1 + f) k x u1 - grad(Phi1 + K1)`:
                     let dbern1_dn =
                         (self.scratch_phi1[r] - self.scratch_phi1[l]) * e.inv_center_dist_m;
-                    let av1_l = geom.coriolis_f[l] + self.scratch_zeta1[l];
-                    let av1_r = geom.coriolis_f[r] + self.scratch_zeta1[r];
+                    let av1_l = fl + self.scratch_zeta1[l];
+                    let av1_r = fr + self.scratch_zeta1[r];
                     let rot1 = 0.5
                         * (av1_l * (e.nx_left * self.v1_north[l] - e.ny_left * self.u1_east[l])
                             + av1_r
                                 * (e.nx_right * self.v1_north[r] - e.ny_right * self.u1_east[r]));
-                    let vert_mom1 =
-                        (-w12_e).max(0.0) * (u2_cur - u1_cur) + 6.5e-7 * (u2_cur - u1_cur);
+                    let du21 = u2_cur - u1_cur;
+                    let vert_mom1 = ((-w12_e).max(0.0) + 6.5e-7) * du21;
                     let div_damp1 =
                         nu_div * (self.scratch_div1[r] - self.scratch_div1[l]) * e.inv_center_dist_m;
 
-                    let land_share = 0.5
-                        * ((if self.tides.bed_m()[l] > 0.0 { 1.0 } else { 0.0 })
-                            + (if self.tides.bed_m()[r] > 0.0 { 1.0 } else { 0.0 }));
-                    let r_land = 1.28e-5 * (1.0 + 1.85 * mount);
-                    let r_ekman = 0.95e-5 + land_share * (r_land - 0.95e-5);
-                    let quad_drag1 = 1.1e-6 * u1_cur.abs() * (1.0 + land_share * mount);
+                    let drag1 = drag.r_ekman + drag.quad_drag1 * u1_cur.abs();
                     let rhs1 = rot1 - dbern1_dn + vert_mom1 + div_damp1 + 0.35 * ep_edge;
-                    self.scratch_u_next[e_idx] = ((self.rk_u1_0[e_idx] + stage_dt * rhs1)
-                        / (1.0 + stage_dt * (r_ekman + quad_drag1)))
+                    self.u1_edge[e_idx] = ((self.rk_u1_0[e_idx] + stage_dt * rhs1)
+                        / (1.0 + stage_dt * drag1))
                         .clamp(-60.0, 60.0);
 
                     // Layer 2 vector-invariant momentum: `(zeta2 + f) k x u2 - grad(Phi2 + K2)`:
                     let dbern2_dn =
                         (self.scratch_phi2[r] - self.scratch_phi2[l]) * e.inv_center_dist_m;
-                    let av2_l = geom.coriolis_f[l] + self.scratch_zeta2[l];
-                    let av2_r = geom.coriolis_f[r] + self.scratch_zeta2[r];
+                    let av2_l = fl + self.scratch_zeta2[l];
+                    let av2_r = fr + self.scratch_zeta2[r];
                     let rot2 = 0.5
                         * (av2_l * (e.nx_left * self.v2_north[l] - e.ny_left * self.u2_east[l])
                             + av2_r
                                 * (e.nx_right * self.v2_north[r] - e.ny_right * self.u2_east[r]));
-                    let vert_mom2 =
-                        w12_e.max(0.0) * (u1_cur - u2_cur) + 6.5e-7 * (u1_cur - u2_cur);
+                    let vert_mom2 = -(w12_e.max(0.0) + 6.5e-7) * du21;
                     let div_damp2 =
                         nu_div * (self.scratch_div2[r] - self.scratch_div2[l]) * e.inv_center_dist_m;
-                    let r_upper = 4.5e-7 + 2.0e-7 * u2_cur.abs() + 9.0e-7 * mount;
+                    let r_upper = drag.r_upper_base + 2.0e-7 * u2_cur.abs();
                     let rhs2 = rot2 - dbern2_dn + vert_mom2 + div_damp2 + 1.35 * ep_edge;
-                    self.scratch_u2_next[e_idx] = ((self.rk_u2_0[e_idx] + stage_dt * rhs2)
+                    self.u2_edge[e_idx] = ((self.rk_u2_0[e_idx] + stage_dt * rhs2)
                         / (1.0 + stage_dt * r_upper))
                         .clamp(-110.0, 110.0);
                 }
-                self.u1_edge.copy_from_slice(&self.scratch_u_next);
-                self.u2_edge.copy_from_slice(&self.scratch_u2_next);
 
                 for i in 0..self.num_cells {
                     let col_div = 0.5 * (self.scratch_div1[i] + self.scratch_div2[i]);
@@ -869,21 +948,22 @@ impl MoistBaroclinicSolver {
             }
 
             // Recompute post-RK3 divergences & column-mass-consistent moisture transport velocity:
-            geom.divergence_from_edge_flux(&self.u1_edge, &mut self.scratch_div1);
-            geom.divergence_from_edge_flux(&self.u2_edge, &mut self.scratch_div2);
+            geom.divergence_2layer(
+                &self.u1_edge,
+                &self.u2_edge,
+                &mut self.scratch_div1,
+                &mut self.scratch_div2,
+            );
             for i in 0..self.num_cells {
                 self.scratch_w12[i] = 0.5 * (self.scratch_div2[i] - self.scratch_div1[i]);
                 let zs = self.surf_elev_m[i];
                 let t1_k = (self.theta1_k[i] - 0.0065 * zs).clamp(195.0, 330.0);
-                let qsat = saturation_column_vapor_kgm2(t1_k, zs).max(0.2);
+                let qsat = qsat_with_elev_base(t1_k, self.qsat_elev_base[i]).max(0.2);
                 self.scratch_phi1[i] = (self.qv_kgm2[i] / qsat).clamp(0.0, 1.5);
             }
             for (e_idx, e) in geom.edges.iter().enumerate() {
                 let u_col = 0.5 * (self.u1_edge[e_idx] + self.u2_edge[e_idx]);
                 let u_bc = 0.5 * (self.u1_edge[e_idx] - self.u2_edge[e_idx]);
-                // Water vapor scale height (~2 km) places ~78% of precipitable water in Layer 1
-                // (`0.78 * u1 + 0.22 * u2`), tapering toward mid-column advection only in bone-dry
-                // desert CBLs (`rh < 0.35`) so shallow heat lows do not artificially trap vapor:
                 let rh_up = if u_col + 0.5 * u_bc >= 0.0 {
                     self.scratch_phi1[e.left as usize]
                 } else {
@@ -891,79 +971,67 @@ impl MoistBaroclinicSolver {
                 };
                 let low_trap = 0.16 + 0.40 * ((rh_up - 0.25) / 0.30).clamp(0.0, 1.0);
                 self.scratch_moist_edge[e_idx] = u_col + low_trap * u_bc;
-                self.scratch_u2_next[e_idx] = u_col;
+                self.scratch_u2_col[e_idx] = u_col;
             }
 
-            // 4. Conservative upwind finite-volume advection of theta1, theta2, qv, qc:
-            advect_scalar_upwind(
+            // 4. Conservative upwind finite-volume advection of (theta1, theta2) and (qv, qc):
+            advect_scalar_upwind_2layer(
                 geom,
                 &self.u1_edge,
-                &self.scratch_div1,
-                dt,
-                &mut self.theta1_k,
-                &mut self.scratch_edge_flux,
-                &mut self.scratch_lap_a,
-            );
-            advect_scalar_upwind(
-                geom,
                 &self.u2_edge,
+                &self.scratch_div1,
                 &self.scratch_div2,
                 dt,
+                &mut self.theta1_k,
                 &mut self.theta2_k,
                 &mut self.scratch_edge_flux,
+                &mut self.scratch_edge_flux2,
                 &mut self.scratch_lap_a,
+                &mut self.scratch_lap_b,
             );
-            advect_tracer_flux_limited(
+            advect_tracer_flux_limited_2layer(
                 geom,
                 &self.scratch_moist_edge,
+                &self.scratch_u2_col,
                 dt,
                 &mut self.qv_kgm2,
-                &mut self.scratch_edge_flux,
-                &mut self.scratch_lap_a,
-            );
-            advect_tracer_flux_limited(
-                geom,
-                &self.scratch_u2_next,
-                dt,
                 &mut self.qc_kgm2,
                 &mut self.scratch_edge_flux,
+                &mut self.scratch_edge_flux2,
                 &mut self.scratch_lap_a,
+                &mut self.scratch_lap_b,
             );
 
             // Subgrid baroclinic eddy poleward heat & synoptic moisture diffusion (Stone 1972 / GM):
             if kappa_eddy_max > 0.0 {
                 geom.laplacian_scalar(&self.theta1_k, &mut self.scratch_lap_a);
+                let dt_ke = dt * kappa_eddy_max;
                 for i in 0..self.num_cells {
-                    let extratrop = ((geom.sin_lat[i].abs() - 0.28) / 0.35).clamp(0.0, 1.0);
                     self.theta1_k[i] = (self.theta1_k[i]
-                        + dt * kappa_eddy_max * extratrop * self.scratch_lap_a[i])
+                        + dt_ke * self.extratrop_theta_weight[i] * self.scratch_lap_a[i])
                         .clamp(195.0, 345.0);
-                }
-                // Conservative edge-flux subgrid synoptic & easterly-wave moisture mixing
-                // (gated so Fickian diffusion never pumps marine vapor into subsaturated deserts against
-                // offshore winds or supersaturates subfreezing continental interiors above `0.80 * qsat`):
-                for i in 0..self.num_cells {
                     let zs = self.surf_elev_m[i];
                     let t1_k = (self.theta1_k[i] - 0.0065 * zs).clamp(195.0, 330.0);
-                    self.scratch_lap_b[i] = saturation_column_vapor_kgm2(t1_k, zs).max(0.2);
+                    self.scratch_lap_b[i] =
+                        qsat_with_elev_base(t1_k, self.qsat_elev_base[i]).max(0.2);
                 }
                 let kappa_q_ext = 0.68 * kappa_eddy_max;
                 let kappa_q_trop = 0.22 * kappa_eddy_max;
                 for (e_idx, e) in geom.edges.iter().enumerate() {
                     let l = e.left as usize;
                     let r = e.right as usize;
-                    let sin_m = 0.5 * (geom.sin_lat[l].abs() + geom.sin_lat[r].abs());
-                    let ext = ((sin_m - 0.36) / 0.30).clamp(0.0, 1.0);
+                    let ext = self.edge_drag[e_idx].ext_q_weight;
                     let mut kappa_q = kappa_q_trop + (kappa_q_ext - kappa_q_trop) * ext;
                     let dq = self.qv_kgm2[r] - self.qv_kgm2[l];
-                    // Prevent diffusing vapor into a cell whose RH already exceeds 0.82 or under strong subsidence:
                     if dq < 0.0 {
                         let rh_r = self.qv_kgm2[r] / self.scratch_lap_b[r];
-                        let sub_gate = (1.0 + 35_000.0 * self.scratch_w12[r].min(0.0)).clamp(0.15, 1.0);
+                        let sub_gate =
+                            (1.0 + 35_000.0 * self.scratch_w12[r].min(0.0)).clamp(0.15, 1.0);
                         kappa_q *= ((0.85 - rh_r) / 0.15).clamp(0.0, 1.0) * sub_gate;
                     } else if dq > 0.0 {
                         let rh_l = self.qv_kgm2[l] / self.scratch_lap_b[l];
-                        let sub_gate = (1.0 + 35_000.0 * self.scratch_w12[l].min(0.0)).clamp(0.15, 1.0);
+                        let sub_gate =
+                            (1.0 + 35_000.0 * self.scratch_w12[l].min(0.0)).clamp(0.15, 1.0);
                         kappa_q *= ((0.85 - rh_l) / 0.15).clamp(0.0, 1.0) * sub_gate;
                     }
                     self.scratch_edge_flux[e_idx] = -kappa_q * dq * e.inv_center_dist_m;
@@ -974,20 +1042,16 @@ impl MoistBaroclinicSolver {
                 }
             }
 
-            // Scale-selective biharmonic (-nu4 * nabla^4) hyperdiffusion on theta1 & theta2:
-            apply_biharmonic_smoothing(
+            // Scale-selective biharmonic (-nu4 * nabla^4) hyperdiffusion on (theta1, theta2):
+            apply_biharmonic_smoothing_2layer(
                 geom,
                 dt * nu4_scalar,
                 &mut self.theta1_k,
-                &mut self.scratch_lap_a,
-                &mut self.scratch_lap_b,
-            );
-            apply_biharmonic_smoothing(
-                geom,
-                dt * nu4_scalar,
                 &mut self.theta2_k,
                 &mut self.scratch_lap_a,
                 &mut self.scratch_lap_b,
+                &mut self.scratch_lap_c,
+                &mut self.scratch_lap_d,
             );
 
             // 5. Moist microphysics, orographic/frontal lift, deep convection & latent heat release:
@@ -1000,16 +1064,13 @@ impl MoistBaroclinicSolver {
 
                 let is_ocean = self.tides.bed_m()[i] < 0.0 || self.tides.is_inundated_land(i);
                 let zs = self.surf_elev_m[i];
+                let qsat_base = self.qsat_elev_base[i];
                 let w12 = self.scratch_w12[i];
                 let t1_k = (self.theta1_k[i] - 0.0065 * zs).clamp(195.0, 330.0);
-                let qsat_amb = saturation_column_vapor_kgm2(t1_k, zs).max(0.2);
+                let qsat_amb = qsat_with_elev_base(t1_k, qsat_base).max(0.2);
                 let rh_amb = (self.qv_kgm2[i] / qsat_amb).clamp(0.0, 2.0);
                 let warm_frac = ((t1_k - 268.15) / 22.0).clamp(0.0, 1.0);
 
-                // Orographic upslope lift `u1 . grad(z_s) > 0`, warm-frontal isentropic upglide
-                // `max(0, -u1 . grad(theta1)) / (dtheta/dz)` (which lifts midlatitude storm tracks over
-                // winter cold domes while vanishing identically in equatorward subtropical trade winds!),
-                // and synoptic/ITCZ ascent (`w12 > 0`) vs warm Hadley/Foehn subsidence (`w12 < 0`):
                 let slope_w = ux * self.surf_gx[i] + vy * self.surf_gy[i];
                 let w_orog = slope_w.max(0.0);
                 let w_downslope = (-slope_w).max(0.0);
@@ -1025,19 +1086,13 @@ impl MoistBaroclinicSolver {
                 .min(0.18)
                     * synop_lcl_gate;
                 let w_lift = w_orog * orog_lcl_gate + w_synop;
-                // Deep Hadley subsidence drying acts in warm ridges (`warm_frac -> 1`), whereas shallow
-                // winter continental cold domes (`warm_frac -> 0`) remain penetrable by overrunning fronts:
                 let hadley_sub_scale = 0.20 + 0.80 * warm_frac;
                 let w_subside = hadley_sub_scale * (65_000.0 * (-w12).max(0.0)).min(0.18)
                     + 0.85 * w_downslope;
 
                 let lift_cool_k = (14.0 * w_lift - 15.0 * w_subside).clamp(-6.5, 6.5);
-                let qsat_eff = saturation_column_vapor_kgm2(t1_k - lift_cool_k, zs);
+                let qsat_eff = qsat_with_elev_base(t1_k - lift_cool_k, qsat_base);
 
-                // Betts-Miller (~40-hour grid-scale) deep moist convection: slow enough over coastal
-                // margins (`rate <= 0.024 hr^-1`) that ocean moisture penetrates 2,500 km across tropical
-                // and summer continents rather than raining out in the first coastal grid cell, while
-                // remaining strictly suppressed under subtropical subsidence inversions:
                 let rh = (self.qv_kgm2[i] / qsat_eff.max(0.2)).clamp(0.0, 2.0);
                 let subside_cap_k = 1.45 + 72.0 * w_subside;
                 let surf_buoy_k = if is_ocean {
@@ -1059,14 +1114,10 @@ impl MoistBaroclinicSolver {
                         * rate)
                         .min(self.qv_kgm2[i] * 0.20);
                 }
-                // Cumulus updraft precipitation efficiency (~68% falls directly as convective showers;
-                // ~32% detrains into anvil/cumulus cloud condensate `qc_kgm2`):
                 let conv_precip_mm = 0.68 * conv_cond;
                 let conv_detrain = conv_cond - conv_precip_mm;
                 let qv_after_conv = (self.qv_kgm2[i] - conv_cond).max(0.0);
 
-                // Sundqvist (1978) subgrid fractional condensation (accounting for lower saturation
-                // vapor pressure over ice below freezing, and raised under subtropical subsidence):
                 let base_rh_crit = if is_ocean {
                     0.79 - 0.06 * (1.0 - warm_frac)
                 } else {
@@ -1075,9 +1126,6 @@ impl MoistBaroclinicSolver {
                 let rh_crit = (base_rh_crit + 2.8 * w_subside - 0.50 * w_lift).clamp(0.50, 0.98);
                 let q_crit = rh_crit * qsat_eff;
                 let ls_cond = if qv_after_conv > q_crit {
-                    // ~50-hour synoptic moisture residence time in warm air so marine moisture penetrates
-                    // 2,000+ km inland, and faster (~25-hour) Bergeron condensation in cold air so winter
-                    // midlatitudes precipitate snow cleanly without 200% supersaturation:
                     let base_ls = 0.019 + 0.020 * (1.0 - warm_frac);
                     let rate_ls = (base_ls
                         + 0.34 * w_frontal.min(0.08)
@@ -1085,7 +1133,6 @@ impl MoistBaroclinicSolver {
                         * (dt / 3600.0);
                     (qv_after_conv - q_crit) * rate_ls
                 } else {
-                    // Subsaturated dry-air & subsidence cloud evaporation (crisp rain shadows & clear horse latitudes!):
                     let evap_rate = (0.030 + 2.2 * w_subside).min(0.65) * (dt / 1800.0);
                     let sub_def = (q_crit - qv_after_conv) * evap_rate;
                     -sub_def.min(self.qc_kgm2[i])
@@ -1096,14 +1143,10 @@ impl MoistBaroclinicSolver {
                 self.qv_kgm2[i] = (self.qv_kgm2[i] - net_cond).max(0.0);
                 self.qc_kgm2[i] = (self.qc_kgm2[i] + conv_detrain + ls_clamped).max(0.0);
 
-                // Moist-adiabatic latent heating (`~0.42 K per kg/m^2` weighted 40/60 toward Layer 2
-                // so deep tropical rainfall balances ascent cooling while stabilizing `theta2 - theta1`):
                 let latent_dtheta = 0.42 * net_cond;
                 self.theta1_k[i] = (self.theta1_k[i] + 0.40 * latent_dtheta).clamp(195.0, 345.0);
                 self.theta2_k[i] = (self.theta2_k[i] + 0.60 * latent_dtheta).clamp(215.0, 385.0);
 
-                // Bergeron-Findeisen / Kessler autoconversion (glaciated cold clouds precipitate at
-                // lower condensate path `0.025 kg/m^2` than warm cumulus `0.12 kg/m^2`):
                 let qc = self.qc_kgm2[i];
                 let qc_crit = 0.025 + 0.095 * warm_frac;
                 let auto_precip_mm = if qc > qc_crit {
@@ -1123,7 +1166,7 @@ impl MoistBaroclinicSolver {
                 self.snow_mm_hr[i] += snow_mm;
 
                 // Land surface snowpack & deep root-zone Manabe bucket update (`300 mm` field capacity):
-                if self.tides.bed_m()[i] > 0.0 && !self.tides.is_inundated_land(i) {
+                if !is_ocean {
                     self.snow_depth_m[i] += snow_mm * 0.008;
                     let melt_depth_m = if self.tsurf_c[i] > 0.2 && self.snow_depth_m[i] > 0.0 {
                         (0.00085 * self.tsurf_c[i] * (dt / 3600.0)).min(self.snow_depth_m[i])
@@ -1134,14 +1177,15 @@ impl MoistBaroclinicSolver {
                     let liquid_in_mm = rain_mm + melt_depth_m * 125.0;
                     if liquid_in_mm > 0.0 {
                         let sat = self.soil_moisture[i].clamp(0.0, 1.0);
-                        let runoff_frac = (sat * sat * sat * (0.16 + 0.64 * self.mountainosity_norm[i]))
-                            .clamp(0.02, 1.0);
+                        let runoff_frac =
+                            (sat * sat * sat * (0.16 + 0.64 * self.mountainosity_norm[i]))
+                                .clamp(0.02, 1.0);
                         let infil_mm = liquid_in_mm * (1.0 - runoff_frac);
                         let new_sm = self.soil_moisture[i] + infil_mm / 300.0;
                         let bucket_overflow_mm = ((new_sm - 1.0).max(0.0)) * 300.0;
                         self.soil_moisture[i] = new_sm.clamp(0.0, 1.0);
                         let total_runoff_mm = liquid_in_mm * runoff_frac + bucket_overflow_mm;
-                        hourly_runoff_m[i] += total_runoff_mm * 0.001;
+                        self.scratch_runoff_m[i] += total_runoff_mm * 0.001;
                     }
                 } else {
                     self.snow_depth_m[i] = 0.0;
@@ -1154,9 +1198,34 @@ impl MoistBaroclinicSolver {
             }
         }
 
-        // Reconstruct final end-of-hour winds, sea-level pressure, high clouds, river routing, & storm surge:
-        geom.reconstruct_cell_vectors(&self.u1_edge, &mut self.u1_east, &mut self.v1_north);
-        geom.reconstruct_cell_vectors(&self.u2_edge, &mut self.u2_east, &mut self.v2_north);
+        // Reconstruct final end-of-hour winds in a single Morton stencil pass:
+        if geom.all_deg_le_6 {
+            for st in &geom.morton_perot6 {
+                let mut u1x = 0.0_f32;
+                let mut v1y = 0.0_f32;
+                let mut u2x = 0.0_f32;
+                let mut v2y = 0.0_f32;
+                for k in 0..6 {
+                    let e = st.edge_idx[k] as usize;
+                    let wx = st.perot_wx[k];
+                    let wy = st.perot_wy[k];
+                    let ue1 = self.u1_edge[e];
+                    let ue2 = self.u2_edge[e];
+                    u1x += ue1 * wx;
+                    v1y += ue1 * wy;
+                    u2x += ue2 * wx;
+                    v2y += ue2 * wy;
+                }
+                let c = st.cell as usize;
+                self.u1_east[c] = u1x;
+                self.v1_north[c] = v1y;
+                self.u2_east[c] = u2x;
+                self.v2_north[c] = v2y;
+            }
+        } else {
+            geom.reconstruct_cell_vectors(&self.u1_edge, &mut self.u1_east, &mut self.v1_north);
+            geom.reconstruct_cell_vectors(&self.u2_edge, &mut self.u2_east, &mut self.v2_north);
+        }
 
         // Zero global mean of `ps_anom_pa` so total dry atmospheric mass is strictly invariant:
         let mut ps_sum = 0.0_f64;
@@ -1196,23 +1265,25 @@ impl MoistBaroclinicSolver {
         }
 
         // Route hourly surface runoff downstream in topological order to compute `river_flow_m3s`:
-        let mut accum_m3s = vec![0.0_f32; self.num_cells];
         for i in 0..self.num_cells {
-            if hourly_runoff_m[i] > 0.0 {
-                accum_m3s[i] = hourly_runoff_m[i] * geom.areas_m2[i] / 3600.0;
-            }
+            self.scratch_accum_m3s[i] = if self.scratch_runoff_m[i] > 0.0 {
+                self.scratch_runoff_m[i] * geom.areas_m2[i] * (1.0 / 3600.0)
+            } else {
+                0.0
+            };
         }
         for &u_idx in &self.topo_order {
             let u = u_idx as usize;
             let dst = self.downstream_cell[u];
             if dst != u32::MAX {
-                let q = accum_m3s[u];
-                accum_m3s[dst as usize] += q;
+                let q = self.scratch_accum_m3s[u];
+                self.scratch_accum_m3s[dst as usize] += q;
             }
         }
         for i in 0..self.num_cells {
             // Smooth 6-hour river channel reservoir response so storm hydrographs crest & recede naturally:
-            self.river_flow_m3s[i] = 0.78 * self.river_flow_m3s[i] + 0.22 * accum_m3s[i];
+            self.river_flow_m3s[i] =
+                0.78 * self.river_flow_m3s[i] + 0.22 * self.scratch_accum_m3s[i];
         }
 
         // Step coupled dynamic tides + storm surge AND unforced astronomical reference tide:
@@ -1243,10 +1314,16 @@ impl MoistBaroclinicSolver {
     }
 
     fn push_meteogram_frame(&mut self) {
-        if self.meteogram_history.len() >= METEOGRAM_HOURS {
-            self.meteogram_history.pop_front();
+        let mut frame = if self.meteogram_history.len() >= METEOGRAM_HOURS {
+            self.meteogram_history
+                .pop_front()
+                .unwrap_or_else(|| vec![MeteogramSample::default(); self.num_cells])
+        } else {
+            vec![MeteogramSample::default(); self.num_cells]
+        };
+        if frame.len() != self.num_cells {
+            frame.resize(self.num_cells, MeteogramSample::default());
         }
-        let mut frame = Vec::with_capacity(self.num_cells);
         for i in 0..self.num_cells {
             let t10 = (self.tsurf_c[i] * 10.0).round().clamp(-3000.0, 3000.0) as i16;
             let slp10 = ((self.slp_hpa[i] - 1000.0) * 10.0)
@@ -1258,12 +1335,12 @@ impl MoistBaroclinicSolver {
             let w10 = (self.wind1_speed_mps[i] * 10.0)
                 .round()
                 .clamp(0.0, 65_000.0) as u16;
-            frame.push(MeteogramSample {
+            frame[i] = MeteogramSample {
                 temp_tenths_c: t10,
                 slp_tenths_hpa: slp10,
                 precip_hundredths_mm: p100,
                 wind_tenths_mps: w10,
-            });
+            };
         }
         self.meteogram_history.push_back(frame);
     }
@@ -1293,97 +1370,150 @@ impl MoistBaroclinicSolver {
     }
 }
 
-/// Advective form $\partial_t \theta + \mathbf{u}\cdot\nabla\theta = 0$ written as
-/// $\nabla\cdot(\theta\mathbf{u}) - \theta\nabla\cdot\mathbf{u}$ so a constant scalar field
-/// is preserved identically even when $\nabla\cdot\mathbf{u} \ne 0$.
-fn advect_scalar_upwind(
+/// Fused 2-layer advective form $\partial_t \theta + \mathbf{u}\cdot\nabla\theta = 0$ written as
+/// $\nabla\cdot(\theta\mathbf{u}) - \theta\nabla\cdot\mathbf{u}$.
+#[allow(clippy::too_many_arguments)]
+fn advect_scalar_upwind_2layer(
     geom: &FiniteVolumeSphereGeom,
-    u_edge: &[f32],
-    div_u: &[f32],
+    u1_edge: &[f32],
+    u2_edge: &[f32],
+    div_u1: &[f32],
+    div_u2: &[f32],
     dt: f32,
-    field: &mut [f32],
-    scratch_flux: &mut [f32],
-    scratch_div_fu: &mut [f32],
+    field1: &mut [f32],
+    field2: &mut [f32],
+    scratch_flux1: &mut [f32],
+    scratch_flux2: &mut [f32],
+    scratch_div_fu1: &mut [f32],
+    scratch_div_fu2: &mut [f32],
 ) {
     for (e_idx, e) in geom.edges.iter().enumerate() {
-        let u = u_edge[e_idx];
-        let f_up = if u >= 0.0 {
-            field[e.left as usize]
-        } else {
-            field[e.right as usize]
-        };
-        scratch_flux[e_idx] = u * f_up;
+        let l = e.left as usize;
+        let r = e.right as usize;
+        let u1 = u1_edge[e_idx];
+        let u2 = u2_edge[e_idx];
+        scratch_flux1[e_idx] = u1 * if u1 >= 0.0 { field1[l] } else { field1[r] };
+        scratch_flux2[e_idx] = u2 * if u2 >= 0.0 { field2[l] } else { field2[r] };
     }
-    geom.divergence_from_edge_flux(scratch_flux, scratch_div_fu);
+    geom.divergence_2layer(
+        scratch_flux1,
+        scratch_flux2,
+        scratch_div_fu1,
+        scratch_div_fu2,
+    );
     for i in 0..geom.num_cells {
-        let adv = scratch_div_fu[i] - field[i] * div_u[i];
-        field[i] -= dt * adv;
+        field1[i] -= dt * (scratch_div_fu1[i] - field1[i] * div_u1[i]);
+        field2[i] -= dt * (scratch_div_fu2[i] - field2[i] * div_u2[i]);
     }
 }
 
-/// Conservative positivity-preserving upwind flux transport for non-negative moisture tracers (`qv`, `qc`).
-fn advect_tracer_flux_limited(
+/// Fused 2-tracer positivity-preserving upwind flux transport for non-negative moisture tracers (`qv`, `qc`).
+#[allow(clippy::too_many_arguments)]
+fn advect_tracer_flux_limited_2layer(
     geom: &FiniteVolumeSphereGeom,
-    u_edge: &[f32],
+    u1_edge: &[f32],
+    u2_edge: &[f32],
     dt: f32,
-    tracer: &mut [f32],
-    scratch_flux: &mut [f32],
-    scratch_outflow: &mut [f32],
+    tracer1: &mut [f32],
+    tracer2: &mut [f32],
+    scratch_flux1: &mut [f32],
+    scratch_flux2: &mut [f32],
+    scratch_outflow1: &mut [f32],
+    scratch_outflow2: &mut [f32],
 ) {
-    scratch_outflow.fill(0.0);
+    scratch_outflow1.fill(0.0);
+    scratch_outflow2.fill(0.0);
     for (e_idx, e) in geom.edges.iter().enumerate() {
-        let u = u_edge[e_idx];
-        if u > 0.0 {
-            let l = e.left as usize;
-            let q = u * tracer[l];
-            scratch_flux[e_idx] = q;
-            scratch_outflow[l] += dt * e.dual_len_m * q;
-        } else if u < 0.0 {
-            let r = e.right as usize;
-            let q = u * tracer[r];
-            scratch_flux[e_idx] = q;
-            scratch_outflow[r] += dt * e.dual_len_m * (-q);
+        let l = e.left as usize;
+        let r = e.right as usize;
+        let dt_len = dt * e.dual_len_m;
+
+        let u1 = u1_edge[e_idx];
+        if u1 > 0.0 {
+            let q = u1 * tracer1[l];
+            scratch_flux1[e_idx] = q;
+            scratch_outflow1[l] += dt_len * q;
+        } else if u1 < 0.0 {
+            let q = u1 * tracer1[r];
+            scratch_flux1[e_idx] = q;
+            scratch_outflow1[r] += dt_len * (-q);
         } else {
-            scratch_flux[e_idx] = 0.0;
+            scratch_flux1[e_idx] = 0.0;
+        }
+
+        let u2 = u2_edge[e_idx];
+        if u2 > 0.0 {
+            let q = u2 * tracer2[l];
+            scratch_flux2[e_idx] = q;
+            scratch_outflow2[l] += dt_len * q;
+        } else if u2 < 0.0 {
+            let q = u2 * tracer2[r];
+            scratch_flux2[e_idx] = q;
+            scratch_outflow2[r] += dt_len * (-q);
+        } else {
+            scratch_flux2[e_idx] = 0.0;
         }
     }
-    // Scale outgoing fluxes where needed so `tracer >= 0` strictly without creating/destroying mass:
+
     for (e_idx, e) in geom.edges.iter().enumerate() {
-        let q = scratch_flux[e_idx];
-        if q > 0.0 {
-            let l = e.left as usize;
-            let avail = 0.90 * tracer[l] * geom.areas_m2[l];
-            if scratch_outflow[l] > avail && scratch_outflow[l] > 1e-9 {
-                scratch_flux[e_idx] = q * (avail / scratch_outflow[l]);
+        let l = e.left as usize;
+        let r = e.right as usize;
+
+        let q1 = scratch_flux1[e_idx];
+        if q1 > 0.0 {
+            let avail = 0.90 * tracer1[l] * geom.areas_m2[l];
+            if scratch_outflow1[l] > avail && scratch_outflow1[l] > 1e-9 {
+                scratch_flux1[e_idx] = q1 * (avail / scratch_outflow1[l]);
             }
-        } else if q < 0.0 {
-            let r = e.right as usize;
-            let avail = 0.90 * tracer[r] * geom.areas_m2[r];
-            if scratch_outflow[r] > avail && scratch_outflow[r] > 1e-9 {
-                scratch_flux[e_idx] = q * (avail / scratch_outflow[r]);
+        } else if q1 < 0.0 {
+            let avail = 0.90 * tracer1[r] * geom.areas_m2[r];
+            if scratch_outflow1[r] > avail && scratch_outflow1[r] > 1e-9 {
+                scratch_flux1[e_idx] = q1 * (avail / scratch_outflow1[r]);
+            }
+        }
+
+        let q2 = scratch_flux2[e_idx];
+        if q2 > 0.0 {
+            let avail = 0.90 * tracer2[l] * geom.areas_m2[l];
+            if scratch_outflow2[l] > avail && scratch_outflow2[l] > 1e-9 {
+                scratch_flux2[e_idx] = q2 * (avail / scratch_outflow2[l]);
+            }
+        } else if q2 < 0.0 {
+            let avail = 0.90 * tracer2[r] * geom.areas_m2[r];
+            if scratch_outflow2[r] > avail && scratch_outflow2[r] > 1e-9 {
+                scratch_flux2[e_idx] = q2 * (avail / scratch_outflow2[r]);
             }
         }
     }
+
+    geom.divergence_2layer(
+        scratch_flux1,
+        scratch_flux2,
+        scratch_outflow1,
+        scratch_outflow2,
+    );
     for i in 0..geom.num_cells {
-        let mut div_q = 0.0_f32;
-        for inc in geom.incident_edges(i) {
-            div_q += scratch_flux[inc.edge_idx as usize] * inc.flux_factor;
-        }
-        tracer[i] = (tracer[i] - dt * div_q).max(0.0);
+        tracer1[i] = (tracer1[i] - dt * scratch_outflow1[i]).max(0.0);
+        tracer2[i] = (tracer2[i] - dt * scratch_outflow2[i]).max(0.0);
     }
 }
 
-fn apply_biharmonic_smoothing(
+#[allow(clippy::too_many_arguments)]
+fn apply_biharmonic_smoothing_2layer(
     geom: &FiniteVolumeSphereGeom,
     dt_nu4: f32,
-    field: &mut [f32],
-    lap1: &mut [f32],
-    lap2: &mut [f32],
+    field1: &mut [f32],
+    field2: &mut [f32],
+    lap1_a: &mut [f32],
+    lap2_a: &mut [f32],
+    lap1_b: &mut [f32],
+    lap2_b: &mut [f32],
 ) {
-    geom.laplacian_scalar(field, lap1);
-    geom.laplacian_scalar(lap1, lap2);
+    geom.laplacian_2layer(field1, field2, lap1_a, lap2_a);
+    geom.laplacian_2layer(lap1_a, lap2_a, lap1_b, lap2_b);
     for i in 0..geom.num_cells {
-        field[i] -= dt_nu4 * lap2[i];
+        field1[i] -= dt_nu4 * lap1_b[i];
+        field2[i] -= dt_nu4 * lap2_b[i];
     }
 }
 
@@ -1429,13 +1559,35 @@ fn radiative_equilibrium_surface_c(
     greenhouse_offset_k: f32,
     zs_m: f32,
 ) -> f32 {
-    let eff_mu = annual_mu + 0.58 * (daily_mu - annual_mu);
     let atmo_atten = (-zs_m.max(0.0) / 4800.0).exp();
     let slant_scatter = (1.0 - (annual_mu * 2.85).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-    let atmo_alb = (0.20 + 0.12 * slant_scatter) * atmo_atten;
-    let base_alb = 0.58 * surf_albedo + 0.42 * atmo_alb;
-    // Preserve high planetary albedo (`~0.67`) on thick perennial ice sheets (`surf_albedo > 0.55`)
-    // without locking thin seasonal snowpacks (`surf_albedo ~ 0.46`) into a summer glacier trap:
+    let atmo_alb_term = 0.42 * (0.20 + 0.12 * slant_scatter) * atmo_atten;
+    radiative_equilibrium_surface_c_fast(
+        daily_mu,
+        annual_mu,
+        surf_albedo,
+        atmo_alb_term,
+        solar_luminosity,
+        glac_offset_c,
+        greenhouse_offset_k,
+        zs_m,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn radiative_equilibrium_surface_c_fast(
+    daily_mu: f32,
+    annual_mu: f32,
+    surf_albedo: f32,
+    atmo_alb_term: f32,
+    solar_luminosity: f32,
+    glac_offset_c: f32,
+    greenhouse_offset_k: f32,
+    zs_m: f32,
+) -> f32 {
+    let eff_mu = annual_mu + 0.58 * (daily_mu - annual_mu);
+    let base_alb = 0.58 * surf_albedo + atmo_alb_term;
     let ice_floor = if surf_albedo > 0.55 {
         0.88 * surf_albedo
     } else {
@@ -1450,16 +1602,7 @@ fn radiative_equilibrium_surface_c(
         .clamp(-62.0, 52.0)
 }
 
-/// Scale-aware Rhines (1975) / Eliassen–Palm subgrid baroclinic eddy closure:
-/// - Computes planetary rotational Rhines index $\tilde{s} = \frac{|\Omega| R}{\gamma_R c_{\text{bc}}}$
-///   purely from rotation rate $\Omega$, radius $R$, and internal baroclinic wave speed $c_{\text{bc}}$.
-/// - Slow rotators ($\tilde{s} < 0.75$, `1 cell` Held–Hou regime) have $m_{\text{eddy}} = 0$, so
-///   subgrid eddy momentum forcing vanishes identically and the single hemisphere-wide cell
-///   emerges purely from resolved primitive-equation angular momentum conservation.
-/// - Faster rotators ($m_{\text{eddy}} \ge 1 \implies N = 2 m_{\text{eddy}} + 1 \in \{3, 5, 7, \dots\}$)
-///   experience baroclinic Rossby wave momentum-flux convergence scaled by local baroclinicity
-///   $\Delta\theta_{\text{eq-pole}}$ and subgrid unresolvedness $\chi_{\text{sg}}(L_D / \Delta x)$,
-///   projected to conserve global axial angular momentum $\sum_i A_i a_{\text{EP},i} \cos\phi_i \equiv 0$.
+/// Scale-aware Rhines (1975) / Eliassen–Palm subgrid baroclinic eddy closure.
 fn compute_subgrid_ep_eddy_forcing(
     geom: &FiniteVolumeSphereGeom,
     c_bc: f32,
@@ -1479,8 +1622,9 @@ fn compute_subgrid_ep_eddy_forcing(
 
     let baroc_scale = (dtheta_eq_pole / 38.0).clamp(0.0, 2.0);
     let f_mid = (1.4142 * omega_abs).max(1.0e-6);
-    let ld_mid = c_bc / f_mid;
-    let chi_mid = 1.0 / (1.0 + (ld_mid / (4.5 * d_mean)).powi(2));
+    let inv_45_d = 1.0 / (4.5 * d_mean);
+    let ld_mid_r = (c_bc / f_mid) * inv_45_d;
+    let chi_mid = 1.0 / (1.0 + ld_mid_r * ld_mid_r);
     let kappa_eddy = if omega_abs > 1.0e-7 {
         3.6e5 * chi_mid * baroc_scale
     } else {
@@ -1498,16 +1642,17 @@ fn compute_subgrid_ep_eddy_forcing(
     let amp = 1.85e-4 * baroc_scale;
     let f_floor = (0.25 * omega_abs).max(1.0e-6);
     let half_pi = std::f32::consts::FRAC_PI_2;
+    let c_bc_scaled = c_bc * inv_45_d;
 
     let mut pos_torque = 0.0_f64;
     let mut neg_torque = 0.0_f64;
     for i in 0..geom.num_cells {
-        let ld_i = c_bc / geom.coriolis_f[i].abs().max(f_floor);
-        let chi_sg = 1.0 / (1.0 + (ld_i / (4.5 * d_mean)).powi(2));
+        let ld_r = c_bc_scaled / geom.coriolis_f[i].abs().max(f_floor);
+        let chi_sg = 1.0 / (1.0 + ld_r * ld_r);
         let phi_star = (geom.lats_rad[i] - phi_itcz).clamp(-half_pi, half_pi);
-        let eq_taper = 0.35 + 0.65 * (phi_star.abs() / 0.32).min(1.0);
-        // Half-wavelength `pi / (2 * n_cells)` -> phase `2 * n_cells * |phi_star|`, vanishing at both 0 and pi/2:
-        let a_raw = -amp * chi_sg * eq_taper * (2.0 * n_cells * phi_star.abs()).sin();
+        let phi_abs = phi_star.abs();
+        let eq_taper = 0.35 + 0.65 * (phi_abs * (1.0 / 0.32)).min(1.0);
+        let a_raw = -amp * chi_sg * eq_taper * (2.0 * n_cells * phi_abs).sin();
         out_ep_east[i] = a_raw;
 
         let moment = (geom.areas_m2[i] as f64) * (geom.cos_lat[i] as f64);
@@ -1532,11 +1677,13 @@ fn compute_subgrid_ep_eddy_forcing(
     kappa_eddy
 }
 
-/// Exact 24-hour mean of $\max(0, \cos z) = \max(0, \sin\phi\sin\delta + \cos\phi\cos\delta\cos H)$
-/// integrated over hour angle $H \in [-\pi, \pi]$ via sunrise/sunset half-day angle $h_0$.
 #[inline]
-fn exact_daily_mean_cos_z(sin_phi: f32, cos_phi: f32, sin_dec: f32) -> f32 {
-    let cos_dec = (1.0 - sin_dec * sin_dec).max(0.0).sqrt();
+fn exact_daily_mean_cos_z_with_cos_dec(
+    sin_phi: f32,
+    cos_phi: f32,
+    sin_dec: f32,
+    cos_dec: f32,
+) -> f32 {
     let denom = cos_phi * cos_dec;
     if denom <= 1.0e-6 {
         return (sin_phi * sin_dec).max(0.0);
@@ -1547,14 +1694,27 @@ fn exact_daily_mean_cos_z(sin_phi: f32, cos_phi: f32, sin_dec: f32) -> f32 {
     (std::f32::consts::FRAC_1_PI * (h0 * sin_phi * sin_dec + denom * sin_h0)).max(0.0)
 }
 
+/// Exact 24-hour mean of $\max(0, \cos z) = \max(0, \sin\phi\sin\delta + \cos\phi\cos\delta\cos H)$
+/// integrated over hour angle $H \in [-\pi, \pi]$ via sunrise/sunset half-day angle $h_0$.
+#[inline]
+fn exact_daily_mean_cos_z(sin_phi: f32, cos_phi: f32, sin_dec: f32) -> f32 {
+    let cos_dec = (1.0 - sin_dec * sin_dec).max(0.0).sqrt();
+    exact_daily_mean_cos_z_with_cos_dec(sin_phi, cos_phi, sin_dec, cos_dec)
+}
+
+#[inline]
+fn qsat_with_elev_base(t_k: f32, qsat_elev_base: f32) -> f32 {
+    let tc = (t_k - 273.15).clamp(-65.0, 52.0);
+    let es_ratio = (17.67 * tc / (tc + 243.5)).exp();
+    (qsat_elev_base * es_ratio).clamp(0.05, 110.0)
+}
+
 /// Bolton (1980) Clausius–Clapeyron saturation column water vapor ($\text{kg m}^{-2}$)
 /// as a function of lower-tropospheric temperature `t_k` (K) and surface elevation `zs_m` (m).
 #[inline]
 pub fn saturation_column_vapor_kgm2(t_k: f32, zs_m: f32) -> f32 {
-    let tc = (t_k - 273.15).clamp(-65.0, 52.0);
-    let es_ratio = (17.67 * tc / (tc + 243.5)).exp();
-    let elev_atten = (-zs_m.max(0.0) / 2400.0).exp();
-    (9.2 * elev_atten * es_ratio).clamp(0.05, 110.0)
+    let qsat_base = 9.2 * (-zs_m.max(0.0) / 2400.0).exp();
+    qsat_with_elev_base(t_k, qsat_base)
 }
 
 #[cfg(test)]
