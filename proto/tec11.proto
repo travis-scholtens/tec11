@@ -225,6 +225,48 @@ message HistoryStage {
   repeated StatePair conflicts = 6;
 }
 
+// --- Stellar, Atmospheric, Lunar, and Celestial Environment Metadata ---
+
+message HomeStarMetadata {
+  string spectral_type = 1;
+  string class_description = 2;
+  float bv_color = 3;
+  Vec3 rgb = 4;
+  float temp_k = 5;
+  float mass_solar = 6;
+  float radius_solar = 7;
+  float luminosity_solar = 8;
+  float habitable_au = 9;
+  float orbital_period_days = 10;
+  float angular_diameter_deg = 11;
+  float solar_tide_factor = 12;
+  float age_gyr = 13;
+  float lifespan_gyr = 14;
+  Vec3 gal_pos_kpc = 15;
+}
+
+message PlanetaryEnvironment {
+  HomeStarMetadata home_star = 1;
+  uint32 star_filter = 2;
+  uint32 atmosphere_id = 3;
+  bool has_atmosphere = 4;
+  bool has_life = 5;
+  uint32 moon_count = 6;
+  float moon_mass_lunar = 7;
+  float current_moon_dist_radii = 8;
+  uint32 target_moon_dist_radii = 9;
+  uint64 constellation_seed = 10;
+  bytes sys_rng_state_16b = 11;
+  bool is_sol_system = 12;
+  uint32 target_day_hours = 13;
+  uint32 target_tilt_deg = 14;
+  uint32 land_pct = 15;
+  uint32 atm_dt_myr = 16;
+  uint32 life_dt_myr = 17;
+  uint32 people_dt_myr = 18;
+  float meteor_freq = 19;
+}
+
 // --- Top-Level Snapshot Message (.tec11 file payload) ---
 
 message PlanetSnapshot {
@@ -242,4 +284,7 @@ message PlanetSnapshot {
     PrehistoryStage prehistory = 7;
     HistoryStage history = 8;
   }
+
+  // Optional stellar, atmospheric, lunar, solar-system, and constellation metadata
+  PlanetaryEnvironment environment = 9;
 }

@@ -65,7 +65,8 @@ pub use sun_sky::{
     format_solar_system_summary, generate_default_constellations, generate_solar_system_with_rng,
     recompute_planet_visibility_from_home, sample_atmosphere_with_rng, sample_home_star_with_rng,
     substitute_simulated_planet, AtmosphereType, CelestialStar, Constellation, GalacticVantage,
-    GalaxyType, HomeStar, PlanetKind, PlanetaryOptics, SolarSystemPlanet, SunSandbox,
+    GalaxyType, HomeStar, PlanetKind, PlanetaryOptics, ReconstructedSkyEnvironment,
+    SolarSystemPlanet, SunSandbox,
 };
 pub use tectonics::{LithosphericGroup, TectonicsSimulation};
 pub use terrain::TerrainSandbox;

@@ -169,6 +169,9 @@ pub struct WorldSimulation {
     solar_system: Vec<SolarSystemPlanet>,
     constellations: Vec<Constellation>,
     home_planet_index: usize,
+    constellation_seed: u64,
+    sys_rng_bytes: [u8; 16],
+    is_sol_system: bool,
     rng: Pcg64Mcg,
 }
 
@@ -197,6 +200,7 @@ impl WorldSimulation {
         let atmosphere = AtmosphereType::EarthLikeN2O2;
         let optics = PlanetaryOptics::compute(&home_star, atmosphere);
         let mut sys_rng = Pcg64Mcg::from_seed_u64(seed ^ 0x517C_C1B7_2722_0A95);
+        let sys_rng_bytes = sys_rng.to_bytes();
         let ecliptic_pole = [0.0, -0.398, 0.917];
         let mut solar_system =
             generate_solar_system_with_rng(&mut sys_rng, &home_star, ecliptic_pole, true);
@@ -224,6 +228,9 @@ impl WorldSimulation {
             solar_system,
             constellations,
             home_planet_index,
+            constellation_seed: seed,
+            sys_rng_bytes,
+            is_sol_system: true,
             rng: Pcg64Mcg::from_seed_u64(seed.wrapping_add(1000)),
         };
         sim.sync_counters();
@@ -244,6 +251,8 @@ impl WorldSimulation {
         self.star_filter = self.home_star.star_filter_id();
         self.atmosphere_id = self.atmosphere.id();
         self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
+        self.sys_rng_bytes = sky_rng.to_bytes();
+        self.is_sol_system = is_sol;
         let ecliptic_pole = [0.0, -0.398, 0.917];
         self.solar_system = generate_solar_system_with_rng(
             &mut sky_rng,
@@ -347,6 +356,9 @@ impl WorldSimulation {
         self.star_filter = self.home_star.star_filter_id();
         self.atmosphere_id = self.atmosphere.id();
         self.optics = PlanetaryOptics::compute(&self.home_star, self.atmosphere);
+        self.sys_rng_bytes = sky_rng.to_bytes();
+        self.is_sol_system = is_sol;
+        self.constellation_seed = seed;
         let ecliptic_pole = [0.0, -0.398, 0.917];
         self.solar_system = generate_solar_system_with_rng(
             &mut sky_rng,
@@ -1333,19 +1345,104 @@ impl WorldSimulation {
         }
     }
 
+    pub fn build_environment_proto(&self) -> tec11_proto::PlanetaryEnvironment {
+        let (has_atmosphere, has_life) = match &self.stage {
+            WorldStageState::Tectonics(tec) => (tec.has_atmosphere(), tec.has_life()),
+            _ => (true, true),
+        };
+        tec11_proto::PlanetaryEnvironment {
+            home_star: Some(self.home_star.to_proto()),
+            star_filter: self.star_filter,
+            atmosphere_id: self.atmosphere_id,
+            has_atmosphere,
+            has_life,
+            moon_count: self.params.moon_count,
+            moon_mass_lunar: self.params.moon_mass,
+            current_moon_dist_radii: self.current_moon_dist_radii(),
+            target_moon_dist_radii: self.params.moon_dist_radii,
+            constellation_seed: self.constellation_seed,
+            sys_rng_state_16b: self.sys_rng_bytes.to_vec(),
+            is_sol_system: self.is_sol_system,
+            target_day_hours: self.params.day_hours,
+            target_tilt_deg: self.params.tilt_deg,
+            land_pct: self.params.land_pct,
+            atm_dt_myr: self.params.atm_dt_myr,
+            life_dt_myr: self.params.life_dt_myr,
+            people_dt_myr: self.params.people_dt_myr,
+            meteor_freq: self.params.meteor_freq,
+        }
+    }
+
     pub fn encode_snapshot(&self) -> Vec<u8> {
         let _span = crate::profile::span(crate::profile::ProfilePhase::StageSnapshotEncode);
-        match &self.stage {
-            WorldStageState::Tectonics(tec) => tec.encode_snapshot(),
-            WorldStageState::Prehistory(pre) => pre.encode_snapshot(),
-            WorldStageState::History(hist) => hist.encode_snapshot(),
-        }
+        let mut snap = match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.to_snapshot(),
+            WorldStageState::Prehistory(pre) => pre.to_snapshot(),
+            WorldStageState::History(hist) => hist.to_snapshot(),
+        };
+        snap.environment = Some(self.build_environment_proto());
+        snap.encode_bytes()
     }
 
     pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
         let Ok(snap) = tec11_proto::PlanetSnapshot::decode_bytes(bytes) else {
             return false;
         };
+        if let Some(ref env) = snap.environment {
+            if snap.grid_size >= 2 {
+                self.params.grid_size = snap.grid_size;
+            }
+            if env.target_day_hours > 0 {
+                self.params.day_hours = env.target_day_hours;
+            } else if snap.spin > 0.0 {
+                self.params.day_hours = (24.0 / snap.spin).round().clamp(4.0, 240.0) as u32;
+            }
+            if env.target_tilt_deg <= 89 && (env.target_tilt_deg > 0 || snap.tilt_deg == 0.0) {
+                self.params.tilt_deg = env.target_tilt_deg;
+            } else if snap.tilt_deg >= 0.0 {
+                self.params.tilt_deg = snap.tilt_deg.round().clamp(0.0, 89.0) as u32;
+            }
+            if env.land_pct > 0 {
+                self.params.land_pct = env.land_pct;
+            }
+            if env.atm_dt_myr > 0 {
+                self.params.atm_dt_myr = env.atm_dt_myr;
+            }
+            if env.life_dt_myr > 0 {
+                self.params.life_dt_myr = env.life_dt_myr;
+            }
+            if env.people_dt_myr > 0 {
+                self.params.people_dt_myr = env.people_dt_myr;
+            }
+            self.params.moon_count = env.moon_count;
+            self.params.moon_mass = env.moon_mass_lunar;
+            if env.target_moon_dist_radii >= 15 {
+                self.params.moon_dist_radii = env.target_moon_dist_radii;
+            }
+            self.params.meteor_freq = env.meteor_freq.clamp(0.0, 10.0);
+
+            let radius_km = if snap.radius_km > 0.0 {
+                snap.radius_km
+            } else {
+                Self::planet_radius_km(self.params.grid_size)
+            };
+            let sky = crate::sun_sky::ReconstructedSkyEnvironment::from_snapshot(
+                &snap,
+                radius_km,
+                self.params.land_pct,
+            );
+            self.home_star = sky.home_star;
+            self.star_filter = sky.star_filter;
+            self.atmosphere = sky.atmosphere;
+            self.atmosphere_id = sky.atmosphere.id();
+            self.optics = sky.optics;
+            self.constellation_seed = sky.constellation_seed;
+            self.sys_rng_bytes = sky.sys_rng_bytes;
+            self.is_sol_system = sky.is_sol_system;
+            self.solar_system = sky.solar_system;
+            self.home_planet_index = sky.home_planet_index;
+            self.constellations = sky.constellations;
+        }
         match &snap.stage {
             Some(tec11_proto::PlanetStageOneof::Tectonics(_)) => {
                 let Some(tec) = TectonicsSimulation::from_snapshot(&snap, 42) else {
@@ -1374,7 +1471,7 @@ impl WorldSimulation {
                 }
                 hist.set_solar_system(self.solar_system.clone());
                 hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
-                if !hist.constellations().is_empty() {
+                if snap.environment.is_none() && !hist.constellations().is_empty() {
                     self.constellations = hist.constellations().to_vec();
                 }
                 if let Some(pre_base) = &hist_proto.prehistory_base {

@@ -3686,18 +3686,36 @@ function paintStratigraphySideCanvas(view) {
 
   const ySea = kmToY(0.0);
   const ySurfBase = kmToY(elevKm);
+  const tSky = view.tileSky || null;
+  const hasAtm = !tSky || tSky.hasAtmosphere !== false;
+  const zRgb = tSky && Array.isArray(tSky.skyZenithRgb) ? tSky.skyZenithRgb : [0.16, 0.38, 0.82];
+  const hRgb = tSky && Array.isArray(tSky.skyHorizonRgb) ? tSky.skyHorizonRgb : [0.48, 0.72, 0.96];
   const skyGrad = ctx.createLinearGradient(0, padTop, 0, Math.max(padTop + 20, Math.min(ySea, ySurfBase)));
-  skyGrad.addColorStop(0.0, "#0b192c");
-  skyGrad.addColorStop(1.0, "#1e3a5f");
+  if (hasAtm) {
+    skyGrad.addColorStop(
+      0.0,
+      `rgb(${Math.round(Math.min(255, (0.04 + 0.56 * zRgb[0]) * 255))},${Math.round(Math.min(255, (0.06 + 0.58 * zRgb[1]) * 255))},${Math.round(Math.min(255, (0.10 + 0.62 * zRgb[2]) * 255))})`
+    );
+    skyGrad.addColorStop(
+      1.0,
+      `rgb(${Math.round(Math.min(255, (0.08 + 0.68 * hRgb[0]) * 255))},${Math.round(Math.min(255, (0.10 + 0.70 * hRgb[1]) * 255))},${Math.round(Math.min(255, (0.14 + 0.72 * hRgb[2]) * 255))})`
+    );
+  } else {
+    skyGrad.addColorStop(0.0, "#04070f");
+    skyGrad.addColorStop(1.0, "#090d18");
+  }
   ctx.fillStyle = skyGrad;
   ctx.fillRect(colLeft, padTop, colW, plotH);
 
-  // If submarine (elevKm < 0), fill ocean water above the seafloor
-  if (elevKm < 0.0) {
+  // If submarine (elevKm < 0) and planet has an atmosphere/hydrosphere, fill ocean water above the seafloor
+  if (elevKm < 0.0 && hasAtm) {
+    const oR = Math.round(Math.min(255, (0.03 + 0.42 * zRgb[0]) * 255));
+    const oG = Math.round(Math.min(255, (0.08 + 0.52 * zRgb[1]) * 255));
+    const oB = Math.round(Math.min(255, (0.16 + 0.62 * zRgb[2]) * 255));
     const oceanGrad = ctx.createLinearGradient(0, Math.max(padTop, ySea), 0, Math.min(cssH, ySurfBase + 12));
-    oceanGrad.addColorStop(0.0, "rgba(14, 116, 144, 0.78)");
-    oceanGrad.addColorStop(0.6, "rgba(12, 74, 110, 0.88)");
-    oceanGrad.addColorStop(1.0, "rgba(8, 47, 73, 0.95)");
+    oceanGrad.addColorStop(0.0, `rgba(${oR}, ${oG}, ${oB}, 0.78)`);
+    oceanGrad.addColorStop(0.6, `rgba(${Math.round(oR * 0.68)}, ${Math.round(oG * 0.68)}, ${Math.round(oB * 0.74)}, 0.88)`);
+    oceanGrad.addColorStop(1.0, `rgba(${Math.round(oR * 0.42)}, ${Math.round(oG * 0.44)}, ${Math.round(oB * 0.52)}, 0.95)`);
     ctx.fillStyle = oceanGrad;
     ctx.beginPath();
     ctx.moveTo(colLeft, Math.max(padTop, ySea));
@@ -5226,6 +5244,7 @@ function scheduleWorldTick(view) {
   view.timerId = setTimeout(() => {
     if (!view.isRunning || activeView !== view) return;
     view.session.step();
+    view.dirtySnapshot = true;
     updateWorldDataBuffers(view, false);
     if (view.setWorldInfo) {
       view.setWorldInfo(buildWorldInfo(view))();
@@ -5270,6 +5289,10 @@ export const mountWorldView =
       moonDistRadii,
       meteorFreqTenths / 10.0
     );
+    if (activeClimateSnapshotBytes) {
+      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+    }
+    view.dirtySnapshot = false;
     view.inspectorMode = "world";
     view.aspect = aspect;
     view.selectedTileIdx = -1;
@@ -5312,6 +5335,12 @@ export const mountWorldView =
     return () => {
       canvas.removeEventListener("click", handleCanvasClick);
       stopWorldLoop(view);
+      if (view.dirtySnapshot && view.session) {
+        const bytes = view.session.encode_snapshot();
+        if (bytes && bytes.length > 0) {
+          activeClimateSnapshotBytes = bytes;
+        }
+      }
       if (activeView === view) {
         activeView = null;
       }
@@ -5351,6 +5380,7 @@ export const createWorld =
       meteorFreqTenths / 10.0,
       randomize
     );
+    activeView.dirtySnapshot = true;
     activeView.selectedTileIdx = -1;
     activeView.selectedStateId = -1;
     activeView.selectedLangId = -1;
@@ -5362,6 +5392,7 @@ export const createWorld =
 export const stepWorld = (setWorldInfo) => () => {
   if (!activeView || !activeView.session || activeView.isRunning) return;
   activeView.session.step();
+  activeView.dirtySnapshot = true;
   updateWorldDataBuffers(activeView, false);
   setWorldInfo(buildWorldInfo(activeView))();
 };
@@ -5369,6 +5400,7 @@ export const stepWorld = (setWorldInfo) => () => {
 export const advanceWorldStage = (setWorldInfo) => () => {
   if (!activeView || !activeView.session) return;
   activeView.session.advance_stage();
+  activeView.dirtySnapshot = true;
   activeView.selectedTileIdx = -1;
   activeView.selectedStateId = -1;
   activeView.selectedLangId = -1;
@@ -5402,6 +5434,7 @@ export const setWorldSunAndAtmosphere =
   () => {
     if (!activeView || !activeView.session) return;
     activeView.session.set_sun_and_atmosphere(starFilter, atmosphereId);
+    activeView.dirtySnapshot = true;
     updateWorldDataBuffers(activeView, false);
     setWorldInfo(buildWorldInfo(activeView))();
   };
@@ -5412,6 +5445,7 @@ export const saveWorldPlanet = (setWorldInfo) => () => {
   if (!bytes || bytes.length === 0) return;
   storeSavedSnapshotBytes(bytes);
   activeClimateSnapshotBytes = bytes;
+  activeView.dirtySnapshot = false;
   triggerBinaryDownload("tec11-world.tec11", bytes);
   setWorldInfo(buildWorldInfo(activeView))();
 };
@@ -5423,6 +5457,7 @@ export const loadSavedPlanetIntoWorld = (setWorldInfo) => () => {
   stopWorldLoop(activeView);
   if (activeView.session.load_snapshot_bytes(saved)) {
     activeClimateSnapshotBytes = saved;
+    activeView.dirtySnapshot = false;
     activeView.selectedTileIdx = -1;
     activeView.selectedStateId = -1;
     activeView.selectedLangId = -1;
@@ -5440,6 +5475,7 @@ export const loadFilePlanetIntoWorld = (setWorldInfo) => () => {
     if (activeView.session.load_snapshot_bytes(bytes)) {
       storeSavedSnapshotBytes(bytes);
       activeClimateSnapshotBytes = bytes;
+      activeView.dirtySnapshot = false;
       activeView.selectedTileIdx = -1;
       activeView.selectedStateId = -1;
       activeView.selectedLangId = -1;
@@ -6731,6 +6767,9 @@ function buildTidesInfo(view) {
     dayOfYear: s.sim_day_of_year(),
     daysPerYear: s.days_per_year(),
     clockLabel: s.sim_clock_label(),
+    moonCount: s.moon_count(),
+    moonMassTenths: Math.max(1, Math.round(s.moon_mass() * 10.0)),
+    moonDistRadii: Math.max(20, Math.round(s.moon_dist_radii())),
     maxTideText: `${s.max_tide_m().toFixed(2)} m`,
     maxRangeText: `${s.max_tidal_range_m().toFixed(2)} m`,
     maxCurrentText: `${s.max_current_mps().toFixed(2)} m/s`,
@@ -6777,12 +6816,14 @@ export const mountTidesView =
     view.unlit = true;
     view.arrowStrokeStyle = "rgba(224, 242, 254, 0.85)";
 
-    view.session = new WasmTidesSession();
     if (activeClimateSnapshotBytes) {
-      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
+      view.session = WasmTidesSession.from_snapshot_or_earth(activeClimateSnapshotBytes);
+      view.session.set_day_of_year(dayOfYear);
+    } else {
+      view.session = new WasmTidesSession();
+      view.session.set_day_of_year(dayOfYear);
+      view.session.set_moon_params(moonCount, moonMassTenths / 10.0, moonDistRadii);
     }
-    view.session.set_day_of_year(dayOfYear);
-    view.session.set_moon_params(moonCount, moonMassTenths / 10.0, moonDistRadii);
 
     view.aspect = aspect;
     view.showArrows = showArrows;
@@ -7033,7 +7074,12 @@ function buildWeatherInfo(view) {
     dayOfYear: s.sim_day_of_year(),
     daysPerYear: s.days_per_year(),
     clockLabel: s.sim_clock_label(),
+    atmosphereId: s.atmosphere_id(),
     atmosphereName: s.atmosphere_name(),
+    glaciationPct: Math.max(0, Math.min(100, Math.round(s.glaciation() * 100.0))),
+    moonCount: s.moon_count(),
+    moonMassTenths: Math.max(1, Math.round(s.moon_mass() * 10.0)),
+    moonDistRadii: Math.max(20, Math.round(s.moon_dist_radii())),
     meanTempText: `${meanT >= 0 ? "+" : ""}${meanT.toFixed(1)} °C`,
     slpRangeText: `${Math.round(minP)}..${Math.round(maxP)} hPa`,
     maxWindText: `${s.max_wind_mps().toFixed(1)} m/s`,
@@ -7084,17 +7130,20 @@ export const mountWeatherView =
     view.mesh.material = view.material;
     view.unlit = true;
 
-    view.session = activeClimateSnapshotBytes
-      ? WasmWeatherSession.from_snapshot_or_earth(activeClimateSnapshotBytes)
-      : new WasmWeatherSession();
-    view.session.set_day_of_year(dayOfYear);
-    view.session.set_environment_params(
-      Math.max(0, atmId | 0),
-      Math.max(0.0, Math.min(1.0, glacPct / 100.0)),
-      Math.max(0, moonCount | 0),
-      Math.max(0.1, moonMassTenths / 10.0),
-      Math.max(20.0, moonDistRadii)
-    );
+    if (activeClimateSnapshotBytes) {
+      view.session = WasmWeatherSession.from_snapshot_or_earth(activeClimateSnapshotBytes);
+      view.session.set_day_of_year(dayOfYear);
+    } else {
+      view.session = new WasmWeatherSession();
+      view.session.set_day_of_year(dayOfYear);
+      view.session.set_environment_params(
+        Math.max(0, atmId | 0),
+        Math.max(0.0, Math.min(1.0, glacPct / 100.0)),
+        Math.max(0, moonCount | 0),
+        Math.max(0.1, moonMassTenths / 10.0),
+        Math.max(20.0, moonDistRadii)
+      );
+    }
 
     view.aspect = aspect;
     view.arrowMode = arrowMode;

@@ -30,8 +30,12 @@ impl WeatherSandbox {
 
     pub fn from_snapshot_bytes(bytes: &[u8]) -> Option<Self> {
         let base = FinePlanetBase::from_snapshot_bytes(bytes)?;
+        let atm = base.atmosphere.id();
         let glac = (base.prehistory.glaciation() as f32).clamp(0.0, 1.0);
-        Some(Self::from_base(base, 0, glac, 1, 1.0, 60.27))
+        let mc = base.default_moon_count;
+        let mm = base.default_moon_mass_lunar;
+        let md = base.default_moon_dist_radii;
+        Some(Self::from_base(base, atm, glac, mc, mm, md))
     }
 
     pub fn from_base(
@@ -153,9 +157,7 @@ impl WeatherSandbox {
             }
         }
 
-        let solar_tide_factor = (base.home_star.mass_solar
-            / base.home_star.habitable_au.max(0.05).powi(3))
-        .clamp(0.02, 20.0) as f64;
+        let solar_tide_factor = (base.home_star.solar_tide_factor as f64).clamp(0.02, 50.0);
 
         MoistBaroclinicSolver::new(
             &base.fine.grid,
@@ -184,29 +186,18 @@ impl WeatherSandbox {
     }
 
     pub fn load_earth(&mut self) {
-        let atm = self.solver.atmosphere_id();
-        let mc = self.solver.tides.moon_count();
-        let mm = self.solver.tides.primary_mass_lunar();
-        let md = self.solver.tides.primary_dist_radii();
-        *self = Self::from_base(
-            FinePlanetBase::new_earth(),
-            atm,
-            EARTH_GLACIATION as f32,
-            mc,
-            mm,
-            md,
-        );
+        *self = Self::new_earth();
     }
 
     pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
         let Some(base) = FinePlanetBase::from_snapshot_bytes(bytes) else {
             return false;
         };
-        let atm = self.solver.atmosphere_id();
+        let atm = base.atmosphere.id();
         let glac = (base.prehistory.glaciation() as f32).clamp(0.0, 1.0);
-        let mc = self.solver.tides.moon_count();
-        let mm = self.solver.tides.primary_mass_lunar();
-        let md = self.solver.tides.primary_dist_radii();
+        let mc = base.default_moon_count;
+        let mm = base.default_moon_mass_lunar;
+        let md = base.default_moon_dist_radii;
         *self = Self::from_base(base, atm, glac, mc, mm, md);
         true
     }
@@ -690,8 +681,8 @@ impl WeatherSandbox {
                 radius_km: self.base.prehistory.radius_km(),
                 day_hours: self.base.day_hours(),
                 tilt_deg: self.base.prehistory.tilt_deg(),
-                has_atmosphere: true,
-                has_life: true,
+                has_atmosphere: self.base.has_atmosphere,
+                has_life: self.base.has_life,
                 current_year: year,
                 moon_count: self.solver.tides.moon_count(),
                 home_star: &self.base.home_star,
@@ -702,7 +693,8 @@ impl WeatherSandbox {
                 location_summary: loc_summary,
                 population_summary: wx_summary,
                 technology: format!(
-                    "{} · Glac {:.0}% · {} Moon(s)",
+                    "{} · {} · Glac {:.0}% · {} Moon(s)",
+                    self.base.home_star.spectral_type,
                     self.base.atmosphere.name(),
                     self.solver.glaciation() * 100.0,
                     self.solver.tides.moon_count()
@@ -982,5 +974,93 @@ mod tests {
         assert!(meteogram.contains("\"Precip (mm/h)\""));
         assert!(meteogram.contains("\"SLP (hPa)\""));
         assert!(meteogram.contains("\"Temp (°C)\""));
+    }
+
+    #[test]
+    fn test_weather_and_tides_preserve_world_sun_atmosphere_moons_and_sky_colors() {
+        use crate::tides_sandbox::TidesSandbox;
+        use crate::world::{WorldCreateParams, WorldSimulation};
+
+        let mut world = WorldSimulation::new(
+            WorldCreateParams {
+                grid_size: 4,
+                day_hours: 18,
+                tilt_deg: 29,
+                land_pct: 32,
+                atm_dt_myr: 50,
+                life_dt_myr: 50,
+                people_dt_myr: 50,
+                moon_count: 2,
+                moon_mass: 1.8,
+                moon_dist_radii: 45,
+                meteor_freq: 1.2,
+            },
+            777,
+        );
+        // M-class Red Dwarf (filter = 4) + Tholin Haze atmosphere (id = 3)
+        world.set_sun_and_atmosphere(4, 3);
+        world.advance_stage(); // Enter Prehistory so biosphere & hydrosphere are active
+
+        let world_view = world
+            .inspect_tile_structured(0)
+            .expect("world tile inspection view");
+        let snap_bytes = world.encode_snapshot();
+
+        // 1. Verify WorldSimulation reload preserves star, atmosphere, moons, and sky colors
+        let mut reloaded_world = WorldSimulation::new(WorldCreateParams::default(), 1);
+        assert!(reloaded_world.load_snapshot_bytes(&snap_bytes));
+        assert_eq!(reloaded_world.home_star().spectral_type, world.home_star().spectral_type);
+        assert_eq!(reloaded_world.atmosphere_id(), 3);
+        assert_eq!(reloaded_world.params().moon_count, 2);
+        assert_eq!(reloaded_world.params().moon_dist_radii, 45);
+
+        // 2. Verify WeatherSandbox preserves exact 2D sky/vantage colors, planets, constellations, and moons
+        let mut wx =
+            WeatherSandbox::from_snapshot_bytes(&snap_bytes).expect("weather from snapshot");
+        assert_eq!(wx.solver.atmosphere_id(), 3);
+        assert_eq!(wx.solver.tides.moon_count(), 2);
+        assert!((wx.solver.tides.primary_mass_lunar() - 1.8).abs() < 1e-4);
+        assert!((wx.solver.tides.primary_dist_radii() - 45.0).abs() < 1e-3);
+
+        let wx_view = wx
+            .inspect_tile_structured(0)
+            .expect("weather fine tile inspection view");
+        assert_eq!(wx_view.sky.sun_rgb, world_view.sky.sun_rgb);
+        assert_eq!(wx_view.sky.sky_zenith_rgb, world_view.sky.sky_zenith_rgb);
+        assert_eq!(wx_view.sky.sky_horizon_rgb, world_view.sky.sky_horizon_rgb);
+        assert_eq!(wx_view.sky.sunset_rgb, world_view.sky.sunset_rgb);
+        assert_eq!(wx_view.sky.twilight_rgb, world_view.sky.twilight_rgb);
+        assert_eq!(
+            wx_view.vantage.plant_foliage_rgb,
+            world_view.vantage.plant_foliage_rgb
+        );
+        assert_eq!(
+            wx_view.vantage.plant_highlight_rgb,
+            world_view.vantage.plant_highlight_rgb
+        );
+        assert_eq!(wx_view.sky.moons.len(), 2);
+        assert_eq!(wx_view.sky.planets.len(), world_view.sky.planets.len());
+        assert_eq!(
+            wx_view.sky.constellations.len(),
+            world_view.sky.constellations.len()
+        );
+        assert_eq!(
+            wx_view.sky.constellations[0].ra_deg,
+            world_view.sky.constellations[0].ra_deg
+        );
+
+        // 3. Verify TidesSandbox also preserves star, atmosphere, moons, and sky colors
+        let mut tides =
+            TidesSandbox::from_snapshot_bytes(&snap_bytes).expect("tides from snapshot");
+        assert_eq!(tides.solver.moon_count(), 2);
+        let tides_view = tides
+            .inspect_tile_structured(0)
+            .expect("tides fine tile inspection view");
+        assert_eq!(tides_view.sky.sun_rgb, world_view.sky.sun_rgb);
+        assert_eq!(tides_view.sky.sky_zenith_rgb, world_view.sky.sky_zenith_rgb);
+        assert_eq!(
+            tides_view.vantage.plant_foliage_rgb,
+            world_view.vantage.plant_foliage_rgb
+        );
     }
 }

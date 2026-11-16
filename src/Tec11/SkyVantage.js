@@ -275,10 +275,21 @@ export function paintTileSkyCanvas(view) {
   const hRgb = sky.skyHorizonRgb || [0.48, 0.72, 0.96];
   const sRgb = sky.sunsetRgb || [0.95, 0.45, 0.22];
   const tRgb = sky.twilightRgb || [0.18, 0.22, 0.45];
+  const sunRgbArr = sky.sunRgb || [1.0, 0.96, 0.85];
 
   const overcastMix = hasAtm ? Math.min(0.88, cloudLow * 0.72 + stormDark * 0.42) : 0.0;
   const stormDim = 1.0 - stormDark * 0.48;
   const overcastDayLum = (0.14 + 0.56 * dayFactor) * stormDim;
+  const cloudTintZen = [
+    0.48 + 0.32 * zRgb[0] + 0.20 * sunRgbArr[0],
+    0.48 + 0.32 * zRgb[1] + 0.20 * sunRgbArr[1],
+    0.48 + 0.32 * zRgb[2] + 0.20 * sunRgbArr[2],
+  ];
+  const cloudTintHor = [
+    0.50 + 0.32 * hRgb[0] + 0.18 * sunRgbArr[0],
+    0.50 + 0.32 * hRgb[1] + 0.18 * sunRgbArr[1],
+    0.50 + 0.32 * hRgb[2] + 0.18 * sunRgbArr[2],
+  ];
 
   const mixChannel = (nightV, dayV, twiV, greyBias) => {
     const clearV =
@@ -290,10 +301,10 @@ export function paintTileSkyCanvas(view) {
   };
 
   const zenColor = hasAtm
-    ? `rgb(${mixChannel(0.02, zRgb[0], tRgb[0], 0.74)}, ${mixChannel(0.04, zRgb[1], tRgb[1], 0.79)}, ${mixChannel(0.11, zRgb[2], tRgb[2], 0.88)})`
+    ? `rgb(${mixChannel(0.02 + 0.04 * zRgb[0], zRgb[0], tRgb[0], cloudTintZen[0])}, ${mixChannel(0.03 + 0.05 * zRgb[1], zRgb[1], tRgb[1], cloudTintZen[1])}, ${mixChannel(0.04 + 0.08 * zRgb[2], zRgb[2], tRgb[2], cloudTintZen[2])})`
     : "rgb(4, 7, 15)";
   const horColor = hasAtm
-    ? `rgb(${mixChannel(0.05, hRgb[0], sRgb[0], 0.80)}, ${mixChannel(0.08, hRgb[1], sRgb[1], 0.84)}, ${mixChannel(0.17, hRgb[2], sRgb[2], 0.91)})`
+    ? `rgb(${mixChannel(0.04 + 0.06 * hRgb[0], hRgb[0], sRgb[0], cloudTintHor[0])}, ${mixChannel(0.05 + 0.07 * hRgb[1], hRgb[1], sRgb[1], cloudTintHor[1])}, ${mixChannel(0.06 + 0.11 * hRgb[2], hRgb[2], sRgb[2], cloudTintHor[2])})`
     : "rgb(9, 13, 24)";
 
   // Clip inside the local sky dome
@@ -519,12 +530,15 @@ export function paintTileSkyCanvas(view) {
     const drift = (totalDays * 4.5 + (view.tileWeatherAnimPhase || 0.0) * 0.12) % 10.0;
     const wx = Math.sin(windAzRad);
     const wy = -Math.cos(windAzRad);
-    const cloudBright = Math.round((78 + 165 * dayFactor) * (1.0 - 0.36 * stormDark));
+    const cloudBright = (78 + 165 * dayFactor) * (1.0 - 0.36 * stormDark);
+    const cR = Math.min(255, Math.round(cloudBright * cloudTintHor[0]));
+    const cG = Math.min(255, Math.round(cloudBright * cloudTintHor[1]));
+    const cB = Math.min(255, Math.round(cloudBright * cloudTintHor[2]));
 
     // High Cirrus wisps
     if (cloudHigh > 0.04) {
       ctx.save();
-      ctx.strokeStyle = `rgba(${Math.min(255, cloudBright + 24)}, ${Math.min(255, cloudBright + 28)}, 250, ${(0.34 * cloudHigh).toFixed(3)})`;
+      ctx.strokeStyle = `rgba(${Math.min(255, cR + 24)}, ${Math.min(255, cG + 24)}, ${Math.min(255, cB + 26)}, ${(0.34 * cloudHigh).toFixed(3)})`;
       ctx.lineWidth = 2.6;
       for (let i = 0; i < 6; i++) {
         const seed = (i + 1) * 1.618 + (view.selectedTileIdx || 0) * 0.17;
@@ -552,8 +566,8 @@ export function paintTileSkyCanvas(view) {
         const py = cy + u * wy + v * wx;
         const rPuff = radius * (0.18 + 0.22 * cloudLow + 0.06 * (i % 3));
         const gCloud = ctx.createRadialGradient(px, py, rPuff * 0.15, px, py, rPuff);
-        gCloud.addColorStop(0.0, `rgba(${cloudBright}, ${cloudBright + 4}, ${cloudBright + 12}, ${puffAlpha.toFixed(3)})`);
-        gCloud.addColorStop(1.0, `rgba(${cloudBright}, ${cloudBright + 4}, ${cloudBright + 12}, 0)`);
+        gCloud.addColorStop(0.0, `rgba(${cR}, ${cG}, ${cB}, ${puffAlpha.toFixed(3)})`);
+        gCloud.addColorStop(1.0, `rgba(${cR}, ${cG}, ${cB}, 0)`);
         ctx.fillStyle = gCloud;
         ctx.beginPath();
         ctx.arc(px, py, rPuff, 0, Math.PI * 2);
@@ -796,10 +810,21 @@ export function paintTileVantageCanvas(view) {
   const hRgb = sky.skyHorizonRgb || [0.48, 0.72, 0.96];
   const sRgb = sky.sunsetRgb || [0.95, 0.45, 0.22];
   const tRgb = sky.twilightRgb || [0.18, 0.22, 0.45];
+  const sunRgbArr = sky.sunRgb || [1.0, 0.96, 0.85];
 
   const overcastMix = hasAtm ? Math.min(0.88, cloudLow * 0.72 + stormDark * 0.42) : 0.0;
   const stormDim = 1.0 - stormDark * 0.48;
   const overcastDayLum = (0.14 + 0.56 * dayFactor) * stormDim;
+  const cloudTintZen = [
+    0.48 + 0.32 * zRgb[0] + 0.20 * sunRgbArr[0],
+    0.48 + 0.32 * zRgb[1] + 0.20 * sunRgbArr[1],
+    0.48 + 0.32 * zRgb[2] + 0.20 * sunRgbArr[2],
+  ];
+  const cloudTintHor = [
+    0.50 + 0.32 * hRgb[0] + 0.18 * sunRgbArr[0],
+    0.50 + 0.32 * hRgb[1] + 0.18 * sunRgbArr[1],
+    0.50 + 0.32 * hRgb[2] + 0.18 * sunRgbArr[2],
+  ];
 
   const mixCh = (nightV, dayV, twiV, greyBias) => {
     const clearV =
@@ -810,10 +835,18 @@ export function paintTileVantageCanvas(view) {
     );
   };
   const zenRgb = hasAtm
-    ? [mixCh(0.02, zRgb[0], tRgb[0], 0.74), mixCh(0.04, zRgb[1], tRgb[1], 0.79), mixCh(0.11, zRgb[2], tRgb[2], 0.88)]
+    ? [
+        mixCh(0.02 + 0.04 * zRgb[0], zRgb[0], tRgb[0], cloudTintZen[0]),
+        mixCh(0.03 + 0.05 * zRgb[1], zRgb[1], tRgb[1], cloudTintZen[1]),
+        mixCh(0.04 + 0.08 * zRgb[2], zRgb[2], tRgb[2], cloudTintZen[2]),
+      ]
     : [4, 7, 15];
   const horRgb = hasAtm
-    ? [mixCh(0.05, hRgb[0], sRgb[0], 0.80), mixCh(0.08, hRgb[1], sRgb[1], 0.84), mixCh(0.17, hRgb[2], sRgb[2], 0.91)]
+    ? [
+        mixCh(0.04 + 0.06 * hRgb[0], hRgb[0], sRgb[0], cloudTintHor[0]),
+        mixCh(0.05 + 0.07 * hRgb[1], hRgb[1], sRgb[1], cloudTintHor[1]),
+        mixCh(0.06 + 0.11 * hRgb[2], hRgb[2], sRgb[2], cloudTintHor[2]),
+      ]
     : [9, 13, 24];
 
   const yHor0 = altToY(0.0);
@@ -1025,14 +1058,20 @@ export function paintTileVantageCanvas(view) {
 
   // 5b. Live High Cirrus & Mid/Low Cloud Decks in the Sky (before distant mountains so high peaks pierce low clouds!)
   if (hasAtm && (cloudHigh > 0.04 || cloudLow > 0.04)) {
-    const cloudBaseLum = Math.round((68 + 168 * dayFactor) * (1.0 - 0.42 * stormDark));
-    const cloudShadowLum = Math.round(cloudBaseLum * (0.62 - 0.18 * stormDark));
+    const cloudBaseLum = (68 + 168 * dayFactor) * (1.0 - 0.42 * stormDark);
+    const cloudShadowLum = cloudBaseLum * (0.62 - 0.18 * stormDark);
+    const cbR = Math.min(255, Math.round(cloudBaseLum * cloudTintHor[0]));
+    const cbG = Math.min(255, Math.round(cloudBaseLum * cloudTintHor[1]));
+    const cbB = Math.min(255, Math.round(cloudBaseLum * cloudTintHor[2]));
+    const csR = Math.min(255, Math.round(cloudShadowLum * cloudTintZen[0]));
+    const csG = Math.min(255, Math.round(cloudShadowLum * cloudTintZen[1]));
+    const csB = Math.min(255, Math.round(cloudShadowLum * cloudTintZen[2]));
     const windRelAz = wrapDeltaAzDeg(windAzDeg, viewAzDeg);
     const driftDeg = (totalDays * 48.0 + (view.tileWeatherAnimPhase || 0.0) * 1.4) * (windRelAz >= 0 ? 1 : -1);
 
     if (cloudHigh > 0.04) {
       ctx.save();
-      ctx.strokeStyle = `rgba(${Math.min(255, cloudBaseLum + 26)}, ${Math.min(255, cloudBaseLum + 30)}, 252, ${(0.36 * cloudHigh).toFixed(3)})`;
+      ctx.strokeStyle = `rgba(${Math.min(255, cbR + 26)}, ${Math.min(255, cbG + 26)}, ${Math.min(255, cbB + 28)}, ${(0.36 * cloudHigh).toFixed(3)})`;
       ctx.lineWidth = 2.4;
       for (let i = 0; i < 7; i++) {
         const wAz = ((i * 51.4 + driftDeg * 0.4) % 360.0 + 360.0) % 360.0;
@@ -1063,9 +1102,9 @@ export function paintTileVantageCanvas(view) {
         const cxP = dAzToX(dAz);
         const cyP = altToY(altBase + 6.0);
         const cg = ctx.createLinearGradient(cxP, cyP - puffH, cxP, cyP + puffH * 0.55);
-        cg.addColorStop(0.0, `rgba(${Math.min(255, cloudBaseLum + 16)}, ${Math.min(255, cloudBaseLum + 18)}, ${Math.min(255, cloudBaseLum + 24)}, ${bankAlpha.toFixed(3)})`);
-        cg.addColorStop(0.75, `rgba(${cloudShadowLum}, ${cloudShadowLum + 4}, ${cloudShadowLum + 12}, ${(bankAlpha * 0.92).toFixed(3)})`);
-        cg.addColorStop(1.0, `rgba(${cloudShadowLum}, ${cloudShadowLum + 4}, ${cloudShadowLum + 12}, 0)`);
+        cg.addColorStop(0.0, `rgba(${Math.min(255, cbR + 16)}, ${Math.min(255, cbG + 16)}, ${Math.min(255, cbB + 18)}, ${bankAlpha.toFixed(3)})`);
+        cg.addColorStop(0.75, `rgba(${csR}, ${csG}, ${csB}, ${(bankAlpha * 0.92).toFixed(3)})`);
+        cg.addColorStop(1.0, `rgba(${csR}, ${csG}, ${csB}, 0)`);
         ctx.fillStyle = cg;
         ctx.beginPath();
         ctx.ellipse(cxP, cyP, puffW, puffH, 0, 0, Math.PI * 2);

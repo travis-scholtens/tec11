@@ -73,6 +73,7 @@ pub struct TectonicsSimulation {
     sterilization_delays: u32,
     last_impact_tile: Option<usize>,
     last_impact_diameter_km: f32,
+    saved_environment: Option<tec11_proto::PlanetaryEnvironment>,
     rng: Pcg64Mcg,
 }
 
@@ -223,6 +224,7 @@ impl TectonicsSimulation {
             sterilization_delays: 0,
             last_impact_tile: None,
             last_impact_diameter_km: 0.0,
+            saved_environment: None,
             rng,
         };
         sim.climate_model
@@ -1700,33 +1702,62 @@ impl TectonicsSimulation {
         tile.to_stratigraphy_json(tile_idx, None)
     }
 
+    pub fn saved_environment(&self) -> Option<&tec11_proto::PlanetaryEnvironment> {
+        self.saved_environment.as_ref()
+    }
+
+    pub fn set_saved_environment(&mut self, env: Option<tec11_proto::PlanetaryEnvironment>) {
+        self.saved_environment = env;
+    }
+
     pub fn inspect_tile_structured(
         &self,
         tile_idx: usize,
     ) -> Option<crate::sky_vantage::TileInspectionView> {
         let tile = self.tiles.get(tile_idx)?;
-        let home_star = crate::sun_sky::HomeStar::sol();
-        let optics = crate::sun_sky::PlanetaryOptics::compute(
-            &home_star,
-            crate::sun_sky::AtmosphereType::EarthLikeN2O2,
-        );
-        let mut sys_rng = Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95 ^ (self.grid.size as u64));
-        let ecliptic_pole = [0.0, -0.398, 0.917];
-        let mut solar_system = crate::sun_sky::generate_solar_system_with_rng(
-            &mut sys_rng,
-            &home_star,
-            ecliptic_pole,
-            true,
-        );
-        crate::sun_sky::substitute_simulated_planet(
-            &mut solar_system,
-            &home_star,
-            self.radius_km() as f32,
-            self.land_percent(),
-            self.moon_count,
-            ecliptic_pole,
-        );
-        let constellations = crate::sun_sky::generate_default_constellations(42);
+        let (home_star, optics, solar_system, constellations) =
+            if let Some(ref env_proto) = self.saved_environment {
+                let dummy_snap = tec11_proto::PlanetSnapshot {
+                    rng_state_16b: Vec::new(),
+                    grid_size: self.grid.size,
+                    radius_km: self.radius_km() as f32,
+                    spin: self.current_spin() as f32,
+                    tilt_deg: self.current_tilt_deg() as f32,
+                    stage: None,
+                    environment: Some(env_proto.clone()),
+                };
+                let sky = crate::sun_sky::ReconstructedSkyEnvironment::from_snapshot(
+                    &dummy_snap,
+                    self.radius_km() as f32,
+                    self.land_percent(),
+                );
+                (sky.home_star, sky.optics, sky.solar_system, sky.constellations)
+            } else {
+                let home_star = crate::sun_sky::HomeStar::sol();
+                let optics = crate::sun_sky::PlanetaryOptics::compute(
+                    &home_star,
+                    crate::sun_sky::AtmosphereType::EarthLikeN2O2,
+                );
+                let mut sys_rng =
+                    Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95 ^ (self.grid.size as u64));
+                let ecliptic_pole = [0.0, -0.398, 0.917];
+                let mut solar_system = crate::sun_sky::generate_solar_system_with_rng(
+                    &mut sys_rng,
+                    &home_star,
+                    ecliptic_pole,
+                    true,
+                );
+                crate::sun_sky::substitute_simulated_planet(
+                    &mut solar_system,
+                    &home_star,
+                    self.radius_km() as f32,
+                    self.land_percent(),
+                    self.moon_count,
+                    ecliptic_pole,
+                );
+                let constellations = crate::sun_sky::generate_default_constellations(42);
+                (home_star, optics, solar_system, constellations)
+            };
         let elev = tile.elevation();
         let has_atm = self.has_atmosphere();
         let has_life = self.has_life();
@@ -1843,6 +1874,17 @@ impl TectonicsSimulation {
             })
             .collect();
 
+        let env_out = self.saved_environment.as_ref().map(|e| {
+            let mut env = e.clone();
+            env.has_atmosphere = self.has_atmosphere();
+            env.has_life = self.has_life();
+            env.moon_count = self.moon_count;
+            env.moon_mass_lunar = self.moon_mass as f32;
+            env.current_moon_dist_radii = self.current_moon_dist_radii() as f32;
+            env.target_moon_dist_radii = self.target_moon_dist_radii.round().max(15.0) as u32;
+            env
+        });
+
         tec11_proto::PlanetSnapshot {
             rng_state_16b: self.rng.to_bytes().to_vec(),
             grid_size: self.grid.size,
@@ -1860,6 +1902,7 @@ impl TectonicsSimulation {
                     ridges: proto_ridges,
                 },
             )),
+            environment: env_out,
         }
     }
 
@@ -2087,6 +2130,28 @@ impl TectonicsSimulation {
             tilt_deg,
         );
 
+        let (moon_count, moon_mass, target_moon_dist_radii, meteor_freq) =
+            if let Some(ref env) = snap.environment {
+                (
+                    env.moon_count,
+                    if env.moon_count == 0 {
+                        0.0
+                    } else if env.moon_mass_lunar > 0.0 {
+                        env.moon_mass_lunar as f64
+                    } else {
+                        1.0
+                    },
+                    if env.target_moon_dist_radii >= 15 {
+                        env.target_moon_dist_radii as f64
+                    } else {
+                        60.0
+                    },
+                    (env.meteor_freq as f64).clamp(0.0, 10.0),
+                )
+            } else {
+                (1, 1.0, 60.0, 1.0)
+            };
+
         let mut sim = Self {
             grid,
             adjacency,
@@ -2102,9 +2167,9 @@ impl TectonicsSimulation {
             geoticks,
             target_day_hours,
             base_tilt_deg: tilt_deg,
-            moon_count: 1,
-            moon_mass: 1.0,
-            target_moon_dist_radii: 60.0,
+            moon_count,
+            moon_mass,
+            target_moon_dist_radii,
             tiles,
             groups,
             ridges,
@@ -2115,12 +2180,13 @@ impl TectonicsSimulation {
             tile_temp_c: vec![15.0; n],
             tile_precip_norm: vec![0.5; n],
             tile_impact_scars: vec![0.0; n],
-            meteor_freq: 1.0,
+            meteor_freq,
             impact_count: 0,
             impact_winter_ticks: 0,
             sterilization_delays: 0,
             last_impact_tile: None,
             last_impact_diameter_km: 0.0,
+            saved_environment: snap.environment.clone(),
             rng,
         };
         sim.climate_model

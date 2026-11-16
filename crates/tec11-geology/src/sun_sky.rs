@@ -155,6 +155,95 @@ impl HomeStar {
             }
         }
     }
+
+    pub fn to_proto(&self) -> tec11_proto::HomeStarMetadata {
+        tec11_proto::HomeStarMetadata {
+            spectral_type: self.spectral_type.clone(),
+            class_description: self.class_description.clone(),
+            bv_color: self.bv_color,
+            rgb: Some(tec11_proto::Vec3 {
+                x: self.rgb[0],
+                y: self.rgb[1],
+                z: self.rgb[2],
+            }),
+            temp_k: self.temp_k,
+            mass_solar: self.mass_solar,
+            radius_solar: self.radius_solar,
+            luminosity_solar: self.luminosity_solar,
+            habitable_au: self.habitable_au,
+            orbital_period_days: self.orbital_period_days,
+            angular_diameter_deg: self.angular_diameter_deg,
+            solar_tide_factor: self.solar_tide_factor,
+            age_gyr: self.age_gyr,
+            lifespan_gyr: self.lifespan_gyr,
+            gal_pos_kpc: Some(tec11_proto::Vec3 {
+                x: self.gal_pos_kpc[0],
+                y: self.gal_pos_kpc[1],
+                z: self.gal_pos_kpc[2],
+            }),
+        }
+    }
+
+    pub fn from_proto(p: &tec11_proto::HomeStarMetadata) -> Self {
+        let sol = Self::sol();
+        let rgb = p
+            .rgb
+            .map(|v| [v.x.clamp(0.0, 1.0), v.y.clamp(0.0, 1.0), v.z.clamp(0.0, 1.0)])
+            .unwrap_or_else(|| bv_to_rgb(p.bv_color));
+        let gal = p
+            .gal_pos_kpc
+            .map(|v| [v.x, v.y, v.z])
+            .unwrap_or(sol.gal_pos_kpc);
+        Self {
+            spectral_type: if p.spectral_type.is_empty() {
+                sol.spectral_type
+            } else {
+                p.spectral_type.clone()
+            },
+            class_description: if p.class_description.is_empty() {
+                sol.class_description
+            } else {
+                p.class_description.clone()
+            },
+            bv_color: p.bv_color,
+            rgb,
+            temp_k: if p.temp_k > 100.0 { p.temp_k } else { sol.temp_k },
+            mass_solar: if p.mass_solar > 0.01 { p.mass_solar } else { sol.mass_solar },
+            radius_solar: if p.radius_solar > 0.01 { p.radius_solar } else { sol.radius_solar },
+            luminosity_solar: if p.luminosity_solar > 1e-5 {
+                p.luminosity_solar
+            } else {
+                sol.luminosity_solar
+            },
+            habitable_au: if p.habitable_au > 0.005 {
+                p.habitable_au
+            } else {
+                sol.habitable_au
+            },
+            orbital_period_days: if p.orbital_period_days > 1.0 {
+                p.orbital_period_days
+            } else {
+                sol.orbital_period_days
+            },
+            angular_diameter_deg: if p.angular_diameter_deg > 0.01 {
+                p.angular_diameter_deg
+            } else {
+                sol.angular_diameter_deg
+            },
+            solar_tide_factor: if p.solar_tide_factor > 0.0 {
+                p.solar_tide_factor
+            } else {
+                sol.solar_tide_factor
+            },
+            age_gyr: if p.age_gyr > 0.0 { p.age_gyr } else { sol.age_gyr },
+            lifespan_gyr: if p.lifespan_gyr > 0.0 {
+                p.lifespan_gyr
+            } else {
+                sol.lifespan_gyr
+            },
+            gal_pos_kpc: gal,
+        }
+    }
 }
 
 /// A single naked-eye visible star on the celestial sphere (`star.py` in `Celestiality`).
@@ -3073,6 +3162,154 @@ impl SunSandbox {
             op.plant_color_name,
             op.plant_pigment_desc
         )
+    }
+}
+
+/// Complete stellar, atmospheric, lunar, solar-system, and constellation environment reconstructed
+/// from a `tec11_proto::PlanetaryEnvironment` (or defaulted to Earth / Sol when `None`).
+#[derive(Clone, Debug)]
+pub struct ReconstructedSkyEnvironment {
+    pub home_star: HomeStar,
+    pub star_filter: u32,
+    pub atmosphere: AtmosphereType,
+    pub optics: PlanetaryOptics,
+    pub has_atmosphere: bool,
+    pub has_life: bool,
+    pub moon_count: u32,
+    pub moon_mass_lunar: f32,
+    pub current_moon_dist_radii: f32,
+    pub target_moon_dist_radii: u32,
+    pub constellation_seed: u64,
+    pub sys_rng_bytes: [u8; 16],
+    pub is_sol_system: bool,
+    pub solar_system: Vec<SolarSystemPlanet>,
+    pub home_planet_index: usize,
+    pub constellations: Vec<Constellation>,
+}
+
+impl ReconstructedSkyEnvironment {
+    pub fn from_snapshot(
+        snap: &tec11_proto::PlanetSnapshot,
+        planet_radius_km: f32,
+        fallback_land_pct: u32,
+    ) -> Self {
+        let ecliptic_pole = [0.0, -0.398, 0.917];
+        let stage_flags = match &snap.stage {
+            Some(tec11_proto::PlanetStageOneof::Tectonics(tec)) => (
+                tec.atmosphere_ticks_remaining == 0,
+                tec.life_ticks_remaining == 0,
+            ),
+            _ => (true, true),
+        };
+
+        if let Some(env) = &snap.environment {
+            let home_star = env
+                .home_star
+                .as_ref()
+                .map(HomeStar::from_proto)
+                .unwrap_or_else(HomeStar::sol);
+            let star_filter = if env.star_filter > 0 {
+                env.star_filter
+            } else {
+                home_star.star_filter_id()
+            };
+            let atmosphere = AtmosphereType::from_id(env.atmosphere_id);
+            let optics = PlanetaryOptics::compute(&home_star, atmosphere);
+            let sys_rng_bytes = <[u8; 16]>::try_from(env.sys_rng_state_16b.as_slice())
+                .unwrap_or_else(|_| Pcg64Mcg::from_seed_u64(42 ^ 0x517C_C1B7_2722_0A95).to_bytes());
+            let mut sys_rng = Pcg64Mcg::from_bytes(sys_rng_bytes);
+            let mut solar_system = generate_solar_system_with_rng(
+                &mut sys_rng,
+                &home_star,
+                ecliptic_pole,
+                env.is_sol_system,
+            );
+            let land_pct = if env.land_pct > 0 {
+                env.land_pct
+            } else {
+                fallback_land_pct
+            };
+            let home_planet_index = substitute_simulated_planet(
+                &mut solar_system,
+                &home_star,
+                planet_radius_km,
+                land_pct,
+                env.moon_count,
+                ecliptic_pole,
+            );
+            let constellation_seed = env.constellation_seed;
+            let constellations = generate_default_constellations(constellation_seed);
+            let target_dist = if env.target_moon_dist_radii >= 15 {
+                env.target_moon_dist_radii
+            } else {
+                60
+            };
+            let cur_dist = if env.current_moon_dist_radii >= 10.0 {
+                env.current_moon_dist_radii
+            } else {
+                target_dist as f32
+            };
+            let moon_mass = if env.moon_count == 0 {
+                0.0
+            } else if env.moon_mass_lunar > 0.0 {
+                env.moon_mass_lunar
+            } else {
+                1.0
+            };
+            Self {
+                home_star,
+                star_filter,
+                atmosphere,
+                optics,
+                has_atmosphere: env.has_atmosphere,
+                has_life: env.has_life,
+                moon_count: env.moon_count,
+                moon_mass_lunar: moon_mass,
+                current_moon_dist_radii: cur_dist,
+                target_moon_dist_radii: target_dist,
+                constellation_seed,
+                sys_rng_bytes,
+                is_sol_system: env.is_sol_system,
+                solar_system,
+                home_planet_index,
+                constellations,
+            }
+        } else {
+            let home_star = HomeStar::sol();
+            let atmosphere = AtmosphereType::EarthLikeN2O2;
+            let optics = PlanetaryOptics::compute(&home_star, atmosphere);
+            let mut sys_rng = Pcg64Mcg::from_seed_u64(42 ^ 0x517C_C1B7_2722_0A95);
+            let sys_rng_bytes = sys_rng.to_bytes();
+            let mut solar_system =
+                generate_solar_system_with_rng(&mut sys_rng, &home_star, ecliptic_pole, true);
+            let home_planet_index = substitute_simulated_planet(
+                &mut solar_system,
+                &home_star,
+                planet_radius_km,
+                fallback_land_pct,
+                1,
+                ecliptic_pole,
+            );
+            let constellations = generate_default_constellations(42);
+            Self {
+                home_star,
+                star_filter: 2,
+                atmosphere,
+                optics,
+                has_atmosphere: stage_flags.0,
+                has_life: stage_flags.1,
+                moon_count: 1,
+                moon_mass_lunar: 1.0,
+                current_moon_dist_radii: 60.0,
+                target_moon_dist_radii: 60,
+                constellation_seed: 42,
+                sys_rng_bytes,
+                is_sol_system: true,
+                solar_system,
+                home_planet_index,
+                constellations,
+            }
+        }
     }
 }
 

@@ -77,6 +77,15 @@ impl WasmTidesSession {
         }
     }
 
+    pub fn from_snapshot_or_earth(bytes: &[u8]) -> Self {
+        let sandbox = if bytes.is_empty() {
+            TidesSandbox::new_earth()
+        } else {
+            TidesSandbox::from_snapshot_bytes(bytes).unwrap_or_else(TidesSandbox::new_earth)
+        };
+        Self { sandbox }
+    }
+
     pub fn load_earth(&mut self) {
         self.sandbox.load_earth();
     }

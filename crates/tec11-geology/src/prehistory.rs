@@ -134,6 +134,7 @@ pub struct PrehistorySimulation {
     next_heritage_id: u32,
     is_custom: bool,
     settled_biosphere: Option<SettledBiosphere>,
+    saved_environment: Option<tec11_proto::PlanetaryEnvironment>,
     rng: Pcg64Mcg,
 }
 
@@ -339,6 +340,7 @@ impl PrehistorySimulation {
             next_heritage_id: 0,
             is_custom: false,
             settled_biosphere: None,
+            saved_environment: None,
             rng: Pcg64Mcg::new(seed),
         };
         sim.refresh_climate_and_rivers();
@@ -348,6 +350,12 @@ impl PrehistorySimulation {
     /// Transition directly from a `TectonicsSimulation` in memory without serializing to protobuf
     /// or reconstructing the `SphericalGrid`, adjacency graph, or `OceanGridGeometry`.
     pub fn from_tectonics_mut(tec: &mut TectonicsSimulation) -> Self {
+        let mut saved_environment = tec.saved_environment().cloned();
+        if let Some(ref mut env) = saved_environment {
+            env.has_atmosphere = true;
+            env.has_life = true;
+            env.current_moon_dist_radii = env.target_moon_dist_radii as f32;
+        }
         let (
             grid,
             adjacency,
@@ -393,6 +401,7 @@ impl PrehistorySimulation {
             next_heritage_id: 0,
             is_custom: true,
             settled_biosphere: None,
+            saved_environment,
             rng,
         };
         sim.refresh_climate_and_rivers();
@@ -474,6 +483,7 @@ impl PrehistorySimulation {
             next_heritage_id: self.next_heritage_id,
             is_custom: true,
             settled_biosphere: None,
+            saved_environment: self.saved_environment.clone(),
             rng,
         };
         sim.refresh_climate_and_rivers_without_biosphere();
@@ -836,6 +846,14 @@ impl PrehistorySimulation {
         }
     }
 
+    pub fn saved_environment(&self) -> Option<&tec11_proto::PlanetaryEnvironment> {
+        self.saved_environment.as_ref()
+    }
+
+    pub fn set_saved_environment(&mut self, env: Option<tec11_proto::PlanetaryEnvironment>) {
+        self.saved_environment = env;
+    }
+
     pub fn to_snapshot(&self) -> tec11_proto::PlanetSnapshot {
         tec11_proto::PlanetSnapshot {
             rng_state_16b: self.rng.to_bytes().to_vec(),
@@ -846,6 +864,7 @@ impl PrehistorySimulation {
             stage: Some(tec11_proto::PlanetStageOneof::Prehistory(
                 self.to_proto_prehistory_stage(),
             )),
+            environment: self.saved_environment.clone(),
         }
     }
 
@@ -948,13 +967,14 @@ impl PrehistorySimulation {
                     next_heritage_id: 0,
                     is_custom: true,
                     settled_biosphere: None,
+                    saved_environment: snap.environment.clone(),
                     rng,
                 };
                 sim.refresh_climate_and_rivers();
                 Some(sim)
             }
             tec11_proto::PlanetStageOneof::Prehistory(pre) => {
-                Self::from_proto_prehistory_stage(
+                let mut sim = Self::from_proto_prehistory_stage(
                     pre,
                     grid,
                     adjacency,
@@ -963,11 +983,13 @@ impl PrehistorySimulation {
                     cells,
                     tilt_deg,
                     rng,
-                )
+                )?;
+                sim.saved_environment = snap.environment.clone();
+                Some(sim)
             }
             tec11_proto::PlanetStageOneof::History(hist) => {
                 let pre = hist.prehistory_base.as_ref()?;
-                Self::from_proto_prehistory_stage(
+                let mut sim = Self::from_proto_prehistory_stage(
                     pre,
                     grid,
                     adjacency,
@@ -976,7 +998,9 @@ impl PrehistorySimulation {
                     cells,
                     tilt_deg,
                     rng,
-                )
+                )?;
+                sim.saved_environment = snap.environment.clone();
+                Some(sim)
             }
         }
     }
@@ -1106,6 +1130,7 @@ impl PrehistorySimulation {
             next_heritage_id,
             is_custom: true,
             settled_biosphere: None,
+            saved_environment: None,
             rng,
         };
         sim.refresh_climate_and_rivers();
@@ -1409,28 +1434,54 @@ impl PrehistorySimulation {
         tile_idx: usize,
     ) -> Option<crate::sky_vantage::TileInspectionView> {
         let tile = self.tiles.get(tile_idx)?;
-        let home_star = crate::sun_sky::HomeStar::sol();
-        let optics = crate::sun_sky::PlanetaryOptics::compute(
-            &home_star,
-            crate::sun_sky::AtmosphereType::EarthLikeN2O2,
-        );
-        let mut sys_rng = Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95);
-        let ecliptic_pole = [0.0, -0.398, 0.917];
-        let mut solar_system = crate::sun_sky::generate_solar_system_with_rng(
-            &mut sys_rng,
-            &home_star,
-            ecliptic_pole,
-            true,
-        );
-        crate::sun_sky::substitute_simulated_planet(
-            &mut solar_system,
-            &home_star,
-            self.radius_km() as f32,
-            self.land_percent(),
-            1,
-            ecliptic_pole,
-        );
-        let constellations = crate::sun_sky::generate_default_constellations(42);
+        let (home_star, optics, solar_system, constellations, moon_count) =
+            if let Some(ref env_proto) = self.saved_environment {
+                let dummy_snap = tec11_proto::PlanetSnapshot {
+                    rng_state_16b: Vec::new(),
+                    grid_size: self.grid.size,
+                    radius_km: self.radius_km() as f32,
+                    spin: self.spin as f32,
+                    tilt_deg: self.tilt_deg as f32,
+                    stage: None,
+                    environment: Some(env_proto.clone()),
+                };
+                let sky = crate::sun_sky::ReconstructedSkyEnvironment::from_snapshot(
+                    &dummy_snap,
+                    self.radius_km() as f32,
+                    self.land_percent(),
+                );
+                (
+                    sky.home_star,
+                    sky.optics,
+                    sky.solar_system,
+                    sky.constellations,
+                    sky.moon_count,
+                )
+            } else {
+                let home_star = crate::sun_sky::HomeStar::sol();
+                let optics = crate::sun_sky::PlanetaryOptics::compute(
+                    &home_star,
+                    crate::sun_sky::AtmosphereType::EarthLikeN2O2,
+                );
+                let mut sys_rng = Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95);
+                let ecliptic_pole = [0.0, -0.398, 0.917];
+                let mut solar_system = crate::sun_sky::generate_solar_system_with_rng(
+                    &mut sys_rng,
+                    &home_star,
+                    ecliptic_pole,
+                    true,
+                );
+                crate::sun_sky::substitute_simulated_planet(
+                    &mut solar_system,
+                    &home_star,
+                    self.radius_km() as f32,
+                    self.land_percent(),
+                    1,
+                    ecliptic_pole,
+                );
+                let constellations = crate::sun_sky::generate_default_constellations(42);
+                (home_star, optics, solar_system, constellations, 1)
+            };
         let elev = tile.elevation();
         let koeppen = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
         let loc_summary = if elev <= 0.0 {
@@ -1488,7 +1539,7 @@ impl PrehistorySimulation {
                 has_atmosphere: true,
                 has_life: true,
                 current_year: 0,
-                moon_count: 1,
+                moon_count,
                 home_star: &home_star,
                 optics: &optics,
                 solar_system: &solar_system,

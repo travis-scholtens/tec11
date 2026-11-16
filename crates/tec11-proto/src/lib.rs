@@ -203,6 +203,7 @@ mod tests {
                     age_ticks: 4,
                 }],
             })),
+            environment: None,
         };
 
         let bytes = snap.encode_bytes();

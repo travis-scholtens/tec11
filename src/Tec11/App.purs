@@ -424,6 +424,9 @@ type TidesInfo =
   , dayOfYear :: Int
   , daysPerYear :: Int
   , clockLabel :: String
+  , moonCount :: Int
+  , moonMassTenths :: Int
+  , moonDistRadii :: Int
   , maxTideText :: String
   , maxRangeText :: String
   , maxCurrentText :: String
@@ -447,7 +450,12 @@ type WeatherInfo =
   , dayOfYear :: Int
   , daysPerYear :: Int
   , clockLabel :: String
+  , atmosphereId :: Int
   , atmosphereName :: String
+  , glaciationPct :: Int
+  , moonCount :: Int
+  , moonMassTenths :: Int
+  , moonDistRadii :: Int
   , meanTempText :: String
   , slpRangeText :: String
   , maxWindText :: String
@@ -1524,6 +1532,9 @@ mkApp = do
       , dayOfYear: 80
       , daysPerYear: 365
       , clockLabel: "Day 80 · 12:00 UTC (+0h)"
+      , moonCount: 1
+      , moonMassTenths: 10
+      , moonDistRadii: 60
       , maxTideText: "0.00 m"
       , maxRangeText: "0.00 m"
       , maxCurrentText: "0.00 m/s"
@@ -1556,7 +1567,12 @@ mkApp = do
       , dayOfYear: 80
       , daysPerYear: 365
       , clockLabel: "Year 0 · Day 80 · 12:00 UTC (+0h)"
-      , atmosphereName: "N2-O2 + O3 Ozone (Earth-like, 1.0 bar)"
+      , atmosphereId: 0
+      , atmosphereName: "G2V · N2-O2 + O3 Ozone (Earth-like, 1.0 bar)"
+      , glaciationPct: 35
+      , moonCount: 1
+      , moonMassTenths: 10
+      , moonDistRadii: 60
       , meanTempText: "+14.5 °C"
       , slpRangeText: "1013..1013 hPa"
       , maxWindText: "0.0 m/s"
@@ -1573,6 +1589,40 @@ mkApp = do
       , selectedReport: "Click any fine tile on the globe to inspect live temperature, sea-level pressure, surface & 300 hPa jet winds, cloud decks, rain/snowfall, snowpack, river discharge, coastal storm surge, 48-hour meteogram, and synced local sky & 100° horizon vantage."
       , tileView: defaultTileViewInfo
       }
+
+    let
+      syncWorldControlsFromInfo :: WorldInfo -> Effect Unit
+      syncWorldControlsFromInfo info = do
+        setWorldInfo info
+        setWorldSize info.gridSize
+        setWorldDayHours info.dayHours
+        setWorldTiltDeg info.tiltDeg
+        setWorldLandPct info.landPct
+        setWorldAtmDt info.atmDtMyr
+        setWorldLifeDt info.lifeDtMyr
+        setWorldPeopleDt info.peopleDtMyr
+        setWorldMoonCount info.moonCount
+        setWorldMoonMassTenths info.moonMassTenths
+        setWorldMoonDistRadii info.moonDistRadii
+        setWorldMeteorFreqTenths info.meteorFreqTenths
+        setWorldSunFilter info.sunFilter
+        setWorldAtmosphereId info.atmosphereId
+
+      syncTidesControlsFromInfo :: TidesInfo -> Effect Unit
+      syncTidesControlsFromInfo info = do
+        setTidesInfo info
+        setTidesMoonCount info.moonCount
+        setTidesMoonMassTenths info.moonMassTenths
+        setTidesMoonDistRadii info.moonDistRadii
+
+      syncWeatherControlsFromInfo :: WeatherInfo -> Effect Unit
+      syncWeatherControlsFromInfo info = do
+        setWeatherInfo info
+        setWeatherAtmId info.atmosphereId
+        setWeatherGlaciationPct info.glaciationPct
+        setWeatherMoonCount info.moonCount
+        setWeatherMoonMassTenths info.moonMassTenths
+        setWeatherMoonDistRadii info.moonDistRadii
 
     useEffectOnce do
       initWasm (setWasmReady true)
@@ -1630,7 +1680,7 @@ mkApp = do
           mountHistoryView historyAspect historyShowRivers setHistoryInfo
         WorldScreen -> do
           setRotationDeg 0
-          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldAspect setWorldInfo
+          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldAspect syncWorldControlsFromInfo
         MoonScreen -> do
           setRotationDeg 0
           mountMoonView moonCount moonMassTenths moonDistRadii moonEpochPct moonAspect moonShowTidalScour moonShowFluvial moonShowDeposition setMoonInfo
@@ -1642,10 +1692,10 @@ mkApp = do
           mountSunView sunGalaxyType sunVantage sunStarFilter sunAspect sunShowGalacticPlane sunShowConstellations setSunInfo
         TidesScreen -> do
           setRotationDeg 0
-          mountTidesView tidesMoonCount tidesMoonMassTenths tidesMoonDistRadii tidesDayOfYear tidesAspect tidesShowArrows setTidesInfo
+          mountTidesView tidesMoonCount tidesMoonMassTenths tidesMoonDistRadii tidesDayOfYear tidesAspect tidesShowArrows syncTidesControlsFromInfo
         WeatherScreen -> do
           setRotationDeg 0
-          mountWeatherView weatherAtmId weatherGlaciationPct weatherMoonCount weatherMoonMassTenths weatherMoonDistRadii weatherDayOfYear weatherAspect weatherArrowMode setWeatherInfo
+          mountWeatherView weatherAtmId weatherGlaciationPct weatherMoonCount weatherMoonMassTenths weatherMoonDistRadii weatherDayOfYear weatherAspect weatherArrowMode syncWeatherControlsFromInfo
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -1963,20 +2013,7 @@ mkApp = do
 
       handleCreateWorld :: Effect Unit
       handleCreateWorld =
-        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldRandomize \info -> do
-          setWorldInfo info
-          setWorldDayHours info.dayHours
-          setWorldTiltDeg info.tiltDeg
-          setWorldLandPct info.landPct
-          setWorldAtmDt info.atmDtMyr
-          setWorldLifeDt info.lifeDtMyr
-          setWorldPeopleDt info.peopleDtMyr
-          setWorldMoonCount info.moonCount
-          setWorldMoonMassTenths info.moonMassTenths
-          setWorldMoonDistRadii info.moonDistRadii
-          setWorldMeteorFreqTenths info.meteorFreqTenths
-          setWorldSunFilter info.sunFilter
-          setWorldAtmosphereId info.atmosphereId
+        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldRandomize syncWorldControlsFromInfo
 
       handleMoonCountChange :: Maybe String -> Effect Unit
       handleMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
@@ -5673,14 +5710,14 @@ mkApp = do
                                   { id: "world-load-btn"
                                   , className: "action-btn secondary"
                                   , disabled: worldInfo.isRunning
-                                  , onClick: capture_ (loadFilePlanetIntoWorld setWorldInfo)
+                                  , onClick: capture_ (loadFilePlanetIntoWorld syncWorldControlsFromInfo)
                                   , children: [ R.text "Load..." ]
                                   }
                               , R.button
                                   { id: "world-saved-btn"
                                   , className: "action-btn secondary"
                                   , disabled: worldInfo.isRunning || not worldInfo.hasSavedPlanet
-                                  , onClick: capture_ (loadSavedPlanetIntoWorld setWorldInfo)
+                                  , onClick: capture_ (loadSavedPlanetIntoWorld syncWorldControlsFromInfo)
                                   , children: [ R.text "Load Saved" ]
                                   }
                               ]
@@ -7041,20 +7078,20 @@ mkApp = do
                               [ R.button
                                   { id: "tides-earth-btn"
                                   , className: "action-btn secondary"
-                                  , onClick: capture_ (loadEarthIntoTides setTidesInfo)
+                                  , onClick: capture_ (loadEarthIntoTides syncTidesControlsFromInfo)
                                   , children: [ R.text "Use Earth" ]
                                   }
                               , R.button
                                   { id: "tides-saved-btn"
                                   , className: "action-btn secondary"
                                   , disabled: not tidesInfo.hasSavedPlanet
-                                  , onClick: capture_ (loadSavedPlanetIntoTides setTidesInfo)
+                                  , onClick: capture_ (loadSavedPlanetIntoTides syncTidesControlsFromInfo)
                                   , children: [ R.text "Saved Planet" ]
                                   }
                               , R.button
                                   { id: "tides-load-btn"
                                   , className: "action-btn secondary"
-                                  , onClick: capture_ (loadFilePlanetIntoTides setTidesInfo)
+                                  , onClick: capture_ (loadFilePlanetIntoTides syncTidesControlsFromInfo)
                                   , children: [ R.text "Load (.tec11)" ]
                                   }
                               ]
@@ -7437,22 +7474,20 @@ mkApp = do
                               [ R.button
                                   { id: "weather-earth-btn"
                                   , className: "action-btn secondary"
-                                  , onClick: capture_ do
-                                      setWeatherGlaciationPct 35
-                                      loadEarthIntoWeather setWeatherInfo
+                                  , onClick: capture_ (loadEarthIntoWeather syncWeatherControlsFromInfo)
                                   , children: [ R.text "Use Earth" ]
                                   }
                               , R.button
                                   { id: "weather-saved-btn"
                                   , className: "action-btn secondary"
                                   , disabled: not weatherInfo.hasSavedPlanet
-                                  , onClick: capture_ (loadSavedPlanetIntoWeather setWeatherInfo)
+                                  , onClick: capture_ (loadSavedPlanetIntoWeather syncWeatherControlsFromInfo)
                                   , children: [ R.text "Saved Planet" ]
                                   }
                               , R.button
                                   { id: "weather-load-btn"
                                   , className: "action-btn secondary"
-                                  , onClick: capture_ (loadFilePlanetIntoWeather setWeatherInfo)
+                                  , onClick: capture_ (loadFilePlanetIntoWeather syncWeatherControlsFromInfo)
                                   , children: [ R.text "Load (.tec11)" ]
                                   }
                               ]

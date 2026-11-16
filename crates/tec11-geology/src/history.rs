@@ -7607,7 +7607,12 @@ impl HistorySimulation {
         show_rivers: bool,
         selected_tile: Option<usize>,
     ) -> Vec<f32> {
-        self.tile_colors_rgb_with_optics(aspect, show_rivers, selected_tile, None)
+        let optics = if self.prehistory.saved_environment().is_some() {
+            Some(&self.optics)
+        } else {
+            None
+        };
+        self.tile_colors_rgb_with_optics(aspect, show_rivers, selected_tile, optics)
     }
 
     pub fn tile_colors_rgb_with_optics(
@@ -7919,6 +7924,7 @@ impl HistorySimulation {
                     conflicts,
                 },
             )),
+            environment: pre_snap.environment,
         }
     }
 
@@ -7933,7 +7939,24 @@ impl HistorySimulation {
         let Some(pre) = PrehistorySimulation::from_snapshot(&snap, 42) else {
             return false;
         };
-        let mut sim = Self::from_prehistory(pre, 42);
+        let mut sim = if snap.environment.is_some() {
+            let sky = crate::sun_sky::ReconstructedSkyEnvironment::from_snapshot(
+                &snap,
+                pre.radius_km() as f32,
+                pre.land_percent(),
+            );
+            let mut s = Self::from_prehistory_with_sky(
+                pre,
+                sky.moon_count,
+                sky.solar_system,
+                sky.constellations,
+                42,
+            );
+            s.set_sky_optics(sky.home_star, sky.optics);
+            s
+        } else {
+            Self::from_prehistory(pre, 42)
+        };
         if let Ok(arr) = <[u8; 16]>::try_from(snap.rng_state_16b.as_slice()) {
             sim.rng = Pcg64Mcg::from_bytes(arr);
         }

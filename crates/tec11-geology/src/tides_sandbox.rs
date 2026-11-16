@@ -15,7 +15,8 @@ use crate::sky_vantage::{
 };
 use crate::sun_sky::{
     generate_default_constellations, generate_solar_system_with_rng, substitute_simulated_planet,
-    AtmosphereType, Constellation, HomeStar, PlanetaryOptics, SolarSystemPlanet,
+    AtmosphereType, Constellation, HomeStar, PlanetaryOptics, ReconstructedSkyEnvironment,
+    SolarSystemPlanet,
 };
 use crate::terrain::{TERRAIN_MIN_RIVER_ELEV, TERRAIN_MIN_RIVER_PRECIP};
 use crate::world::koeppen_climate_name;
@@ -32,6 +33,11 @@ pub struct FinePlanetBase {
     pub home_star: HomeStar,
     pub atmosphere: AtmosphereType,
     pub optics: PlanetaryOptics,
+    pub has_atmosphere: bool,
+    pub has_life: bool,
+    pub default_moon_count: u32,
+    pub default_moon_mass_lunar: f32,
+    pub default_moon_dist_radii: f32,
     pub solar_system: Vec<SolarSystemPlanet>,
     pub constellations: Vec<Constellation>,
     settled_biosphere: Option<SettledBiosphere>,
@@ -45,7 +51,23 @@ impl FinePlanetBase {
     pub fn from_snapshot_bytes(bytes: &[u8]) -> Option<Self> {
         let snap = tec11_proto::PlanetSnapshot::decode_bytes(bytes).ok()?;
         let pre = PrehistorySimulation::from_snapshot(&snap, 42)?;
-        Some(Self::from_prehistory(pre))
+        let sky = ReconstructedSkyEnvironment::from_snapshot(
+            &snap,
+            pre.radius_km() as f32,
+            pre.land_percent(),
+        );
+        let mut base = Self::from_prehistory(pre);
+        base.home_star = sky.home_star;
+        base.atmosphere = sky.atmosphere;
+        base.optics = sky.optics;
+        base.has_atmosphere = sky.has_atmosphere;
+        base.has_life = sky.has_life;
+        base.default_moon_count = sky.moon_count;
+        base.default_moon_mass_lunar = sky.moon_mass_lunar;
+        base.default_moon_dist_radii = sky.current_moon_dist_radii;
+        base.solar_system = sky.solar_system;
+        base.constellations = sky.constellations;
+        Some(base)
     }
 
     pub fn from_prehistory(prehistory: PrehistorySimulation) -> Self {
@@ -100,22 +122,74 @@ impl FinePlanetBase {
         let day_hours = 24.0 / prehistory.spin().max(0.1);
         let geom = FiniteVolumeSphereGeom::new(&fine.grid, &fine.adjacency, radius_m, day_hours);
 
-        let home_star = HomeStar::sol();
-        let atmosphere = AtmosphereType::EarthLikeN2O2;
-        let optics = PlanetaryOptics::compute(&home_star, atmosphere);
-        let mut sys_rng = Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95);
-        let ecliptic_pole = [0.0, -0.398, 0.917];
-        let mut solar_system =
-            generate_solar_system_with_rng(&mut sys_rng, &home_star, ecliptic_pole, true);
-        substitute_simulated_planet(
-            &mut solar_system,
-            &home_star,
-            prehistory.radius_km() as f32,
-            prehistory.land_percent(),
-            1,
-            ecliptic_pole,
-        );
-        let constellations = generate_default_constellations(42);
+        let (
+            home_star,
+            atmosphere,
+            optics,
+            has_atmosphere,
+            has_life,
+            default_moon_count,
+            default_moon_mass_lunar,
+            default_moon_dist_radii,
+            solar_system,
+            constellations,
+        ) = if let Some(env_proto) = prehistory.saved_environment().cloned() {
+            let dummy_snap = tec11_proto::PlanetSnapshot {
+                rng_state_16b: Vec::new(),
+                grid_size: prehistory.grid().size,
+                radius_km: prehistory.radius_km() as f32,
+                spin: prehistory.spin() as f32,
+                tilt_deg: prehistory.tilt_deg() as f32,
+                stage: None,
+                environment: Some(env_proto),
+            };
+            let sky = ReconstructedSkyEnvironment::from_snapshot(
+                &dummy_snap,
+                prehistory.radius_km() as f32,
+                prehistory.land_percent(),
+            );
+            (
+                sky.home_star,
+                sky.atmosphere,
+                sky.optics,
+                sky.has_atmosphere,
+                sky.has_life,
+                sky.moon_count,
+                sky.moon_mass_lunar,
+                sky.current_moon_dist_radii,
+                sky.solar_system,
+                sky.constellations,
+            )
+        } else {
+            let home_star = HomeStar::sol();
+            let atmosphere = AtmosphereType::EarthLikeN2O2;
+            let optics = PlanetaryOptics::compute(&home_star, atmosphere);
+            let mut sys_rng = Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95);
+            let ecliptic_pole = [0.0, -0.398, 0.917];
+            let mut solar_system =
+                generate_solar_system_with_rng(&mut sys_rng, &home_star, ecliptic_pole, true);
+            substitute_simulated_planet(
+                &mut solar_system,
+                &home_star,
+                prehistory.radius_km() as f32,
+                prehistory.land_percent(),
+                1,
+                ecliptic_pole,
+            );
+            let constellations = generate_default_constellations(42);
+            (
+                home_star,
+                atmosphere,
+                optics,
+                true,
+                true,
+                1,
+                1.0,
+                60.27,
+                solar_system,
+                constellations,
+            )
+        };
 
         Self {
             prehistory,
@@ -128,6 +202,11 @@ impl FinePlanetBase {
             home_star,
             atmosphere,
             optics,
+            has_atmosphere,
+            has_life,
+            default_moon_count,
+            default_moon_mass_lunar,
+            default_moon_dist_radii,
             solar_system,
             constellations,
             settled_biosphere: None,
@@ -202,17 +281,28 @@ impl FinePlanetBase {
     }
 
     /// True-color surface RGB (`[0..1]`) for fine cell `fine_idx` based on Köppen biome, rock felsity,
-    /// elevation relief, rivers, and snowpack depth `snow_depth_m`.
+    /// planetary sky & foliage optics (`self.optics`), elevation relief, rivers, and `snow_depth_m`.
     pub fn true_color_land_or_sea_rgb(&self, fine_idx: usize, snow_depth_m: f32) -> [f32; 3] {
         let elev_km = self.fine.fine_elevations_km[fine_idx];
         if elev_km <= 0.0 {
+            if !self.has_atmosphere {
+                let s = ((7.5 + elev_km) / 7.5).clamp(0.12, 1.0);
+                return [0.24 * s, 0.27 * s, 0.34 * s];
+            }
             let depth_km = (-elev_km).clamp(0.0, 6.5);
             let shelf = (1.0 - (depth_km / 0.25).min(1.0)).powi(2);
             let abyss = (depth_km / 5.2).clamp(0.0, 1.0);
-            let r = 0.04 + 0.10 * shelf - 0.02 * abyss;
-            let g = 0.19 + 0.26 * shelf - 0.10 * abyss;
-            let b = 0.42 + 0.22 * shelf - 0.18 * abyss;
-            return [r.clamp(0.01, 1.0), g.clamp(0.03, 1.0), b.clamp(0.12, 1.0)];
+            let sky = self.optics.sky_zenith_rgb;
+            let open_r = 0.02 + 0.34 * sky[0];
+            let open_g = 0.06 + 0.48 * sky[1];
+            let open_b = 0.14 + 0.56 * sky[2];
+            let depth_scale_r = 1.0 + 0.35 * shelf - 0.52 * abyss;
+            let depth_scale_g = 1.0 + 0.42 * shelf - 0.50 * abyss;
+            let depth_scale_b = 1.0 + 0.28 * shelf - 0.38 * abyss;
+            let r = (open_r * depth_scale_r).clamp(0.01, 1.0);
+            let g = (open_g * depth_scale_g).clamp(0.02, 1.0);
+            let b = (open_b * depth_scale_b).clamp(0.04, 1.0);
+            return [r, g, b];
         }
 
         let c_idx = self.fine_primary_coarse[fine_idx];
@@ -235,21 +325,67 @@ impl FinePlanetBase {
             0.31 + 0.24 * felsity,
             0.28 + 0.20 * felsity,
         ];
+        if !self.has_atmosphere {
+            return rock_rgb;
+        }
         let fol = self.optics.plant_foliage_rgb;
         let hi = self.optics.plant_highlight_rgb;
 
-        let (veg_w, mut base_rgb) = match koeppen {
-            1 => (0.90, [fol[0] * 0.78, fol[1] * 0.90, fol[2] * 0.72]), // Af rainforest
-            2 => (0.82, [fol[0] * 0.85, fol[1] * 0.95, fol[2] * 0.76]), // Am monsoon
-            3 => (0.62, [0.46 * fol[0] + 0.32, 0.56 * fol[1] + 0.26, 0.35 * fol[2] + 0.14]), // Aw savanna
-            4 => (0.28, [0.64, 0.56, 0.36]),                            // BS steppe
-            5 => (0.05, [0.78, 0.67, 0.46]),                            // BW desert
-            6 | 7 | 8 => (0.74, [0.55 * fol[0] + 0.30 * hi[0], 0.62 * fol[1] + 0.32 * hi[1], 0.55 * fol[2] + 0.25 * hi[2]]),
-            9 | 10 | 11 => (0.68, [fol[0] * 0.64, fol[1] * 0.74, fol[2] * 0.68]), // Boreal taiga
-            13 => (0.22, [0.46, 0.48, 0.39]),                                     // ET tundra
-            12 => (0.0, [0.88, 0.92, 0.96]),                                      // EF icecap
-            _ => (0.45, [0.42, 0.52, 0.34]),
+        let (raw_veg_w, mut base_rgb) = match koeppen {
+            1 => (0.90, [fol[0] * 0.84, fol[1] * 0.84, fol[2] * 0.84]), // Af rainforest
+            2 => (
+                0.82,
+                [
+                    0.72 * fol[0] + 0.18 * hi[0],
+                    0.72 * fol[1] + 0.18 * hi[1],
+                    0.72 * fol[2] + 0.18 * hi[2],
+                ],
+            ), // Am monsoon
+            3 => (
+                0.62,
+                [
+                    0.50 * fol[0] + 0.18 * hi[0] + 0.24,
+                    0.50 * fol[1] + 0.18 * hi[1] + 0.20,
+                    0.50 * fol[2] + 0.18 * hi[2] + 0.12,
+                ],
+            ), // Aw savanna
+            4 => (
+                0.28,
+                [
+                    0.38 * fol[0] + 0.40,
+                    0.38 * fol[1] + 0.35,
+                    0.38 * fol[2] + 0.23,
+                ],
+            ), // BS steppe
+            5 => (0.05, [0.78, 0.67, 0.46]), // BW desert
+            6 | 7 | 8 => (
+                0.74,
+                [
+                    0.58 * fol[0] + 0.30 * hi[0],
+                    0.58 * fol[1] + 0.30 * hi[1],
+                    0.58 * fol[2] + 0.30 * hi[2],
+                ],
+            ),
+            9 | 10 | 11 => (0.68, [fol[0] * 0.68, fol[1] * 0.68, fol[2] * 0.68]), // Boreal taiga
+            13 => (
+                0.22,
+                [
+                    0.35 * fol[0] + 0.30,
+                    0.35 * fol[1] + 0.30,
+                    0.35 * fol[2] + 0.27,
+                ],
+            ), // ET tundra
+            12 => (0.0, [0.88, 0.92, 0.96]), // EF icecap
+            _ => (
+                0.45,
+                [
+                    0.55 * fol[0] + 0.20,
+                    0.55 * fol[1] + 0.18,
+                    0.55 * fol[2] + 0.15,
+                ],
+            ),
         };
+        let veg_w = if self.has_life { raw_veg_w } else { 0.0 };
 
         let alpine = ((elev_km - 2.6) / 2.2).clamp(0.0, 1.0);
         let eff_veg = veg_w * (1.0 - 0.85 * alpine);
@@ -264,10 +400,16 @@ impl FinePlanetBase {
         }
 
         if self.fine_is_river[fine_idx] {
+            let sky = self.optics.sky_zenith_rgb;
+            let riv = [
+                (0.04 + 0.42 * sky[0]).clamp(0.02, 0.90),
+                (0.09 + 0.54 * sky[1]).clamp(0.04, 0.92),
+                (0.18 + 0.64 * sky[2]).clamp(0.08, 0.95),
+            ];
             base_rgb = [
-                0.35 * base_rgb[0] + 0.08,
-                0.35 * base_rgb[1] + 0.28,
-                0.35 * base_rgb[2] + 0.52,
+                0.35 * base_rgb[0] + 0.65 * riv[0],
+                0.35 * base_rgb[1] + 0.65 * riv[1],
+                0.35 * base_rgb[2] + 0.65 * riv[2],
             ];
         }
 
@@ -310,6 +452,14 @@ impl TidesSandbox {
         Self::from_base(FinePlanetBase::new_earth(), 1, 1.0, 60.27)
     }
 
+    pub fn from_snapshot_bytes(bytes: &[u8]) -> Option<Self> {
+        let base = FinePlanetBase::from_snapshot_bytes(bytes)?;
+        let mc = base.default_moon_count;
+        let mm = base.default_moon_mass_lunar;
+        let md = base.default_moon_dist_radii;
+        Some(Self::from_base(base, mc, mm, md))
+    }
+
     pub fn from_base(
         base: FinePlanetBase,
         moon_count: u32,
@@ -339,19 +489,16 @@ impl TidesSandbox {
     }
 
     pub fn load_earth(&mut self) {
-        let mc = self.solver.moon_count();
-        let mm = self.solver.primary_mass_lunar();
-        let md = self.solver.primary_dist_radii();
-        *self = Self::from_base(FinePlanetBase::new_earth(), mc, mm, md);
+        *self = Self::new_earth();
     }
 
     pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
         let Some(base) = FinePlanetBase::from_snapshot_bytes(bytes) else {
             return false;
         };
-        let mc = self.solver.moon_count();
-        let mm = self.solver.primary_mass_lunar();
-        let md = self.solver.primary_dist_radii();
+        let mc = base.default_moon_count;
+        let mm = base.default_moon_mass_lunar;
+        let md = base.default_moon_dist_radii;
         *self = Self::from_base(base, mc, mm, md);
         true
     }
@@ -610,8 +757,8 @@ impl TidesSandbox {
                 radius_km: self.base.prehistory.radius_km(),
                 day_hours: self.base.day_hours(),
                 tilt_deg: self.base.prehistory.tilt_deg(),
-                has_atmosphere: true,
-                has_life: true,
+                has_atmosphere: self.base.has_atmosphere,
+                has_life: self.base.has_life,
                 current_year: year,
                 moon_count: self.solver.moon_count(),
                 home_star: &self.base.home_star,

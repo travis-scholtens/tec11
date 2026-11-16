@@ -101,7 +101,11 @@ impl WasmWeatherSession {
     }
 
     pub fn atmosphere_name(&self) -> String {
-        self.sandbox.base.atmosphere.name().to_string()
+        format!(
+            "{} · {}",
+            self.sandbox.base.home_star.spectral_type,
+            self.sandbox.base.atmosphere.name()
+        )
     }
 
     pub fn glaciation(&self) -> f32 {
