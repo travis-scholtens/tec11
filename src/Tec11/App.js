@@ -3520,6 +3520,7 @@ function buildHistoryInspectorBundle(view) {
   if (tileView.hasTile && typeof window !== "undefined") {
     window.requestAnimationFrame(() => paintStratigraphySideCanvas(view));
     setTimeout(() => paintStratigraphySideCanvas(view), 45);
+    setTimeout(() => paintStratigraphySideCanvas(view), 120);
   }
 
   return { stateView, tileView, languageDetail, nationDetail };
@@ -3637,6 +3638,13 @@ function paintStratigraphySideCanvas(view) {
       cssH * 0.5
     );
     ctx.restore();
+    canvas.onmousemove = null;
+    canvas.onmouseleave = null;
+    const labelEl = document.getElementById("stratigraphy-hover-label");
+    if (labelEl) {
+      labelEl.textContent =
+        "Click any tile on the globe to view its cross-section; hover a rock layer for composition & veins.";
+    }
     return;
   }
 
@@ -4267,8 +4275,8 @@ function paintStratigraphySideCanvas(view) {
   }
 
   // Kimberlite Diatreme Pipe ascending from the mantle Moho through the crust
-  for (let i = 0; i < layers.length; i++) {
-    const kl = layers[i];
+  for (let i = 0; i < strat.layers.length; i++) {
+    const kl = strat.layers[i];
     if (kl.kind === "I" && typeof kl.felsity === "number" && kl.felsity <= 0.35) {
       const pipeU = 0.5 + (detRand((strat.tileIdx || 0) + 17, i, 77) - 0.5) * 0.28;
       const pipeX = colLeft + pipeU * colW;

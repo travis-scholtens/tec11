@@ -2169,10 +2169,16 @@ export function applyParsedTileToView(view, parsedTile) {
   const sky = parsedTile.sky || null;
   const vantage = parsedTile.vantage || null;
   const liveEnv = parsedTile.liveEnv || null;
+  const strat = parsedTile.stratigraphy || null;
   view.tileSky = sky;
   view.tileVantage = vantage;
   view.tileLiveEnv = liveEnv;
-  view.tileStratigraphy = parsedTile.stratigraphy || null;
+  view.tileStratigraphy = strat;
+  if (view.lastStratTileIdx !== view.selectedTileIdx) {
+    view.lastStratTileIdx = view.selectedTileIdx;
+    view.hoveredStratLayerIdx = -1;
+    view.hoveredStratInterfaceIdx = -1;
+  }
 
   if (view.tileSkyYear === undefined) view.tileSkyYear = 0;
   if (view.tileSkyDay === undefined) view.tileSkyDay = 0;
