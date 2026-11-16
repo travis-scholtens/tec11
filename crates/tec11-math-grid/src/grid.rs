@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 
 use crate::vec3::{cross, dot, normal, Vec3, Vec3Key};
 
@@ -20,6 +20,30 @@ fn sorted_centroid_normal(mut pts: [Vec3; 3]) -> Vec3 {
     ])
 }
 
+/// Finds the 2 shared vertices between adjacent pentagon/hexagon vertex loops on the stack
+/// without heap-allocating temporary `BTreeSet` / `Vec` containers.
+#[inline]
+fn find_two_shared_vertices(f1_verts: &[Vec3], f2_verts: &[Vec3]) -> [Vec3; 2] {
+    let mut f1_keys = [Vec3Key::from_vec3([0.0, 0.0, 0.0]); 8];
+    let n1 = f1_verts.len().min(8);
+    for (k, &v) in f1_verts.iter().take(n1).enumerate() {
+        f1_keys[k] = Vec3Key::from_vec3(v);
+    }
+    let mut common = [[0.0_f64; 3]; 2];
+    let mut found = 0usize;
+    for &v2 in f2_verts {
+        let k2 = Vec3Key::from_vec3(v2);
+        if f1_keys[..n1].contains(&k2) {
+            if found < 2 {
+                common[found] = v2;
+            }
+            found += 1;
+        }
+    }
+    debug_assert_eq!(found, 2, "Adjacent faces must share 2 vertices");
+    common
+}
+
 /// Spherical pentagon/hexagon grid matching `grid.py`.
 #[derive(Clone, Debug)]
 pub struct SphericalGrid {
@@ -27,9 +51,9 @@ pub struct SphericalGrid {
     /// Ordered list of face center vectors and their counter-clockwise vertex loops.
     pub faces: Vec<(Vec3, Vec<Vec3>)>,
     /// Lookup from face center key to index in `self.faces`.
-    pub face_index: BTreeMap<Vec3Key, usize>,
+    pub face_index: HashMap<Vec3Key, usize>,
     /// Lookup from vertex coordinate key to the face centers meeting at that vertex.
-    pub vertices: BTreeMap<Vec3Key, Vec<Vec3>>,
+    pub vertices: HashMap<Vec3Key, Vec<Vec3>>,
 }
 
 impl SphericalGrid {
@@ -38,8 +62,8 @@ impl SphericalGrid {
         let mut grid = Self {
             size: 0,
             faces: Vec::with_capacity(12),
-            face_index: BTreeMap::new(),
-            vertices: BTreeMap::new(),
+            face_index: HashMap::with_capacity(12),
+            vertices: HashMap::with_capacity(20),
         };
 
         let x: f64 = -0.525731112119133606;
@@ -92,8 +116,8 @@ impl SphericalGrid {
         Self {
             size,
             faces: Vec::new(),
-            face_index: BTreeMap::new(),
-            vertices: BTreeMap::new(),
+            face_index: HashMap::new(),
+            vertices: HashMap::new(),
         }
     }
 
@@ -138,16 +162,7 @@ impl SphericalGrid {
 
                 let f1_verts = &prev.faces[prev.face_index[&Vec3Key::from_vec3(f1)]].1;
                 let f2_verts = &prev.faces[prev.face_index[&Vec3Key::from_vec3(f2)]].1;
-
-                let f1_set: BTreeSet<Vec3Key> =
-                    f1_verts.iter().map(|&v| Vec3Key::from_vec3(v)).collect();
-                let common: Vec<Vec3> = f2_verts
-                    .iter()
-                    .copied()
-                    .filter(|&v| f1_set.contains(&Vec3Key::from_vec3(v)))
-                    .collect();
-
-                debug_assert_eq!(common.len(), 2, "Adjacent faces must share 2 vertices");
+                let common = find_two_shared_vertices(f1_verts, f2_verts);
 
                 for neighbor in [f1, f2] {
                     new_vertices.push(sorted_centroid_normal([neighbor, common[0], common[1]]));
@@ -162,11 +177,14 @@ impl SphericalGrid {
         }
     }
 
-    fn add_face_vertices(&mut self, face: Vec3, face_vertices: &[Vec3]) {
+    fn add_face_vertices(&mut self, face: Vec3, fkey: Vec3Key, face_vertices: &[Vec3]) {
         for &vertex in face_vertices {
             let vkey = Vec3Key::from_vec3(vertex);
-            let adj = self.vertices.entry(vkey).or_default();
-            if !adj.iter().any(|&f| Vec3Key::from_vec3(f) == Vec3Key::from_vec3(face)) {
+            let adj = self
+                .vertices
+                .entry(vkey)
+                .or_insert_with(|| Vec::with_capacity(3));
+            if !adj.iter().any(|&f| Vec3Key::from_vec3(f) == fkey) {
                 adj.push(face);
             }
         }
@@ -177,7 +195,7 @@ impl SphericalGrid {
         if self.face_index.contains_key(&fkey) {
             return;
         }
-        self.add_face_vertices(face, &vertices);
+        self.add_face_vertices(face, fkey, &vertices);
         let idx = self.faces.len();
         self.faces.push((face, vertices));
         self.face_index.insert(fkey, idx);
@@ -200,8 +218,8 @@ impl SphericalGrid {
         let mut next = Self {
             size: self.size + 1,
             faces: Vec::with_capacity(expected_faces),
-            face_index: BTreeMap::new(),
-            vertices: BTreeMap::new(),
+            face_index: HashMap::with_capacity(expected_faces),
+            vertices: HashMap::with_capacity(2 * expected_faces),
         };
 
         for (prev_face, prev_face_vertices) in &self.faces {
@@ -223,16 +241,7 @@ impl SphericalGrid {
 
                     let f1_verts = &self.faces[self.face_index[&Vec3Key::from_vec3(f1)]].1;
                     let f2_verts = &self.faces[self.face_index[&Vec3Key::from_vec3(f2)]].1;
-
-                    let f1_set: BTreeSet<Vec3Key> =
-                        f1_verts.iter().map(|&v| Vec3Key::from_vec3(v)).collect();
-                    let common: Vec<Vec3> = f2_verts
-                        .iter()
-                        .copied()
-                        .filter(|&v| f1_set.contains(&Vec3Key::from_vec3(v)))
-                        .collect();
-
-                    debug_assert_eq!(common.len(), 2, "Adjacent faces must share 2 vertices");
+                    let common = find_two_shared_vertices(f1_verts, f2_verts);
 
                     for neighbor in [f1, f2] {
                         new_vertices.push(sorted_centroid_normal([

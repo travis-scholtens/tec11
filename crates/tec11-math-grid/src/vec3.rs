@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 pub type Vec3 = [f64; 3];
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Vec3Key([u64; 3]);
 
 impl Vec3Key {
