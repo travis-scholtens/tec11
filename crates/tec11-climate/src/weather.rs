@@ -592,13 +592,16 @@ impl MoistBaroclinicSolver {
                     0.60 * (self.tsurf_c[i] + 273.15) + 0.40 * (self.theta1_k[i] - 0.0065 * zs)
                 };
                 let qsat_surf = saturation_column_vapor_kgm2(t_evap_k, zs);
+                let sm = self.soil_moisture[i].clamp(0.0, 1.0);
+                let beta_sm = ((sm - 0.10) / 0.55).clamp(0.0, 1.0);
+                let beta_et = beta_sm * (0.35 + 0.65 * beta_sm);
+                let rad_et_gate = 0.15 + 1.05 * cos_z.sqrt();
                 let wet_frac = if is_ocean {
                     1.0 - 0.78 * sea_ice_frac
                 } else if self.is_river[i] {
-                    self.soil_moisture[i].sqrt().clamp(0.55, 1.0)
+                    (beta_et * rad_et_gate).max(0.45 * (0.35 + 0.85 * cos_z.sqrt()))
                 } else {
-                    // Root-zone vegetative transpiration sustains evapotranspiration until soil dries out:
-                    self.soil_moisture[i].clamp(0.0, 1.0).sqrt()
+                    beta_et * rad_et_gate
                 };
                 let w_sub_prev = (65_000.0 * (-self.scratch_w12[i]).max(0.0)).min(0.16);
                 let q_eq_cap = if is_ocean {
@@ -612,7 +615,14 @@ impl MoistBaroclinicSolver {
                     (evap_coeff * (q_eq_cap - self.qv_kgm2[i]).max(0.0) * dt).min(0.25);
                 self.qv_kgm2[i] += evap_kgm2;
                 if !is_ocean && evap_kgm2 > 0.0 {
-                    self.soil_moisture[i] = (self.soil_moisture[i] - evap_kgm2 / 180.0).max(0.0);
+                    // River-channel open-water evaporation draws from routed river flow rather than hillslope soil:
+                    let soil_draw_share = if self.is_river[i] && wet_frac > 1e-5 {
+                        ((beta_et * rad_et_gate) / wet_frac).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    self.soil_moisture[i] =
+                        (self.soil_moisture[i] - (evap_kgm2 * soil_draw_share) / 300.0).max(0.0);
                 }
 
                 let rad_surf_c = radiative_equilibrium_surface_c(
@@ -809,13 +819,12 @@ impl MoistBaroclinicSolver {
                     let div_damp1 =
                         nu_div * (self.scratch_div1[r] - self.scratch_div1[l]) * e.inv_center_dist_m;
 
-                    let is_land_edge = self.tides.bed_m()[l] > 0.0 || self.tides.bed_m()[r] > 0.0;
-                    let r_ekman = if is_land_edge {
-                        1.7e-5 * (1.0 + 1.4 * mount)
-                    } else {
-                        0.95e-5
-                    };
-                    let quad_drag1 = 1.1e-6 * u1_cur.abs() * (1.0 + mount);
+                    let land_share = 0.5
+                        * ((if self.tides.bed_m()[l] > 0.0 { 1.0 } else { 0.0 })
+                            + (if self.tides.bed_m()[r] > 0.0 { 1.0 } else { 0.0 }));
+                    let r_land = 1.28e-5 * (1.0 + 1.85 * mount);
+                    let r_ekman = 0.95e-5 + land_share * (r_land - 0.95e-5);
+                    let quad_drag1 = 1.1e-6 * u1_cur.abs() * (1.0 + land_share * mount);
                     let rhs1 = rot1 - dbern1_dn + vert_mom1 + div_damp1 + 0.35 * ep_edge;
                     self.scratch_u_next[e_idx] = ((self.rk_u1_0[e_idx] + stage_dt * rhs1)
                         / (1.0 + stage_dt * (r_ekman + quad_drag1)))
@@ -930,17 +939,34 @@ impl MoistBaroclinicSolver {
                         + dt * kappa_eddy_max * extratrop * self.scratch_lap_a[i])
                         .clamp(195.0, 345.0);
                 }
-                // Conservative edge-flux subgrid synoptic & trade-cumulus moisture mixing:
-                let kappa_q_ext = 0.36 * kappa_eddy_max;
-                let kappa_q_trop = 0.14 * kappa_eddy_max;
+                // Conservative edge-flux subgrid synoptic & easterly-wave moisture mixing
+                // (gated so Fickian diffusion never pumps marine vapor into subsaturated deserts against
+                // offshore winds or supersaturates subfreezing continental interiors above `0.80 * qsat`):
+                for i in 0..self.num_cells {
+                    let zs = self.surf_elev_m[i];
+                    let t1_k = (self.theta1_k[i] - 0.0065 * zs).clamp(195.0, 330.0);
+                    self.scratch_lap_b[i] = saturation_column_vapor_kgm2(t1_k, zs).max(0.2);
+                }
+                let kappa_q_ext = 0.68 * kappa_eddy_max;
+                let kappa_q_trop = 0.22 * kappa_eddy_max;
                 for (e_idx, e) in geom.edges.iter().enumerate() {
                     let l = e.left as usize;
                     let r = e.right as usize;
                     let sin_m = 0.5 * (geom.sin_lat[l].abs() + geom.sin_lat[r].abs());
                     let ext = ((sin_m - 0.36) / 0.30).clamp(0.0, 1.0);
-                    let kappa_q = kappa_q_trop + (kappa_q_ext - kappa_q_trop) * ext;
-                    self.scratch_edge_flux[e_idx] =
-                        -kappa_q * (self.qv_kgm2[r] - self.qv_kgm2[l]) * e.inv_center_dist_m;
+                    let mut kappa_q = kappa_q_trop + (kappa_q_ext - kappa_q_trop) * ext;
+                    let dq = self.qv_kgm2[r] - self.qv_kgm2[l];
+                    // Prevent diffusing vapor into a cell whose RH already exceeds 0.82 or under strong subsidence:
+                    if dq < 0.0 {
+                        let rh_r = self.qv_kgm2[r] / self.scratch_lap_b[r];
+                        let sub_gate = (1.0 + 35_000.0 * self.scratch_w12[r].min(0.0)).clamp(0.15, 1.0);
+                        kappa_q *= ((0.85 - rh_r) / 0.15).clamp(0.0, 1.0) * sub_gate;
+                    } else if dq > 0.0 {
+                        let rh_l = self.qv_kgm2[l] / self.scratch_lap_b[l];
+                        let sub_gate = (1.0 + 35_000.0 * self.scratch_w12[l].min(0.0)).clamp(0.15, 1.0);
+                        kappa_q *= ((0.85 - rh_l) / 0.15).clamp(0.0, 1.0) * sub_gate;
+                    }
+                    self.scratch_edge_flux[e_idx] = -kappa_q * dq * e.inv_center_dist_m;
                 }
                 geom.divergence_from_edge_flux(&self.scratch_edge_flux, &mut self.scratch_lap_a);
                 for i in 0..self.num_cells {
@@ -964,8 +990,9 @@ impl MoistBaroclinicSolver {
                 &mut self.scratch_lap_b,
             );
 
-            // 5. Moist microphysics, orographic upslope lift, deep convection & latent heat release:
+            // 5. Moist microphysics, orographic/frontal lift, deep convection & latent heat release:
             geom.reconstruct_cell_vectors(&self.u1_edge, &mut self.u1_east, &mut self.v1_north);
+            geom.gradient_scalar(&self.theta1_k, &mut self.scratch_gx, &mut self.scratch_gy);
             for i in 0..self.num_cells {
                 let ux = self.u1_east[i];
                 let vy = self.v1_north[i];
@@ -977,78 +1004,117 @@ impl MoistBaroclinicSolver {
                 let t1_k = (self.theta1_k[i] - 0.0065 * zs).clamp(195.0, 330.0);
                 let qsat_amb = saturation_column_vapor_kgm2(t1_k, zs).max(0.2);
                 let rh_amb = (self.qv_kgm2[i] / qsat_amb).clamp(0.0, 2.0);
+                let warm_frac = ((t1_k - 268.15) / 22.0).clamp(0.0, 1.0);
 
-                // Orographic upslope lift `u1 . grad(z_s) > 0` & leeward Foehn downslope `< 0`,
-                // plus synoptic/ITCZ ascent (`w12 > 0`) and Hadley/ridge subsidence (`w12 < 0`):
+                // Orographic upslope lift `u1 . grad(z_s) > 0`, warm-frontal isentropic upglide
+                // `max(0, -u1 . grad(theta1)) / (dtheta/dz)` (which lifts midlatitude storm tracks over
+                // winter cold domes while vanishing identically in equatorward subtropical trade winds!),
+                // and synoptic/ITCZ ascent (`w12 > 0`) vs warm Hadley/Foehn subsidence (`w12 < 0`):
                 let slope_w = ux * self.surf_gx[i] + vy * self.surf_gy[i];
                 let w_orog = slope_w.max(0.0);
                 let w_downslope = (-slope_w).max(0.0);
+                let warm_adv_ks = -(ux * self.scratch_gx[i] + vy * self.scratch_gy[i]).min(0.0);
+                let dth_dz = ((self.theta2_k[i] - self.theta1_k[i]).max(14.0)) / 5500.0;
+                let w_frontal = (warm_adv_ks / dth_dz).min(0.12);
+
                 let synop_lcl_gate = ((rh_amb - 0.44) / 0.24).clamp(0.0, 1.0);
                 let orog_lcl_gate = ((rh_amb - 0.34) / 0.26).clamp(0.0, 1.0);
                 let w_synop = (55_000.0 * w12.max(0.0)
-                    + 16_000.0 * (-self.scratch_div1[i]).max(0.0))
+                    + 16_000.0 * (-self.scratch_div1[i]).max(0.0)
+                    + w_frontal)
                 .min(0.18)
                     * synop_lcl_gate;
                 let w_lift = w_orog * orog_lcl_gate + w_synop;
-                let w_subside = (65_000.0 * (-w12).max(0.0)).min(0.18) + 0.85 * w_downslope;
+                // Deep Hadley subsidence drying acts in warm ridges (`warm_frac -> 1`), whereas shallow
+                // winter continental cold domes (`warm_frac -> 0`) remain penetrable by overrunning fronts:
+                let hadley_sub_scale = 0.20 + 0.80 * warm_frac;
+                let w_subside = hadley_sub_scale * (65_000.0 * (-w12).max(0.0)).min(0.18)
+                    + 0.85 * w_downslope;
 
                 let lift_cool_k = (14.0 * w_lift - 15.0 * w_subside).clamp(-6.5, 6.5);
                 let qsat_eff = saturation_column_vapor_kgm2(t1_k - lift_cool_k, zs);
 
-                // Deep moist convection (measured relative to moist-neutral tropospheric stability,
-                // suppressed under trade-wind / subtropical subsidence inversions):
+                // Betts-Miller (~40-hour grid-scale) deep moist convection: slow enough over coastal
+                // margins (`rate <= 0.024 hr^-1`) that ocean moisture penetrates 2,500 km across tropical
+                // and summer continents rather than raining out in the first coastal grid cell, while
+                // remaining strictly suppressed under subtropical subsidence inversions:
                 let rh = (self.qv_kgm2[i] / qsat_eff.max(0.2)).clamp(0.0, 2.0);
                 let subside_cap_k = 1.45 + 72.0 * w_subside;
-                let theta_e_excess =
-                    (self.theta1_k[i] + 0.95 * self.qv_kgm2[i]) - (self.theta2_k[i] - 14.0);
+                let surf_buoy_k = if is_ocean {
+                    0.0
+                } else {
+                    0.55 * (self.tsurf_c[i] + 273.15 + 0.0065 * zs - self.theta1_k[i] - 4.5)
+                        .clamp(0.0, 8.0)
+                        + 1.35
+                };
+                let theta_e_excess = (self.theta1_k[i] + surf_buoy_k + 0.95 * self.qv_kgm2[i])
+                    - (self.theta2_k[i] - 14.0);
+                let conv_rh_min = if is_ocean { 0.80 } else { 0.57 };
                 let mut conv_cond = 0.0_f32;
-                if theta_e_excess > subside_cap_k && rh > 0.64 && rh_amb > 0.50 {
-                    let rate =
-                        ((theta_e_excess - subside_cap_k) * 0.022).min(0.20) * (dt / 3600.0);
-                    conv_cond = (self.qv_kgm2[i] - 0.62 * qsat_eff).max(0.0) * rate;
+                if theta_e_excess > subside_cap_k && rh > conv_rh_min && rh_amb > 0.49 {
+                    let max_conv_rate = if is_ocean { 0.036 } else { 0.024 };
+                    let rate = ((theta_e_excess - subside_cap_k) * 0.0055).min(max_conv_rate)
+                        * (dt / 3600.0);
+                    conv_cond = ((self.qv_kgm2[i] - (conv_rh_min - 0.03) * qsat_eff).max(0.0)
+                        * rate)
+                        .min(self.qv_kgm2[i] * 0.20);
                 }
+                // Cumulus updraft precipitation efficiency (~68% falls directly as convective showers;
+                // ~32% detrains into anvil/cumulus cloud condensate `qc_kgm2`):
+                let conv_precip_mm = 0.68 * conv_cond;
+                let conv_detrain = conv_cond - conv_precip_mm;
+                let qv_after_conv = (self.qv_kgm2[i] - conv_cond).max(0.0);
 
-                // Sundqvist (1978) subgrid fractional condensation (`rh_crit` lowered by lift,
-                // raised toward `0.98` under subtropical/leeward subsidence):
-                let base_rh_crit = if is_ocean { 0.79 } else { 0.72 };
-                let rh_crit = (base_rh_crit + 2.8 * w_subside - 0.50 * w_lift).clamp(0.58, 0.98);
+                // Sundqvist (1978) subgrid fractional condensation (accounting for lower saturation
+                // vapor pressure over ice below freezing, and raised under subtropical subsidence):
+                let base_rh_crit = if is_ocean {
+                    0.79 - 0.06 * (1.0 - warm_frac)
+                } else {
+                    0.71 - 0.16 * (1.0 - warm_frac)
+                };
+                let rh_crit = (base_rh_crit + 2.8 * w_subside - 0.50 * w_lift).clamp(0.50, 0.98);
                 let q_crit = rh_crit * qsat_eff;
-                let ls_cond = if self.qv_kgm2[i] > q_crit {
-                    // ~36-hour synoptic moisture residence time over flat land so marine air penetrates
-                    // deep into continental interiors, with fast condensation on steep windward slopes:
-                    let rate_ls =
-                        (0.028 + 0.24 * (w_orog * 12.0).min(1.0)) * (dt / 3600.0);
-                    (self.qv_kgm2[i] - q_crit) * rate_ls
+                let ls_cond = if qv_after_conv > q_crit {
+                    // ~50-hour synoptic moisture residence time in warm air so marine moisture penetrates
+                    // 2,000+ km inland, and faster (~25-hour) Bergeron condensation in cold air so winter
+                    // midlatitudes precipitate snow cleanly without 200% supersaturation:
+                    let base_ls = 0.019 + 0.020 * (1.0 - warm_frac);
+                    let rate_ls = (base_ls
+                        + 0.34 * w_frontal.min(0.08)
+                        + 0.24 * (w_orog * 12.0).min(1.0))
+                        * (dt / 3600.0);
+                    (qv_after_conv - q_crit) * rate_ls
                 } else {
                     // Subsaturated dry-air & subsidence cloud evaporation (crisp rain shadows & clear horse latitudes!):
-                    let evap_rate = (0.035 + 2.4 * w_subside).min(0.65) * (dt / 1800.0);
-                    let sub_def = (q_crit - self.qv_kgm2[i]) * evap_rate;
+                    let evap_rate = (0.030 + 2.2 * w_subside).min(0.65) * (dt / 1800.0);
+                    let sub_def = (q_crit - qv_after_conv) * evap_rate;
                     -sub_def.min(self.qc_kgm2[i])
                 };
 
-                let net_cond =
-                    (conv_cond + ls_cond).clamp(-self.qc_kgm2[i], self.qv_kgm2[i] * 0.75);
+                let ls_clamped = ls_cond.clamp(-self.qc_kgm2[i], qv_after_conv * 0.70);
+                let net_cond = conv_cond + ls_clamped;
                 self.qv_kgm2[i] = (self.qv_kgm2[i] - net_cond).max(0.0);
-                self.qc_kgm2[i] = (self.qc_kgm2[i] + net_cond).max(0.0);
+                self.qc_kgm2[i] = (self.qc_kgm2[i] + conv_detrain + ls_clamped).max(0.0);
 
-                // Latent heat release warms the column (upper-air hydrostatic expansion naturally deepens surface lows!):
-                let latent_dtheta = 0.38 * net_cond;
-                self.theta1_k[i] = (self.theta1_k[i] + 0.48 * latent_dtheta).clamp(195.0, 345.0);
-                self.theta2_k[i] = (self.theta2_k[i] + 0.52 * latent_dtheta).clamp(215.0, 385.0);
+                // Moist-adiabatic latent heating (`~0.42 K per kg/m^2` weighted 40/60 toward Layer 2
+                // so deep tropical rainfall balances ascent cooling while stabilizing `theta2 - theta1`):
+                let latent_dtheta = 0.42 * net_cond;
+                self.theta1_k[i] = (self.theta1_k[i] + 0.40 * latent_dtheta).clamp(195.0, 345.0);
+                self.theta2_k[i] = (self.theta2_k[i] + 0.60 * latent_dtheta).clamp(215.0, 385.0);
 
                 // Bergeron-Findeisen / Kessler autoconversion (glaciated cold clouds precipitate at
                 // lower condensate path `0.025 kg/m^2` than warm cumulus `0.12 kg/m^2`):
                 let qc = self.qc_kgm2[i];
-                let warm_frac = ((t1_k - 268.15) / 22.0).clamp(0.0, 1.0);
                 let qc_crit = 0.025 + 0.095 * warm_frac;
-                let precip_step_mm = if qc > qc_crit {
+                let auto_precip_mm = if qc > qc_crit {
                     let orog_boost = 1.0 + 2.4 * (w_orog * 12.0).min(1.0);
                     let auto = (qc - qc_crit) * orog_boost * (dt / 7200.0);
                     auto.min(qc * 0.65)
                 } else {
                     0.0
                 };
-                self.qc_kgm2[i] = (qc - precip_step_mm).max(0.0);
+                self.qc_kgm2[i] = (qc - auto_precip_mm).max(0.0);
+                let precip_step_mm = conv_precip_mm + auto_precip_mm;
 
                 let snow_frac = ((1.2 - self.tsurf_c[i]) / 2.8).clamp(0.0, 1.0);
                 let snow_mm = precip_step_mm * snow_frac;
@@ -1056,7 +1122,7 @@ impl MoistBaroclinicSolver {
                 self.rain_mm_hr[i] += rain_mm;
                 self.snow_mm_hr[i] += snow_mm;
 
-                // Land surface snowpack & Manabe bucket update (`180 mm` field capacity):
+                // Land surface snowpack & deep root-zone Manabe bucket update (`300 mm` field capacity):
                 if self.tides.bed_m()[i] > 0.0 && !self.tides.is_inundated_land(i) {
                     self.snow_depth_m[i] += snow_mm * 0.008;
                     let melt_depth_m = if self.tsurf_c[i] > 0.2 && self.snow_depth_m[i] > 0.0 {
@@ -1068,11 +1134,11 @@ impl MoistBaroclinicSolver {
                     let liquid_in_mm = rain_mm + melt_depth_m * 125.0;
                     if liquid_in_mm > 0.0 {
                         let sat = self.soil_moisture[i].clamp(0.0, 1.0);
-                        let runoff_frac = (sat * sat * (0.45 + 0.45 * self.mountainosity_norm[i]))
-                            .clamp(0.04, 1.0);
+                        let runoff_frac = (sat * sat * sat * (0.16 + 0.64 * self.mountainosity_norm[i]))
+                            .clamp(0.02, 1.0);
                         let infil_mm = liquid_in_mm * (1.0 - runoff_frac);
-                        let new_sm = self.soil_moisture[i] + infil_mm / 180.0;
-                        let bucket_overflow_mm = ((new_sm - 1.0).max(0.0)) * 180.0;
+                        let new_sm = self.soil_moisture[i] + infil_mm / 300.0;
+                        let bucket_overflow_mm = ((new_sm - 1.0).max(0.0)) * 300.0;
                         self.soil_moisture[i] = new_sm.clamp(0.0, 1.0);
                         let total_runoff_mm = liquid_in_mm * runoff_frac + bucket_overflow_mm;
                         hourly_runoff_m[i] += total_runoff_mm * 0.001;
@@ -1845,6 +1911,83 @@ mod tests {
         assert!(
             mean_mm_per_day < 1.0,
             "expected hot subtropical desert interior to remain arid (< 1.0 mm/day) despite summer thermal low, got {mean_mm_per_day:.2} mm/day"
+        );
+    }
+
+    #[test]
+    fn test_equatorial_basin_retains_soil_moisture_without_desert_collapse() {
+        let grid = SphericalGrid::with_size(4);
+        let adj = grid.adjacency();
+        let n = grid.faces.len();
+        let geom = FiniteVolumeSphereGeom::new(&grid, &adj, 6_371_000.0, 24.0);
+
+        let mut bed_m = vec![-3500.0_f32; n];
+        let mut soil = vec![1.0_f32; n];
+        let mount = vec![0.0_f32; n];
+        let is_river = vec![false; n];
+        let snow = vec![0.0_f32; n];
+        let mut interior_cells = Vec::new();
+
+        for i in 0..n {
+            let lat_deg = geom.lats_rad[i].to_degrees();
+            let lon_deg = geom.lons_rad[i].to_degrees();
+            if (-10.0..=10.0).contains(&lat_deg) && (-75.0..=-35.0).contains(&lon_deg) {
+                bed_m[i] = 120.0;
+                soil[i] = 0.45;
+                if (-6.0..=6.0).contains(&lat_deg) && (-68.0..=-45.0).contains(&lon_deg) {
+                    interior_cells.push(i);
+                }
+            }
+        }
+        assert!(!interior_cells.is_empty());
+
+        let base_sst: Vec<f32> = (0..n)
+            .map(|i| (28.5 - 30.2 * geom.sin_lat[i].powi(2)).max(-1.8))
+            .collect();
+
+        let mut solver = MoistBaroclinicSolver::new(
+            &grid,
+            &adj,
+            &geom,
+            WeatherInitConfig {
+                bed_m: &bed_m,
+                mountainosity_norm: &mount,
+                is_river: &is_river,
+                base_sst_c: &base_sst,
+                init_soil_moisture: &soil,
+                init_snow_depth_m: &snow,
+                day_hours: 24.0,
+                tilt_deg: 23.5,
+                days_per_year: 365.25,
+                home_init_angle_rad: 0.0,
+                solar_tide_factor: 0.0,
+                solar_luminosity: 1.0,
+                glaciation: 0.35,
+                atmosphere_id: 0,
+                moon_count: 0,
+                primary_mass_lunar: 0.0,
+                primary_dist_radii: 60.27,
+            },
+        );
+
+        let mut interior_rain_mm = 0.0_f64;
+        for h in 0..360 {
+            solver.step_hour(&geom);
+            if h >= 120 {
+                for &c in &interior_cells {
+                    interior_rain_mm += (solver.rain_mm_hr[c] + solver.snow_mm_hr[c]) as f64;
+                }
+            }
+        }
+        let mean_sm: f32 = interior_cells
+            .iter()
+            .map(|&c| solver.soil_moisture[c])
+            .sum::<f32>()
+            / (interior_cells.len() as f32);
+        let mean_mm_per_day = interior_rain_mm / ((interior_cells.len() as f64) * 10.0);
+        assert!(
+            mean_sm > 0.32 && mean_mm_per_day > 1.2,
+            "expected equatorial interior basin to retain soil moisture (> 0.32) and rain (> 1.2 mm/day), got sm={mean_sm:.3}, rain={mean_mm_per_day:.2} mm/day"
         );
     }
 
