@@ -215,24 +215,28 @@ fn advance_active_thickness(
         }
     }
 
+    let mut any_limited = false;
     for &c_u32 in active_cells {
         let i = c_u32 as usize;
         let avail = 0.95 * h_total_m[i] * geom.areas_m2[i];
         let out_v = scratch_outflow_vol[i];
-        scratch_outflow_scale[i] = if out_v > avail && out_v > 1e-9 {
-            (avail / out_v).clamp(0.0, 1.0)
+        if out_v > avail && out_v > 1e-9 {
+            scratch_outflow_scale[i] = (avail / out_v).clamp(0.0, 1.0);
+            any_limited = true;
         } else {
-            1.0
-        };
+            scratch_outflow_scale[i] = 1.0;
+        }
     }
 
-    for &e_u32 in active_edges {
-        let e_idx = e_u32 as usize;
-        let q = scratch_flux[e_idx];
-        if q > 0.0 {
-            scratch_flux[e_idx] = q * scratch_outflow_scale[geom.edges[e_idx].left as usize];
-        } else if q < 0.0 {
-            scratch_flux[e_idx] = q * scratch_outflow_scale[geom.edges[e_idx].right as usize];
+    if any_limited {
+        for &e_u32 in active_edges {
+            let e_idx = e_u32 as usize;
+            let q = scratch_flux[e_idx];
+            if q > 0.0 {
+                scratch_flux[e_idx] = q * scratch_outflow_scale[geom.edges[e_idx].left as usize];
+            } else if q < 0.0 {
+                scratch_flux[e_idx] = q * scratch_outflow_scale[geom.edges[e_idx].right as usize];
+            }
         }
     }
 
@@ -254,6 +258,161 @@ fn advance_active_thickness(
                 div_hu += scratch_flux[inc.edge_idx as usize] * inc.flux_factor;
             }
             h_total_m[i] = (h_total_m[i] - dt * div_hu).max(0.0);
+        }
+    }
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn advance_active_thickness_paired(
+    geom: &FiniteVolumeSphereGeom,
+    active_cells: &[u32],
+    active_edges: &[u32],
+    dt: f32,
+    bed_m: &[f32],
+    u_edge_a: &[f32],
+    h_total_a: &mut [f32],
+    scratch_flux_a: &mut [f32],
+    scratch_out_vol_a: &mut [f32],
+    scratch_out_scale_a: &mut [f32],
+    u_edge_b: &[f32],
+    h_total_b: &mut [f32],
+    scratch_flux_b: &mut [f32],
+    scratch_out_vol_b: &mut [f32],
+    scratch_out_scale_b: &mut [f32],
+) {
+    for &c_u32 in active_cells {
+        let c = c_u32 as usize;
+        scratch_out_vol_a[c] = 0.0;
+        scratch_out_vol_b[c] = 0.0;
+    }
+
+    for &e_u32 in active_edges {
+        let e_idx = e_u32 as usize;
+        let ua = u_edge_a[e_idx];
+        let ub = u_edge_b[e_idx];
+        if ua.abs() <= 1e-8 && ub.abs() <= 1e-8 {
+            scratch_flux_a[e_idx] = 0.0;
+            scratch_flux_b[e_idx] = 0.0;
+            continue;
+        }
+        let e = &geom.edges[e_idx];
+        let l = e.left as usize;
+        let r = e.right as usize;
+        let zbl = bed_m[l];
+        let zbr = bed_m[r];
+        let zb_star = zbl.max(zbr);
+        let dt_len = dt * e.dual_len_m;
+
+        if ua.abs() <= 1e-8 {
+            scratch_flux_a[e_idx] = 0.0;
+        } else {
+            let h_up_a = if ua > 0.0 {
+                (zbl + h_total_a[l] - zb_star).max(0.0).min(h_total_a[l])
+            } else {
+                (zbr + h_total_a[r] - zb_star).max(0.0).min(h_total_a[r])
+            };
+            let qa = h_up_a * ua;
+            scratch_flux_a[e_idx] = qa;
+            if qa > 0.0 {
+                scratch_out_vol_a[l] += dt_len * qa;
+            } else if qa < 0.0 {
+                scratch_out_vol_a[r] += dt_len * (-qa);
+            }
+        }
+
+        if ub.abs() <= 1e-8 {
+            scratch_flux_b[e_idx] = 0.0;
+        } else {
+            let h_up_b = if ub > 0.0 {
+                (zbl + h_total_b[l] - zb_star).max(0.0).min(h_total_b[l])
+            } else {
+                (zbr + h_total_b[r] - zb_star).max(0.0).min(h_total_b[r])
+            };
+            let qb = h_up_b * ub;
+            scratch_flux_b[e_idx] = qb;
+            if qb > 0.0 {
+                scratch_out_vol_b[l] += dt_len * qb;
+            } else if qb < 0.0 {
+                scratch_out_vol_b[r] += dt_len * (-qb);
+            }
+        }
+    }
+
+    let mut lim_a = false;
+    let mut lim_b = false;
+    for &c_u32 in active_cells {
+        let i = c_u32 as usize;
+        let area95 = 0.95 * geom.areas_m2[i];
+        let avail_a = area95 * h_total_a[i];
+        let out_a = scratch_out_vol_a[i];
+        if out_a > avail_a && out_a > 1e-9 {
+            scratch_out_scale_a[i] = (avail_a / out_a).clamp(0.0, 1.0);
+            lim_a = true;
+        } else {
+            scratch_out_scale_a[i] = 1.0;
+        }
+
+        let avail_b = area95 * h_total_b[i];
+        let out_b = scratch_out_vol_b[i];
+        if out_b > avail_b && out_b > 1e-9 {
+            scratch_out_scale_b[i] = (avail_b / out_b).clamp(0.0, 1.0);
+            lim_b = true;
+        } else {
+            scratch_out_scale_b[i] = 1.0;
+        }
+    }
+
+    if lim_a || lim_b {
+        for &e_u32 in active_edges {
+            let e_idx = e_u32 as usize;
+            let e = &geom.edges[e_idx];
+            if lim_a {
+                let qa = scratch_flux_a[e_idx];
+                if qa > 0.0 {
+                    scratch_flux_a[e_idx] = qa * scratch_out_scale_a[e.left as usize];
+                } else if qa < 0.0 {
+                    scratch_flux_a[e_idx] = qa * scratch_out_scale_a[e.right as usize];
+                }
+            }
+            if lim_b {
+                let qb = scratch_flux_b[e_idx];
+                if qb > 0.0 {
+                    scratch_flux_b[e_idx] = qb * scratch_out_scale_b[e.left as usize];
+                } else if qb < 0.0 {
+                    scratch_flux_b[e_idx] = qb * scratch_out_scale_b[e.right as usize];
+                }
+            }
+        }
+    }
+
+    if geom.all_deg_le_6 {
+        for &c_u32 in active_cells {
+            let i = c_u32 as usize;
+            let st = &geom.cell_div6[i];
+            let mut div_a = 0.0_f32;
+            let mut div_b = 0.0_f32;
+            for k in 0..6 {
+                let e = st.edge_idx[k] as usize;
+                let ff = st.flux_factor[k];
+                div_a += scratch_flux_a[e] * ff;
+                div_b += scratch_flux_b[e] * ff;
+            }
+            h_total_a[i] = (h_total_a[i] - dt * div_a).max(0.0);
+            h_total_b[i] = (h_total_b[i] - dt * div_b).max(0.0);
+        }
+    } else {
+        for &c_u32 in active_cells {
+            let i = c_u32 as usize;
+            let mut div_a = 0.0_f32;
+            let mut div_b = 0.0_f32;
+            for inc in geom.incident_edges(i) {
+                let e = inc.edge_idx as usize;
+                div_a += scratch_flux_a[e] * inc.flux_factor;
+                div_b += scratch_flux_b[e] * inc.flux_factor;
+            }
+            h_total_a[i] = (h_total_a[i] - dt * div_a).max(0.0);
+            h_total_b[i] = (h_total_b[i] - dt * div_b).max(0.0);
         }
     }
 }
@@ -315,8 +474,10 @@ impl LaplaceTidalSolver {
             .collect();
 
         let c_max = (gravity_mps2 * H_WAVE_CAP_M).sqrt();
-        let dt_cfl = (0.48 * min_edge_dist_m / c_max.max(1.0)) as f64;
-        let n_substeps_per_hour = ((3600.0 / dt_cfl.max(10.0)).ceil() as usize).clamp(12, 240);
+        // Forward-backward Sielecki C-grid integration on a hexagonal mesh has stability limit
+        // `c_max * dt / d_min <= 2 / sqrt(6) = 0.8165` (`0.68` gives >16% margin even on pentagons):
+        let dt_cfl = (0.68 * min_edge_dist_m / c_max.max(1.0)) as f64;
+        let n_substeps_per_hour = ((3600.0 / dt_cfl.max(10.0)).ceil() as usize).clamp(6, 240);
         let dt_sub_s = (3600.0 / (n_substeps_per_hour as f64)) as f32;
 
         let initial_ocean: Vec<bool> = bed_m.iter().map(|&zb| zb < 0.0).collect();
@@ -778,8 +939,11 @@ impl LaplaceTidalSolver {
         }
 
         for sub in 0..self.n_substeps_per_hour {
-            let t_sec = base_seconds + ((sub as f64) + 0.5) * (dt as f64);
-            self.evaluate_equilibrium_tide(geom, t_sec);
+            if sub % 4 == 0 {
+                let block = (self.n_substeps_per_hour - sub).min(4) as f64;
+                let t_sec = base_seconds + ((sub as f64) + 0.5 * block) * (dt as f64);
+                self.evaluate_equilibrium_tide(geom, t_sec);
+            }
             reconstruct_active_vectors(
                 geom,
                 &self.active_cells,
@@ -921,63 +1085,65 @@ impl LaplaceTidalSolver {
         }
 
         for sub in 0..self.n_substeps_per_hour {
-            let t_sec = base_seconds + ((sub as f64) + 0.5) * (dt as f64);
+            // 1. Evaluate astronomical bodies every 4 substeps (~15 min) and fill equilibrium tide.
+            if sub % 4 == 0 {
+                let block = (self.n_substeps_per_hour - sub).min(4) as f64;
+                let t_sec = base_seconds + ((sub as f64) + 0.5 * block) * (dt as f64);
+                let (bodies, n_bodies) = self.compute_astro_bodies(geom, t_sec);
+                if n_bodies == 0 {
+                    if self.eta_eq_nonzero {
+                        for &c_u32 in &self.active_cells {
+                            let i = c_u32 as usize;
+                            self.eta_eq_m[i] = 0.0;
+                            astro_ref.eta_eq_m[i] = 0.0;
+                        }
+                        self.eta_eq_nonzero = false;
+                        astro_ref.eta_eq_nonzero = false;
+                    }
+                } else {
+                    self.eta_eq_nonzero = true;
+                    astro_ref.eta_eq_nonzero = true;
+                    let body_slice = &bodies[..n_bodies];
+                    let mut wet_sum_a = 0.0_f64;
+                    let mut wet_area_a = 0.0_f64;
+                    let mut wet_sum_b = 0.0_f64;
+                    let mut wet_area_b = 0.0_f64;
 
-            // 1. Evaluate astronomical bodies ONCE and fill equilibrium tide for both oceans.
-            let (bodies, n_bodies) = self.compute_astro_bodies(geom, t_sec);
-            if n_bodies == 0 {
-                if self.eta_eq_nonzero {
                     for &c_u32 in &self.active_cells {
                         let i = c_u32 as usize;
-                        self.eta_eq_m[i] = 0.0;
-                        astro_ref.eta_eq_m[i] = 0.0;
+                        let p = self.unit_centers[i];
+                        let mut val = 0.0_f32;
+                        for &(rb, amp) in body_slice {
+                            let cos_z = p[0] * rb[0] + p[1] * rb[1] + p[2] * rb[2];
+                            val += amp * 0.5 * (3.0 * cos_z * cos_z - 1.0);
+                        }
+                        self.eta_eq_m[i] = val;
+                        astro_ref.eta_eq_m[i] = val;
+                        let a = geom.areas_m2[i] as f64;
+                        if self.h_total_m[i] > H_DRY_M {
+                            wet_sum_a += (val as f64) * a;
+                            wet_area_a += a;
+                        }
+                        if astro_ref.h_total_m[i] > H_DRY_M {
+                            wet_sum_b += (val as f64) * a;
+                            wet_area_b += a;
+                        }
                     }
-                    self.eta_eq_nonzero = false;
-                    astro_ref.eta_eq_nonzero = false;
-                }
-            } else {
-                self.eta_eq_nonzero = true;
-                astro_ref.eta_eq_nonzero = true;
-                let body_slice = &bodies[..n_bodies];
-                let mut wet_sum_a = 0.0_f64;
-                let mut wet_area_a = 0.0_f64;
-                let mut wet_sum_b = 0.0_f64;
-                let mut wet_area_b = 0.0_f64;
-
-                for &c_u32 in &self.active_cells {
-                    let i = c_u32 as usize;
-                    let p = self.unit_centers[i];
-                    let mut val = 0.0_f32;
-                    for &(rb, amp) in body_slice {
-                        let cos_z = p[0] * rb[0] + p[1] * rb[1] + p[2] * rb[2];
-                        val += amp * 0.5 * (3.0 * cos_z * cos_z - 1.0);
+                    let mean_a = if wet_area_a > 1.0 {
+                        (wet_sum_a / wet_area_a) as f32
+                    } else {
+                        0.0
+                    };
+                    let mean_b = if wet_area_b > 1.0 {
+                        (wet_sum_b / wet_area_b) as f32
+                    } else {
+                        0.0
+                    };
+                    for &c_u32 in &self.active_cells {
+                        let i = c_u32 as usize;
+                        self.eta_eq_m[i] -= mean_a;
+                        astro_ref.eta_eq_m[i] -= mean_b;
                     }
-                    self.eta_eq_m[i] = val;
-                    astro_ref.eta_eq_m[i] = val;
-                    let a = geom.areas_m2[i] as f64;
-                    if self.h_total_m[i] > H_DRY_M {
-                        wet_sum_a += (val as f64) * a;
-                        wet_area_a += a;
-                    }
-                    if astro_ref.h_total_m[i] > H_DRY_M {
-                        wet_sum_b += (val as f64) * a;
-                        wet_area_b += a;
-                    }
-                }
-                let mean_a = if wet_area_a > 1.0 {
-                    (wet_sum_a / wet_area_a) as f32
-                } else {
-                    0.0
-                };
-                let mean_b = if wet_area_b > 1.0 {
-                    (wet_sum_b / wet_area_b) as f32
-                } else {
-                    0.0
-                };
-                for &c_u32 in &self.active_cells {
-                    let i = c_u32 as usize;
-                    self.eta_eq_m[i] -= mean_a;
-                    astro_ref.eta_eq_m[i] -= mean_b;
                 }
             }
 
@@ -1133,8 +1299,8 @@ impl LaplaceTidalSolver {
                 }
             }
 
-            // 4. Conservative thickness updates for both oceans:
-            advance_active_thickness(
+            // 4. Fused conservative thickness updates for both oceans:
+            advance_active_thickness_paired(
                 geom,
                 &self.active_cells,
                 &self.active_edges,
@@ -1145,13 +1311,6 @@ impl LaplaceTidalSolver {
                 &mut self.scratch_flux,
                 &mut self.scratch_outflow_vol,
                 &mut self.scratch_outflow_scale,
-            );
-            advance_active_thickness(
-                geom,
-                &self.active_cells,
-                &self.active_edges,
-                dt,
-                &astro_ref.bed_m,
                 &astro_ref.u_edge,
                 &mut astro_ref.h_total_m,
                 &mut astro_ref.scratch_flux,
