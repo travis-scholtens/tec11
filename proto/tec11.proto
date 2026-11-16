@@ -265,6 +265,8 @@ message PlanetaryEnvironment {
   uint32 life_dt_myr = 17;
   uint32 people_dt_myr = 18;
   float meteor_freq = 19;
+  uint32 galaxy_type = 20;
+  uint32 galactic_vantage = 21;
 }
 
 // --- Top-Level Snapshot Message (.tec11 file payload) ---

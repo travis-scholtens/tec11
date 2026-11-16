@@ -6527,74 +6527,16 @@ impl HistorySimulation {
 
         let mut constellations = Vec::with_capacity(self.constellations.len());
         for c in &self.constellations {
-            let n_stars = (c.star_count as usize).clamp(3, 7);
-            let seed_u64 = (c.index as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                ^ (c.right_ascension_deg.to_bits() as u64)
-                ^ ((c.declination_deg.to_bits() as u64) << 16);
-            let mut crng = Pcg64Mcg::from_seed_u64(seed_u64);
-            let c_dir = normal(c.center_dir);
-            let raw_east = [-c_dir[1], c_dir[0], 0.0];
-            let east_norm =
-                (raw_east[0] * raw_east[0] + raw_east[1] * raw_east[1]).sqrt();
-            let e_ra = if east_norm > 1e-5 {
-                [raw_east[0] / east_norm, raw_east[1] / east_norm, 0.0]
-            } else {
-                [1.0, 0.0, 0.0]
-            };
-            let e_dec = normal([
-                c_dir[1] * e_ra[2] - c_dir[2] * e_ra[1],
-                c_dir[2] * e_ra[0] - c_dir[0] * e_ra[2],
-                c_dir[0] * e_ra[1] - c_dir[1] * e_ra[0],
-            ]);
-
-            let mut stars = Vec::with_capacity(n_stars);
-            stars.push([
-                c.right_ascension_deg,
-                c.declination_deg,
-                c.brightest_mag.clamp(0.1, 3.0),
-            ]);
-            for k in 1..n_stars {
-                let ang = (k as f64) * std::f64::consts::TAU / ((n_stars - 1) as f64)
-                    + crng.uniform(-0.32, 0.32);
-                let rad = crng.uniform(0.055, 0.135);
-                let dx = rad * (ang.cos() * e_ra[0] + ang.sin() * e_dec[0]);
-                let dy = rad * (ang.cos() * e_ra[1] + ang.sin() * e_dec[1]);
-                let dz = rad * (ang.cos() * e_ra[2] + ang.sin() * e_dec[2]);
-                let s_dir = normal([c_dir[0] + dx, c_dir[1] + dy, c_dir[2] + dz]);
-                let s_dec = (s_dir[2].clamp(-1.0, 1.0).asin() * 180.0 / std::f64::consts::PI) as f32;
-                let s_ra = ((s_dir[1].atan2(s_dir[0]) * 180.0 / std::f64::consts::PI)
-                    .rem_euclid(360.0)) as f32;
-                let s_mag = (c.brightest_mag + 0.25 * (k as f32)).clamp(0.4, 3.4);
-                stars.push([s_ra, s_dec, s_mag]);
-            }
-
-            let mut edges = Vec::with_capacity(n_stars);
-            for k in 0..(n_stars - 1) {
-                edges.push([k, k + 1]);
-            }
-            if n_stars >= 4 && c.index % 2 == 0 {
-                edges.push([0, n_stars - 1]);
-            } else if n_stars >= 5 {
-                edges.push([0, 2]);
-            }
-
             let ck = ConceptKey::Constellation(c.index);
             let name = lang_rec
                 .and_then(|l| l.lexicon.get(&ck))
                 .or_else(|| self.languages.values().find_map(|l| l.lexicon.get(&ck)))
                 .map(|orig| orig.word.write(true))
                 .unwrap_or_default();
-
-            constellations.push(TileSkyConstellation {
-                index: c.index,
-                name,
-                ra_deg: c.right_ascension_deg,
-                dec_deg: c.declination_deg,
-                stars,
-                edges,
-            });
+            constellations.push(crate::sky_vantage::constellation_to_sky_asterism(c, name));
         }
+        let (galactic_pole, galactic_center_dir, galaxy_band_mode, galaxy_summary, field_stars) =
+            crate::sky_vantage::extract_galactic_backdrop_fields(&self.constellations);
 
         TileSkyView {
             has_atmosphere: true,
@@ -6613,6 +6555,11 @@ impl HistorySimulation {
             home_orbit_au,
             home_period_days,
             home_init_angle_rad,
+            galactic_pole,
+            galactic_center_dir,
+            galaxy_band_mode,
+            galaxy_summary,
+            field_stars,
             moons,
             planets,
             constellations,

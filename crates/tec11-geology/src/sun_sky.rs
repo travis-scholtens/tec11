@@ -1427,6 +1427,35 @@ pub fn format_solar_system_summary(planets: &[SolarSystemPlanet]) -> String {
         .join(" | ")
 }
 
+/// Shared galactic sky backdrop (3D galactic orientation, galaxy morphology/vantage, and naked-eye
+/// ungrouped field stars) attached to a planet's `Constellation` catalog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GalacticSkyBackdrop {
+    pub galaxy_type: GalaxyType,
+    pub vantage: GalacticVantage,
+    pub gal_pos_kpc: [f32; 3],
+    /// Unit normal of the galactic midplane in the planet's equatorial sky coordinates.
+    pub galactic_pole: [f32; 3],
+    /// Unit vector toward the host galaxy's center `[0, 0, 0] - gal_pos_kpc` in equatorial sky coordinates.
+    pub galactic_center_dir: [f32; 3],
+    /// `0` = disk Milky-Way-like band, `1` = halo one-sided galaxy view, `2` = bulge/spheroid core glow, `3` = irregular clouds.
+    pub galaxy_band_mode: u8,
+    /// Brightest ungrouped naked-eye field stars `[ra_deg, dec_deg, app_mag, bv_color]`.
+    pub field_stars: Vec<[f32; 4]>,
+}
+
+impl GalacticSkyBackdrop {
+    pub fn summary_label(&self) -> String {
+        let [x, y, z] = self.gal_pos_kpc;
+        let r_xy = (x * x + y * y).sqrt();
+        format!(
+            "{} · {} (R={r_xy:.1} kpc, z={z:+.2} kpc)",
+            self.galaxy_type.name(),
+            self.vantage.name()
+        )
+    }
+}
+
 /// A constellation (connected asterism of bright stars on the celestial sphere).
 #[derive(Clone, Debug)]
 pub struct Constellation {
@@ -1436,6 +1465,12 @@ pub struct Constellation {
     pub star_indices: Vec<usize>,
     /// Pairs of star indices `(ia, ib)` forming the constellation's line segments.
     pub edges: Vec<(usize, usize)>,
+    /// Resolved `[ra_deg, dec_deg, app_mag]` star positions in standard J2000-style equatorial coordinates.
+    pub resolved_stars: Vec<[f32; 3]>,
+    /// Local index pairs `[u, v]` into `resolved_stars` (`0..resolved_stars.len()`).
+    pub local_edges: Vec<[usize; 2]>,
+    /// Shared galactic orientation & ungrouped field-star backdrop for 2D sky/vantage rendering.
+    pub backdrop: Option<std::sync::Arc<GalacticSkyBackdrop>>,
     /// Unit vector on the celestial sphere pointing to the centroid of the constellation.
     pub center_dir: Vec3,
     /// Celestial declination `δ ∈ [-90°, +90°]` (`asin(center_dir[2]) * 180 / π`).
@@ -1446,6 +1481,17 @@ pub struct Constellation {
     pub star_count: u32,
     /// Apparent magnitude `m_V` of the brightest (alpha) star in the constellation.
     pub brightest_mag: f32,
+}
+
+impl PartialEq for Constellation {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+            && self.star_count == other.star_count
+            && (self.declination_deg - other.declination_deg).abs() < 1e-4
+            && (self.right_ascension_deg - other.right_ascension_deg).abs() < 1e-4
+            && self.resolved_stars == other.resolved_stars
+            && self.local_edges == other.local_edges
+    }
 }
 
 impl Constellation {
@@ -1484,216 +1530,913 @@ impl Constellation {
     }
 }
 
-/// Generate a deterministic 16-constellation sky catalog spanning all declination bands
-/// from north circumpolar (`+78°`) through the equatorial zodiac (`0°`) to south circumpolar (`-78°`).
-pub fn generate_default_constellations(seed: u64) -> Vec<Constellation> {
-    let mut rng = Pcg64Mcg::from_seed_u64(seed ^ 0xC0A5_7E11_A710_42u64);
-    let base_declinations: [f32; 16] = [
-        78.0, 64.0, 52.0, 38.0, 26.0, 14.0, 5.0, -4.0, -13.0, -24.0, -36.0, -48.0, -58.0, -67.0,
-        -75.0, -82.0,
-    ];
-    let mut out = Vec::with_capacity(16);
-    for (idx, &base_dec) in base_declinations.iter().enumerate() {
-        let dec_deg = (base_dec + (rng.uniform(-3.0, 3.0) as f32)).clamp(-87.0, 87.0);
-        let ra_deg =
-            ((idx as f32) * 22.5 + 15.0 + (rng.uniform(-6.0, 6.0) as f32)).rem_euclid(360.0);
-        let dec_rad = (dec_deg as f64) * PI / 180.0;
-        let ra_rad = (ra_deg as f64) * PI / 180.0;
-        let center_dir = normal([
-            dec_rad.cos() * ra_rad.cos(),
-            dec_rad.cos() * ra_rad.sin(),
-            dec_rad.sin(),
-        ]);
-        let star_count = 3 + ((rng.next_u64() % 5) as u32);
-        let brightest_mag = rng.uniform(0.2, 2.2) as f32;
-        out.push(Constellation {
-            index: idx as u32,
-            star_indices: Vec::new(),
-            edges: Vec::new(),
-            center_dir,
-            declination_deg: dec_deg,
-            right_ascension_deg: ra_deg,
-            star_count,
-            brightest_mag,
-        });
+/// Sample a plausible host `(GalaxyType, GalacticVantage, gal_pos_kpc)` for a solar system.
+/// When `is_sol == true`, returns Milky Way Spiral Arm at Sol's position `[8.1, 0.0, 0.02] kpc`.
+pub fn sample_galactic_home_with_rng(
+    rng: &mut Pcg64Mcg,
+    is_sol: bool,
+) -> (GalaxyType, GalacticVantage, [f32; 3]) {
+    if is_sol {
+        return (
+            GalaxyType::Spiral,
+            GalacticVantage::SpiralArm,
+            [8.1, 0.0, 0.02],
+        );
     }
-    out
+    let g_choices = [
+        GalaxyType::Spiral,
+        GalaxyType::Spiral,
+        GalaxyType::Spiral,
+        GalaxyType::Spiral,
+        GalaxyType::BarredSpiral,
+        GalaxyType::BarredSpiral,
+        GalaxyType::Lenticular,
+        GalaxyType::Elliptical,
+        GalaxyType::Irregular,
+        GalaxyType::GlobularCluster,
+    ];
+    let galaxy_type = g_choices[(rng.next_u64() as usize) % g_choices.len()];
+    let vantage = match galaxy_type {
+        GalaxyType::Spiral | GalaxyType::BarredSpiral => {
+            let v_choices = [
+                GalacticVantage::SpiralArm,
+                GalacticVantage::SpiralArm,
+                GalacticVantage::SpiralArm,
+                GalacticVantage::InterArmDisk,
+                GalacticVantage::InterArmDisk,
+                GalacticVantage::GalacticBulge,
+                GalacticVantage::GalacticHalo,
+            ];
+            v_choices[(rng.next_u64() as usize) % v_choices.len()]
+        }
+        GalaxyType::Lenticular => {
+            let v_choices = [
+                GalacticVantage::InterArmDisk,
+                GalacticVantage::InterArmDisk,
+                GalacticVantage::GalacticBulge,
+                GalacticVantage::GalacticHalo,
+            ];
+            v_choices[(rng.next_u64() as usize) % v_choices.len()]
+        }
+        GalaxyType::Elliptical | GalaxyType::GlobularCluster => {
+            if rng.next_f64() < 0.78 {
+                GalacticVantage::SpheroidCore
+            } else {
+                GalacticVantage::GalacticHalo
+            }
+        }
+        GalaxyType::Irregular => GalacticVantage::SpiralArm,
+    };
+
+    let gal_pos_kpc = match (galaxy_type, vantage) {
+        (GalaxyType::Spiral | GalaxyType::BarredSpiral, GalacticVantage::SpiralArm) => {
+            let r_kpc = rng.uniform(5.5, 10.5);
+            let arm_idx = (rng.next_u64() % 2) as f64;
+            let pitch = 0.26;
+            let base_angle = arm_idx * PI + (r_kpc / 2.2).ln() / pitch;
+            let phi = base_angle + rng.gauss(0.0, 0.14);
+            let z = rng.gauss(0.0, 0.06);
+            [(r_kpc * phi.cos()) as f32, (r_kpc * phi.sin()) as f32, z as f32]
+        }
+        (_, GalacticVantage::InterArmDisk) => {
+            let r_kpc = rng.uniform(4.5, 11.5);
+            let phi = rng.uniform(0.0, 2.0 * PI);
+            let z = rng.gauss(0.0, 0.20);
+            [(r_kpc * phi.cos()) as f32, (r_kpc * phi.sin()) as f32, z as f32]
+        }
+        (_, GalacticVantage::GalacticBulge) => {
+            let r_kpc = rng.uniform(0.5, 2.1);
+            let phi = rng.uniform(0.0, 2.0 * PI);
+            let z = rng.gauss(0.0, 0.42);
+            [(r_kpc * phi.cos()) as f32, (r_kpc * phi.sin()) as f32, z as f32]
+        }
+        (_, GalacticVantage::GalacticHalo) => {
+            let r_xy = rng.uniform(4.0, 11.5);
+            let phi = rng.uniform(0.0, 2.0 * PI);
+            let z_sign = if rng.next_f64() < 0.5 { 1.0 } else { -1.0 };
+            let z = z_sign * rng.uniform(2.8, 6.2);
+            [(r_xy * phi.cos()) as f32, (r_xy * phi.sin()) as f32, z as f32]
+        }
+        (GalaxyType::Irregular, _) => {
+            let r_kpc = rng.uniform(1.0, 5.2);
+            let phi = rng.uniform(0.0, 2.0 * PI);
+            let z = rng.gauss(0.0, 0.55);
+            [(r_kpc * phi.cos()) as f32, (r_kpc * phi.sin()) as f32, z as f32]
+        }
+        _ => {
+            let r_kpc = if galaxy_type == GalaxyType::GlobularCluster {
+                rng.uniform(0.002, 0.012)
+            } else {
+                rng.uniform(2.0, 8.5)
+            };
+            let u = rng.uniform(-1.0, 1.0);
+            let phi = rng.uniform(0.0, 2.0 * PI);
+            let s = (1.0 - u * u).sqrt();
+            [
+                (r_kpc * s * phi.cos()) as f32,
+                (r_kpc * 0.78 * s * phi.sin()) as f32,
+                (r_kpc * 0.62 * u) as f32,
+            ]
+        }
+    };
+    (galaxy_type, vantage, gal_pos_kpc)
 }
 
-/// Build constellation edges and extract connected `Constellation` asterisms across the celestial sphere.
+fn star_dir_to_ra_dec_deg(dir: Vec3) -> (f32, f32) {
+    let d = normal(dir);
+    let dec_deg = (d[2].clamp(-1.0, 1.0).asin() * 180.0 / PI) as f32;
+    let ra_deg = ((d[1].atan2(d[0]) * 180.0 / PI).rem_euclid(360.0)) as f32;
+    (ra_deg, dec_deg)
+}
+
+fn parsed_hipparcos_equatorial_stars() -> &'static Vec<CelestialStar> {
+    static HIP_CACHE: std::sync::OnceLock<Vec<CelestialStar>> = std::sync::OnceLock::new();
+    HIP_CACHE.get_or_init(|| {
+        let mut out = Vec::with_capacity(5200);
+        for line in HIPPARCOS_TSV.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split('\t');
+            let Some(id_s) = parts.next() else { continue };
+            let Some(ra_s) = parts.next() else { continue };
+            let Some(dec_s) = parts.next() else { continue };
+            let Some(pi_s) = parts.next() else { continue };
+            let Some(vmag_s) = parts.next() else { continue };
+            let Some(bv_s) = parts.next() else { continue };
+            let offset_s = parts.next().unwrap_or("0.5");
+
+            let id: u32 = id_s.parse().unwrap_or(0);
+            let alpha_deg: f64 = ra_s.parse().unwrap_or(0.0);
+            let delta_deg: f64 = dec_s.parse().unwrap_or(0.0);
+            let pi_arcsec: f64 = pi_s.parse().unwrap_or(0.001);
+            let vmag: f32 = vmag_s.parse().unwrap_or(5.0);
+            let bv: f32 = bv_s.parse().unwrap_or(0.5);
+            let offset: f32 = offset_s.parse().unwrap_or(0.5);
+
+            let r_ly = (3.26 / pi_arcsec.max(1e-5)) as f32;
+            let ra_rad = alpha_deg * PI / 180.0;
+            let dec_rad = delta_deg * PI / 180.0;
+            let cos_d = dec_rad.cos();
+            let dir = normal([cos_d * ra_rad.cos(), cos_d * ra_rad.sin(), dec_rad.sin()]);
+            let abs_mag = vmag + 5.0 * ((pi_arcsec.max(1e-5).log10() as f32) + 1.0);
+            let base_rgb = bv_to_rgb(bv);
+            out.push(CelestialStar {
+                id,
+                dir,
+                distance_ly: r_ly,
+                bv_color: bv,
+                abs_mag,
+                app_mag: vmag,
+                galactic_offset_rad: offset,
+                rgb: base_rgb,
+                base_rgb,
+            });
+        }
+        out
+    })
+}
+
+/// Evaluate relative 3D stellar density `ρ(x_star)` at galactocentric position `pos = [x, y, z]` kpc.
+fn galactic_3d_stellar_density(
+    galaxy_type: GalaxyType,
+    pos: [f64; 3],
+    is_young: bool,
+    irr_knots: &[[f64; 3]],
+) -> f64 {
+    let (x, y, z) = (pos[0], pos[1], pos[2]);
+    let r_xy = (x * x + y * y).sqrt();
+    match galaxy_type {
+        GalaxyType::Spiral | GalaxyType::BarredSpiral | GalaxyType::Lenticular => {
+            let hz = if galaxy_type == GalaxyType::Lenticular {
+                0.42
+            } else if is_young {
+                0.068 // Young OB/A thin disk (~68 pc scale height, matching Hipparcos)
+            } else {
+                0.28
+            };
+            let sech = 1.0 / (z / hz).clamp(-20.0, 20.0).cosh();
+            let thin_vert = sech * sech;
+            let thick_vert = (if is_young { 0.03 } else { 0.14 }) * (-z.abs() / 0.95).exp();
+            let arm_boost = if galaxy_type == GalaxyType::Lenticular || r_xy < 0.8 {
+                1.0
+            } else {
+                let phi = y.atan2(x);
+                let spiral_phase = 2.0 * phi - (2.0 / 0.26) * (r_xy / 2.2).ln();
+                let amp = if is_young { 0.95 } else { 0.42 };
+                1.0 + amp * spiral_phase.cos().max(0.0)
+            };
+            let disk = (-r_xy / 3.05).exp() * (0.90 * thin_vert * arm_boost + thick_vert);
+            let bulge_amp = if is_young { 0.45 } else { 2.4 };
+            let bulge = if galaxy_type == GalaxyType::BarredSpiral {
+                bulge_amp
+                    * (-(x * x / (2.6 * 2.6) + y * y / (1.1 * 1.1) + z * z / (0.80 * 0.80))).exp()
+            } else {
+                bulge_amp * (-((r_xy * r_xy + (z / 0.60).powi(2)) / (1.65 * 1.65))).exp()
+            };
+            let halo =
+                (if is_young { 0.002 } else { 0.015 }) * (1.0 + (r_xy * r_xy + z * z) / 36.0).powf(-1.5);
+            disk + bulge + halo
+        }
+        GalaxyType::Irregular => {
+            let mut d = 0.28 * (-((r_xy * r_xy + (z / 0.75).powi(2)) / 18.0)).exp();
+            for k in irr_knots {
+                let dx = x - k[0];
+                let dy = y - k[1];
+                let dz = z - k[2];
+                let d2 = dx * dx + dy * dy + dz * dz;
+                d += 1.45 * (-d2 / (0.75 * 0.75)).exp();
+            }
+            d + 0.01
+        }
+        GalaxyType::GlobularCluster => {
+            let r2 = x * x + y * y + z * z;
+            (1.0 + r2 / (0.0055 * 0.0055)).powf(-2.2)
+        }
+        GalaxyType::Elliptical => {
+            let q2 = x * x + (y / 0.78).powi(2) + (z / 0.62).powi(2);
+            (1.0 + q2 / (3.2 * 3.2)).powf(-1.85)
+        }
+    }
+}
+
+/// Sample a 3D luminous stellar beacon `(pos_kpc, bv_color, abs_mag)` directly from the host galaxy's
+/// macroscopic structure (spiral arms, central bar/bulge, starburst knots, or spheroid).
+fn sample_host_galaxy_luminous_beacon(
+    rng: &mut Pcg64Mcg,
+    galaxy_type: GalaxyType,
+    irr_knots: &[[f64; 3]],
+) -> ([f64; 3], f32, f32) {
+    match galaxy_type {
+        GalaxyType::Spiral | GalaxyType::BarredSpiral | GalaxyType::Lenticular => {
+            let bulge_frac = match galaxy_type {
+                GalaxyType::Lenticular => 0.42,
+                GalaxyType::BarredSpiral => 0.34,
+                _ => 0.28,
+            };
+            if rng.next_f64() < bulge_frac {
+                let pos = if galaxy_type == GalaxyType::BarredSpiral {
+                    [
+                        rng.gauss(0.0, 2.05),
+                        rng.gauss(0.0, 0.68),
+                        rng.gauss(0.0, 0.46),
+                    ]
+                } else {
+                    let r = rng.gauss(0.0, 1.35).abs();
+                    let phi = rng.uniform(0.0, 2.0 * PI);
+                    [r * phi.cos(), r * phi.sin(), rng.gauss(0.0, 0.48)]
+                };
+                let bv = rng.uniform(0.82, 1.62) as f32;
+                let abs_mag = rng.uniform(-8.6, -3.8) as f32;
+                (pos, bv, abs_mag)
+            } else {
+                let uprod = (rng.next_f64() * rng.next_f64()).max(1e-6);
+                let r = (-2.65 * uprod.ln()).clamp(0.45, 15.5);
+                let phi = if galaxy_type != GalaxyType::Lenticular && rng.next_f64() < 0.68 {
+                    let arm = if rng.next_f64() < 0.5 { 0.0 } else { PI };
+                    arm + (1.0 / 0.26) * (r / 2.2).max(0.2).ln() + rng.gauss(0.0, 0.32)
+                } else {
+                    rng.uniform(0.0, 2.0 * PI)
+                };
+                let z_sig = if galaxy_type == GalaxyType::Lenticular {
+                    0.22
+                } else {
+                    0.085
+                };
+                let pos = [r * phi.cos(), r * phi.sin(), rng.gauss(0.0, z_sig)];
+                let (bv, abs_mag) = if galaxy_type != GalaxyType::Lenticular && rng.next_f64() < 0.64
+                {
+                    (
+                        rng.uniform(-0.26, 0.20) as f32,
+                        rng.uniform(-9.8, -4.6) as f32,
+                    )
+                } else {
+                    (
+                        rng.uniform(0.78, 1.60) as f32,
+                        rng.uniform(-9.0, -4.2) as f32,
+                    )
+                };
+                (pos, bv, abs_mag)
+            }
+        }
+        GalaxyType::Irregular => {
+            let pos = if !irr_knots.is_empty() && rng.next_f64() < 0.76 {
+                let k = irr_knots[(rng.next_u64() as usize) % irr_knots.len()];
+                [
+                    k[0] + rng.gauss(0.0, 0.48),
+                    k[1] + rng.gauss(0.0, 0.48),
+                    k[2] + rng.gauss(0.0, 0.36),
+                ]
+            } else {
+                let r = rng.uniform(0.3, 4.5);
+                let phi = rng.uniform(0.0, 2.0 * PI);
+                [r * phi.cos(), r * phi.sin(), rng.gauss(0.0, 0.65)]
+            };
+            let bv = if rng.next_f64() < 0.72 {
+                rng.uniform(-0.28, 0.16) as f32
+            } else {
+                rng.uniform(0.75, 1.55) as f32
+            };
+            (pos, bv, rng.uniform(-9.9, -4.5) as f32)
+        }
+        GalaxyType::GlobularCluster => {
+            let u = rng.uniform(-1.0, 1.0);
+            let phi = rng.uniform(0.0, 2.0 * PI);
+            let s = (1.0 - u * u).sqrt();
+            let r = rng.gauss(0.0, 0.0055).abs().min(0.020);
+            (
+                [r * s * phi.cos(), r * s * phi.sin(), r * u],
+                rng.uniform(0.65, 1.55) as f32,
+                rng.uniform(-3.6, 0.8) as f32,
+            )
+        }
+        GalaxyType::Elliptical => {
+            let u = rng.uniform(-1.0, 1.0);
+            let phi = rng.uniform(0.0, 2.0 * PI);
+            let s = (1.0 - u * u).sqrt();
+            let r = rng.gauss(0.0, 2.6).abs().min(11.0);
+            (
+                [r * s * phi.cos(), 0.78 * r * s * phi.sin(), 0.62 * r * u],
+                rng.uniform(0.80, 1.62) as f32,
+                rng.uniform(-8.8, -3.9) as f32,
+            )
+        }
+    }
+}
+
+/// Synthesize a physically grounded night-sky `Constellation` + `GalacticSkyBackdrop` catalog rooted
+/// in the solar system's 3D galactic location `(galaxy_type, vantage, gal_pos_kpc)`:
+/// - Nearby stars (`r_ly << 1,000 ly` disk thickness) populate all sky directions isotropically,
+/// - Distant luminous giants & OB supergiants (`r_ly >= 800 ly`) trace the 3D density of the galactic
+///   plane, spiral arms, bulge, halo hemisphere, or irregular star-forming clouds.
+pub fn synthesize_galactic_sky_constellations(
+    seed: u64,
+    is_sol: bool,
+    galaxy_type: GalaxyType,
+    vantage: GalacticVantage,
+    gal_pos_kpc: [f32; 3],
+) -> Vec<Constellation> {
+    if is_sol {
+        static SOL_SKY: std::sync::OnceLock<Vec<Constellation>> = std::sync::OnceLock::new();
+        return SOL_SKY
+            .get_or_init(|| {
+                let hip_stars = parsed_hipparcos_equatorial_stars();
+                let (_, mut consts) = build_constellations_from_stars(hip_stars);
+                let used: std::collections::BTreeSet<usize> = consts
+                    .iter()
+                    .flat_map(|c| c.star_indices.iter().copied())
+                    .collect();
+                let mut field_candidates: Vec<usize> = (0..hip_stars.len())
+                    .filter(|i| !used.contains(i) && hip_stars[*i].app_mag <= 4.55)
+                    .collect();
+                field_candidates.sort_by(|&a, &b| {
+                    hip_stars[a]
+                        .app_mag
+                        .partial_cmp(&hip_stars[b].app_mag)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                field_candidates.truncate(180);
+                let field_stars: Vec<[f32; 4]> = field_candidates
+                    .into_iter()
+                    .map(|i| {
+                        let s = &hip_stars[i];
+                        let (ra, dec) = star_dir_to_ra_dec_deg(s.dir);
+                        [ra, dec, s.app_mag, s.bv_color]
+                    })
+                    .collect();
+                let backdrop = std::sync::Arc::new(GalacticSkyBackdrop {
+                    galaxy_type: GalaxyType::Spiral,
+                    vantage: GalacticVantage::SpiralArm,
+                    gal_pos_kpc: [8.1, 0.0, 0.02],
+                    galactic_pole: [-0.86767, -0.19808, 0.45598],
+                    galactic_center_dir: [-0.05488, -0.87344, -0.48384],
+                    galaxy_band_mode: 0,
+                    field_stars,
+                });
+                for c in &mut consts {
+                    c.backdrop = Some(std::sync::Arc::clone(&backdrop));
+                }
+                consts
+            })
+            .clone();
+    }
+
+    let mut rng = Pcg64Mcg::from_seed_u64(seed ^ 0x6A1A_C71C_541E_5EED);
+    let hist_pgm = parse_hist_pgm();
+    let (w, h, hist) = (hist_pgm.width, hist_pgm.height, hist_pgm.pixels);
+
+    // Random 3D rotation of the galactic coordinate frame into the planet's equatorial sky frame:
+    let z_rot = rng.uniform(-1.0, 1.0);
+    let theta_rot = rng.uniform(0.0, 2.0 * PI);
+    let r_rot = (1.0 - z_rot * z_rot).sqrt();
+    let u_axis = [r_rot * theta_rot.cos(), r_rot * theta_rot.sin(), z_rot];
+    let rot_angle = rng.uniform(0.0, 2.0 * PI);
+
+    let x0 = [
+        gal_pos_kpc[0] as f64,
+        gal_pos_kpc[1] as f64,
+        gal_pos_kpc[2] as f64,
+    ];
+    let to_center_gal = {
+        let len = (x0[0] * x0[0] + x0[1] * x0[1] + x0[2] * x0[2]).sqrt();
+        if len > 1e-5 {
+            [-x0[0] / len, -x0[1] / len, -x0[2] / len]
+        } else {
+            [1.0, 0.0, 0.0]
+        }
+    };
+    let gal_pole_eq = normal(rotate([0.0, 0.0, 1.0], u_axis, rot_angle));
+    let gal_center_eq = normal(rotate(to_center_gal, u_axis, rot_angle));
+
+    let mut irr_knots = Vec::new();
+    if galaxy_type == GalaxyType::Irregular {
+        for _ in 0..6 {
+            let kr = rng.uniform(0.8, 4.2);
+            let kz = rng.uniform(-1.2, 1.2);
+            let kphi = rng.uniform(0.0, 2.0 * PI);
+            irr_knots.push([
+                x0[0] * 0.4 + kr * kphi.cos(),
+                x0[1] * 0.4 + kr * kphi.sin(),
+                kz,
+            ]);
+        }
+    }
+
+    let is_old_stellar_pop = matches!(
+        galaxy_type,
+        GalaxyType::Elliptical | GalaxyType::Lenticular | GalaxyType::GlobularCluster
+    ) || vantage == GalacticVantage::GalacticBulge;
+    let is_young_starburst = galaxy_type == GalaxyType::Irregular
+        || (matches!(galaxy_type, GalaxyType::Spiral | GalaxyType::BarredSpiral)
+            && vantage == GalacticVantage::SpiralArm);
+
+    let mut stars = Vec::with_capacity(2400);
+    let mut next_id = 1u32;
+
+    // Part A: Local 3D Stellar Neighborhood (`r <= 2,200 ly` around `x0`), thinned by true 3D
+    // galactic stellar density `ρ(x0 + r_kpc * u)` so foreground stars surround disk worlds in all
+    // sky quadrants while thinner OB stars concentrate near the galactic plane and halo worlds have
+    // appropriately sparse local skies:
+    for _ in 0..5200 {
+        let (c, m) = loop {
+            let c = rng.uniform(-0.274, 3.271);
+            let m = rng.uniform(-15.329, 7.49);
+            let x = (((c + 0.274) * (w as f64) / (3.271 + 0.274)) as usize).min(w - 1);
+            let y = (((m + 15.329) * (h as f64) / (7.49 + 15.329)) as usize).min(h - 1);
+            let gray = hist[y * w + x];
+            if gray == 255 {
+                continue;
+            }
+            let mut base_prob = if gray == 254 {
+                0.08 / 255.0
+            } else if gray == 253 {
+                0.18 / 255.0
+            } else {
+                (255.0 - (gray as f64)) / 255.0
+            };
+            if is_old_stellar_pop {
+                if c < 0.05 && m < -1.5 {
+                    base_prob *= 0.12;
+                } else if c > 0.80 && m < 2.2 {
+                    base_prob *= 1.55;
+                }
+            } else if is_young_starburst && c < 0.22 && m < 1.5 {
+                base_prob *= 1.35;
+            }
+            if rng.next_f64() < base_prob {
+                break (c as f32, m as f32);
+            }
+        };
+
+        let is_young = c < 0.32 || m < 0.2;
+        let max_r_ly = (3.26156 / 10.0_f64.powf(((m as f64) - 5.8) / 5.0 - 1.0)).clamp(1.5, 2200.0);
+        let dist_scale = if galaxy_type == GalaxyType::GlobularCluster
+            || vantage == GalacticVantage::GalacticBulge
+        {
+            0.76
+        } else {
+            1.0
+        };
+        let u_vol = rng.uniform(0.0005, 1.0).powf(1.0 / 2.8);
+        let r_ly = ((1.0 + (max_r_ly - 1.0) * u_vol) * dist_scale).max(1.0);
+        let r_kpc = if galaxy_type == GalaxyType::GlobularCluster {
+            (r_ly / 3261.56).min(0.018)
+        } else {
+            r_ly / 3261.56
+        };
+
+        let uz = rng.uniform(-1.0, 1.0);
+        let uphi = rng.uniform(0.0, 2.0 * PI);
+        let ur = (1.0 - uz * uz).sqrt();
+        let v_gal = [ur * uphi.cos(), ur * uphi.sin(), uz];
+        let star_pos = [
+            x0[0] + r_kpc * v_gal[0],
+            x0[1] + r_kpc * v_gal[1],
+            x0[2] + r_kpc * v_gal[2],
+        ];
+        let rho = galactic_3d_stellar_density(galaxy_type, star_pos, is_young, &irr_knots);
+        let p_acc = (rho / 0.32).clamp(0.014, 1.0);
+        if rng.next_f64() >= p_acc {
+            continue;
+        }
+        let app_mag = m + 5.0 * (((r_ly / 3.26156).log10() as f32) - 1.0);
+        if app_mag > 5.8 || stars.len() >= 4200 {
+            continue;
+        }
+        let dir = normal(rotate(v_gal, u_axis, rot_angle));
+        let base_rgb = bv_to_rgb(c);
+        let off = (PI / 2.0 - v_gal[2].clamp(-1.0, 1.0).acos()).abs() as f32;
+        stars.push(CelestialStar {
+            id: next_id,
+            dir,
+            distance_ly: r_ly as f32,
+            bv_color: c,
+            abs_mag: m,
+            app_mag: app_mag.max(-1.6),
+            galactic_offset_rad: off,
+            rgb: base_rgb,
+            base_rgb,
+        });
+        next_id += 1;
+    }
+
+    // Part B: Direct 3D Host-Galaxy Luminous Beacons (`x_star` sampled from spiral arms, bar/bulge,
+    // starburst knots, or spheroid and projected onto the sky via `Δx = x_star - x0`), naturally
+    // tracing the Milky Way band from inside the disk or illuminating one sky hemisphere from the Halo:
+    let min_beacon_kpc = if galaxy_type == GalaxyType::GlobularCluster {
+        0.0012
+    } else {
+        0.25
+    };
+    let has_dust_disk = matches!(
+        galaxy_type,
+        GalaxyType::Spiral | GalaxyType::BarredSpiral | GalaxyType::Irregular
+    );
+    for _ in 0..2800 {
+        let (spos, c, m) = sample_host_galaxy_luminous_beacon(&mut rng, galaxy_type, &irr_knots);
+        let dx = [spos[0] - x0[0], spos[1] - x0[1], spos[2] - x0[2]];
+        let r_kpc = (dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2]).sqrt();
+        if r_kpc < min_beacon_kpc {
+            continue;
+        }
+        let v_gal = [dx[0] / r_kpc, dx[1] / r_kpc, dx[2] / r_kpc];
+        let r_ly = r_kpc * 3261.56;
+        let ext_mag = if has_dust_disk {
+            let dz = (spos[2] - x0[2]).abs();
+            let dust_path_kpc = if x0[2].abs() < 0.14 && spos[2].abs() < 0.14 {
+                r_kpc
+            } else {
+                r_kpc.min(r_kpc * (0.14 / dz.max(0.14)))
+            };
+            (0.55 * dust_path_kpc).min(2.6) as f32
+        } else {
+            0.0
+        };
+        let app_mag = m + 5.0 * (((r_ly / 3.26156).log10() as f32) - 1.0) + ext_mag;
+        if app_mag > 5.65 || stars.len() >= 4800 {
+            continue;
+        }
+        let dir = normal(rotate(v_gal, u_axis, rot_angle));
+        let base_rgb = bv_to_rgb(c);
+        let off = (PI / 2.0 - v_gal[2].clamp(-1.0, 1.0).acos()).abs() as f32;
+        stars.push(CelestialStar {
+            id: next_id,
+            dir,
+            distance_ly: r_ly as f32,
+            bv_color: c,
+            abs_mag: m,
+            app_mag: app_mag.max(-1.4),
+            galactic_offset_rad: off,
+            rgb: base_rgb,
+            base_rgb,
+        });
+        next_id += 1;
+    }
+
+    let (_, mut consts) = build_constellations_from_stars(&stars);
+    let used: std::collections::BTreeSet<usize> = consts
+        .iter()
+        .flat_map(|c| c.star_indices.iter().copied())
+        .collect();
+    let mut field_candidates: Vec<usize> = (0..stars.len())
+        .filter(|i| !used.contains(i) && stars[*i].app_mag <= 4.65)
+        .collect();
+    field_candidates.sort_by(|&a, &b| {
+        stars[a]
+            .app_mag
+            .partial_cmp(&stars[b].app_mag)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    field_candidates.truncate(180);
+    let field_stars: Vec<[f32; 4]> = field_candidates
+        .into_iter()
+        .map(|i| {
+            let s = &stars[i];
+            let (ra, dec) = star_dir_to_ra_dec_deg(s.dir);
+            [ra, dec, s.app_mag, s.bv_color]
+        })
+        .collect();
+
+    let galaxy_band_mode = match (galaxy_type, vantage) {
+        (_, GalacticVantage::GalacticHalo) => 1,
+        (GalaxyType::Elliptical | GalaxyType::GlobularCluster, _)
+        | (_, GalacticVantage::GalacticBulge) => 2,
+        (GalaxyType::Irregular, _) => 3,
+        _ => 0,
+    };
+    let backdrop = std::sync::Arc::new(GalacticSkyBackdrop {
+        galaxy_type,
+        vantage,
+        gal_pos_kpc,
+        galactic_pole: [
+            gal_pole_eq[0] as f32,
+            gal_pole_eq[1] as f32,
+            gal_pole_eq[2] as f32,
+        ],
+        galactic_center_dir: [
+            gal_center_eq[0] as f32,
+            gal_center_eq[1] as f32,
+            gal_center_eq[2] as f32,
+        ],
+        galaxy_band_mode,
+        field_stars,
+    });
+    for c in &mut consts {
+        c.backdrop = Some(std::sync::Arc::clone(&backdrop));
+    }
+    consts
+}
+
+/// Generate a deterministic galaxy-rooted constellation catalog from `seed`.
+/// `seed == 42` uses Earth's real Hipparcos sky around Sol; any other seed samples a host galaxy
+/// location and synthesizes its surrounding 3D stellar neighborhood.
+pub fn generate_default_constellations(seed: u64) -> Vec<Constellation> {
+    if seed == 42 {
+        return synthesize_galactic_sky_constellations(
+            42,
+            true,
+            GalaxyType::Spiral,
+            GalacticVantage::SpiralArm,
+            [8.1, 0.0, 0.02],
+        );
+    }
+    let mut rng = Pcg64Mcg::from_seed_u64(seed ^ 0xC0A5_7E11_A710_42u64);
+    let (galaxy_type, vantage, gal_pos_kpc) = sample_galactic_home_with_rng(&mut rng, false);
+    synthesize_galactic_sky_constellations(seed, false, galaxy_type, vantage, gal_pos_kpc)
+}
+
+/// Build constellation edges and extract connected `Constellation` asterisms (`3..7` stars each)
+/// directly from the 3D `stars` catalog on the celestial sphere.
 pub fn build_constellations_from_stars(
     stars: &[CelestialStar],
 ) -> (Vec<(usize, usize)>, Vec<Constellation>) {
-    let mut bright_indices: Vec<usize> = stars
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.app_mag <= 2.85)
-        .map(|(i, _)| i)
+    if stars.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut bright_indices: Vec<usize> = (0..stars.len())
+        .filter(|&i| stars[i].app_mag <= 3.55)
         .collect();
+    if bright_indices.len() < 80 {
+        bright_indices = (0..stars.len()).collect();
+    }
     bright_indices.sort_by(|&a, &b| {
         stars[a]
             .app_mag
             .partial_cmp(&stars[b].app_mag)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    bright_indices.truncate(220);
+    bright_indices.truncate(240);
+    let nb = bright_indices.len();
 
-    let mut edges = Vec::new();
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); bright_indices.len()];
-    let mut degree = vec![0u8; bright_indices.len()];
-    for i in 0..bright_indices.len() {
-        if degree[i] >= 3 {
+    // Grow bounded connected asterism components (`<= 7` stars, within `23°` of their alpha seed)
+    // so dense galactic star clouds divide into recognizable human-scale constellations instead of
+    // merging into one giant chain, while foreground bright stars across all quadrants form clean asterisms.
+    let mut comp_id: Vec<Option<usize>> = vec![None; nb];
+    let mut degree = vec![0u8; nb];
+    let mut local_adj: Vec<Vec<usize>> = vec![Vec::new(); nb];
+
+    struct AsterismGroup {
+        members: Vec<usize>, // indices into `bright_indices`
+    }
+    let mut groups: Vec<AsterismGroup> = Vec::new();
+
+    for seed_loc in 0..nb {
+        if comp_id[seed_loc].is_some() {
             continue;
         }
-        let ia = bright_indices[i];
-        let pa = stars[ia].dir;
-        let mut best: Option<(usize, f64)> = None;
-        for j in (i + 1)..bright_indices.len() {
-            if degree[j] >= 3 {
-                continue;
-            }
-            let ib = bright_indices[j];
-            let pb = stars[ib].dir;
-            let cos_d = dot(pa, pb);
-            if (0.950..=0.998).contains(&cos_d) {
-                if best.map_or(true, |(_, b_cos)| cos_d > b_cos) {
-                    best = Some((j, cos_d));
+        let gid = groups.len();
+        let alpha_dir = stars[bright_indices[seed_loc]].dir;
+        comp_id[seed_loc] = Some(gid);
+        let mut members = vec![seed_loc];
+
+        // Iteratively attach the nearest unassigned bright star within `3.8°..20.5°` of any current member
+        // (and within `23.5°` of `alpha_dir`), up to 7 stars per constellation:
+        while members.len() < 7 {
+            let mut best_pair: Option<(usize, usize, f64)> = None;
+            for &u in &members {
+                if degree[u] >= 3 {
+                    continue;
+                }
+                let pu = stars[bright_indices[u]].dir;
+                for cand in 0..nb {
+                    if comp_id[cand].is_some() {
+                        continue;
+                    }
+                    let pc = stars[bright_indices[cand]].dir;
+                    if dot(alpha_dir, pc) < 0.917 {
+                        continue; // > 23.5 deg from alpha seed
+                    }
+                    let cos_d = dot(pu, pc);
+                    if (0.936..=0.9978).contains(&cos_d) {
+                        // Prefer bright, crisp separations (~6..14 deg)
+                        let score = cos_d - 0.018 * (stars[bright_indices[cand]].app_mag as f64);
+                        if best_pair.map_or(true, |(_, _, bs)| score > bs) {
+                            best_pair = Some((u, cand, score));
+                        }
+                    }
                 }
             }
-        }
-        if let Some((j, _)) = best {
-            degree[i] += 1;
-            degree[j] += 1;
-            adj[i].push(j);
-            adj[j].push(i);
-            edges.push((bright_indices[i], bright_indices[j]));
-        }
-    }
-
-    struct RawConstellationGroup {
-        star_indices: Vec<usize>,
-        edges: Vec<(usize, usize)>,
-        center_dir: Vec3,
-        declination_deg: f32,
-        right_ascension_deg: f32,
-        brightest_mag: f32,
-    }
-
-    // Extract connected components from `adj`:
-    let mut visited = vec![false; bright_indices.len()];
-    let mut raw_groups: Vec<RawConstellationGroup> = Vec::new();
-    for start in 0..bright_indices.len() {
-        if visited[start] || adj[start].is_empty() {
-            continue;
-        }
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(start);
-        visited[start] = true;
-        let mut comp_local = Vec::new();
-        while let Some(u) = queue.pop_front() {
-            comp_local.push(u);
-            for &v in &adj[u] {
-                if !visited[v] {
-                    visited[v] = true;
-                    queue.push_back(v);
-                }
-            }
-        }
-        if comp_local.len() < 2 {
-            continue;
-        }
-        let comp_stars: Vec<usize> = comp_local.iter().map(|&loc| bright_indices[loc]).collect();
-        let sum = comp_stars.iter().fold([0.0f64; 3], |acc, &s_idx| {
-            let d = stars[s_idx].dir;
-            [acc[0] + d[0], acc[1] + d[1], acc[2] + d[2]]
-        });
-        let min_mag = comp_stars
-            .iter()
-            .map(|&s_idx| stars[s_idx].app_mag)
-            .fold(f32::INFINITY, f32::min);
-        let bright_slice = &bright_indices[..];
-        let comp_edges: Vec<(usize, usize)> = comp_local
-            .iter()
-            .flat_map(|&u| {
-                adj[u]
-                    .iter()
-                    .filter(move |&&v| u < v)
-                    .map(move |&v| (bright_slice[u], bright_slice[v]))
-            })
-            .collect();
-        let center_dir = normal(sum);
-        let dec_deg = (center_dir[2].clamp(-1.0, 1.0).asin() * 180.0 / PI) as f32;
-        let ra_deg = ((center_dir[1].atan2(center_dir[0]) * 180.0 / PI).rem_euclid(360.0)) as f32;
-        raw_groups.push(RawConstellationGroup {
-            star_indices: comp_stars,
-            edges: comp_edges,
-            center_dir,
-            declination_deg: dec_deg,
-            right_ascension_deg: ra_deg,
-            brightest_mag: min_mag,
-        });
-    }
-
-    // Sort from northernmost declination to southernmost declination and cap at 16:
-    raw_groups.sort_by(|a, b| {
-        b.declination_deg
-            .partial_cmp(&a.declination_deg)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    raw_groups.truncate(14);
-
-    // Ensure both deep northern (`dec >= +58°`) and deep southern (`dec <= -58°`) circumpolar bands
-    // have at least one constellation even if the galaxy vantage concentrated bright stars in one hemisphere:
-    let has_deep_north = raw_groups.iter().any(|g| g.declination_deg >= 58.0);
-    let has_deep_south = raw_groups.iter().any(|g| g.declination_deg <= -58.0);
-    let defaults = generate_default_constellations(stars.len() as u64);
-    let mut constellations = Vec::new();
-    if !has_deep_north {
-        if let Some(dn) = defaults.first() {
-            constellations.push(dn.clone());
-        }
-    }
-    for group in raw_groups {
-        let idx = constellations.len();
-        constellations.push(Constellation {
-            index: idx as u32,
-            star_count: group.star_indices.len() as u32,
-            star_indices: group.star_indices,
-            edges: group.edges,
-            center_dir: group.center_dir,
-            declination_deg: group.declination_deg,
-            right_ascension_deg: group.right_ascension_deg,
-            brightest_mag: group.brightest_mag,
-        });
-    }
-    if !has_deep_south {
-        if let Some(ds) = defaults.last() {
-            constellations.push(ds.clone());
-        }
-    }
-    if constellations.len() < 8 {
-        for d in defaults {
-            if constellations.len() >= 12 {
+            if let Some((u, v, _)) = best_pair {
+                comp_id[v] = Some(gid);
+                degree[u] += 1;
+                degree[v] += 1;
+                local_adj[u].push(v);
+                local_adj[v].push(u);
+                members.push(v);
+            } else {
                 break;
             }
-            if !constellations
-                .iter()
-                .any(|c| (c.declination_deg - d.declination_deg).abs() < 12.0)
-            {
-                constellations.push(d);
+        }
+
+        // Optionally close 1 polygon loop (dipper bowl / trapezoid / diamond) on asterisms of >= 4 stars:
+        if members.len() >= 4 {
+            let mut best_close: Option<(usize, usize, f64)> = None;
+            for i in 0..members.len() {
+                let u = members[i];
+                if degree[u] >= 3 {
+                    continue;
+                }
+                for j in (i + 1)..members.len() {
+                    let v = members[j];
+                    if degree[v] >= 3 || local_adj[u].contains(&v) {
+                        continue;
+                    }
+                    let cos_d = dot(
+                        stars[bright_indices[u]].dir,
+                        stars[bright_indices[v]].dir,
+                    );
+                    if (0.968..=0.997).contains(&cos_d)
+                        && best_close.map_or(true, |(_, _, bc)| cos_d > bc)
+                    {
+                        best_close = Some((u, v, cos_d));
+                    }
+                }
+            }
+            if let Some((u, v, _)) = best_close {
+                degree[u] += 1;
+                degree[v] += 1;
+                local_adj[u].push(v);
+                local_adj[v].push(u);
+            }
+        }
+
+        groups.push(AsterismGroup { members });
+    }
+
+    struct CandidateConstellation {
+        prominence: f32,
+        constellation: Constellation,
+    }
+
+    let min_members = if groups.iter().filter(|g| g.members.len() >= 3).count() >= 10 {
+        3
+    } else {
+        2
+    };
+
+    let mut candidates: Vec<CandidateConstellation> = Vec::new();
+    for g in &groups {
+        if g.members.len() < min_members {
+            continue;
+        }
+        let mut sum_dir = [0.0f64; 3];
+        let mut min_mag = f32::INFINITY;
+        let mut lum_sum = 0.0f32;
+        let mut star_indices = Vec::with_capacity(g.members.len());
+        let mut resolved_stars = Vec::with_capacity(g.members.len());
+        let mut loc_to_pos = std::collections::BTreeMap::new();
+
+        for (pos_idx, &loc) in g.members.iter().enumerate() {
+            let s_idx = bright_indices[loc];
+            let st = &stars[s_idx];
+            sum_dir[0] += st.dir[0];
+            sum_dir[1] += st.dir[1];
+            sum_dir[2] += st.dir[2];
+            min_mag = min_mag.min(st.app_mag);
+            lum_sum += (4.0 - st.app_mag).max(0.15);
+            star_indices.push(s_idx);
+            let (ra, dec) = star_dir_to_ra_dec_deg(st.dir);
+            resolved_stars.push([ra, dec, st.app_mag]);
+            loc_to_pos.insert(loc, pos_idx);
+        }
+
+        let mut global_edges = Vec::new();
+        let mut local_edges = Vec::new();
+        for &u_loc in &g.members {
+            for &v_loc in &local_adj[u_loc] {
+                if u_loc < v_loc {
+                    if let (Some(&pu), Some(&pv)) =
+                        (loc_to_pos.get(&u_loc), loc_to_pos.get(&v_loc))
+                    {
+                        global_edges.push((bright_indices[u_loc], bright_indices[v_loc]));
+                        local_edges.push([pu, pv]);
+                    }
+                }
+            }
+        }
+
+        let center_dir = normal(sum_dir);
+        let (ra_deg, dec_deg) = star_dir_to_ra_dec_deg(center_dir);
+        let prominence = (g.members.len() as f32) * 0.85 + lum_sum * 0.55;
+
+        candidates.push(CandidateConstellation {
+            prominence,
+            constellation: Constellation {
+                index: 0,
+                star_count: g.members.len() as u32,
+                star_indices,
+                edges: global_edges,
+                resolved_stars,
+                local_edges,
+                backdrop: None,
+                center_dir,
+                declination_deg: dec_deg,
+                right_ascension_deg: ra_deg,
+                brightest_mag: min_mag,
+            },
+        });
+    }
+
+    // Rank by visual prominence (NEVER north-first!) and select up to 16 well-separated constellations
+    // across the celestial sphere, preserving circumpolar anchors (`|dec| > 60°`) when present in the sky.
+    candidates.sort_by(|a, b| {
+        b.prominence
+            .partial_cmp(&a.prominence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut chosen: Vec<Constellation> = Vec::with_capacity(16);
+    // Reserve the brightest deep-north (> +60°) and deep-south (< -60°) asterisms if physically present
+    // in the star catalog so circumpolar skies aren't crowded out solely by low-declination giants:
+    if let Some(nc) = candidates
+        .iter()
+        .find(|c| c.constellation.declination_deg > 60.0)
+    {
+        chosen.push(nc.constellation.clone());
+    }
+    if let Some(sc) = candidates
+        .iter()
+        .find(|c| c.constellation.declination_deg < -60.0)
+    {
+        chosen.push(sc.constellation.clone());
+    }
+
+    for cand in &candidates {
+        if chosen.len() >= 16 {
+            break;
+        }
+        let c_dir = cand.constellation.center_dir;
+        let too_close = chosen.iter().any(|existing| dot(existing.center_dir, c_dir) > 0.925);
+        if !too_close {
+            chosen.push(cand.constellation.clone());
+        }
+    }
+    if chosen.len() < 12 {
+        for cand in &candidates {
+            if chosen.len() >= 14 {
+                break;
+            }
+            let c_dir = cand.constellation.center_dir;
+            let duplicate = chosen.iter().any(|existing| dot(existing.center_dir, c_dir) > 0.985);
+            if !duplicate {
+                chosen.push(cand.constellation.clone());
             }
         }
     }
-    constellations.sort_by(|a, b| {
+
+    chosen.sort_by(|a, b| {
         b.declination_deg
             .partial_cmp(&a.declination_deg)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    for (idx, c) in constellations.iter_mut().enumerate() {
+    let mut all_edges = Vec::new();
+    for (idx, c) in chosen.iter_mut().enumerate() {
         c.index = idx as u32;
+        all_edges.extend_from_slice(&c.edges);
     }
 
-    (edges, constellations)
+    (all_edges, chosen)
 }
 
 /// Interactive Sun, Plausible Galaxy & Celestial Sphere Star Map model (`SunSandbox`).
@@ -3169,6 +3912,8 @@ impl SunSandbox {
 /// from a `tec11_proto::PlanetaryEnvironment` (or defaulted to Earth / Sol when `None`).
 #[derive(Clone, Debug)]
 pub struct ReconstructedSkyEnvironment {
+    pub galaxy_type: GalaxyType,
+    pub galactic_vantage: GalacticVantage,
     pub home_star: HomeStar,
     pub star_filter: u32,
     pub atmosphere: AtmosphereType,
@@ -3203,6 +3948,8 @@ impl ReconstructedSkyEnvironment {
         };
 
         if let Some(env) = &snap.environment {
+            let galaxy_type = GalaxyType::from_id(env.galaxy_type);
+            let galactic_vantage = GalacticVantage::from_id(env.galactic_vantage);
             let home_star = env
                 .home_star
                 .as_ref()
@@ -3238,7 +3985,13 @@ impl ReconstructedSkyEnvironment {
                 ecliptic_pole,
             );
             let constellation_seed = env.constellation_seed;
-            let constellations = generate_default_constellations(constellation_seed);
+            let constellations = synthesize_galactic_sky_constellations(
+                constellation_seed,
+                env.is_sol_system,
+                galaxy_type,
+                galactic_vantage,
+                home_star.gal_pos_kpc,
+            );
             let target_dist = if env.target_moon_dist_radii >= 15 {
                 env.target_moon_dist_radii
             } else {
@@ -3257,6 +4010,8 @@ impl ReconstructedSkyEnvironment {
                 1.0
             };
             Self {
+                galaxy_type,
+                galactic_vantage,
                 home_star,
                 star_filter,
                 atmosphere,
@@ -3292,6 +4047,8 @@ impl ReconstructedSkyEnvironment {
             );
             let constellations = generate_default_constellations(42);
             Self {
+                galaxy_type: GalaxyType::Spiral,
+                galactic_vantage: GalacticVantage::SpiralArm,
                 home_star,
                 star_filter: 2,
                 atmosphere,
@@ -3393,5 +4150,162 @@ mod tests {
         assert_eq!(solar_sys_colors.len(), sb.tile_count() * 3);
         assert!(sb.planet_count() >= 4);
         assert!(sb.planets()[sb.home_planet_index()].is_home_world);
+    }
+
+    #[test]
+    fn test_galactic_sky_constellations_quadrants_and_vantage_dependence() {
+        fn assert_full_sky_2d_dispersion(consts: &[Constellation], label: &str) {
+            assert!(
+                consts.len() >= 10,
+                "{}: expected >= 10 constellations, got {}",
+                label,
+                consts.len()
+            );
+            let mut quadrants = [0usize; 4];
+            let mut has_north_polar = false;
+            let mut has_south_polar = false;
+            for c in consts {
+                let q = ((c.right_ascension_deg.rem_euclid(360.0)) / 90.0).floor() as usize;
+                quadrants[q.min(3)] += 1;
+                if c.declination_deg >= 55.0 {
+                    has_north_polar = true;
+                }
+                if c.declination_deg <= -55.0 {
+                    has_south_polar = true;
+                }
+                assert!(
+                    c.resolved_stars.len() >= 3,
+                    "{}: constellation must have >= 3 resolved stars",
+                    label
+                );
+                assert!(
+                    !c.local_edges.is_empty(),
+                    "{}: constellation must have connected edges",
+                    label
+                );
+            }
+            for (qi, &cnt) in quadrants.iter().enumerate() {
+                assert!(
+                    cnt >= 1,
+                    "{}: expected >= 1 constellation in RA quadrant {}, got {:?}",
+                    label,
+                    qi,
+                    quadrants
+                );
+            }
+            assert!(has_north_polar, "{}: expected northern polar constellation", label);
+            assert!(has_south_polar, "{}: expected southern polar constellation", label);
+
+            // Verify constellations are NOT arranged in a 1D diagonal line (|r(RA, Dec)| << 1):
+            let n = consts.len() as f32;
+            let mean_ra = consts.iter().map(|c| c.right_ascension_deg).sum::<f32>() / n;
+            let mean_dec = consts.iter().map(|c| c.declination_deg).sum::<f32>() / n;
+            let cov: f32 = consts
+                .iter()
+                .map(|c| (c.right_ascension_deg - mean_ra) * (c.declination_deg - mean_dec))
+                .sum();
+            let var_ra: f32 = consts
+                .iter()
+                .map(|c| (c.right_ascension_deg - mean_ra).powi(2))
+                .sum();
+            let var_dec: f32 = consts
+                .iter()
+                .map(|c| (c.declination_deg - mean_dec).powi(2))
+                .sum();
+            let corr = (cov / (var_ra * var_dec).sqrt().max(1e-6)).abs();
+            assert!(
+                corr < 0.65,
+                "{}: constellations appear collinear in (RA, Dec) with |r| = {:.3}",
+                label,
+                corr
+            );
+
+            let backdrop = consts[0]
+                .backdrop
+                .as_ref()
+                .expect("expected GalacticSkyBackdrop on synthesized constellations");
+            assert!(
+                backdrop.field_stars.len() >= 80,
+                "{}: expected >= 80 ungrouped field stars, got {}",
+                label,
+                backdrop.field_stars.len()
+            );
+        }
+
+        // 1. Sol / Earth (real Hipparcos 3D catalog around [8.1, 0.0, 0.02] kpc):
+        let sol_consts = synthesize_galactic_sky_constellations(
+            777,
+            true,
+            GalaxyType::BarredSpiral,
+            GalacticVantage::SpiralArm,
+            [8.1, 0.0, 0.02],
+        );
+        assert_full_sky_2d_dispersion(&sol_consts, "Sol Hipparcos");
+
+        // 2. Procedural mid-plane Spiral Arm solar system ([8.0, 0.0, 0.03] kpc):
+        let disk_consts = synthesize_galactic_sky_constellations(
+            4242,
+            false,
+            GalaxyType::BarredSpiral,
+            GalacticVantage::SpiralArm,
+            [8.0, 0.0, 0.03],
+        );
+        assert_full_sky_2d_dispersion(&disk_consts, "Procedural SpiralArm");
+
+        // 3. Galactic Halo system ([3.2, 0.0, 1.8] kpc) sits high above the inner galactic disk,
+        //    so distant luminous stars skew strongly toward `galactic_center_dir` / `-galactic_pole`:
+        let halo_consts = synthesize_galactic_sky_constellations(
+            4242,
+            false,
+            GalaxyType::Spiral,
+            GalacticVantage::GalacticHalo,
+            [3.2, 0.0, 1.8],
+        );
+        let halo_bd = halo_consts[0]
+            .backdrop
+            .as_ref()
+            .expect("expected halo backdrop");
+        assert_eq!(halo_bd.galaxy_band_mode, 1);
+
+        let ra_dec_to_eq = |ra_deg: f32, dec_deg: f32| -> [f32; 3] {
+            let ra = ra_deg.to_radians();
+            let dec = dec_deg.to_radians();
+            let cd = dec.cos();
+            [cd * ra.cos(), cd * ra.sin(), dec.sin()]
+        };
+        let gc = halo_bd.galactic_center_dir;
+        let toward_galaxy_stars = halo_bd
+            .field_stars
+            .iter()
+            .filter(|fs| {
+                let d = ra_dec_to_eq(fs[0], fs[1]);
+                d[0] * gc[0] + d[1] * gc[1] + d[2] * gc[2] > 0.0
+            })
+            .count();
+        let halo_frac = toward_galaxy_stars as f32 / halo_bd.field_stars.len().max(1) as f32;
+        assert!(
+            halo_frac > 0.58,
+            "Expected Galactic Halo sky to skew toward host galaxy hemisphere: halo_frac={:.3}",
+            halo_frac
+        );
+
+        // Also check disk concentration along galactic plane for SpiralArm (`|sin(b)| < 0.35`):
+        let disk_bd = disk_consts[0].backdrop.as_ref().unwrap();
+        let gp = disk_bd.galactic_pole;
+        let near_plane_frac = disk_bd
+            .field_stars
+            .iter()
+            .filter(|fs| {
+                let d = ra_dec_to_eq(fs[0], fs[1]);
+                (d[0] * gp[0] + d[1] * gp[1] + d[2] * gp[2]).abs() < 0.35
+            })
+            .count() as f32
+            / disk_bd.field_stars.len().max(1) as f32;
+        // Isotropic uniform sphere has `P(|sin(b)| < 0.35) == 0.35`; disk concentration boosts this significantly:
+        assert!(
+            near_plane_frac > 0.44,
+            "Expected SpiralArm bright field stars to concentrate toward galactic plane (uniform=0.350, got {:.3})",
+            near_plane_frac
+        );
     }
 }

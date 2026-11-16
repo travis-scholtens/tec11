@@ -40,6 +40,52 @@ function raDecDegToEquatorial(raDeg, decDeg) {
   return [cosD * Math.cos(ra), cosD * Math.sin(ra), Math.sin(dec)];
 }
 
+function bvToStarRgb255(bv) {
+  const c = typeof bv === "number" ? bv : 0.45;
+  if (c < 0.15) {
+    return [198, 220, 255];
+  } else if (c < 0.55) {
+    return [244, 247, 255];
+  } else if (c < 1.05) {
+    return [255, 244, 214];
+  }
+  return [255, 216, 178];
+}
+
+function buildGalacticPlaneBasis(sky) {
+  const gpRaw = Array.isArray(sky.galacticPole) && sky.galacticPole.length === 3
+    ? sky.galacticPole
+    : [-0.86767, -0.19808, 0.45598];
+  const gcRaw = Array.isArray(sky.galacticCenterDir) && sky.galacticCenterDir.length === 3
+    ? sky.galacticCenterDir
+    : [-0.05488, -0.87344, -0.48384];
+  const gpLen = Math.hypot(gpRaw[0], gpRaw[1], gpRaw[2]) || 1.0;
+  const gp = [gpRaw[0] / gpLen, gpRaw[1] / gpLen, gpRaw[2] / gpLen];
+
+  // Project galacticCenterDir onto the plane orthogonal to `gp` for disk band `e1`
+  const dotPG = gp[0] * gcRaw[0] + gp[1] * gcRaw[1] + gp[2] * gcRaw[2];
+  let e1 = [gcRaw[0] - dotPG * gp[0], gcRaw[1] - dotPG * gp[1], gcRaw[2] - dotPG * gp[2]];
+  let e1Len = Math.hypot(e1[0], e1[1], e1[2]);
+  if (e1Len < 1e-4) {
+    const ref = Math.abs(gp[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+    e1 = [
+      gp[1] * ref[2] - gp[2] * ref[1],
+      gp[2] * ref[0] - gp[0] * ref[2],
+      gp[0] * ref[1] - gp[1] * ref[0],
+    ];
+    e1Len = Math.hypot(e1[0], e1[1], e1[2]) || 1.0;
+  }
+  e1 = [e1[0] / e1Len, e1[1] / e1Len, e1[2] / e1Len];
+  const e2 = [
+    gp[1] * e1[2] - gp[2] * e1[1],
+    gp[2] * e1[0] - gp[0] * e1[2],
+    gp[0] * e1[1] - gp[1] * e1[0],
+  ];
+  const gcLen = Math.hypot(gcRaw[0], gcRaw[1], gcRaw[2]) || 1.0;
+  const gcUnit = [gcRaw[0] / gcLen, gcRaw[1] / gcLen, gcRaw[2] / gcLen];
+  return { gp, e1, e2, gcUnit, mode: sky.galaxyBandMode || 0 };
+}
+
 function equatorialToHorizontal(eqVec, siderealRad, latRad) {
   const cosT = Math.cos(siderealRad);
   const sinT = Math.sin(siderealRad);
@@ -334,32 +380,84 @@ export function paintTileSkyCanvas(view) {
   ctx.lineTo(cx, cy + radius);
   ctx.stroke();
 
-  // 1. Background stars & Constellation asterisms + diurnal star paths
+  // 1. Host Galaxy Band + Ungrouped Field Stars + Constellation Asterisms
   const starAlpha = (hasAtm ? Math.max(0.24, 1.0 - dayFactor * 0.65) : 0.94) * Math.max(0.08, cloudTrans);
+  const nightSkyVis = (hasAtm ? Math.max(0.10, 1.0 - dayFactor * 0.86) : 0.92) * Math.max(0.06, cloudTrans);
+
+  if (nightSkyVis > 0.05) {
+    const { e1, e2, gcUnit, mode } = buildGalacticPlaneBasis(sky);
+    const bandSteps = mode === 2 ? 14 : 32;
+    for (let s = 0; s < bandSteps; s++) {
+      let eqDir;
+      let coreWeight;
+      if (mode === 2) {
+        // Bulge / Elliptical / Globular Cluster core glow centered on `gcUnit`
+        const ang = (s / bandSteps) * Math.PI * 2.0;
+        const spread = 0.22 * ((s % 3) * 0.45);
+        eqDir = [
+          gcUnit[0] + spread * (Math.cos(ang) * e1[0] + Math.sin(ang) * e2[0]),
+          gcUnit[1] + spread * (Math.cos(ang) * e1[1] + Math.sin(ang) * e2[1]),
+          gcUnit[2] + spread * (Math.cos(ang) * e1[2] + Math.sin(ang) * e2[2]),
+        ];
+        const inv = 1.0 / (Math.hypot(eqDir[0], eqDir[1], eqDir[2]) || 1.0);
+        eqDir = [eqDir[0] * inv, eqDir[1] * inv, eqDir[2] * inv];
+        coreWeight = s === 0 ? 1.35 : 0.72;
+      } else {
+        const l = (s / bandSteps) * Math.PI * 2.0;
+        const cl = Math.cos(l);
+        const sl = Math.sin(l);
+        if (mode === 1 && cl < -0.15) continue; // Halo vantage: galaxy spans one hemisphere centered on gcUnit
+        const cAxis = mode === 1 ? gcUnit : e1;
+        eqDir = [
+          cAxis[0] * cl + e2[0] * sl,
+          cAxis[1] * cl + e2[1] * sl,
+          cAxis[2] * cl + e2[2] * sl,
+        ];
+        coreWeight = mode === 3 ? 0.55 + 0.35 * Math.sin(l * 3.0) : 0.48 + 0.52 * Math.max(0.0, cl);
+      }
+      const horiz = equatorialToHorizontal(eqDir, siderealNow, latRad);
+      if (horiz[2] < -0.08) continue;
+      const pt = projectHorizontalToDome(horiz, cx, cy, radius);
+      const rBand = radius * (mode === 2 ? 0.34 : 0.19 + 0.07 * coreWeight);
+      const aBand = Math.min(0.22, (0.045 + 0.075 * coreWeight) * nightSkyVis);
+      const gBand = ctx.createRadialGradient(pt.x, pt.y, rBand * 0.08, pt.x, pt.y, rBand);
+      const warmCore = mode === 2;
+      gBand.addColorStop(0.0, warmCore ? `rgba(253, 230, 186, ${aBand.toFixed(3)})` : `rgba(186, 214, 255, ${aBand.toFixed(3)})`);
+      gBand.addColorStop(1.0, "rgba(148, 184, 245, 0)");
+      ctx.fillStyle = gBand;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, rBand, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  if (Array.isArray(sky.fieldStars) && nightSkyVis > 0.05) {
+    for (const fs of sky.fieldStars) {
+      const eq = raDecDegToEquatorial(fs[0], fs[1]);
+      const horiz = equatorialToHorizontal(eq, siderealNow, latRad);
+      if (horiz[2] < 0.0) continue;
+      const pt = projectHorizontalToDome(horiz, cx, cy, radius);
+      const mag = typeof fs[2] === "number" ? fs[2] : 3.8;
+      const [sr, sg, sb] = bvToStarRgb255(fs[3]);
+      const rDot = Math.max(0.65, 1.85 - 0.26 * mag);
+      const aDot = Math.min(0.88, Math.max(0.14, (0.92 - 0.14 * mag) * nightSkyVis));
+      ctx.fillStyle = `rgba(${sr}, ${sg}, ${sb}, ${aDot.toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, rDot, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   if (sky.constellations && starAlpha > 0.05) {
     for (const c of sky.constellations) {
-      const cCenterEq = raDecDegToEquatorial(c.raDeg, c.decDeg);
-      drawDiurnalArc(
-        ctx,
-        () => cCenterEq,
-        raNoon,
-        latRad,
-        cx,
-        cy,
-        radius,
-        `rgba(56, 189, 248, ${(0.16 * starAlpha).toFixed(3)})`,
-        0.75,
-        true
-      );
-
       const projStars = (c.stars || []).map((st) => {
         const eq = raDecDegToEquatorial(st[0], st[1]);
         const horiz = equatorialToHorizontal(eq, siderealNow, latRad);
         return { ...projectHorizontalToDome(horiz, cx, cy, radius), mag: st[2] || 1.8 };
       });
 
-      ctx.strokeStyle = `rgba(56, 189, 248, ${(0.62 * starAlpha).toFixed(3)})`;
-      ctx.lineWidth = 1.1;
+      ctx.strokeStyle = `rgba(56, 189, 248, ${(0.58 * starAlpha).toFixed(3)})`;
+      ctx.lineWidth = 1.05;
       for (const edge of c.edges || []) {
         const a = projStars[edge[0]];
         const b = projStars[edge[1]];
@@ -373,7 +471,7 @@ export function paintTileSkyCanvas(view) {
 
       for (const ps of projStars) {
         if (ps.up < -0.01) continue;
-        const rStar = Math.max(1.2, 2.7 - 0.45 * ps.mag);
+        const rStar = Math.max(1.15, 2.65 - 0.42 * ps.mag);
         ctx.fillStyle = `rgba(241, 245, 249, ${(0.95 * starAlpha).toFixed(3)})`;
         ctx.beginPath();
         ctx.arc(ps.x, ps.y, rStar, 0, Math.PI * 2);
@@ -880,8 +978,81 @@ export function paintTileVantageCanvas(view) {
     }
   }
 
-  // 2. Stars & Constellations in horizontal (az, alt) space
+  // 2. Host Galaxy Band + Field Stars + Constellations in horizontal (az, alt) space
   const starAlpha = (hasAtm ? Math.max(0.18, 1.0 - dayFactor * 0.76) : 0.94) * Math.max(0.06, cloudTrans);
+  const vantageNightVis = (hasAtm ? Math.max(0.08, 1.0 - dayFactor * 0.88) : 0.92) * Math.max(0.06, cloudTrans);
+
+  if (vantageNightVis > 0.05) {
+    const { e1, e2, gcUnit, mode } = buildGalacticPlaneBasis(sky);
+    const bandSteps = mode === 2 ? 12 : 36;
+    for (let s = 0; s < bandSteps; s++) {
+      let eqDir;
+      let coreWeight;
+      if (mode === 2) {
+        const ang = (s / bandSteps) * Math.PI * 2.0;
+        const spread = 0.20 * ((s % 3) * 0.45);
+        eqDir = [
+          gcUnit[0] + spread * (Math.cos(ang) * e1[0] + Math.sin(ang) * e2[0]),
+          gcUnit[1] + spread * (Math.cos(ang) * e1[1] + Math.sin(ang) * e2[1]),
+          gcUnit[2] + spread * (Math.cos(ang) * e1[2] + Math.sin(ang) * e2[2]),
+        ];
+        const inv = 1.0 / (Math.hypot(eqDir[0], eqDir[1], eqDir[2]) || 1.0);
+        eqDir = [eqDir[0] * inv, eqDir[1] * inv, eqDir[2] * inv];
+        coreWeight = s === 0 ? 1.35 : 0.72;
+      } else {
+        const l = (s / bandSteps) * Math.PI * 2.0;
+        const cl = Math.cos(l);
+        const sl = Math.sin(l);
+        if (mode === 1 && cl < -0.15) continue;
+        const cAxis = mode === 1 ? gcUnit : e1;
+        eqDir = [
+          cAxis[0] * cl + e2[0] * sl,
+          cAxis[1] * cl + e2[1] * sl,
+          cAxis[2] * cl + e2[2] * sl,
+        ];
+        coreWeight = mode === 3 ? 0.55 + 0.35 * Math.sin(l * 3.0) : 0.48 + 0.52 * Math.max(0.0, cl);
+      }
+      const horiz = equatorialToHorizontal(eqDir, siderealNow, latRad);
+      const aa = horizVecToAzAlt(horiz);
+      if (aa.altDeg < -8.0) continue;
+      const dAz = wrapDeltaAzDeg(aa.azDeg, viewAzDeg);
+      if (Math.abs(dAz) > 66.0) continue;
+      const bx = dAzToX(dAz);
+      const by = altToY(aa.altDeg);
+      const rBand = cssW * (mode === 2 ? 0.28 : 0.16 + 0.06 * coreWeight);
+      const aBand = Math.min(0.22, (0.042 + 0.072 * coreWeight) * vantageNightVis);
+      const gBand = ctx.createRadialGradient(bx, by, rBand * 0.08, bx, by, rBand);
+      const warmCore = mode === 2;
+      gBand.addColorStop(0.0, warmCore ? `rgba(253, 230, 186, ${aBand.toFixed(3)})` : `rgba(186, 214, 255, ${aBand.toFixed(3)})`);
+      gBand.addColorStop(1.0, "rgba(148, 184, 245, 0)");
+      ctx.fillStyle = gBand;
+      ctx.beginPath();
+      ctx.arc(bx, by, rBand, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  if (Array.isArray(sky.fieldStars) && vantageNightVis > 0.05) {
+    for (const fs of sky.fieldStars) {
+      const eq = raDecDegToEquatorial(fs[0], fs[1]);
+      const horiz = equatorialToHorizontal(eq, siderealNow, latRad);
+      const aa = horizVecToAzAlt(horiz);
+      if (aa.altDeg < -2.0) continue;
+      const dAz = wrapDeltaAzDeg(aa.azDeg, viewAzDeg);
+      if (Math.abs(dAz) > 52.0) continue;
+      const sx = dAzToX(dAz);
+      const sy = altToY(aa.altDeg);
+      const mag = typeof fs[2] === "number" ? fs[2] : 3.8;
+      const [sr, sg, sb] = bvToStarRgb255(fs[3]);
+      const rDot = Math.max(0.65, 1.75 - 0.25 * mag);
+      const aDot = Math.min(0.86, Math.max(0.12, (0.90 - 0.14 * mag) * vantageNightVis));
+      ctx.fillStyle = `rgba(${sr}, ${sg}, ${sb}, ${aDot.toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(sx, sy, rDot, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   if (sky.constellations && starAlpha > 0.05) {
     for (const c of sky.constellations) {
       const projStars = (c.stars || []).map((st) => {

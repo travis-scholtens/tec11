@@ -6,9 +6,10 @@ use crate::population::tile_population_thousands_with_water_tech;
 use crate::prehistory::PrehistorySimulation;
 use crate::racination::Heritage;
 use crate::sun_sky::{
-    format_solar_system_summary, generate_default_constellations, generate_solar_system_with_rng,
-    sample_atmosphere_with_rng, sample_home_star_with_rng, substitute_simulated_planet,
-    AtmosphereType, Constellation, HomeStar, PlanetaryOptics, SolarSystemPlanet,
+    format_solar_system_summary, generate_solar_system_with_rng, sample_atmosphere_with_rng,
+    sample_galactic_home_with_rng, sample_home_star_with_rng, substitute_simulated_planet,
+    synthesize_galactic_sky_constellations, AtmosphereType, Constellation, GalacticVantage,
+    GalaxyType, HomeStar, PlanetaryOptics, SolarSystemPlanet,
 };
 use crate::tectonics::TectonicsSimulation;
 use crate::tile::TileGeology;
@@ -161,6 +162,8 @@ pub struct WorldSimulation {
     tectonics_ticks: u32,
     prehistory_ticks: u32,
     history_ticks: u32,
+    galaxy_type: GalaxyType,
+    galactic_vantage: GalacticVantage,
     star_filter: u32,
     atmosphere_id: u32,
     home_star: HomeStar,
@@ -196,6 +199,8 @@ impl WorldSimulation {
             seed,
         );
         tec.set_meteor_freq(params.meteor_freq as f64);
+        let galaxy_type = GalaxyType::Spiral;
+        let galactic_vantage = GalacticVantage::SpiralArm;
         let home_star = HomeStar::sol();
         let atmosphere = AtmosphereType::EarthLikeN2O2;
         let optics = PlanetaryOptics::compute(&home_star, atmosphere);
@@ -212,7 +217,13 @@ impl WorldSimulation {
             params.moon_count,
             ecliptic_pole,
         );
-        let constellations = generate_default_constellations(seed);
+        let constellations = synthesize_galactic_sky_constellations(
+            seed,
+            true,
+            galaxy_type,
+            galactic_vantage,
+            home_star.gal_pos_kpc,
+        );
         let mut sim = Self {
             params,
             stage: WorldStageState::Tectonics(tec),
@@ -220,6 +231,8 @@ impl WorldSimulation {
             tectonics_ticks: 0,
             prehistory_ticks: 0,
             history_ticks: 0,
+            galaxy_type,
+            galactic_vantage,
             star_filter: 2,
             atmosphere_id: 0,
             home_star,
@@ -242,10 +255,17 @@ impl WorldSimulation {
     pub fn set_sun_and_atmosphere(&mut self, star_filter: u32, atmosphere_id: u32) {
         let mut sky_rng = self.rng.clone();
         let is_sol = star_filter == 2 && atmosphere_id == 0;
+        let (gal_type, gal_vantage, gal_pos) = sample_galactic_home_with_rng(&mut sky_rng, is_sol);
+        self.galaxy_type = gal_type;
+        self.galactic_vantage = gal_vantage;
+        let is_old_pop = matches!(
+            gal_type,
+            GalaxyType::Elliptical | GalaxyType::Lenticular | GalaxyType::GlobularCluster
+        ) || gal_vantage == GalacticVantage::GalacticBulge;
         self.home_star = if is_sol {
             HomeStar::sol()
         } else {
-            sample_home_star_with_rng(&mut sky_rng, [8.1, 0.0, 0.02], star_filter, false)
+            sample_home_star_with_rng(&mut sky_rng, gal_pos, star_filter, is_old_pop)
         };
         self.atmosphere = sample_atmosphere_with_rng(&mut sky_rng, atmosphere_id);
         self.star_filter = self.home_star.star_filter_id();
@@ -268,8 +288,16 @@ impl WorldSimulation {
             self.params.moon_count,
             ecliptic_pole,
         );
+        self.constellations = synthesize_galactic_sky_constellations(
+            self.constellation_seed,
+            is_sol,
+            self.galaxy_type,
+            self.galactic_vantage,
+            self.home_star.gal_pos_kpc,
+        );
         if let WorldStageState::History(hist) = &mut self.stage {
             hist.set_solar_system(self.solar_system.clone());
+            hist.set_constellations(self.constellations.clone());
             hist.set_sky_optics(self.home_star.clone(), self.optics.clone());
         }
     }
@@ -295,7 +323,14 @@ impl WorldSimulation {
     }
 
     pub fn planets_summary_text(&self) -> String {
-        format_solar_system_summary(&self.solar_system)
+        let [gx, gy, gz] = self.home_star.gal_pos_kpc;
+        let r_xy = (gx * gx + gy * gy).sqrt();
+        format!(
+            "[{} · {}, R={r_xy:.1} kpc, z={gz:+.2} kpc] {}",
+            self.galaxy_type.name(),
+            self.galactic_vantage.name(),
+            format_solar_system_summary(&self.solar_system)
+        )
     }
 
     pub fn star_filter(&self) -> u32 {
@@ -347,10 +382,17 @@ impl WorldSimulation {
         let eff_star_filter = if randomize { 0 } else { self.star_filter };
         let eff_atm_id = if randomize { 99 } else { self.atmosphere_id };
         let is_sol = eff_star_filter == 2 && eff_atm_id == 0 && !randomize;
+        let (gal_type, gal_vantage, gal_pos) = sample_galactic_home_with_rng(&mut sky_rng, is_sol);
+        self.galaxy_type = gal_type;
+        self.galactic_vantage = gal_vantage;
+        let is_old_pop = matches!(
+            gal_type,
+            GalaxyType::Elliptical | GalaxyType::Lenticular | GalaxyType::GlobularCluster
+        ) || gal_vantage == GalacticVantage::GalacticBulge;
         self.home_star = if is_sol {
             HomeStar::sol()
         } else {
-            sample_home_star_with_rng(&mut sky_rng, [8.1, 0.0, 0.02], eff_star_filter, false)
+            sample_home_star_with_rng(&mut sky_rng, gal_pos, eff_star_filter, is_old_pop)
         };
         self.atmosphere = sample_atmosphere_with_rng(&mut sky_rng, eff_atm_id);
         self.star_filter = self.home_star.star_filter_id();
@@ -374,7 +416,13 @@ impl WorldSimulation {
             params.moon_count,
             ecliptic_pole,
         );
-        self.constellations = generate_default_constellations(seed);
+        self.constellations = synthesize_galactic_sky_constellations(
+            seed,
+            is_sol,
+            self.galaxy_type,
+            self.galactic_vantage,
+            self.home_star.gal_pos_kpc,
+        );
         self.params = params;
         let mut tec = TectonicsSimulation::new_with_full_params(
             params.grid_size,
@@ -1380,6 +1428,8 @@ impl WorldSimulation {
             life_dt_myr: self.params.life_dt_myr,
             people_dt_myr: self.params.people_dt_myr,
             meteor_freq: self.params.meteor_freq,
+            galaxy_type: self.galaxy_type.id(),
+            galactic_vantage: self.galactic_vantage.id(),
         }
     }
 
@@ -1441,6 +1491,8 @@ impl WorldSimulation {
                 radius_km,
                 self.params.land_pct,
             );
+            self.galaxy_type = sky.galaxy_type;
+            self.galactic_vantage = sky.galactic_vantage;
             self.home_star = sky.home_star;
             self.star_filter = sky.star_filter;
             self.atmosphere = sky.atmosphere;

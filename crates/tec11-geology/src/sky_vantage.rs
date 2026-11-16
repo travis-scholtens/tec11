@@ -185,6 +185,11 @@ pub struct TileSkyView {
     pub home_orbit_au: f32,
     pub home_period_days: f32,
     pub home_init_angle_rad: f32,
+    pub galactic_pole: [f32; 3],
+    pub galactic_center_dir: [f32; 3],
+    pub galaxy_band_mode: u8,
+    pub galaxy_summary: String,
+    pub field_stars: Vec<[f32; 4]>,
     pub moons: Vec<TileSkyMoon>,
     pub planets: Vec<TileSkyPlanet>,
     pub constellations: Vec<TileSkyConstellation>,
@@ -195,8 +200,13 @@ impl TileSkyView {
         let moons_json: Vec<String> = self.moons.iter().map(|m| m.to_json()).collect();
         let planets_json: Vec<String> = self.planets.iter().map(|p| p.to_json()).collect();
         let consts_json: Vec<String> = self.constellations.iter().map(|c| c.to_json()).collect();
+        let fstars_json: Vec<String> = self
+            .field_stars
+            .iter()
+            .map(|s| format!("[{:.1},{:.1},{:.2},{:.2}]", s[0], s[1], s[2], s[3]))
+            .collect();
         format!(
-            "{{\"latDeg\":{:.2},\"lonDeg\":{:.2},\"tiltDeg\":{:.2},\"daysPerYear\":{},\"dayHours\":{:.2},\"currentHistoryYear\":{},\"sunName\":{},\"sunRgb\":[{:.3},{:.3},{:.3}],\"skyZenithRgb\":[{:.3},{:.3},{:.3}],\"skyHorizonRgb\":[{:.3},{:.3},{:.3}],\"sunsetRgb\":[{:.3},{:.3},{:.3}],\"twilightRgb\":[{:.3},{:.3},{:.3}],\"homeOrbitAu\":{:.4},\"homePeriodDays\":{:.4},\"homeInitAngleRad\":{:.4},\"moons\":[{}],\"planets\":[{}],\"constellations\":[{}],\"hasAtmosphere\":{}}}",
+            "{{\"latDeg\":{:.2},\"lonDeg\":{:.2},\"tiltDeg\":{:.2},\"daysPerYear\":{},\"dayHours\":{:.2},\"currentHistoryYear\":{},\"sunName\":{},\"sunRgb\":[{:.3},{:.3},{:.3}],\"skyZenithRgb\":[{:.3},{:.3},{:.3}],\"skyHorizonRgb\":[{:.3},{:.3},{:.3}],\"sunsetRgb\":[{:.3},{:.3},{:.3}],\"twilightRgb\":[{:.3},{:.3},{:.3}],\"homeOrbitAu\":{:.4},\"homePeriodDays\":{:.4},\"homeInitAngleRad\":{:.4},\"galacticPole\":[{:.4},{:.4},{:.4}],\"galacticCenterDir\":[{:.4},{:.4},{:.4}],\"galaxyBandMode\":{},\"galaxySummary\":{},\"fieldStars\":[{}],\"moons\":[{}],\"planets\":[{}],\"constellations\":[{}],\"hasAtmosphere\":{}}}",
             self.lat_deg,
             self.lon_deg,
             self.tilt_deg,
@@ -222,6 +232,15 @@ impl TileSkyView {
             self.home_orbit_au,
             self.home_period_days,
             self.home_init_angle_rad,
+            self.galactic_pole[0],
+            self.galactic_pole[1],
+            self.galactic_pole[2],
+            self.galactic_center_dir[0],
+            self.galactic_center_dir[1],
+            self.galactic_center_dir[2],
+            self.galaxy_band_mode,
+            json_escape(&self.galaxy_summary),
+            fstars_json.join(","),
             moons_json.join(","),
             planets_json.join(","),
             consts_json.join(","),
@@ -446,6 +465,101 @@ impl TileInspectionView {
     }
 }
 
+/// Convert a `Constellation` from the 3D galactic star catalog into a `TileSkyConstellation`,
+/// using its true `resolved_stars` and `local_edges` when present.
+pub fn constellation_to_sky_asterism(c: &Constellation, name: String) -> TileSkyConstellation {
+    if !c.resolved_stars.is_empty() {
+        return TileSkyConstellation {
+            index: c.index,
+            name,
+            ra_deg: c.right_ascension_deg,
+            dec_deg: c.declination_deg,
+            stars: c.resolved_stars.clone(),
+            edges: c.local_edges.clone(),
+        };
+    }
+
+    let n_stars = (c.star_count as usize).clamp(3, 7);
+    let seed_u64 = (c.index as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (c.right_ascension_deg.to_bits() as u64)
+        ^ ((c.declination_deg.to_bits() as u64) << 16);
+    let mut crng = Pcg64Mcg::from_seed_u64(seed_u64);
+    let c_dir = normal(c.center_dir);
+    let raw_east = [-c_dir[1], c_dir[0], 0.0];
+    let east_norm = (raw_east[0] * raw_east[0] + raw_east[1] * raw_east[1]).sqrt();
+    let e_ra = if east_norm > 1e-5 {
+        [raw_east[0] / east_norm, raw_east[1] / east_norm, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let e_dec = normal([
+        c_dir[1] * e_ra[2] - c_dir[2] * e_ra[1],
+        c_dir[2] * e_ra[0] - c_dir[0] * e_ra[2],
+        c_dir[0] * e_ra[1] - c_dir[1] * e_ra[0],
+    ]);
+
+    let mut stars = Vec::with_capacity(n_stars);
+    stars.push([
+        c.right_ascension_deg,
+        c.declination_deg,
+        c.brightest_mag.clamp(0.1, 3.0),
+    ]);
+    for k in 1..n_stars {
+        let ang = (k as f64) * std::f64::consts::TAU / ((n_stars - 1) as f64)
+            + crng.uniform(-0.32, 0.32);
+        let rad = crng.uniform(0.055, 0.135);
+        let dx = rad * (ang.cos() * e_ra[0] + ang.sin() * e_dec[0]);
+        let dy = rad * (ang.cos() * e_ra[1] + ang.sin() * e_dec[1]);
+        let dz = rad * (ang.cos() * e_ra[2] + ang.sin() * e_dec[2]);
+        let s_dir = normal([c_dir[0] + dx, c_dir[1] + dy, c_dir[2] + dz]);
+        let s_dec = (s_dir[2].clamp(-1.0, 1.0).asin() * 180.0 / std::f64::consts::PI) as f32;
+        let s_ra =
+            ((s_dir[1].atan2(s_dir[0]) * 180.0 / std::f64::consts::PI).rem_euclid(360.0)) as f32;
+        let s_mag = (c.brightest_mag + 0.25 * (k as f32)).clamp(0.4, 3.4);
+        stars.push([s_ra, s_dec, s_mag]);
+    }
+    let mut edges = Vec::with_capacity(n_stars);
+    for k in 0..(n_stars - 1) {
+        edges.push([k, k + 1]);
+    }
+    TileSkyConstellation {
+        index: c.index,
+        name,
+        ra_deg: c.right_ascension_deg,
+        dec_deg: c.declination_deg,
+        stars,
+        edges,
+    }
+}
+
+/// Extract `(galactic_pole, galactic_center_dir, galaxy_band_mode, galaxy_summary, field_stars)`
+/// from a planet's `Constellation` catalog (falling back to Sol's Milky Way plane if absent).
+pub fn extract_galactic_backdrop_fields(
+    constellations_src: &[Constellation],
+) -> ([f32; 3], [f32; 3], u8, String, Vec<[f32; 4]>) {
+    if let Some(bd) = constellations_src
+        .first()
+        .and_then(|c| c.backdrop.as_deref())
+    {
+        (
+            bd.galactic_pole,
+            bd.galactic_center_dir,
+            bd.galaxy_band_mode,
+            bd.summary_label(),
+            bd.field_stars.clone(),
+        )
+    } else {
+        (
+            [-0.86767, -0.19808, 0.45598],
+            [-0.05488, -0.87344, -0.48384],
+            0,
+            "Spiral Galaxy (Sb/Sc) · Spiral Arm (R=8.1 kpc, z=+0.02 kpc)".to_string(),
+            Vec::new(),
+        )
+    }
+}
+
 /// Build the celestial `TileSkyView` for a unit-sphere normal `center` given planetary & stellar parameters.
 pub fn build_celestial_sky_view(
     center: [f64; 3],
@@ -514,68 +628,12 @@ pub fn build_celestial_sky_view(
         });
     }
 
-    let mut constellations = Vec::with_capacity(constellations_src.len());
-    for c in constellations_src {
-        let n_stars = (c.star_count as usize).clamp(3, 7);
-        let seed_u64 = (c.index as u64)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            ^ (c.right_ascension_deg.to_bits() as u64)
-            ^ ((c.declination_deg.to_bits() as u64) << 16);
-        let mut crng = Pcg64Mcg::from_seed_u64(seed_u64);
-        let c_dir = normal(c.center_dir);
-        let raw_east = [-c_dir[1], c_dir[0], 0.0];
-        let east_norm = (raw_east[0] * raw_east[0] + raw_east[1] * raw_east[1]).sqrt();
-        let e_ra = if east_norm > 1e-5 {
-            [raw_east[0] / east_norm, raw_east[1] / east_norm, 0.0]
-        } else {
-            [1.0, 0.0, 0.0]
-        };
-        let e_dec = normal([
-            c_dir[1] * e_ra[2] - c_dir[2] * e_ra[1],
-            c_dir[2] * e_ra[0] - c_dir[0] * e_ra[2],
-            c_dir[0] * e_ra[1] - c_dir[1] * e_ra[0],
-        ]);
-
-        let mut stars = Vec::with_capacity(n_stars);
-        stars.push([
-            c.right_ascension_deg,
-            c.declination_deg,
-            c.brightest_mag.clamp(0.1, 3.0),
-        ]);
-        for k in 1..n_stars {
-            let ang = (k as f64) * std::f64::consts::TAU / ((n_stars - 1) as f64)
-                + crng.uniform(-0.32, 0.32);
-            let rad = crng.uniform(0.055, 0.135);
-            let dx = rad * (ang.cos() * e_ra[0] + ang.sin() * e_dec[0]);
-            let dy = rad * (ang.cos() * e_ra[1] + ang.sin() * e_dec[1]);
-            let dz = rad * (ang.cos() * e_ra[2] + ang.sin() * e_dec[2]);
-            let s_dir = normal([c_dir[0] + dx, c_dir[1] + dy, c_dir[2] + dz]);
-            let s_dec = (s_dir[2].clamp(-1.0, 1.0).asin() * 180.0 / std::f64::consts::PI) as f32;
-            let s_ra =
-                ((s_dir[1].atan2(s_dir[0]) * 180.0 / std::f64::consts::PI).rem_euclid(360.0)) as f32;
-            let s_mag = (c.brightest_mag + 0.25 * (k as f32)).clamp(0.4, 3.4);
-            stars.push([s_ra, s_dec, s_mag]);
-        }
-
-        let mut edges = Vec::with_capacity(n_stars);
-        for k in 0..(n_stars - 1) {
-            edges.push([k, k + 1]);
-        }
-        if n_stars >= 4 && c.index % 2 == 0 {
-            edges.push([0, n_stars - 1]);
-        } else if n_stars >= 5 {
-            edges.push([0, 2]);
-        }
-
-        constellations.push(TileSkyConstellation {
-            index: c.index,
-            name: String::new(),
-            ra_deg: c.right_ascension_deg,
-            dec_deg: c.declination_deg,
-            stars,
-            edges,
-        });
-    }
+    let constellations: Vec<TileSkyConstellation> = constellations_src
+        .iter()
+        .map(|c| constellation_to_sky_asterism(c, String::new()))
+        .collect();
+    let (galactic_pole, galactic_center_dir, galaxy_band_mode, galaxy_summary, field_stars) =
+        extract_galactic_backdrop_fields(constellations_src);
 
     TileSkyView {
         has_atmosphere,
@@ -594,6 +652,11 @@ pub fn build_celestial_sky_view(
         home_orbit_au,
         home_period_days,
         home_init_angle_rad,
+        galactic_pole,
+        galactic_center_dir,
+        galaxy_band_mode,
+        galaxy_summary,
+        field_stars,
         moons,
         planets,
         constellations,

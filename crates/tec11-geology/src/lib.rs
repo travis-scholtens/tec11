@@ -63,10 +63,11 @@ pub use split_sandbox::SplitSandbox;
 pub use sun_sky::{
     build_constellations_from_stars, bv_to_rgb, bv_to_temp_k, classify_star,
     format_solar_system_summary, generate_default_constellations, generate_solar_system_with_rng,
-    recompute_planet_visibility_from_home, sample_atmosphere_with_rng, sample_home_star_with_rng,
-    substitute_simulated_planet, AtmosphereType, CelestialStar, Constellation, GalacticVantage,
-    GalaxyType, HomeStar, PlanetKind, PlanetaryOptics, ReconstructedSkyEnvironment,
-    SolarSystemPlanet, SunSandbox,
+    recompute_planet_visibility_from_home, sample_atmosphere_with_rng,
+    sample_galactic_home_with_rng, sample_home_star_with_rng, substitute_simulated_planet,
+    synthesize_galactic_sky_constellations, AtmosphereType, CelestialStar, Constellation,
+    GalacticSkyBackdrop, GalacticVantage, GalaxyType, HomeStar, PlanetKind, PlanetaryOptics,
+    ReconstructedSkyEnvironment, SolarSystemPlanet, SunSandbox,
 };
 pub use tectonics::{LithosphericGroup, TectonicsSimulation};
 pub use terrain::TerrainSandbox;
