@@ -14,6 +14,7 @@ const CD_BOTTOM: f32 = 0.0025;
 const U_BG_MPS: f32 = 0.08;
 const HISTORY_HOURS: usize = 48;
 const RANGE_WINDOW_HOURS: usize = 28;
+const BASE_INUNDATION_CEIL_M: f32 = 55.0;
 
 /// Ephemeris and tidal strength of an individual moon in `LaplaceTidalSolver`.
 #[derive(Clone, Debug)]
@@ -47,10 +48,18 @@ pub struct AtmosphericTideForcing<'a> {
 #[derive(Clone, Debug)]
 pub struct LaplaceTidalSolver {
     num_cells: usize,
-    unit_centers: Vec<Vec3>,
+    unit_centers: Vec<[f32; 3]>,
     bed_m: Vec<f32>,
     initial_ocean: Vec<bool>,
     edge_slope_sq: Vec<f32>,
+    cell_inv_deg: Vec<f32>,
+
+    inundation_ceil_m: f32,
+    active_domain_dirty: bool,
+    active_cells: Vec<u32>,
+    active_edges: Vec<u32>,
+    eta_eq_nonzero: bool,
+    astro_dirty: bool,
 
     gravity_mps2: f32,
     day_hours: f64,
@@ -94,12 +103,15 @@ pub struct LaplaceTidalSolver {
     /// for computing 28h `tidal_range_m` and instant 48h Tide Gauge sparklines on any clicked tile.
     eta_history_mm: VecDeque<Vec<i16>>,
 
-    // Scratch buffers to avoid per-substep heap allocations.
+    // Scratch buffers to avoid per-substep and per-hour heap allocations.
     scratch_flux: Vec<f32>,
     scratch_outflow_vol: Vec<f32>,
     scratch_outflow_scale: Vec<f32>,
-    scratch_u_next: Vec<f32>,
     scratch_edge_diss: Vec<f32>,
+    scratch_atm_dp_acc: Vec<f32>,
+    scratch_atm_tau_acc: Vec<f32>,
+    scratch_range_min: Vec<i16>,
+    scratch_range_max: Vec<i16>,
 }
 
 #[inline]
@@ -130,6 +142,122 @@ fn equatorial_to_subpoint_unit_xyz(eq: Vec3, gmst_rad: f64) -> Vec3 {
     ]
 }
 
+#[inline]
+fn reconstruct_active_vectors(
+    geom: &FiniteVolumeSphereGeom,
+    active_cells: &[u32],
+    u_edge: &[f32],
+    out_u_east: &mut [f32],
+    out_v_north: &mut [f32],
+) {
+    if geom.all_deg_le_6 {
+        for &c_u32 in active_cells {
+            let c = c_u32 as usize;
+            let st = &geom.cell_perot6[c];
+            let mut ux = 0.0_f32;
+            let mut vy = 0.0_f32;
+            for k in 0..6 {
+                let ue = u_edge[st.edge_idx[k] as usize];
+                ux += ue * st.perot_wx[k];
+                vy += ue * st.perot_wy[k];
+            }
+            out_u_east[c] = ux;
+            out_v_north[c] = vy;
+        }
+    } else {
+        geom.reconstruct_cell_vectors(u_edge, out_u_east, out_v_north);
+    }
+}
+
+#[inline]
+fn advance_active_thickness(
+    geom: &FiniteVolumeSphereGeom,
+    active_cells: &[u32],
+    active_edges: &[u32],
+    dt: f32,
+    bed_m: &[f32],
+    u_edge: &[f32],
+    h_total_m: &mut [f32],
+    scratch_flux: &mut [f32],
+    scratch_outflow_vol: &mut [f32],
+    scratch_outflow_scale: &mut [f32],
+) {
+    for &c_u32 in active_cells {
+        scratch_outflow_vol[c_u32 as usize] = 0.0;
+    }
+
+    for &e_u32 in active_edges {
+        let e_idx = e_u32 as usize;
+        let u = u_edge[e_idx];
+        if u.abs() <= 1e-8 {
+            scratch_flux[e_idx] = 0.0;
+            continue;
+        }
+        let e = &geom.edges[e_idx];
+        let l = e.left as usize;
+        let r = e.right as usize;
+        let zb_star = bed_m[l].max(bed_m[r]);
+        let h_up = if u > 0.0 {
+            (bed_m[l] + h_total_m[l] - zb_star)
+                .max(0.0)
+                .min(h_total_m[l])
+        } else {
+            (bed_m[r] + h_total_m[r] - zb_star)
+                .max(0.0)
+                .min(h_total_m[r])
+        };
+        let q = h_up * u;
+        scratch_flux[e_idx] = q;
+        if q > 0.0 {
+            scratch_outflow_vol[l] += dt * e.dual_len_m * q;
+        } else if q < 0.0 {
+            scratch_outflow_vol[r] += dt * e.dual_len_m * (-q);
+        }
+    }
+
+    for &c_u32 in active_cells {
+        let i = c_u32 as usize;
+        let avail = 0.95 * h_total_m[i] * geom.areas_m2[i];
+        let out_v = scratch_outflow_vol[i];
+        scratch_outflow_scale[i] = if out_v > avail && out_v > 1e-9 {
+            (avail / out_v).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+    }
+
+    for &e_u32 in active_edges {
+        let e_idx = e_u32 as usize;
+        let q = scratch_flux[e_idx];
+        if q > 0.0 {
+            scratch_flux[e_idx] = q * scratch_outflow_scale[geom.edges[e_idx].left as usize];
+        } else if q < 0.0 {
+            scratch_flux[e_idx] = q * scratch_outflow_scale[geom.edges[e_idx].right as usize];
+        }
+    }
+
+    if geom.all_deg_le_6 {
+        for &c_u32 in active_cells {
+            let i = c_u32 as usize;
+            let st = &geom.cell_div6[i];
+            let mut div_hu = 0.0_f32;
+            for k in 0..6 {
+                div_hu += scratch_flux[st.edge_idx[k] as usize] * st.flux_factor[k];
+            }
+            h_total_m[i] = (h_total_m[i] - dt * div_hu).max(0.0);
+        }
+    } else {
+        for &c_u32 in active_cells {
+            let i = c_u32 as usize;
+            let mut div_hu = 0.0_f32;
+            for inc in geom.incident_edges(i) {
+                div_hu += scratch_flux[inc.edge_idx as usize] * inc.flux_factor;
+            }
+            h_total_m[i] = (h_total_m[i] - dt * div_hu).max(0.0);
+        }
+    }
+}
+
 impl LaplaceTidalSolver {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -149,12 +277,16 @@ impl LaplaceTidalSolver {
         let ne = geom.edges.len();
         debug_assert_eq!(bed_m.len(), n);
 
-        let unit_centers: Vec<Vec3> = grid
+        let unit_centers: Vec<[f32; 3]> = grid
             .faces
             .iter()
             .map(|&(p, _)| {
                 let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt().max(1e-12);
-                [p[0] / len, p[1] / len, p[2] / len]
+                [
+                    (p[0] / len) as f32,
+                    (p[1] / len) as f32,
+                    (p[2] / len) as f32,
+                ]
             })
             .collect();
 
@@ -171,6 +303,17 @@ impl LaplaceTidalSolver {
             min_edge_dist_m = geom.mean_edge_dist_m.max(5_000.0);
         }
 
+        let cell_inv_deg: Vec<f32> = (0..n)
+            .map(|i| {
+                let deg = geom.incident_edges(i).len();
+                if deg > 0 {
+                    1.0 / (deg as f32)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
         let c_max = (gravity_mps2 * H_WAVE_CAP_M).sqrt();
         let dt_cfl = (0.48 * min_edge_dist_m / c_max.max(1.0)) as f64;
         let n_substeps_per_hour = ((3600.0 / dt_cfl.max(10.0)).ceil() as usize).clamp(12, 240);
@@ -185,6 +328,13 @@ impl LaplaceTidalSolver {
             bed_m,
             initial_ocean,
             edge_slope_sq,
+            cell_inv_deg,
+            inundation_ceil_m: BASE_INUNDATION_CEIL_M,
+            active_domain_dirty: true,
+            active_cells: Vec::with_capacity(n),
+            active_edges: Vec::with_capacity(ne),
+            eta_eq_nonzero: false,
+            astro_dirty: false,
             gravity_mps2,
             day_hours: day_hours.clamp(2.0, 240.0),
             tilt_rad: tilt_deg.clamp(0.0, 89.0) * PI / 180.0,
@@ -212,17 +362,60 @@ impl LaplaceTidalSolver {
             scratch_flux: vec![0.0; ne],
             scratch_outflow_vol: vec![0.0; n],
             scratch_outflow_scale: vec![1.0; n],
-            scratch_u_next: vec![0.0; ne],
             scratch_edge_diss: vec![0.0; ne],
+            scratch_atm_dp_acc: vec![0.0; ne],
+            scratch_atm_tau_acc: vec![0.0; ne],
+            scratch_range_min: vec![0; n],
+            scratch_range_max: vec![0; n],
         };
         solver.set_moon_params(moon_count, primary_mass_lunar, primary_dist_radii);
         solver.reset_state(geom);
         solver
     }
 
+    fn target_inundation_ceil_m(&self) -> f32 {
+        let eq_sum: f64 = self.moons.iter().map(|m| m.eq_amp_m).sum();
+        (BASE_INUNDATION_CEIL_M + 4.5 * (eq_sum as f32)).max(BASE_INUNDATION_CEIL_M)
+    }
+
+    fn ensure_active_domain(&mut self, geom: &FiniteVolumeSphereGeom) {
+        if !self.active_domain_dirty {
+            return;
+        }
+        let ceil = self.inundation_ceil_m.max(self.target_inundation_ceil_m());
+        self.inundation_ceil_m = ceil;
+        self.active_cells.clear();
+        for &c_u32 in &geom.morton_cells {
+            let c = c_u32 as usize;
+            if self.bed_m[c] <= ceil || self.h_total_m[c] > 0.0 {
+                self.active_cells.push(c_u32);
+            }
+        }
+        self.active_edges.clear();
+        for (e_idx, e) in geom.edges.iter().enumerate() {
+            let l = e.left as usize;
+            let r = e.right as usize;
+            if self.bed_m[l].max(self.bed_m[r]) <= ceil
+                || self.h_total_m[l] > 0.0
+                || self.h_total_m[r] > 0.0
+            {
+                self.active_edges.push(e_idx as u32);
+            }
+        }
+        self.active_domain_dirty = false;
+    }
+
+    #[inline]
+    pub fn has_astro_forcing(&self) -> bool {
+        self.solar_tide_factor > 1e-6 || self.moons.iter().any(|m| m.eq_amp_m > 1e-6)
+    }
+
     /// Resets the ocean to a calm initial equilibrium sea surface (`eta = 0`, `u = 0`) at `t = 0`.
     pub fn reset_state(&mut self, geom: &FiniteVolumeSphereGeom) {
         self.elapsed_hours = 0;
+        self.inundation_ceil_m = self.target_inundation_ceil_m();
+        self.active_domain_dirty = true;
+        self.astro_dirty = false;
         for i in 0..self.num_cells {
             self.h_total_m[i] = (-self.bed_m[i]).max(0.0);
             self.eta_m[i] = 0.0;
@@ -233,6 +426,11 @@ impl LaplaceTidalSolver {
             self.tidal_range_m[i] = 0.0;
         }
         self.u_edge.fill(0.0);
+        self.scratch_flux.fill(0.0);
+        self.scratch_edge_diss.fill(0.0);
+        self.eta_eq_m.fill(0.0);
+        self.eta_eq_nonzero = false;
+        self.ensure_active_domain(geom);
         self.evaluate_equilibrium_tide(geom, 0.0);
         self.eta_history_mm.clear();
         self.push_history_frame();
@@ -276,6 +474,9 @@ impl LaplaceTidalSolver {
                 node_asc_rad: ((m as f32) * 2.399) % std::f32::consts::TAU,
                 eq_amp_m,
             });
+        }
+        if self.target_inundation_ceil_m() > self.inundation_ceil_m {
+            self.active_domain_dirty = true;
         }
     }
 
@@ -353,48 +554,16 @@ impl LaplaceTidalSolver {
         equatorial_to_subpoint_unit_xyz(sun_now_eq, gmst)
     }
 
-    /// Evaluates the combined lunar + solar quadrupole equilibrium tide $\eta_{\text{eq},i}$ (m),
-    /// removing the instantaneous wet-ocean area mean so total water volume is undisturbed.
-    fn evaluate_equilibrium_tide(&mut self, geom: &FiniteVolumeSphereGeom, sim_seconds: f64) {
-        let total_days =
-            (self.start_day_of_year as f64) + 0.5 + sim_seconds / (self.day_hours * 3600.0);
-        let base_days = total_days.floor();
-        let utc_tau = total_days - base_days;
-
-        let lam_noon =
-            self.home_init_angle_rad + 2.0 * PI * (base_days + 0.5) / self.days_per_year;
-        let sun_noon_eq = ecliptic_to_equatorial(lam_noon, 0.0, self.tilt_rad);
-        let ra_noon = sun_noon_eq[1].atan2(sun_noon_eq[0]);
-        let gmst = ra_noon + 2.0 * PI * (utc_tau - 0.5);
-
-        let mut bodies: Vec<(Vec3, f64)> = Vec::with_capacity(self.moons.len() + 1);
-        let radius_scale = self.geom_radius_scale(geom);
-
-        if self.solar_tide_factor > 1e-6 {
-            let lam_sun = self.home_init_angle_rad + 2.0 * PI * total_days / self.days_per_year;
-            let sun_eq = ecliptic_to_equatorial(lam_sun, 0.0, self.tilt_rad);
-            let r_sun = equatorial_to_subpoint_unit_xyz(sun_eq, gmst);
-            let amp_sun = LOVE_GAMMA2 * 0.1648 * self.solar_tide_factor * radius_scale;
-            bodies.push((r_sun, amp_sun));
-        }
-
-        for moon in &self.moons {
-            if moon.eq_amp_m <= 1e-6 {
-                continue;
-            }
-            let period = (moon.period_local_days as f64).max(1.0);
-            let inc_rad = (moon.inclination_deg as f64) * PI / 180.0;
-            let lam = (moon.init_angle_rad as f64) + 2.0 * PI * total_days / period;
-            let node = (moon.node_asc_rad as f64) - 2.0 * PI * total_days / (period * 248.0);
-            let beta = (inc_rad.sin() * (lam - node).sin()).clamp(-1.0, 1.0).asin();
-            let moon_eq = ecliptic_to_equatorial(lam, beta, self.tilt_rad);
-            let r_moon = equatorial_to_subpoint_unit_xyz(moon_eq, gmst);
-            bodies.push((r_moon, LOVE_GAMMA2 * moon.eq_amp_m * radius_scale));
-        }
-
-        if bodies.is_empty() {
-            self.eta_eq_m.fill(0.0);
-            return;
+    /// Computes stack-allocated `([rx, ry, rz], ramped_amp_m)` quadrupole forcing bodies at `sim_seconds`.
+    fn compute_astro_bodies(
+        &self,
+        geom: &FiniteVolumeSphereGeom,
+        sim_seconds: f64,
+    ) -> ([([f32; 3], f32); 7], usize) {
+        let mut bodies = [([0.0_f32; 3], 0.0_f32); 7];
+        let mut n_bodies = 0usize;
+        if !self.has_astro_forcing() {
+            return (bodies, 0);
         }
 
         // Smooth 4-hour sin^2 ramp from t = 0 so starting at rest excites clean Kelvin/Poincaré
@@ -405,29 +574,94 @@ impl LaplaceTidalSolver {
         } else {
             1.0
         };
+        if ramp <= 0.0 {
+            return (bodies, 0);
+        }
+
+        let total_days =
+            (self.start_day_of_year as f64) + 0.5 + sim_seconds / (self.day_hours * 3600.0);
+        let base_days = total_days.floor();
+        let utc_tau = total_days - base_days;
+
+        let lam_noon =
+            self.home_init_angle_rad + 2.0 * PI * (base_days + 0.5) / self.days_per_year;
+        let sun_noon_eq = ecliptic_to_equatorial(lam_noon, 0.0, self.tilt_rad);
+        let ra_noon = sun_noon_eq[1].atan2(sun_noon_eq[0]);
+        let gmst = ra_noon + 2.0 * PI * (utc_tau - 0.5);
+        let radius_scale = self.geom_radius_scale(geom);
+
+        if self.solar_tide_factor > 1e-6 {
+            let lam_sun = self.home_init_angle_rad + 2.0 * PI * total_days / self.days_per_year;
+            let sun_eq = ecliptic_to_equatorial(lam_sun, 0.0, self.tilt_rad);
+            let r_sun = equatorial_to_subpoint_unit_xyz(sun_eq, gmst);
+            let amp_sun = LOVE_GAMMA2 * 0.1648 * self.solar_tide_factor * radius_scale * ramp;
+            bodies[n_bodies] = (
+                [r_sun[0] as f32, r_sun[1] as f32, r_sun[2] as f32],
+                amp_sun as f32,
+            );
+            n_bodies += 1;
+        }
+
+        for moon in &self.moons {
+            if moon.eq_amp_m <= 1e-6 || n_bodies >= 7 {
+                continue;
+            }
+            let period = (moon.period_local_days as f64).max(1.0);
+            let inc_rad = (moon.inclination_deg as f64) * PI / 180.0;
+            let lam = (moon.init_angle_rad as f64) + 2.0 * PI * total_days / period;
+            let node = (moon.node_asc_rad as f64) - 2.0 * PI * total_days / (period * 248.0);
+            let beta = (inc_rad.sin() * (lam - node).sin()).clamp(-1.0, 1.0).asin();
+            let moon_eq = ecliptic_to_equatorial(lam, beta, self.tilt_rad);
+            let r_moon = equatorial_to_subpoint_unit_xyz(moon_eq, gmst);
+            let amp_moon = LOVE_GAMMA2 * moon.eq_amp_m * radius_scale * ramp;
+            bodies[n_bodies] = (
+                [r_moon[0] as f32, r_moon[1] as f32, r_moon[2] as f32],
+                amp_moon as f32,
+            );
+            n_bodies += 1;
+        }
+
+        (bodies, n_bodies)
+    }
+
+    /// Evaluates the combined lunar + solar quadrupole equilibrium tide $\eta_{\text{eq},i}$ (m),
+    /// removing the instantaneous wet-ocean area mean so total water volume is undisturbed.
+    fn evaluate_equilibrium_tide(&mut self, geom: &FiniteVolumeSphereGeom, sim_seconds: f64) {
+        let (bodies, n_bodies) = self.compute_astro_bodies(geom, sim_seconds);
+        if n_bodies == 0 {
+            if self.eta_eq_nonzero {
+                for &c_u32 in &self.active_cells {
+                    self.eta_eq_m[c_u32 as usize] = 0.0;
+                }
+                self.eta_eq_nonzero = false;
+            }
+            return;
+        }
+        self.eta_eq_nonzero = true;
+        let body_slice = &bodies[..n_bodies];
 
         let mut wet_sum = 0.0_f64;
         let mut wet_area = 0.0_f64;
-        for i in 0..self.num_cells {
+        for &c_u32 in &self.active_cells {
+            let i = c_u32 as usize;
             let p = self.unit_centers[i];
-            let mut val = 0.0_f64;
-            for &(rb, amp) in &bodies {
+            let mut val = 0.0_f32;
+            for &(rb, amp) in body_slice {
                 let cos_z = p[0] * rb[0] + p[1] * rb[1] + p[2] * rb[2];
                 val += amp * 0.5 * (3.0 * cos_z * cos_z - 1.0);
             }
-            val *= ramp;
-            self.eta_eq_m[i] = val as f32;
+            self.eta_eq_m[i] = val;
             if self.h_total_m[i] > H_DRY_M {
                 let a = geom.areas_m2[i] as f64;
-                wet_sum += val * a;
+                wet_sum += (val as f64) * a;
                 wet_area += a;
             }
         }
 
         if wet_area > 1.0 {
             let mean_eq = (wet_sum / wet_area) as f32;
-            for v in &mut self.eta_eq_m {
-                *v -= mean_eq;
+            for &c_u32 in &self.active_cells {
+                self.eta_eq_m[c_u32 as usize] -= mean_eq;
             }
         }
     }
@@ -437,6 +671,84 @@ impl LaplaceTidalSolver {
         (geom.radius_m / 6_371_000.0).clamp(0.25, 4.0)
     }
 
+    fn precompute_hourly_atm_edge_forcing(
+        &mut self,
+        geom: &FiniteVolumeSphereGeom,
+        forcing: AtmosphericTideForcing<'_>,
+    ) {
+        let inv_rho = 1.0 / RHO_SEAWATER;
+        for &e_u32 in &self.active_edges {
+            let e_idx = e_u32 as usize;
+            let e = &geom.edges[e_idx];
+            let l = e.left as usize;
+            let r = e.right as usize;
+            let dp_dn = (forcing.p_anom_pa[r] - forcing.p_anom_pa[l]) * e.inv_center_dist_m;
+            let tau_l = forcing.tau_east_pa[l] * e.nx_left + forcing.tau_north_pa[l] * e.ny_left;
+            let tau_r = forcing.tau_east_pa[r] * e.nx_right + forcing.tau_north_pa[r] * e.ny_right;
+            self.scratch_atm_dp_acc[e_idx] = -inv_rho * dp_dn;
+            self.scratch_atm_tau_acc[e_idx] = inv_rho * 0.5 * (tau_l + tau_r);
+        }
+    }
+
+    fn finalize_hour(&mut self, geom: &FiniteVolumeSphereGeom) {
+        reconstruct_active_vectors(
+            geom,
+            &self.active_cells,
+            &self.u_edge,
+            &mut self.u_east,
+            &mut self.v_north,
+        );
+
+        let inv_sub = 1.0 / (self.n_substeps_per_hour as f32);
+        if geom.all_deg_le_6 {
+            for &c_u32 in &self.active_cells {
+                let i = c_u32 as usize;
+                let ux = self.u_east[i];
+                let vy = self.v_north[i];
+                self.speed_mps[i] = (ux * ux + vy * vy).sqrt();
+                let h = self.h_total_m[i];
+                self.eta_m[i] = if h > H_DRY_M {
+                    self.bed_m[i] + h
+                } else {
+                    0.0
+                };
+                let st = &geom.cell_div6[i];
+                let inv_deg = self.cell_inv_deg[i];
+                // Note for pentagons, slot [5] repeats slot [0], so sum only real degree via CSR or mask:
+                let start = geom.cell_edge_offsets[i];
+                let end = geom.cell_edge_offsets[i + 1];
+                let deg = end - start;
+                let mut diss_sum = 0.0_f32;
+                for k in 0..deg {
+                    diss_sum += self.scratch_edge_diss[st.edge_idx[k] as usize];
+                }
+                self.dissipation_wm2[i] = diss_sum * inv_deg * inv_sub;
+            }
+        } else {
+            for &c_u32 in &self.active_cells {
+                let i = c_u32 as usize;
+                let ux = self.u_east[i];
+                let vy = self.v_north[i];
+                self.speed_mps[i] = (ux * ux + vy * vy).sqrt();
+                let h = self.h_total_m[i];
+                self.eta_m[i] = if h > H_DRY_M {
+                    self.bed_m[i] + h
+                } else {
+                    0.0
+                };
+                let mut diss_sum = 0.0_f32;
+                for inc in geom.incident_edges(i) {
+                    diss_sum += self.scratch_edge_diss[inc.edge_idx as usize];
+                }
+                self.dissipation_wm2[i] = diss_sum * self.cell_inv_deg[i] * inv_sub;
+            }
+        }
+
+        self.elapsed_hours += 1;
+        self.push_history_frame();
+        self.recompute_rolling_tidal_range();
+    }
+
     /// Advances the global tidal ocean by `1 hour` (`n_substeps_per_hour` forward–backward Sielecki
     /// substeps), optionally forced by atmospheric pressure and wind stress (`forcing`).
     pub fn step_hour(
@@ -444,34 +756,49 @@ impl LaplaceTidalSolver {
         geom: &FiniteVolumeSphereGeom,
         forcing: Option<AtmosphericTideForcing<'_>>,
     ) {
+        self.ensure_active_domain(geom);
         let base_seconds = (self.elapsed_hours as f64) * 3600.0;
         let dt = self.dt_sub_s;
         let g = self.gravity_mps2;
-        let inv_rho = 1.0 / RHO_SEAWATER;
-
-        // Mild abyssal radiative relaxation rate (`~16 h` timescale) accounting for unmodeled
-        // baroclinic internal-tide radiation into the deep ocean so open-ocean M2 equilibrates cleanly.
         let r_rad = 1.7e-5_f32;
         let kappa_wave = 1.6e4_f32;
 
-        self.dissipation_wm2.fill(0.0);
-        let inv_sub = 1.0 / (self.n_substeps_per_hour as f32);
+        let has_atm = if let Some(f_atm) = forcing {
+            self.precompute_hourly_atm_edge_forcing(geom, f_atm);
+            true
+        } else {
+            false
+        };
+
+        for &e_u32 in &self.active_edges {
+            self.scratch_edge_diss[e_u32 as usize] = 0.0;
+        }
+        if self.has_astro_forcing() {
+            self.astro_dirty = true;
+        }
 
         for sub in 0..self.n_substeps_per_hour {
             let t_sec = base_seconds + ((sub as f64) + 0.5) * (dt as f64);
             self.evaluate_equilibrium_tide(geom, t_sec);
-            geom.reconstruct_cell_vectors(&self.u_edge, &mut self.u_east, &mut self.v_north);
+            reconstruct_active_vectors(
+                geom,
+                &self.active_cells,
+                &self.u_edge,
+                &mut self.u_east,
+                &mut self.v_north,
+            );
 
-            // 1. Momentum update on C-grid edges (Audusse hydrostatic reconstruction + implicit drag).
-            for (e_idx, e) in geom.edges.iter().enumerate() {
+            // 1. Momentum update on active C-grid edges (Audusse hydrostatic reconstruction + implicit drag).
+            for &e_u32 in &self.active_edges {
+                let e_idx = e_u32 as usize;
+                let e = &geom.edges[e_idx];
                 let l = e.left as usize;
                 let r = e.right as usize;
                 let hl = self.h_total_m[l];
                 let hr = self.h_total_m[r];
 
                 if hl <= H_DRY_M && hr <= H_DRY_M {
-                    self.scratch_u_next[e_idx] = 0.0;
-                    self.scratch_edge_diss[e_idx] = 0.0;
+                    self.u_edge[e_idx] = 0.0;
                     continue;
                 }
 
@@ -484,24 +811,19 @@ impl LaplaceTidalSolver {
                 let hr_star = (zetar - zb_star).max(0.0);
 
                 if hl_star <= H_DRY_M && hr_star <= H_DRY_M {
-                    self.scratch_u_next[e_idx] = 0.0;
-                    self.scratch_edge_diss[e_idx] = 0.0;
+                    self.u_edge[e_idx] = 0.0;
                     continue;
                 }
 
                 let zeta_l_eff = zb_star + hl_star;
                 let zeta_r_eff = zb_star + hr_star;
                 let h_edge = 0.5 * (hl_star + hr_star);
-
-                // Wave-speed depth cap `H_WAVE_CAP_M` scales barotropic pressure-gradient acceleration
-                // in ultra-deep abyssal trenches (`> 4500 m`) so explicit substeps remain fast & stable.
                 let wave_scale = if h_edge > H_WAVE_CAP_M {
                     H_WAVE_CAP_M / h_edge
                 } else {
                     1.0
                 };
 
-                //SAL anomaly relative to resting sea level (`0` on ocean, `zb` on dry land):
                 let eta_anom_l = zetal - zbl.max(0.0);
                 let eta_anom_r = zetar - zbr.max(0.0);
                 let sal_weight = (h_edge / 200.0).clamp(0.0, 1.0) * SAL_BETA;
@@ -510,27 +832,22 @@ impl LaplaceTidalSolver {
                 let d_sal_dn = (eta_anom_r - eta_anom_l) * e.inv_center_dist_m;
                 let d_eq_dn = (self.eta_eq_m[r] - self.eta_eq_m[l]) * e.inv_center_dist_m;
 
-                // Coriolis normal component: `f * (nx * v_north - ny * u_east)` averaged across left & right.
-                let cor_l = geom.coriolis_f[l] * (e.nx_left * self.v_north[l] - e.ny_left * self.u_east[l]);
-                let cor_r = geom.coriolis_f[r] * (e.nx_right * self.v_north[r] - e.ny_right * self.u_east[r]);
-                let cor_acc = 0.5 * (cor_l + cor_r);
-
-                let mut atm_acc = 0.0_f32;
-                if let Some(ref f_atm) = forcing {
-                    let dp_dn = (f_atm.p_anom_pa[r] - f_atm.p_anom_pa[l]) * e.inv_center_dist_m;
-                    let tau_l = f_atm.tau_east_pa[l] * e.nx_left + f_atm.tau_north_pa[l] * e.ny_left;
-                    let tau_r = f_atm.tau_east_pa[r] * e.nx_right + f_atm.tau_north_pa[r] * e.ny_right;
-                    let tau_edge = 0.5 * (tau_l + tau_r);
-                    // Shallow shelves amplify wind-driven storm surge (`tau / (rho * h)`).
-                    atm_acc = -inv_rho * dp_dn + (tau_edge * inv_rho) / h_edge.max(2.5);
-                }
-
-                let accel = cor_acc
-                    + wave_scale * (-g * d_zeta_dn + g * sal_weight * d_sal_dn + g * d_eq_dn + atm_acc);
-
-                let u_old = self.u_edge[e_idx];
                 let vt_l = e.nx_left * self.v_north[l] - e.ny_left * self.u_east[l];
                 let vt_r = e.nx_right * self.v_north[r] - e.ny_right * self.u_east[r];
+                let cor_acc = 0.5 * (geom.coriolis_f[l] * vt_l + geom.coriolis_f[r] * vt_r);
+
+                let atm_acc = if has_atm {
+                    self.scratch_atm_dp_acc[e_idx]
+                        + self.scratch_atm_tau_acc[e_idx] / h_edge.max(2.5)
+                } else {
+                    0.0
+                };
+
+                let accel = cor_acc
+                    + wave_scale
+                        * (-g * d_zeta_dn + g * sal_weight * d_sal_dn + g * d_eq_dn + atm_acc);
+
+                let u_old = self.u_edge[e_idx];
                 let vt_avg = 0.5 * (vt_l + vt_r);
                 let speed_mag = (u_old * u_old + vt_avg * vt_avg + U_BG_MPS * U_BG_MPS).sqrt();
 
@@ -540,102 +857,338 @@ impl LaplaceTidalSolver {
                 let r_tot = r_bot + r_wave + r_rad;
 
                 let u_new = ((u_old + dt * accel) / (1.0 + dt * r_tot)).clamp(-12.0, 12.0);
-                self.scratch_u_next[e_idx] = u_new;
-                self.scratch_edge_diss[e_idx] =
+                self.u_edge[e_idx] = u_new;
+                self.scratch_edge_diss[e_idx] +=
                     RHO_SEAWATER * h_edge * (r_bot + r_wave) * u_new * u_new;
             }
-            self.u_edge.copy_from_slice(&self.scratch_u_next);
 
-            // 2. Upwind thickness flux with positivity-preserving outflow limiter (strict mass conservation).
-            self.scratch_outflow_vol.fill(0.0);
-            for (e_idx, e) in geom.edges.iter().enumerate() {
-                let u = self.u_edge[e_idx];
-                if u.abs() <= 1e-8 {
-                    self.scratch_flux[e_idx] = 0.0;
-                    continue;
-                }
-                let l = e.left as usize;
-                let r = e.right as usize;
-                let zb_star = self.bed_m[l].max(self.bed_m[r]);
-                let h_up = if u > 0.0 {
-                    (self.bed_m[l] + self.h_total_m[l] - zb_star).max(0.0).min(self.h_total_m[l])
-                } else {
-                    (self.bed_m[r] + self.h_total_m[r] - zb_star).max(0.0).min(self.h_total_m[r])
-                };
-                let q = h_up * u;
-                self.scratch_flux[e_idx] = q;
-                if q > 0.0 {
-                    self.scratch_outflow_vol[l] += dt * e.dual_len_m * q;
-                } else if q < 0.0 {
-                    self.scratch_outflow_vol[r] += dt * e.dual_len_m * (-q);
-                }
-            }
-
-            for i in 0..self.num_cells {
-                let avail = 0.95 * self.h_total_m[i] * geom.areas_m2[i];
-                let out_v = self.scratch_outflow_vol[i];
-                self.scratch_outflow_scale[i] = if out_v > avail && out_v > 1e-9 {
-                    (avail / out_v).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-            }
-
-            for (e_idx, e) in geom.edges.iter().enumerate() {
-                let q = self.scratch_flux[e_idx];
-                if q > 0.0 {
-                    self.scratch_flux[e_idx] = q * self.scratch_outflow_scale[e.left as usize];
-                } else if q < 0.0 {
-                    self.scratch_flux[e_idx] = q * self.scratch_outflow_scale[e.right as usize];
-                }
-            }
-
-            // 3. Conservative thickness update & dissipation accumulation.
-            for i in 0..self.num_cells {
-                let mut div_hu = 0.0_f32;
-                let mut diss_sum = 0.0_f32;
-                let mut edge_cnt = 0.0_f32;
-                for inc in geom.incident_edges(i) {
-                    let e_idx = inc.edge_idx as usize;
-                    div_hu += self.scratch_flux[e_idx] * inc.flux_factor;
-                    diss_sum += self.scratch_edge_diss[e_idx];
-                    edge_cnt += 1.0;
-                }
-                self.h_total_m[i] = (self.h_total_m[i] - dt * div_hu).max(0.0);
-                if edge_cnt > 0.0 {
-                    self.dissipation_wm2[i] += (diss_sum / edge_cnt) * inv_sub;
-                }
-            }
+            // 2 & 3. Upwind thickness flux with positivity limiter + conservative thickness update.
+            advance_active_thickness(
+                geom,
+                &self.active_cells,
+                &self.active_edges,
+                dt,
+                &self.bed_m,
+                &self.u_edge,
+                &mut self.h_total_m,
+                &mut self.scratch_flux,
+                &mut self.scratch_outflow_vol,
+                &mut self.scratch_outflow_scale,
+            );
         }
 
-        // Reconstruct final end-of-hour velocity, speed, free-surface anomaly `eta_m`, and 28h range.
-        geom.reconstruct_cell_vectors(&self.u_edge, &mut self.u_east, &mut self.v_north);
+        self.finalize_hour(geom);
+    }
+
+    /// Steps both `self` (coupled dynamic tides + atmospheric storm surge) and `astro_ref`
+    /// (unforced astronomical reference tide) by `1 hour` in fused cache-shared passes, writing
+    /// `out_storm_surge_m = self.eta_m - astro_ref.eta_m`.
+    ///
+    /// When neither lunar nor solar tides are active, `astro_ref` remains at lake-at-rest (`0 m`)
+    /// and is skipped completely.
+    pub fn step_hour_paired_storm_surge(
+        &mut self,
+        astro_ref: &mut Self,
+        geom: &FiniteVolumeSphereGeom,
+        forcing: AtmosphericTideForcing<'_>,
+        out_storm_surge_m: &mut [f32],
+    ) {
+        assert_eq!(out_storm_surge_m.len(), self.num_cells);
+        if !self.has_astro_forcing() && !astro_ref.astro_dirty {
+            self.step_hour(geom, Some(forcing));
+            astro_ref.elapsed_hours = self.elapsed_hours;
+            out_storm_surge_m.copy_from_slice(&self.eta_m);
+            return;
+        }
+
+        self.ensure_active_domain(geom);
+        astro_ref.inundation_ceil_m = astro_ref.inundation_ceil_m.max(self.inundation_ceil_m);
+        astro_ref.ensure_active_domain(geom);
+
+        let base_seconds = (self.elapsed_hours as f64) * 3600.0;
+        let dt = self.dt_sub_s;
+        let g = self.gravity_mps2;
+        let r_rad = 1.7e-5_f32;
+        let kappa_wave = 1.6e4_f32;
+
+        self.precompute_hourly_atm_edge_forcing(geom, forcing);
+        for &e_u32 in &self.active_edges {
+            self.scratch_edge_diss[e_u32 as usize] = 0.0;
+        }
+        if self.has_astro_forcing() {
+            self.astro_dirty = true;
+            astro_ref.astro_dirty = true;
+        }
+
+        for sub in 0..self.n_substeps_per_hour {
+            let t_sec = base_seconds + ((sub as f64) + 0.5) * (dt as f64);
+
+            // 1. Evaluate astronomical bodies ONCE and fill equilibrium tide for both oceans.
+            let (bodies, n_bodies) = self.compute_astro_bodies(geom, t_sec);
+            if n_bodies == 0 {
+                if self.eta_eq_nonzero {
+                    for &c_u32 in &self.active_cells {
+                        let i = c_u32 as usize;
+                        self.eta_eq_m[i] = 0.0;
+                        astro_ref.eta_eq_m[i] = 0.0;
+                    }
+                    self.eta_eq_nonzero = false;
+                    astro_ref.eta_eq_nonzero = false;
+                }
+            } else {
+                self.eta_eq_nonzero = true;
+                astro_ref.eta_eq_nonzero = true;
+                let body_slice = &bodies[..n_bodies];
+                let mut wet_sum_a = 0.0_f64;
+                let mut wet_area_a = 0.0_f64;
+                let mut wet_sum_b = 0.0_f64;
+                let mut wet_area_b = 0.0_f64;
+
+                for &c_u32 in &self.active_cells {
+                    let i = c_u32 as usize;
+                    let p = self.unit_centers[i];
+                    let mut val = 0.0_f32;
+                    for &(rb, amp) in body_slice {
+                        let cos_z = p[0] * rb[0] + p[1] * rb[1] + p[2] * rb[2];
+                        val += amp * 0.5 * (3.0 * cos_z * cos_z - 1.0);
+                    }
+                    self.eta_eq_m[i] = val;
+                    astro_ref.eta_eq_m[i] = val;
+                    let a = geom.areas_m2[i] as f64;
+                    if self.h_total_m[i] > H_DRY_M {
+                        wet_sum_a += (val as f64) * a;
+                        wet_area_a += a;
+                    }
+                    if astro_ref.h_total_m[i] > H_DRY_M {
+                        wet_sum_b += (val as f64) * a;
+                        wet_area_b += a;
+                    }
+                }
+                let mean_a = if wet_area_a > 1.0 {
+                    (wet_sum_a / wet_area_a) as f32
+                } else {
+                    0.0
+                };
+                let mean_b = if wet_area_b > 1.0 {
+                    (wet_sum_b / wet_area_b) as f32
+                } else {
+                    0.0
+                };
+                for &c_u32 in &self.active_cells {
+                    let i = c_u32 as usize;
+                    self.eta_eq_m[i] -= mean_a;
+                    astro_ref.eta_eq_m[i] -= mean_b;
+                }
+            }
+
+            // 2. Fused Perot velocity reconstruction for both oceans in a single stencil pass.
+            if geom.all_deg_le_6 {
+                for &c_u32 in &self.active_cells {
+                    let c = c_u32 as usize;
+                    let st = &geom.cell_perot6[c];
+                    let mut ux_a = 0.0_f32;
+                    let mut vy_a = 0.0_f32;
+                    let mut ux_b = 0.0_f32;
+                    let mut vy_b = 0.0_f32;
+                    for k in 0..6 {
+                        let e_idx = st.edge_idx[k] as usize;
+                        let wx = st.perot_wx[k];
+                        let wy = st.perot_wy[k];
+                        let ua = self.u_edge[e_idx];
+                        let ub = astro_ref.u_edge[e_idx];
+                        ux_a += ua * wx;
+                        vy_a += ua * wy;
+                        ux_b += ub * wx;
+                        vy_b += ub * wy;
+                    }
+                    self.u_east[c] = ux_a;
+                    self.v_north[c] = vy_a;
+                    astro_ref.u_east[c] = ux_b;
+                    astro_ref.v_north[c] = vy_b;
+                }
+            } else {
+                geom.reconstruct_cell_vectors(&self.u_edge, &mut self.u_east, &mut self.v_north);
+                geom.reconstruct_cell_vectors(
+                    &astro_ref.u_edge,
+                    &mut astro_ref.u_east,
+                    &mut astro_ref.v_north,
+                );
+            }
+
+            // 3. Fused Audusse edge momentum update sharing `geom.edges`, `bed_m`, `coriolis_f`, and `edge_slope_sq`.
+            for &e_u32 in &self.active_edges {
+                let e_idx = e_u32 as usize;
+                let e = &geom.edges[e_idx];
+                let l = e.left as usize;
+                let r = e.right as usize;
+                let zbl = self.bed_m[l];
+                let zbr = self.bed_m[r];
+                let zb_star = zbl.max(zbr);
+                let zb_l_pos = zbl.max(0.0);
+                let zb_r_pos = zbr.max(0.0);
+                let fl = geom.coriolis_f[l];
+                let fr = geom.coriolis_f[r];
+                let slope_sq = self.edge_slope_sq[e_idx];
+
+                // Coupled tide + storm surge edge update:
+                let hl_a = self.h_total_m[l];
+                let hr_a = self.h_total_m[r];
+                if hl_a <= H_DRY_M && hr_a <= H_DRY_M {
+                    self.u_edge[e_idx] = 0.0;
+                } else {
+                    let zetal = zbl + hl_a;
+                    let zetar = zbr + hr_a;
+                    let hl_star = (zetal - zb_star).max(0.0);
+                    let hr_star = (zetar - zb_star).max(0.0);
+                    if hl_star <= H_DRY_M && hr_star <= H_DRY_M {
+                        self.u_edge[e_idx] = 0.0;
+                    } else {
+                        let h_edge = 0.5 * (hl_star + hr_star);
+                        let wave_scale = if h_edge > H_WAVE_CAP_M {
+                            H_WAVE_CAP_M / h_edge
+                        } else {
+                            1.0
+                        };
+                        let sal_weight = (h_edge / 200.0).clamp(0.0, 1.0) * SAL_BETA;
+                        let d_zeta_dn = (hr_star - hl_star) * e.inv_center_dist_m;
+                        let d_sal_dn =
+                            ((zetar - zb_r_pos) - (zetal - zb_l_pos)) * e.inv_center_dist_m;
+                        let d_eq_dn = (self.eta_eq_m[r] - self.eta_eq_m[l]) * e.inv_center_dist_m;
+
+                        let vt_l = e.nx_left * self.v_north[l] - e.ny_left * self.u_east[l];
+                        let vt_r = e.nx_right * self.v_north[r] - e.ny_right * self.u_east[r];
+                        let cor_acc = 0.5 * (fl * vt_l + fr * vt_r);
+                        let atm_acc = self.scratch_atm_dp_acc[e_idx]
+                            + self.scratch_atm_tau_acc[e_idx] / h_edge.max(2.5);
+                        let accel = cor_acc
+                            + wave_scale
+                                * (-g * d_zeta_dn
+                                    + g * sal_weight * d_sal_dn
+                                    + g * d_eq_dn
+                                    + atm_acc);
+
+                        let u_old = self.u_edge[e_idx];
+                        let vt_avg = 0.5 * (vt_l + vt_r);
+                        let speed_mag =
+                            (u_old * u_old + vt_avg * vt_avg + U_BG_MPS * U_BG_MPS).sqrt();
+                        let r_bot = CD_BOTTOM * speed_mag / h_edge.max(1.5);
+                        let n_bv = 0.0025 * (h_edge / 300.0).clamp(0.0, 1.0);
+                        let r_wave = kappa_wave * n_bv * slope_sq / h_edge.max(25.0);
+                        let r_tot = r_bot + r_wave + r_rad;
+
+                        let u_new = ((u_old + dt * accel) / (1.0 + dt * r_tot)).clamp(-12.0, 12.0);
+                        self.u_edge[e_idx] = u_new;
+                        self.scratch_edge_diss[e_idx] +=
+                            RHO_SEAWATER * h_edge * (r_bot + r_wave) * u_new * u_new;
+                    }
+                }
+
+                // Unforced astronomical reference edge update:
+                let hl_b = astro_ref.h_total_m[l];
+                let hr_b = astro_ref.h_total_m[r];
+                if hl_b <= H_DRY_M && hr_b <= H_DRY_M {
+                    astro_ref.u_edge[e_idx] = 0.0;
+                } else {
+                    let zetal = zbl + hl_b;
+                    let zetar = zbr + hr_b;
+                    let hl_star = (zetal - zb_star).max(0.0);
+                    let hr_star = (zetar - zb_star).max(0.0);
+                    if hl_star <= H_DRY_M && hr_star <= H_DRY_M {
+                        astro_ref.u_edge[e_idx] = 0.0;
+                    } else {
+                        let h_edge = 0.5 * (hl_star + hr_star);
+                        let wave_scale = if h_edge > H_WAVE_CAP_M {
+                            H_WAVE_CAP_M / h_edge
+                        } else {
+                            1.0
+                        };
+                        let sal_weight = (h_edge / 200.0).clamp(0.0, 1.0) * SAL_BETA;
+                        let d_zeta_dn = (hr_star - hl_star) * e.inv_center_dist_m;
+                        let d_sal_dn =
+                            ((zetar - zb_r_pos) - (zetal - zb_l_pos)) * e.inv_center_dist_m;
+                        let d_eq_dn =
+                            (astro_ref.eta_eq_m[r] - astro_ref.eta_eq_m[l]) * e.inv_center_dist_m;
+
+                        let vt_l =
+                            e.nx_left * astro_ref.v_north[l] - e.ny_left * astro_ref.u_east[l];
+                        let vt_r =
+                            e.nx_right * astro_ref.v_north[r] - e.ny_right * astro_ref.u_east[r];
+                        let cor_acc = 0.5 * (fl * vt_l + fr * vt_r);
+                        let accel = cor_acc
+                            + wave_scale
+                                * (-g * d_zeta_dn + g * sal_weight * d_sal_dn + g * d_eq_dn);
+
+                        let u_old = astro_ref.u_edge[e_idx];
+                        let vt_avg = 0.5 * (vt_l + vt_r);
+                        let speed_mag =
+                            (u_old * u_old + vt_avg * vt_avg + U_BG_MPS * U_BG_MPS).sqrt();
+                        let r_bot = CD_BOTTOM * speed_mag / h_edge.max(1.5);
+                        let n_bv = 0.0025 * (h_edge / 300.0).clamp(0.0, 1.0);
+                        let r_wave = kappa_wave * n_bv * slope_sq / h_edge.max(25.0);
+                        let r_tot = r_bot + r_wave + r_rad;
+
+                        astro_ref.u_edge[e_idx] =
+                            ((u_old + dt * accel) / (1.0 + dt * r_tot)).clamp(-12.0, 12.0);
+                    }
+                }
+            }
+
+            // 4. Conservative thickness updates for both oceans:
+            advance_active_thickness(
+                geom,
+                &self.active_cells,
+                &self.active_edges,
+                dt,
+                &self.bed_m,
+                &self.u_edge,
+                &mut self.h_total_m,
+                &mut self.scratch_flux,
+                &mut self.scratch_outflow_vol,
+                &mut self.scratch_outflow_scale,
+            );
+            advance_active_thickness(
+                geom,
+                &self.active_cells,
+                &self.active_edges,
+                dt,
+                &astro_ref.bed_m,
+                &astro_ref.u_edge,
+                &mut astro_ref.h_total_m,
+                &mut astro_ref.scratch_flux,
+                &mut astro_ref.scratch_outflow_vol,
+                &mut astro_ref.scratch_outflow_scale,
+            );
+        }
+
+        self.finalize_hour(geom);
+        astro_ref.elapsed_hours += 1;
+
         for i in 0..self.num_cells {
-            let ux = self.u_east[i];
-            let vy = self.v_north[i];
-            self.speed_mps[i] = (ux * ux + vy * vy).sqrt();
-            let h = self.h_total_m[i];
-            self.eta_m[i] = if h > H_DRY_M {
-                self.bed_m[i] + h
+            let h_ref = astro_ref.h_total_m[i];
+            let eta_ref = if h_ref > H_DRY_M {
+                astro_ref.bed_m[i] + h_ref
             } else {
                 0.0
             };
+            astro_ref.eta_m[i] = eta_ref;
+            out_storm_surge_m[i] = self.eta_m[i] - eta_ref;
         }
-
-        self.elapsed_hours += 1;
-        self.push_history_frame();
-        self.recompute_rolling_tidal_range();
     }
 
     fn push_history_frame(&mut self) {
-        if self.eta_history_mm.len() >= HISTORY_HOURS {
-            self.eta_history_mm.pop_front();
+        let mut frame = if self.eta_history_mm.len() >= HISTORY_HOURS {
+            self.eta_history_mm
+                .pop_front()
+                .unwrap_or_else(|| vec![0_i16; self.num_cells])
+        } else {
+            vec![0_i16; self.num_cells]
+        };
+        if frame.len() != self.num_cells {
+            frame.resize(self.num_cells, 0);
         }
-        let frame: Vec<i16> = self
-            .eta_m
-            .iter()
-            .map(|&eta| (eta * 1000.0).round().clamp(-32_000.0, 32_000.0) as i16)
-            .collect();
+        for i in 0..self.num_cells {
+            frame[i] = (self.eta_m[i] * 1000.0).round().clamp(-32_000.0, 32_000.0) as i16;
+        }
         self.eta_history_mm.push_back(frame);
     }
 
@@ -646,22 +1199,30 @@ impl LaplaceTidalSolver {
             return;
         }
         let skip = len.saturating_sub(RANGE_WINDOW_HOURS);
-        let mut mins = vec![i16::MAX; self.num_cells];
-        let mut maxs = vec![i16::MIN; self.num_cells];
+        for &c_u32 in &self.active_cells {
+            let i = c_u32 as usize;
+            self.scratch_range_min[i] = i16::MAX;
+            self.scratch_range_max[i] = i16::MIN;
+        }
         for frame in self.eta_history_mm.iter().skip(skip) {
-            for i in 0..self.num_cells {
+            for &c_u32 in &self.active_cells {
+                let i = c_u32 as usize;
                 let v = frame[i];
-                if v < mins[i] {
-                    mins[i] = v;
+                if v < self.scratch_range_min[i] {
+                    self.scratch_range_min[i] = v;
                 }
-                if v > maxs[i] {
-                    maxs[i] = v;
+                if v > self.scratch_range_max[i] {
+                    self.scratch_range_max[i] = v;
                 }
             }
         }
-        for i in 0..self.num_cells {
+        for &c_u32 in &self.active_cells {
+            let i = c_u32 as usize;
             if self.h_total_m[i] > H_DRY_M || self.initial_ocean[i] {
-                self.tidal_range_m[i] = ((maxs[i] as i32 - mins[i] as i32).max(0) as f32) * 0.001;
+                self.tidal_range_m[i] = ((self.scratch_range_max[i] as i32
+                    - self.scratch_range_min[i] as i32)
+                    .max(0) as f32)
+                    * 0.001;
             } else {
                 self.tidal_range_m[i] = 0.0;
             }
@@ -688,8 +1249,9 @@ impl LaplaceTidalSolver {
 
     /// Counts how many originally-land fine cells are currently inundated by tide/surge.
     pub fn inundated_land_count(&self) -> u32 {
-        (0..self.num_cells)
-            .filter(|&i| self.is_inundated_land(i))
+        self.active_cells
+            .iter()
+            .filter(|&&c| self.is_inundated_land(c as usize))
             .count() as u32
     }
 
@@ -825,5 +1387,44 @@ mod tests {
             (1.65..=2.25).contains(&ratio),
             "expected ~2x tidal range when doubling moon mass, got r1={r1}, r2={r2}, ratio={ratio}"
         );
+    }
+
+    #[test]
+    fn test_paired_storm_surge_matches_separate_solvers() {
+        let (grid, geom, bed_m) = make_test_ocean(4);
+        let n = geom.num_cells;
+        let p_anom: Vec<f32> = (0..n).map(|i| -1800.0 * ((i as f32 * 0.17).sin())).collect();
+        let tau_x: Vec<f32> = (0..n).map(|i| 0.85 * ((i as f32 * 0.11).cos())).collect();
+        let tau_y: Vec<f32> = (0..n).map(|i| -0.45 * ((i as f32 * 0.23).sin())).collect();
+        let forcing = AtmosphericTideForcing {
+            p_anom_pa: &p_anom,
+            tau_east_pa: &tau_x,
+            tau_north_pa: &tau_y,
+        };
+
+        let mut sep_coupled = LaplaceTidalSolver::new(
+            &grid, &geom, bed_m.clone(), 24.0, 23.44, 365.25, 0.0, 1.0, 1, 1.0, 60.27,
+        );
+        let mut sep_astro = sep_coupled.clone();
+
+        let mut fused_coupled = sep_coupled.clone();
+        let mut fused_astro = sep_coupled.clone();
+        let mut surge = vec![0.0_f32; n];
+
+        for _ in 0..8 {
+            sep_coupled.step_hour(&geom, Some(forcing));
+            sep_astro.step_hour(&geom, None);
+            fused_coupled.step_hour_paired_storm_surge(&mut fused_astro, &geom, forcing, &mut surge);
+        }
+
+        for i in 0..n {
+            let expected_surge = sep_coupled.eta_m[i] - sep_astro.eta_m[i];
+            assert!(
+                (surge[i] - expected_surge).abs() < 1e-5,
+                "paired storm surge mismatch at cell {i}: got {}, expected {expected_surge}",
+                surge[i]
+            );
+            assert!((fused_coupled.dissipation_wm2[i] - sep_coupled.dissipation_wm2[i]).abs() < 1e-5);
+        }
     }
 }

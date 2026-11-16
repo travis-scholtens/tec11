@@ -1216,18 +1216,16 @@ impl MoistBaroclinicSolver {
         }
 
         // Step coupled dynamic tides + storm surge AND unforced astronomical reference tide:
-        self.tides.step_hour(
+        self.tides.step_hour_paired_storm_surge(
+            &mut self.astro_ref_tides,
             geom,
-            Some(AtmosphericTideForcing {
+            AtmosphericTideForcing {
                 p_anom_pa: &self.ps_anom_pa,
                 tau_east_pa: &self.tau_east_pa,
                 tau_north_pa: &self.tau_north_pa,
-            }),
+            },
+            &mut self.storm_surge_m,
         );
-        self.astro_ref_tides.step_hour(geom, None);
-        for i in 0..self.num_cells {
-            self.storm_surge_m[i] = self.tides.eta_m[i] - self.astro_ref_tides.eta_m[i];
-        }
 
         self.update_front_strength(geom);
         self.push_meteogram_frame();
