@@ -8,7 +8,7 @@ use tec11_math_grid::{
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::language::{Language, SoundChangeKind, Word, WordOrigin};
-use crate::lifeforms::{SettledSpecies, SpeciesKind};
+use crate::lifeforms::{select_salient_flora_and_fauna_ids, SettledSpecies, SpeciesKind};
 use crate::population::{
     is_farmable, is_habitable, is_passable, main_ocean, tile_population_thousands,
     PlanetaryGeography,
@@ -1043,6 +1043,8 @@ pub struct HistorySimulation {
     constellations: Vec<Constellation>,
     geography: PlanetaryGeography,
     settled_species: Vec<SettledSpecies>,
+    coarse_salient_species: Vec<Vec<usize>>,
+    coarse_total_species_counts: Vec<u16>,
     tile_species: Vec<Vec<usize>>,
     rivers: Vec<Vec<usize>>,
     river_routes: Vec<Vec<usize>>,
@@ -1167,6 +1169,8 @@ impl HistorySimulation {
             constellations,
             geography: PlanetaryGeography::default(),
             settled_species: Vec::new(),
+            coarse_salient_species: Vec::new(),
+            coarse_total_species_counts: Vec::new(),
             tile_species: vec![Vec::new(); num_fine],
             rivers: Vec::new(),
             river_routes: Vec::new(),
@@ -1262,28 +1266,22 @@ impl HistorySimulation {
         self.geography = biosphere.geography;
         let coarse_species = biosphere.tile_all_species;
         self.settled_species = biosphere.species;
+        self.coarse_total_species_counts = coarse_species
+            .iter()
+            .map(|v| v.len().min(u16::MAX as usize) as u16)
+            .collect();
         let salient_coarse_species: Vec<Vec<usize>> = (0..num_coarse)
             .map(|c| {
-                let mut sp_list = coarse_species[c].clone();
-                if sp_list.len() > 4 {
-                    sp_list.sort_by_key(|&sp_id| {
-                        let sp = &self.settled_species[sp_id];
-                        let priority = match (sp.kind, sp.trophic_level) {
-                            (SpeciesKind::Animal, 4) => 0u32,
-                            (SpeciesKind::Animal, 3) => 1u32,
-                            (SpeciesKind::Animal, _) => 2u32,
-                            (SpeciesKind::Plant, _) => 2u32,
-                        };
-                        let hash = (sp_id as u32)
-                            .wrapping_mul(0x9E37_79B9)
-                            .rotate_left(13)
-                            ^ (c as u32).wrapping_mul(0x85EB_CA6B);
-                        (priority, hash)
-                    });
-                    sp_list.truncate(4);
-                    sp_list.sort_unstable();
-                }
-                sp_list
+                let (mut fl, fa) = select_salient_flora_and_fauna_ids(
+                    &self.settled_species,
+                    &coarse_species[c],
+                    c,
+                    5,
+                    5,
+                );
+                fl.extend(fa);
+                fl.sort_unstable();
+                fl
             })
             .collect();
         self.tile_species = Vec::with_capacity(num_fine);
@@ -1300,11 +1298,22 @@ impl HistorySimulation {
                             set.insert(sp);
                         }
                     }
-                    set.into_iter().take(6).collect()
+                    let combined: Vec<usize> = set.into_iter().collect();
+                    let (mut fl, fa) = select_salient_flora_and_fauna_ids(
+                        &self.settled_species,
+                        &combined,
+                        f_idx,
+                        6,
+                        6,
+                    );
+                    fl.extend(fa);
+                    fl.sort_unstable();
+                    fl
                 }
             };
             self.tile_species.push(sp_vec);
         }
+        self.coarse_salient_species = salient_coarse_species;
         drop(_span_bio);
 
         // 2. Trace coarse rivers (`hmin = 2.0`, `pmin = 0.25`) and route them on the subdivided terrain grid (`routerivers`).
@@ -7041,6 +7050,18 @@ impl HistorySimulation {
                     .map(|t| t.elevation())
                     .unwrap_or(-4.0);
                 let sky = self.build_tile_sky_view(display_idx, None);
+                let mut flora = Vec::new();
+                let mut fauna = Vec::new();
+                if let Some(sp_list) = self.coarse_salient_species.get(c_idx) {
+                    for &sp_idx in sp_list {
+                        if let Some(sp) = self.settled_species.get(sp_idx) {
+                            match sp.kind {
+                                SpeciesKind::Plant => flora.push(sp.name.clone()),
+                                SpeciesKind::Animal => fauna.push(sp.name.clone()),
+                            }
+                        }
+                    }
+                }
                 return Some(TileInspectionView {
                     display_idx,
                     fine_idx: None,
@@ -7052,8 +7073,8 @@ impl HistorySimulation {
                     technology: "Marine".to_string(),
                     nationalities: Vec::new(),
                     languages: Vec::new(),
-                    flora: Vec::new(),
-                    fauna: Vec::new(),
+                    flora,
+                    fauna,
                     sky,
                     vantage,
                     stratigraphy_json,
@@ -7069,6 +7090,24 @@ impl HistorySimulation {
         if fine_elev <= 0.0 {
             let ocean_label = self.ocean_and_sea_label_for_tile(primary_c, None);
             let sky = self.build_tile_sky_view(display_idx, None);
+            let mut flora = Vec::new();
+            let mut fauna = Vec::new();
+            let sea_sp_src = if !self.tile_species[fine_idx].is_empty() {
+                &self.tile_species[fine_idx]
+            } else {
+                self.coarse_salient_species
+                    .get(primary_c)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[])
+            };
+            for &sp_idx in sea_sp_src {
+                if let Some(sp) = self.settled_species.get(sp_idx) {
+                    match sp.kind {
+                        SpeciesKind::Plant => flora.push(sp.name.clone()),
+                        SpeciesKind::Animal => fauna.push(sp.name.clone()),
+                    }
+                }
+            }
             return Some(TileInspectionView {
                 display_idx,
                 fine_idx: Some(fine_idx),
@@ -7080,8 +7119,8 @@ impl HistorySimulation {
                 technology: "Maritime".to_string(),
                 nationalities: Vec::new(),
                 languages: Vec::new(),
-                flora: Vec::new(),
-                fauna: Vec::new(),
+                flora,
+                fauna,
                 sky,
                 vantage,
                 stratigraphy_json,
@@ -7655,9 +7694,9 @@ impl HistorySimulation {
 
         let max_cap = self.capacities.iter().copied().fold(1.0f32, f32::max);
         let max_sp = self
-            .tile_species
+            .coarse_total_species_counts
             .iter()
-            .map(|v| v.len())
+            .copied()
             .max()
             .unwrap_or(1)
             .max(1) as f32;
@@ -7740,7 +7779,12 @@ impl HistorySimulation {
 
             match aspect {
                 "species" => {
-                    let s = (self.tile_species[f_idx].len() as f32 / max_sp).clamp(0.0, 1.0);
+                    let total_sp = self
+                        .coarse_total_species_counts
+                        .get(c_idx)
+                        .copied()
+                        .unwrap_or_else(|| self.tile_species[f_idx].len() as u16);
+                    let s = (total_sp as f32 / max_sp).clamp(0.0, 1.0);
                     out.extend_from_slice(&[0.15 * (1.0 - s), 0.2 + 0.75 * s, 0.12]);
                 }
                 "population" => {

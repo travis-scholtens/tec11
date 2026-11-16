@@ -6,7 +6,6 @@ use tec11_climate::{
 use tec11_math_grid::{FineParentage, FullSphereFineGrid, Pcg64Mcg};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::lifeforms::{settle_species_on_climate, SettledBiosphere, SpeciesKind};
 use crate::prehistory::PrehistorySimulation;
 use crate::rivers::trace_coarse_rivers;
 use crate::sky_vantage::{
@@ -40,7 +39,6 @@ pub struct FinePlanetBase {
     pub default_moon_dist_radii: f32,
     pub solar_system: Vec<SolarSystemPlanet>,
     pub constellations: Vec<Constellation>,
-    settled_biosphere: Option<SettledBiosphere>,
 }
 
 impl FinePlanetBase {
@@ -209,7 +207,6 @@ impl FinePlanetBase {
             default_moon_dist_radii,
             solar_system,
             constellations,
-            settled_biosphere: None,
         }
     }
 
@@ -255,29 +252,11 @@ impl FinePlanetBase {
     }
 
     pub fn flora_and_fauna_for_coarse(&mut self, c_idx: usize) -> (Vec<String>, Vec<String>) {
-        if self.settled_biosphere.is_none() {
-            let elevs = self.prehistory.tile_elevations();
-            self.settled_biosphere = Some(settle_species_on_climate(
-                &elevs,
-                self.prehistory.climate_model(),
-            ));
+        if !self.has_atmosphere || !self.has_life {
+            return (Vec::new(), Vec::new());
         }
-        let mut flora = Vec::new();
-        let mut fauna = Vec::new();
-        if let Some(ref bio) = self.settled_biosphere {
-            if let Some(sp_ids) = bio.tile_all_species.get(c_idx) {
-                for &sp_id in sp_ids {
-                    if let Some(sp) = bio.species.get(sp_id) {
-                        match sp.kind {
-                            SpeciesKind::Plant if flora.len() < 10 => flora.push(sp.name.clone()),
-                            SpeciesKind::Animal if fauna.len() < 10 => fauna.push(sp.name.clone()),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        (flora, fauna)
+        self.prehistory
+            .salient_flora_and_fauna_for_tile(c_idx, 8, 8)
     }
 
     /// True-color surface RGB (`[0..1]`) for fine cell `fine_idx` based on Köppen biome, rock felsity,

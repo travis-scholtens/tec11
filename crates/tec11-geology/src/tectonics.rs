@@ -74,6 +74,7 @@ pub struct TectonicsSimulation {
     last_impact_tile: Option<usize>,
     last_impact_diameter_km: f32,
     saved_environment: Option<tec11_proto::PlanetaryEnvironment>,
+    cached_biosphere: std::cell::RefCell<Option<(u32, crate::lifeforms::SettledBiosphere)>>,
     rng: Pcg64Mcg,
 }
 
@@ -225,6 +226,7 @@ impl TectonicsSimulation {
             last_impact_tile: None,
             last_impact_diameter_km: 0.0,
             saved_environment: None,
+            cached_biosphere: std::cell::RefCell::new(None),
             rng,
         };
         sim.climate_model
@@ -1772,7 +1774,7 @@ impl TectonicsSimulation {
                 crate::world::koeppen_climate_name(k_code)
             )
         };
-        crate::sky_vantage::build_coarse_tile_inspection_view(
+        let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
             tile_idx,
             crate::sky_vantage::CoarseTileSkyParams {
                 grid: &self.grid,
@@ -1804,7 +1806,37 @@ impl TectonicsSimulation {
                 },
                 stratigraphy_json: self.inspect_tile_stratigraphy_json(tile_idx),
             },
-        )
+        )?;
+        if has_atm && has_life {
+            let (flora, fauna) = self.salient_flora_and_fauna_for_tile(tile_idx, 6, 6);
+            view.flora = flora;
+            view.fauna = fauna;
+        }
+        Some(view)
+    }
+
+    pub fn salient_flora_and_fauna_for_tile(
+        &self,
+        tile_idx: usize,
+        max_flora: usize,
+        max_fauna: usize,
+    ) -> (Vec<String>, Vec<String>) {
+        if !self.has_atmosphere() || !self.has_life() {
+            return (Vec::new(), Vec::new());
+        }
+        let mut guard = self.cached_biosphere.borrow_mut();
+        if !guard.as_ref().is_some_and(|(gt, _)| *gt == self.geoticks) {
+            let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
+            let bio =
+                crate::lifeforms::settle_species_on_climate(&elevations, &self.climate_model);
+            *guard = Some((self.geoticks, bio));
+        }
+        match guard.as_ref() {
+            Some((_, bio)) => {
+                bio.select_salient_flora_and_fauna_names(tile_idx, max_flora, max_fauna)
+            }
+            None => (Vec::new(), Vec::new()),
+        }
     }
 
     fn refresh_climate_fields(&mut self) {
@@ -2187,6 +2219,7 @@ impl TectonicsSimulation {
             last_impact_tile: None,
             last_impact_diameter_km: 0.0,
             saved_environment: snap.environment.clone(),
+            cached_biosphere: std::cell::RefCell::new(None),
             rng,
         };
         sim.climate_model

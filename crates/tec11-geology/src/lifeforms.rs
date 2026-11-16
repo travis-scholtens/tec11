@@ -317,6 +317,168 @@ pub struct SettledBiosphere {
     pub tile_all_species: Vec<Vec<usize>>,
 }
 
+/// Deterministically select ecologically stratified `(flora_ids, fauna_ids)` from `tile_sp_ids`,
+/// sampling across plant growth forms (trees, grasses, shrubs/flowers, fruits/tubers) and animal
+/// trophic guilds (vertebrate herbivores, mesopredators/omnivores, invertebrates, and at most
+/// `ceil(max_fauna / 4)` apex predators) without alphabetical or predator-only bias.
+pub fn select_salient_flora_and_fauna_ids(
+    species: &[SettledSpecies],
+    tile_sp_ids: &[usize],
+    tile_seed: usize,
+    max_flora: usize,
+    max_fauna: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let mix_hash = |sp_id: usize| -> u32 {
+        let mut h = (sp_id as u32)
+            .wrapping_mul(0x9E37_79B9)
+            ^ (tile_seed as u32).wrapping_mul(0x85EB_CA6B);
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x7FEB_352D);
+        h ^= h >> 15;
+        h
+    };
+
+    // 1. Flora guilds: 0 = tree, 1 = grass, 2 = bush/flower, 3 = fruit/tuber/fungus/other
+    let mut plant_guilds: [Vec<(u32, usize)>; 4] = [
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ];
+    // 2. Fauna guilds: 0 = vertebrate herbivore (L2), 1 = mesopredator/omnivore (L3),
+    //    2 = insect/invertebrate (L2), 3 = apex predator (L4)
+    let mut animal_guilds: [Vec<(u32, usize)>; 4] = [
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ];
+
+    for &sp_id in tile_sp_ids {
+        let Some(sp) = species.get(sp_id) else {
+            continue;
+        };
+        let h = mix_hash(sp_id);
+        match sp.kind {
+            SpeciesKind::Plant => {
+                let g = match sp.subkind.as_str() {
+                    "tree" => 0,
+                    "grass" => 1,
+                    "bush" | "flower" => 2,
+                    _ => 3,
+                };
+                plant_guilds[g].push((h, sp_id));
+            }
+            SpeciesKind::Animal => {
+                let g = if sp.trophic_level >= 4 {
+                    3
+                } else if sp.trophic_level == 3 {
+                    1
+                } else if sp.subkind == "insect" {
+                    2
+                } else {
+                    0
+                };
+                animal_guilds[g].push((h, sp_id));
+            }
+        }
+    }
+
+    for g in &mut plant_guilds {
+        g.sort_unstable_by_key(|&(h, sp_id)| (h, sp_id));
+    }
+    for g in &mut animal_guilds {
+        g.sort_unstable_by_key(|&(h, sp_id)| (h, sp_id));
+    }
+
+    let mut flora_out = Vec::with_capacity(max_flora);
+    let mut p_cursors = [0usize; 4];
+    while flora_out.len() < max_flora {
+        let mut added = false;
+        for g in 0..4 {
+            if flora_out.len() >= max_flora {
+                break;
+            }
+            if p_cursors[g] < plant_guilds[g].len() {
+                flora_out.push(plant_guilds[g][p_cursors[g]].1);
+                p_cursors[g] += 1;
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    flora_out.sort_unstable();
+
+    let mut fauna_out = Vec::with_capacity(max_fauna);
+    let mut a_cursors = [0usize; 4];
+    let apex_cap = ((max_fauna + 3) / 4).max(1);
+    let mut apex_picked = 0usize;
+    // Eltonian trophic schedule: favor herbivores & omnivores/mesopredators over apex predators
+    const TROPHIC_ORDER: [usize; 6] = [0, 1, 0, 2, 3, 1];
+    while fauna_out.len() < max_fauna {
+        let mut added = false;
+        for &g in &TROPHIC_ORDER {
+            if fauna_out.len() >= max_fauna {
+                break;
+            }
+            if g == 3 && apex_picked >= apex_cap {
+                continue;
+            }
+            if a_cursors[g] < animal_guilds[g].len() {
+                fauna_out.push(animal_guilds[g][a_cursors[g]].1);
+                a_cursors[g] += 1;
+                if g == 3 {
+                    apex_picked += 1;
+                }
+                added = true;
+            }
+        }
+        if !added {
+            // If lower guilds are exhausted and slots remain, allow remaining apex species as fallback
+            if a_cursors[3] < animal_guilds[3].len() {
+                fauna_out.push(animal_guilds[3][a_cursors[3]].1);
+                a_cursors[3] += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    fauna_out.sort_unstable();
+
+    (flora_out, fauna_out)
+}
+
+impl SettledBiosphere {
+    pub fn select_salient_flora_and_fauna_names(
+        &self,
+        tile_idx: usize,
+        max_flora: usize,
+        max_fauna: usize,
+    ) -> (Vec<String>, Vec<String>) {
+        let Some(sp_ids) = self.tile_all_species.get(tile_idx) else {
+            return (Vec::new(), Vec::new());
+        };
+        let (fl_ids, fa_ids) = select_salient_flora_and_fauna_ids(
+            &self.species,
+            sp_ids,
+            tile_idx,
+            max_flora,
+            max_fauna,
+        );
+        let flora = fl_ids
+            .into_iter()
+            .filter_map(|id| self.species.get(id).map(|s| s.name.clone()))
+            .collect();
+        let fauna = fa_ids
+            .into_iter()
+            .filter_map(|id| self.species.get(id).map(|s| s.name.clone()))
+            .collect();
+        (flora, fauna)
+    }
+}
+
 /// Extract a `"<key>": "<low>-<high>"` range from a JSON line in `animals.tsv` / `plants.tsv`.
 fn extract_json_range(json_str: &str, key: &str) -> Option<ValueRange> {
     let needle = format!("\"{key}\":");

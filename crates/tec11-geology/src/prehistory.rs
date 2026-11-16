@@ -133,7 +133,7 @@ pub struct PrehistorySimulation {
     seafaring_heritages: BTreeSet<u32>,
     next_heritage_id: u32,
     is_custom: bool,
-    settled_biosphere: Option<SettledBiosphere>,
+    settled_biosphere: std::cell::RefCell<Option<SettledBiosphere>>,
     saved_environment: Option<tec11_proto::PlanetaryEnvironment>,
     rng: Pcg64Mcg,
 }
@@ -339,7 +339,7 @@ impl PrehistorySimulation {
             seafaring_heritages: BTreeSet::new(),
             next_heritage_id: 0,
             is_custom: false,
-            settled_biosphere: None,
+            settled_biosphere: std::cell::RefCell::new(None),
             saved_environment: None,
             rng: Pcg64Mcg::new(seed),
         };
@@ -400,7 +400,7 @@ impl PrehistorySimulation {
             seafaring_heritages: BTreeSet::new(),
             next_heritage_id: 0,
             is_custom: true,
-            settled_biosphere: None,
+            settled_biosphere: std::cell::RefCell::new(None),
             saved_environment,
             rng,
         };
@@ -482,7 +482,7 @@ impl PrehistorySimulation {
             seafaring_heritages: std::mem::take(&mut self.seafaring_heritages),
             next_heritage_id: self.next_heritage_id,
             is_custom: true,
-            settled_biosphere: None,
+            settled_biosphere: std::cell::RefCell::new(None),
             saved_environment: self.saved_environment.clone(),
             rng,
         };
@@ -516,7 +516,7 @@ impl PrehistorySimulation {
     /// Advance the prehistory simulation by 1 tick (`4,000` years, matching `PrehistorySimulation.update`
     /// in `prehistorysimulation.py:103-146`).
     pub fn step(&mut self) {
-        self.settled_biosphere = None;
+        *self.settled_biosphere.borrow_mut() = None;
         let _span_glac = crate::profile::span(crate::profile::ProfilePhase::PreGlaciationClimate);
         // 1. Count initial glacial tiles (`EF = 12`, `ET = 13`) per continent group (`prehistorysimulation.py:104-106`).
         let old_glaciers: Vec<usize> = self
@@ -760,7 +760,7 @@ impl PrehistorySimulation {
     }
 
     pub(crate) fn take_or_settle_biosphere(&mut self, elevations: &[f32]) -> SettledBiosphere {
-        if let Some(bio) = self.settled_biosphere.take() {
+        if let Some(bio) = self.settled_biosphere.get_mut().take() {
             bio
         } else {
             let bio = settle_species_on_climate(elevations, &self.climate_model);
@@ -779,7 +779,7 @@ impl PrehistorySimulation {
         self.sync_classification_arrays();
         let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
         self.refresh_rivers(&elevations);
-        self.settled_biosphere = None;
+        *self.settled_biosphere.get_mut() = None;
         elevations
     }
 
@@ -787,7 +787,7 @@ impl PrehistorySimulation {
         let elevations = self.refresh_climate_and_rivers_without_biosphere();
         let biosphere = settle_species_on_climate(&elevations, &self.climate_model);
         self.update_ag_potential_from_biosphere(&biosphere);
-        self.settled_biosphere = Some(biosphere);
+        *self.settled_biosphere.get_mut() = Some(biosphere);
     }
 
     /// Serialize this simulation state as a `PrehistoryStage` inside a `tec11_proto::PlanetSnapshot`.
@@ -966,7 +966,7 @@ impl PrehistorySimulation {
                     seafaring_heritages: BTreeSet::new(),
                     next_heritage_id: 0,
                     is_custom: true,
-                    settled_biosphere: None,
+                    settled_biosphere: std::cell::RefCell::new(None),
                     saved_environment: snap.environment.clone(),
                     rng,
                 };
@@ -1129,7 +1129,7 @@ impl PrehistorySimulation {
             seafaring_heritages,
             next_heritage_id,
             is_custom: true,
-            settled_biosphere: None,
+            settled_biosphere: std::cell::RefCell::new(None),
             saved_environment: None,
             rng,
         };
@@ -1524,7 +1524,7 @@ impl PrehistorySimulation {
         } else {
             ("Uninhabited".to_string(), "Prehistory".to_string())
         };
-        crate::sky_vantage::build_coarse_tile_inspection_view(
+        let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
             tile_idx,
             crate::sky_vantage::CoarseTileSkyParams {
                 grid: &self.grid,
@@ -1550,7 +1550,28 @@ impl PrehistorySimulation {
                 technology: tech_str,
                 stratigraphy_json: self.inspect_tile_stratigraphy_json(tile_idx),
             },
-        )
+        )?;
+        let (flora, fauna) = self.salient_flora_and_fauna_for_tile(tile_idx, 6, 6);
+        view.flora = flora;
+        view.fauna = fauna;
+        Some(view)
+    }
+
+    pub fn salient_flora_and_fauna_for_tile(
+        &self,
+        tile_idx: usize,
+        max_flora: usize,
+        max_fauna: usize,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut guard = self.settled_biosphere.borrow_mut();
+        if guard.is_none() {
+            let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
+            *guard = Some(settle_species_on_climate(&elevations, &self.climate_model));
+        }
+        match guard.as_ref() {
+            Some(bio) => bio.select_salient_flora_and_fauna_names(tile_idx, max_flora, max_fauna),
+            None => (Vec::new(), Vec::new()),
+        }
     }
 }
 

@@ -761,7 +761,7 @@ impl WorldSimulation {
                         koeppen_climate_name(k_code)
                     )
                 };
-                crate::sky_vantage::build_coarse_tile_inspection_view(
+                let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
                     tile_idx,
                     crate::sky_vantage::CoarseTileSkyParams {
                         grid: tec.grid(),
@@ -793,7 +793,13 @@ impl WorldSimulation {
                         },
                         stratigraphy_json: tec.inspect_tile_stratigraphy_json(tile_idx),
                     },
-                )
+                )?;
+                if has_atm && has_life {
+                    let (flora, fauna) = tec.salient_flora_and_fauna_for_tile(tile_idx, 6, 6);
+                    view.flora = flora;
+                    view.fauna = fauna;
+                }
+                Some(view)
             }
             WorldStageState::Prehistory(pre) => {
                 let tile = pre.tiles().get(tile_idx)?;
@@ -839,7 +845,7 @@ impl WorldSimulation {
                 } else {
                     ("Uninhabited".to_string(), "Prehistory".to_string())
                 };
-                crate::sky_vantage::build_coarse_tile_inspection_view(
+                let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
                     tile_idx,
                     crate::sky_vantage::CoarseTileSkyParams {
                         grid: pre.grid(),
@@ -865,7 +871,11 @@ impl WorldSimulation {
                         technology: tech_str,
                         stratigraphy_json: tile.to_stratigraphy_json(tile_idx, None),
                     },
-                )
+                )?;
+                let (flora, fauna) = pre.salient_flora_and_fauna_for_tile(tile_idx, 6, 6);
+                view.flora = flora;
+                view.fauna = fauna;
+                Some(view)
             }
             WorldStageState::History(hist) => hist.inspect_tile_structured(tile_idx),
         }
@@ -1648,6 +1658,88 @@ mod tests {
         assert_eq!(
             stage0_constellations, stage2_constellations,
             "World constellations should remain consistent from Stage 0 through Stage 2"
+        );
+    }
+
+    #[test]
+    fn test_world_and_weather_salient_flora_and_fauna_trophic_balance() {
+        let params = WorldCreateParams {
+            grid_size: 4,
+            day_hours: 24,
+            tilt_deg: 23,
+            land_pct: 32,
+            atm_dt_myr: 5,
+            life_dt_myr: 5,
+            people_dt_myr: 20,
+            ..Default::default()
+        };
+        let mut world = WorldSimulation::new(params, 2026);
+        for _ in 0..4 {
+            world.step();
+        }
+
+        // 1. Stage 0 (Tectonics with active biosphere): habitable land tiles have settled flora & fauna
+        let mut tec_flora_tiles = 0usize;
+        for t in 0..world.tile_count() {
+            if let Some(v) = world.inspect_tile_structured(t) {
+                if !v.flora.is_empty() && !v.fauna.is_empty() {
+                    tec_flora_tiles += 1;
+                }
+            }
+        }
+        assert!(
+            tec_flora_tiles > 20,
+            "Expected >20 biosphere Tectonics tiles with both flora and fauna, got {tec_flora_tiles}"
+        );
+
+        // 2. Stage 1 (Prehistory): both land and temperate ocean tiles have settled flora & fauna
+        world.advance_stage();
+        assert_eq!(world.stage_index(), 1);
+        let mut pre_land_both = 0usize;
+        let mut pre_sea_both = 0usize;
+        for t in 0..world.tile_count() {
+            if let Some(v) = world.inspect_tile_structured(t) {
+                if !v.flora.is_empty() && !v.fauna.is_empty() {
+                    if v.vantage.obs_is_land {
+                        pre_land_both += 1;
+                    } else {
+                        pre_sea_both += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            pre_land_both > 20,
+            "Expected >20 Prehistory land tiles with both flora & fauna, got {pre_land_both}"
+        );
+        assert!(
+            pre_sea_both > 20,
+            "Expected >20 Prehistory sea tiles with marine flora & fauna, got {pre_sea_both}"
+        );
+
+        // 3. Stage 2 (History): fine land faces & coarse ocean faces have BOTH flora & fauna (never 0 flora + 4 predators!)
+        world.advance_stage();
+        assert_eq!(world.stage_index(), 2);
+        let mut hist_land_with_flora_and_fauna = 0usize;
+        let mut hist_sea_with_flora_and_fauna = 0usize;
+        for d_idx in 0..world.tile_count() {
+            if let Some(v) = world.inspect_tile_structured(d_idx) {
+                if !v.flora.is_empty() && !v.fauna.is_empty() {
+                    if v.vantage.obs_is_land {
+                        hist_land_with_flora_and_fauna += 1;
+                    } else {
+                        hist_sea_with_flora_and_fauna += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            hist_land_with_flora_and_fauna > 100,
+            "Expected >100 History fine land tiles with both flora & fauna, got {hist_land_with_flora_and_fauna}"
+        );
+        assert!(
+            hist_sea_with_flora_and_fauna > 20,
+            "Expected >20 History sea tiles with marine flora & fauna, got {hist_sea_with_flora_and_fauna}"
         );
     }
 }
