@@ -18,6 +18,15 @@ impl WasmWeatherSession {
         }
     }
 
+    pub fn from_snapshot_or_earth(bytes: &[u8]) -> Self {
+        let sandbox = if bytes.is_empty() {
+            WeatherSandbox::new_earth()
+        } else {
+            WeatherSandbox::from_snapshot_bytes(bytes).unwrap_or_else(WeatherSandbox::new_earth)
+        };
+        Self { sandbox }
+    }
+
     pub fn load_earth(&mut self) {
         self.sandbox.load_earth();
     }

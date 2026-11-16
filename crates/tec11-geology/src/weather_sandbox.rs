@@ -28,6 +28,12 @@ impl WeatherSandbox {
         )
     }
 
+    pub fn from_snapshot_bytes(bytes: &[u8]) -> Option<Self> {
+        let base = FinePlanetBase::from_snapshot_bytes(bytes)?;
+        let glac = (base.prehistory.glaciation() as f32).clamp(0.0, 1.0);
+        Some(Self::from_base(base, 0, glac, 1, 1.0, 60.27))
+    }
+
     pub fn from_base(
         mut base: FinePlanetBase,
         atmosphere_id: u32,

@@ -6970,7 +6970,13 @@ function updateWeatherDataBuffers(view, rebuildGeometry = false) {
     applyWeatherArrowColor(view, arrowMode);
     const arrowPos = session.weather_arrow_positions(arrowMode);
     view.arrowLines.visible = arrowPos.length > 0;
-    view.arrowGeometry.setAttribute("position", new THREE.Float32BufferAttribute(arrowPos, 3));
+    const existingArrowAttr = view.arrowGeometry.getAttribute("position");
+    if (existingArrowAttr && existingArrowAttr.array.length === arrowPos.length) {
+      existingArrowAttr.array.set(arrowPos);
+      existingArrowAttr.needsUpdate = true;
+    } else {
+      view.arrowGeometry.setAttribute("position", new THREE.Float32BufferAttribute(arrowPos, 3));
+    }
   } else {
     view.arrowLines.visible = false;
   }
@@ -7048,7 +7054,7 @@ function buildWeatherInfo(view) {
 
 function stopWeatherTimer(view) {
   if (view && view.timerId !== null) {
-    clearInterval(view.timerId);
+    clearTimeout(view.timerId);
     view.timerId = null;
   }
 }
@@ -7078,10 +7084,9 @@ export const mountWeatherView =
     view.mesh.material = view.material;
     view.unlit = true;
 
-    view.session = new WasmWeatherSession();
-    if (activeClimateSnapshotBytes) {
-      view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
-    }
+    view.session = activeClimateSnapshotBytes
+      ? WasmWeatherSession.from_snapshot_or_earth(activeClimateSnapshotBytes)
+      : new WasmWeatherSession();
     view.session.set_day_of_year(dayOfYear);
     view.session.set_environment_params(
       Math.max(0, atmId | 0),
@@ -7150,15 +7155,23 @@ export const toggleWeatherRunning = (setWeatherInfo) => () => {
     stopWeatherTimer(activeView);
   } else {
     const viewRef = activeView;
-    viewRef.timerId = setInterval(() => {
-      if (activeView !== viewRef || !viewRef.session) {
-        stopWeatherTimer(viewRef);
-        return;
-      }
-      viewRef.session.step_hours(1);
-      updateWeatherDataBuffers(viewRef, false);
-      setWeatherInfo(buildWeatherInfo(viewRef))();
-    }, 180);
+    const scheduleNextTick = (delayMs) => {
+      viewRef.timerId = setTimeout(() => {
+        if (activeView !== viewRef || !viewRef.session) {
+          stopWeatherTimer(viewRef);
+          return;
+        }
+        const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+        viewRef.session.step_hours(1);
+        updateWeatherDataBuffers(viewRef, false);
+        setWeatherInfo(buildWeatherInfo(viewRef))();
+        const elapsed = (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0;
+        if (activeView === viewRef && viewRef.timerId !== null) {
+          scheduleNextTick(Math.max(16, Math.round(180 - elapsed)));
+        }
+      }, delayMs);
+    };
+    scheduleNextTick(16);
   }
   setWeatherInfo(buildWeatherInfo(activeView))();
 };
