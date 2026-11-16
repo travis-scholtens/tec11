@@ -108,18 +108,21 @@ impl WeatherSandbox {
             };
         }
 
-        // Match `weather::glaciation_temp_offset_c`: `0.0` = icehouse, `~0.35` = modern Earth, `1.0` = greenhouse:
-        let glac_offset_c = 14.0 * (glaciation.clamp(0.0, 1.0) - 0.35);
+        let tilt_deg = base.prehistory.tilt_deg();
+        let glac_offset_c = tec11_climate::glaciation_temp_offset_c(glaciation);
         let mut base_sst_c = Vec::with_capacity(nf);
         let mut init_soil_moisture = Vec::with_capacity(nf);
         let mut init_snow_depth_m = Vec::with_capacity(nf);
 
         for i in 0..nf {
             let sin_phi = base.geom.sin_lat[i];
+            let cos_phi = base.geom.cos_lat[i];
+            let annual_mu = tec11_climate::orbital_annual_mean_cos_z(sin_phi, cos_phi, tilt_deg);
             let fine_sst_anom = base.fine.interpolate_coarse(i, &coarse_sst_anom);
             // Western boundary currents (+sst_anom) warm midlatitude east-coast waters up to +5.2 C,
-            // while eastern boundary upwelling (-sst_anom) cools subtropical west coasts:
-            let sst = (28.5 - 30.2 * sin_phi * sin_phi + 5.2 * fine_sst_anom).clamp(-1.8, 30.5);
+            // while eastern boundary upwelling (-sst_anom) cools subtropical west coasts, driven
+            // by tilt-general orbital insolation `annual_mu` rather than hardcoded `sin^2(lat)`:
+            let sst = tec11_climate::equilibrium_open_sst_c(annual_mu, 1.0, fine_sst_anom);
             base_sst_c.push(sst);
 
             let bed_m = base.fine.fine_bed_m[i];
@@ -134,7 +137,7 @@ impl WeatherSandbox {
 
                 let elev_km = base.fine.fine_elevations_km[i].max(0.0);
                 let t_annual_est_c =
-                    28.5 - 48.0 * sin_phi * sin_phi - 6.5 * elev_km + glac_offset_c;
+                    -20.0 + 160.0 * annual_mu - 6.5 * elev_km + glac_offset_c;
                 let alpine_snow_m = if t_annual_est_c < -2.0 {
                     ((-2.0 - t_annual_est_c) * 0.015).clamp(0.0, 0.06)
                 } else {

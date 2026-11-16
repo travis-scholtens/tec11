@@ -233,17 +233,13 @@ impl MoistBaroclinicSolver {
         let astro_ref_tides = tides.clone();
         let (p_ref_pa, greenhouse_offset_k) = atmosphere_thermo_params(cfg.atmosphere_id);
 
-        let sin_tilt = (cfg.tilt_deg.clamp(0.0, 89.0).to_radians().sin()) as f32;
         let mut annual_mu = Vec::with_capacity(n);
         for i in 0..n {
-            let sin_phi = geom.sin_lat[i];
-            let cos_phi = geom.cos_lat[i];
-            let mut sum_mu = 0.0_f32;
-            for k in 0..16 {
-                let ls = (k as f32) * (std::f32::consts::TAU / 16.0);
-                sum_mu += exact_daily_mean_cos_z(sin_phi, cos_phi, sin_tilt * ls.sin());
-            }
-            annual_mu.push(sum_mu * (1.0 / 16.0));
+            annual_mu.push(orbital_annual_mean_cos_z(
+                geom.sin_lat[i],
+                geom.cos_lat[i],
+                cfg.tilt_deg,
+            ));
         }
 
         let mut solver = Self {
@@ -364,27 +360,42 @@ impl MoistBaroclinicSolver {
 
             let daily_mu = exact_daily_mean_cos_z(sin_phi, cos_phi, sin_dec);
             let annual_mu = self.annual_mu[i];
+            let pot_sst_c = self.base_sst_c[i]
+                + 18.0 * self.solar_luminosity * (daily_mu - annual_mu)
+                + glac_offset_c
+                + 0.65 * self.greenhouse_offset_k;
+            let sea_ice_frac = if is_ocean {
+                ((-1.8 - pot_sst_c) / 4.2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let veg_alb = 0.28 - 0.14 * self.soil_moisture[i];
             let snow_frac = (self.snow_depth_m[i] / 0.10).clamp(0.0, 1.0);
             let ice_sheet_frac = ((self.snow_depth_m[i] - 0.55) / 0.65).clamp(0.0, 1.0);
             let snow_alb = 0.46 + 0.30 * ice_sheet_frac;
             let surf_albedo = if is_ocean {
-                0.08
+                (1.0 - sea_ice_frac) * 0.08 + sea_ice_frac * 0.62
             } else {
                 (1.0 - snow_frac) * veg_alb + snow_frac * snow_alb
             };
 
             let t0_c = if is_ocean {
-                (self.base_sst_c[i]
-                    + 18.0 * self.solar_luminosity * (daily_mu - annual_mu)
-                    + 0.55 * glac_offset_c
-                    + 0.45 * self.greenhouse_offset_k)
-                    .clamp(-1.8, 36.0)
+                let rad_ice_c = radiative_equilibrium_surface_c(
+                    daily_mu,
+                    annual_mu,
+                    0.62,
+                    self.solar_luminosity,
+                    glac_offset_c,
+                    self.greenhouse_offset_k,
+                    0.0,
+                );
+                let ice_skin_c = (0.62 * rad_ice_c + 0.38 * (-1.8)).min(0.0);
+                ((1.0 - sea_ice_frac) * pot_sst_c.clamp(-1.8, 42.0) + sea_ice_frac * ice_skin_c)
+                    .clamp(-45.0, 42.0)
             } else {
                 radiative_equilibrium_surface_c(
                     daily_mu,
                     annual_mu,
-                    sin_phi,
                     surf_albedo,
                     self.solar_luminosity,
                     glac_offset_c,
@@ -405,8 +416,9 @@ impl MoistBaroclinicSolver {
 
             let t1_k = (t0_c + 273.15 - 7.5 + wave_seed).clamp(205.0, 325.0);
             // Potential temperature at sigma1 = 0.78 (`Pi1 ~ 0.931`) and sigma2 = 0.28:
+            let stab_trop = 25.0 + 7.0 * (1.0 - (annual_mu * 2.8).clamp(0.0, 1.0));
             self.theta1_k[i] = t1_k + 0.0065 * zs;
-            self.theta2_k[i] = self.theta1_k[i] + 29.0 + 7.0 * sin_phi * sin_phi - 0.35 * wave_seed;
+            self.theta2_k[i] = self.theta1_k[i] + stab_trop - 0.35 * wave_seed;
 
             let qsat = saturation_column_vapor_kgm2(t1_k, zs);
             let rh_init = if is_ocean {
@@ -529,13 +541,23 @@ impl MoistBaroclinicSolver {
                 let sin_phi = geom.sin_lat[i];
                 let cos_lat = geom.cos_lat[i];
 
+                // Exact zero-mean diurnal solar anomaly `(cos_z - daily_mu)` + daily-mean insolation `daily_mu`:
+                let daily_mu = exact_daily_mean_cos_z(sin_phi, cos_lat, sin_dec);
+                let annual_mu = self.annual_mu[i];
+                let pot_sst_c = self.base_sst_c[i]
+                    + 18.0 * self.solar_luminosity * (daily_mu - annual_mu)
+                    + glac_offset_c
+                    + 0.65 * self.greenhouse_offset_k;
+                let sea_ice_frac = if is_ocean {
+                    ((-1.8 - pot_sst_c) / 4.2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+
                 let cloud_tot = (self.cloud_low[i] + 0.55 * self.cloud_high[i]).clamp(0.0, 1.0);
                 let surf_albedo = if is_ocean {
-                    if self.tsurf_c[i] < -1.7 {
-                        0.60
-                    } else {
-                        0.06 + 0.14 * (1.0 - cos_z).powi(3)
-                    }
+                    let open_alb = 0.06 + 0.14 * (1.0 - cos_z).powi(3);
+                    (1.0 - sea_ice_frac) * open_alb + sea_ice_frac * 0.62
                 } else {
                     let veg_alb = 0.28 - 0.14 * self.soil_moisture[i];
                     let snow_frac = (self.snow_depth_m[i] / 0.10).clamp(0.0, 1.0);
@@ -544,9 +566,6 @@ impl MoistBaroclinicSolver {
                     (1.0 - snow_frac) * veg_alb + snow_frac * snow_alb
                 };
 
-                // Exact zero-mean diurnal solar anomaly `(cos_z - daily_mu)` + daily-mean insolation `daily_mu`:
-                let daily_mu = exact_daily_mean_cos_z(sin_phi, cos_lat, sin_dec);
-                let annual_mu = self.annual_mu[i];
                 let sw_trans = 1.0 - 0.52 * cloud_tot;
                 let diurnal_sw_wm2 = 1361.0
                     * self.solar_luminosity
@@ -566,7 +585,7 @@ impl MoistBaroclinicSolver {
                 };
                 let qsat_surf = saturation_column_vapor_kgm2(t_evap_k, zs);
                 let wet_frac = if is_ocean {
-                    1.0
+                    1.0 - 0.78 * sea_ice_frac
                 } else if self.is_river[i] {
                     self.soil_moisture[i].sqrt().clamp(0.55, 1.0)
                 } else {
@@ -585,7 +604,6 @@ impl MoistBaroclinicSolver {
                 let rad_surf_c = radiative_equilibrium_surface_c(
                     daily_mu,
                     annual_mu,
-                    sin_phi,
                     surf_albedo,
                     self.solar_luminosity,
                     glac_offset_c,
@@ -601,15 +619,17 @@ impl MoistBaroclinicSolver {
                 let local_eq_c = rad_surf_c + bowen_arid_bonus_c;
 
                 if is_ocean {
-                    // Ocean mixed layer includes seasonal solar lag/cycle around `base_sst_c`:
-                    let target_sst = (self.base_sst_c[i]
-                        + 18.0 * self.solar_luminosity * (daily_mu - annual_mu)
-                        + 0.55 * glac_offset_c
-                        + 0.45 * self.greenhouse_offset_k)
-                        .clamp(-1.8, 36.0);
-                    let d_ts = (diurnal_sw_wm2 / 4.2e6) * dt
-                        + ((target_sst - self.tsurf_c[i]) / (72.0 * 3600.0)) * dt;
-                    self.tsurf_c[i] = (self.tsurf_c[i] + d_ts).clamp(-2.0, 38.0);
+                    // Open ocean mixed layer equilibrates to full greenhouse shift; below `-1.8 °C`,
+                    // sea ice forms a bright (`albedo = 0.62`) insulating lid whose skin cools radiatively:
+                    let t_air_surf_c = (self.theta1_k[i] + 4.5) - 273.15;
+                    let ice_eq_c = (0.45 * rad_surf_c + 0.30 * t_air_surf_c + 0.25 * (-1.8)).min(0.0);
+                    let target_sst = (1.0 - sea_ice_frac) * pot_sst_c.clamp(-1.8, 42.0)
+                        + sea_ice_frac * ice_eq_c;
+                    let c_ocean = (1.0 - sea_ice_frac) * 4.2e6 + sea_ice_frac * 3.4e5;
+                    let tau_ocean_s = ((1.0 - sea_ice_frac) * 72.0 + sea_ice_frac * 14.0) * 3600.0;
+                    let d_ts = (diurnal_sw_wm2 / c_ocean) * dt
+                        + ((target_sst - self.tsurf_c[i]) / tau_ocean_s) * dt;
+                    self.tsurf_c[i] = (self.tsurf_c[i] + d_ts).clamp(-45.0, 42.0);
                 } else {
                     // Land surface energy balance couples local radiative-Bowen equilibrium with advected
                     // lower-tropospheric air mass `theta1_k` (so maritime west coasts stay mild in
@@ -645,7 +665,8 @@ impl MoistBaroclinicSolver {
                     (ch_sens * (wspd + 2.5) / 1350.0) * (ts_pot_k - 4.5 - self.theta1_k[i]);
 
                 let rad_eq_th1 = (local_eq_c + 273.15 + 0.0065 * zs - 4.5).clamp(210.0, 328.0);
-                let rad_eq_th2 = rad_eq_th1 + 29.0 + 8.0 * sin_phi * sin_phi;
+                let stab_trop = 25.0 + 7.0 * (1.0 - (annual_mu * 2.8).clamp(0.0, 1.0));
+                let rad_eq_th2 = rad_eq_th1 + stab_trop;
                 let tau_rad1 = 1.0 / (12.0 * 86400.0);
                 let tau_rad2 = 1.0 / (16.0 * 86400.0);
 
@@ -1233,22 +1254,42 @@ fn apply_biharmonic_smoothing(
     }
 }
 
-/// Glaciation temperature offset (°C) mapping `0.0` (icehouse, `-4.9 °C`),
-/// `~0.35` (present-day Earth, `0.0 °C`), and `1.0` (greenhouse, `+9.1 °C`).
+/// Orbital-mean (16-point solar longitude average) daily solar zenith cosine for arbitrary
+/// axial tilt `tilt_deg` (`0..89 deg`).
+pub fn orbital_annual_mean_cos_z(sin_phi: f32, cos_phi: f32, tilt_deg: f64) -> f32 {
+    let sin_tilt = (tilt_deg.clamp(0.0, 89.0).to_radians().sin()) as f32;
+    let mut sum_mu = 0.0_f32;
+    for k in 0..16 {
+        let ls = (k as f32) * (std::f32::consts::TAU / 16.0);
+        sum_mu += exact_daily_mean_cos_z(sin_phi, cos_phi, sin_tilt * ls.sin());
+    }
+    sum_mu * (1.0 / 16.0)
+}
+
+/// Unclamped open-ocean thermal potential (°C) at modern Earth baseline (`glaciation = 0.35`),
+/// driven purely by orbital-mean insolation `annual_mu` and gyre `sst_anomaly` (no `sin^2(lat)`
+/// assumption, so high-obliquity planets naturally place cooler waters in low-insolation belts).
+#[inline]
+pub fn equilibrium_open_sst_c(annual_mu: f32, solar_luminosity: f32, sst_anomaly: f32) -> f32 {
+    (-29.7 + 190.0 * solar_luminosity * annual_mu + 5.2 * sst_anomaly).clamp(-32.0, 34.0)
+}
+
+/// Uniform radiative greenhouse/glaciation offset (°C) mapping `0.0` (icehouse, `-6.65 °C`),
+/// `0.35` (present-day Earth, `0.0 °C`), `0.50` (tectonic average, `+2.85 °C`), and
+/// `1.0` (greenhouse, `+12.35 °C`). Cold-region / ice-margin amplification emerges physically
+/// from sea-ice and snow albedo + sea-ice thermal insulation rather than latitude formulas.
 #[inline]
 pub fn glaciation_temp_offset_c(glaciation: f32) -> f32 {
-    14.0 * (glaciation.clamp(0.0, 1.0) - 0.35)
+    19.0 * (glaciation.clamp(0.0, 1.0) - 0.35)
 }
 
 /// Budyko–Sellers / North & Coakley (1979) radiative-convective surface equilibrium (°C)
 /// driven directly by daily-mean (`daily_mu`) and orbital-mean (`annual_mu`) solar zenith cosines
 /// (valid for arbitrary axial tilt `0..89 deg`, preserving bright ice-sheet albedo and high-plateau thin air).
 #[inline]
-#[allow(clippy::too_many_arguments)]
 fn radiative_equilibrium_surface_c(
     daily_mu: f32,
     annual_mu: f32,
-    sin_phi: f32,
     surf_albedo: f32,
     solar_luminosity: f32,
     glac_offset_c: f32,
@@ -1257,8 +1298,9 @@ fn radiative_equilibrium_surface_c(
 ) -> f32 {
     let eff_mu = annual_mu + 0.58 * (daily_mu - annual_mu);
     let atmo_atten = (-zs_m.max(0.0) / 4800.0).exp();
-    let atmo_alb = (0.20 + 0.12 * sin_phi * sin_phi) * atmo_atten;
-    let base_alb = 0.45 * surf_albedo + 0.55 * atmo_alb;
+    let slant_scatter = (1.0 - (annual_mu * 2.85).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let atmo_alb = (0.20 + 0.12 * slant_scatter) * atmo_atten;
+    let base_alb = 0.58 * surf_albedo + 0.42 * atmo_alb;
     // Preserve high planetary albedo (`~0.67`) on thick perennial ice sheets (`surf_albedo > 0.55`)
     // without locking thin seasonal snowpacks (`surf_albedo ~ 0.46`) into a summer glacier trap:
     let ice_floor = if surf_albedo > 0.55 {
@@ -1663,5 +1705,103 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_tilt_general_ocean_sst_and_sea_ice_amplification() {
+        let grid = SphericalGrid::with_size(4);
+        let adj = grid.adjacency();
+        let n = grid.faces.len();
+        let geom = FiniteVolumeSphereGeom::new(&grid, &adj, 6_371_000.0, 24.0);
+        let bed_m = vec![-3500.0_f32; n];
+        let mount = vec![0.0_f32; n];
+        let is_river = vec![false; n];
+        let soil = vec![1.0_f32; n];
+        let snow = vec![0.0_f32; n];
+
+        let run_aquaplanet = |tilt_deg: f64, glaciation: f32| -> (f64, f64, f64) {
+            let base_sst: Vec<f32> = (0..n)
+                .map(|i| {
+                    let amu =
+                        orbital_annual_mean_cos_z(geom.sin_lat[i], geom.cos_lat[i], tilt_deg);
+                    equilibrium_open_sst_c(amu, 1.0, 0.0)
+                })
+                .collect();
+            let mut solver = MoistBaroclinicSolver::new(
+                &grid,
+                &adj,
+                &geom,
+                WeatherInitConfig {
+                    bed_m: &bed_m,
+                    mountainosity_norm: &mount,
+                    is_river: &is_river,
+                    base_sst_c: &base_sst,
+                    init_soil_moisture: &soil,
+                    init_snow_depth_m: &snow,
+                    day_hours: 24.0,
+                    tilt_deg,
+                    days_per_year: 365.25,
+                    home_init_angle_rad: 0.0,
+                    solar_tide_factor: 0.0,
+                    solar_luminosity: 1.0,
+                    glaciation,
+                    atmosphere_id: 0,
+                    moon_count: 0,
+                    primary_mass_lunar: 0.0,
+                    primary_dist_radii: 60.27,
+                },
+            );
+            for _ in 0..48 {
+                solver.step_hour(&geom);
+            }
+            let mut g_sum = 0.0_f64;
+            let mut g_a = 0.0_f64;
+            let mut eq_sum = 0.0_f64;
+            let mut eq_a = 0.0_f64;
+            let mut pol_sum = 0.0_f64;
+            let mut pol_a = 0.0_f64;
+            for i in 0..n {
+                let a = geom.areas_m2[i] as f64;
+                let t = solver.tsurf_c[i] as f64;
+                g_sum += t * a;
+                g_a += a;
+                let abs_lat = geom.lats_rad[i].abs().to_degrees();
+                if abs_lat < 15.0 {
+                    eq_sum += t * a;
+                    eq_a += a;
+                } else if abs_lat > 70.0 {
+                    pol_sum += t * a;
+                    pol_a += a;
+                }
+            }
+            (g_sum / g_a, eq_sum / eq_a, pol_sum / pol_a)
+        };
+
+        let (gm_ice, eq_ice, pol_ice) = run_aquaplanet(23.5, 0.0);
+        let (gm_earth, _eq_earth, _pol_earth) = run_aquaplanet(23.5, 0.35);
+        let (gm_green, eq_green, pol_green) = run_aquaplanet(23.5, 1.0);
+
+        // Ice-free/ice-capped aquaplanet (no elevated Antarctica/continents) runs ~2 C warmer than
+        // continental Earth, spanning ~8..11.5 C (icehouse) -> ~16..19 C (Earth) -> ~27..32 C (greenhouse):
+        assert!(
+            (7.5..=12.0).contains(&gm_ice)
+                && (15.5..=19.0).contains(&gm_earth)
+                && (27.0..=32.5).contains(&gm_green),
+            "expected aquaplanet GMST to span icehouse..modern..greenhouse, got ice={gm_ice:.2}, earth={gm_earth:.2}, green={gm_green:.2}"
+        );
+        let d_trop = eq_green - eq_ice;
+        let d_pole = pol_green - pol_ice;
+        assert!(
+            d_pole > d_trop * 1.25,
+            "expected emergent sea-ice polar amplification at 23.5 deg tilt (d_pole={d_pole:.2} > 1.25 * d_trop={d_trop:.2})"
+        );
+
+        // At 75 deg obliquity, annual insolation is higher at the poles than at the equator,
+        // so the equatorial belt must be cooler than the polar mean without any sin^2(lat) bias:
+        let (_gm_hi, eq_hi, pol_hi) = run_aquaplanet(75.0, 0.0);
+        assert!(
+            pol_hi > eq_hi + 5.0,
+            "expected 75 deg obliquity aquaplanet to have warmer poles ({pol_hi:.2} C) than equator ({eq_hi:.2} C)"
+        );
     }
 }

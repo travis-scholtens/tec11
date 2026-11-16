@@ -9,7 +9,10 @@ pub mod weather;
 pub use earth_data::EARTH_SIZE6_ELEVATIONS_M;
 pub use fv_geom::{CellEdgeIncidence, DirectedDualEdge, FiniteVolumeSphereGeom};
 pub use tides::{AtmosphericTideForcing, LaplaceTidalSolver, TidalMoonBody};
-pub use weather::{saturation_column_vapor_kgm2, MoistBaroclinicSolver, WeatherInitConfig};
+pub use weather::{
+    equilibrium_open_sst_c, glaciation_temp_offset_c, orbital_annual_mean_cos_z,
+    saturation_column_vapor_kgm2, MoistBaroclinicSolver, WeatherInitConfig,
+};
 pub use koeppen::{classify_tile, KoeppenCode, TileClimateClassification};
 pub use model::{
     bearing_deg, insolation, nominal_cells_for_spin, wind_direction_deg, ClimateModel,
