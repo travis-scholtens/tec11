@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use tec11_math_grid::{SphericalGrid, Vec3, Vec3Key};
@@ -41,6 +40,57 @@ pub struct CellEdgeIncidence {
     pub perot_wy: f32,
 }
 
+/// Fixed-degree-6 Perot vector-reconstruction stencil ordered by 3D Morton cell code.
+/// Pentagon cells pad slot `[5]` with zero weights so inner loops unroll without branches.
+#[derive(Clone, Copy, Debug)]
+pub struct MortonPerotStencil6 {
+    pub cell: u32,
+    pub edge_idx: [u32; 6],
+    pub perot_wx: [f32; 6],
+    pub perot_wy: [f32; 6],
+}
+
+/// Fixed-degree-6 conservative edge-flux divergence stencil ordered by 3D Morton cell code.
+#[derive(Clone, Copy, Debug)]
+pub struct MortonDivStencil6 {
+    pub cell: u32,
+    pub edge_idx: [u32; 6],
+    pub flux_factor: [f32; 6],
+}
+
+/// Fixed-degree-6 conservative scalar Laplacian stencil ordered by 3D Morton cell code.
+#[derive(Clone, Copy, Debug)]
+pub struct MortonLapStencil6 {
+    pub cell: u32,
+    pub neighbor: [u32; 6],
+    pub weight: [f32; 6],
+}
+
+/// Fixed-degree-6 cell-centered scalar gradient stencil ordered by 3D Morton cell code.
+#[derive(Clone, Copy, Debug)]
+pub struct MortonGradStencil6 {
+    pub cell: u32,
+    pub neighbor: [u32; 6],
+    pub wx: [f32; 6],
+    pub wy: [f32; 6],
+}
+
+/// Cell-indexed fixed-degree-6 Perot stencil for subset loops (e.g. wet ocean cells).
+#[derive(Clone, Copy, Debug)]
+pub struct CellPerotStencil6 {
+    pub edge_idx: [u32; 6],
+    pub perot_wx: [f32; 6],
+    pub perot_wy: [f32; 6],
+}
+
+/// Cell-indexed fixed-degree-6 divergence & neighbor stencil for subset/limiter loops.
+#[derive(Clone, Copy, Debug)]
+pub struct CellDivStencil6 {
+    pub edge_idx: [u32; 6],
+    pub neighbor: [u32; 6],
+    pub flux_factor: [f32; 6],
+}
+
 /// Static spherical finite-volume C-grid geometry for pentagonal/hexagonal `SphericalGrid` meshes.
 #[derive(Clone, Debug)]
 pub struct FiniteVolumeSphereGeom {
@@ -62,9 +112,43 @@ pub struct FiniteVolumeSphereGeom {
     /// CSR row offsets of length `num_cells + 1` into `cell_edges`.
     pub cell_edge_offsets: Vec<usize>,
     pub cell_edges: Vec<CellEdgeIncidence>,
+    /// Unique undirected dual edges (`left < right`), sorted by 3D Morton midpoint code for cache locality.
     pub edges: Vec<DirectedDualEdge>,
     /// Mean center-to-center distance $\bar{d}_e$ (m), useful for CFL & hyperviscosity scaling.
     pub mean_edge_dist_m: f32,
+    /// True when every cell has degree $\le 6$ (always true for pentagonal/hexagonal `SphericalGrid`s).
+    pub all_deg_le_6: bool,
+    /// Cell indices `0..num_cells` ordered by 30-bit 3D Morton code of cell centers.
+    pub morton_cells: Vec<u32>,
+    pub morton_perot6: Vec<MortonPerotStencil6>,
+    /// Aligned 1:1 with `morton_perot6` for fused `reconstruct_and_div_2layer`.
+    pub morton_flux6: Vec<[f32; 6]>,
+    pub morton_div6: Vec<MortonDivStencil6>,
+    pub morton_lap6: Vec<MortonLapStencil6>,
+    pub morton_grad6: Vec<MortonGradStencil6>,
+    /// Indexed directly by `cell` (`0..num_cells`).
+    pub cell_perot6: Vec<CellPerotStencil6>,
+    /// Indexed directly by `cell` (`0..num_cells`).
+    pub cell_div6: Vec<CellDivStencil6>,
+}
+
+#[inline]
+fn spread_bits_10_to_30(mut v: u32) -> u32 {
+    v &= 0x0000_03ff;
+    v = (v | (v << 16)) & 0x0300_00ff;
+    v = (v | (v << 8)) & 0x0300_f00f;
+    v = (v | (v << 4)) & 0x030c_30c3;
+    v = (v | (v << 2)) & 0x0924_9249;
+    v
+}
+
+/// 30-bit 3D Morton (Z-order) code for a point near the unit sphere `[-1, 1]^3`.
+#[inline]
+pub fn morton3d_unit_sphere(p: Vec3) -> u32 {
+    let qx = (((p[0] + 1.0) * 0.5).clamp(0.0, 1.0) * 1023.0) as u32;
+    let qy = (((p[1] + 1.0) * 0.5).clamp(0.0, 1.0) * 1023.0) as u32;
+    let qz = (((p[2] + 1.0) * 0.5).clamp(0.0, 1.0) * 1023.0) as u32;
+    spread_bits_10_to_30(qx) | (spread_bits_10_to_30(qy) << 1) | (spread_bits_10_to_30(qz) << 2)
 }
 
 #[inline]
@@ -161,9 +245,15 @@ impl FiniteVolumeSphereGeom {
         let mut east_xyz = Vec::with_capacity(n);
         let mut north_xyz = Vec::with_capacity(n);
         let mut bases_f64 = Vec::with_capacity(n);
+        let mut cell_centers = Vec::with_capacity(n);
+        let mut all_deg_le_6 = true;
 
-        for &(center, ref verts) in &grid.faces {
+        for (cell_idx, &(center, ref verts)) in grid.faces.iter().enumerate() {
+            if adjacency[cell_idx].len() > 6 {
+                all_deg_le_6 = false;
+            }
             let p = norm3(center);
+            cell_centers.push(p);
             let mut omega = 0.0_f64;
             let m = verts.len();
             for k in 0..m {
@@ -190,20 +280,19 @@ impl FiniteVolumeSphereGeom {
             north_xyz.push([north[0] as f32, north[1] as f32, north[2] as f32]);
         }
 
-        // Build unique undirected edges (left < right) and map shared vertices.
-        let mut edges = Vec::with_capacity(n * 3);
-        let mut edge_lookup: HashMap<(u32, u32), u32> = HashMap::with_capacity(n * 3);
+        // Build unique undirected edges (left < right) and tag each with its 3D Morton midpoint code.
+        let mut keyed_edges: Vec<(u32, DirectedDualEdge)> = Vec::with_capacity(n * 3);
         let mut dist_sum = 0.0_f64;
 
         for i in 0..n {
-            let (pi_raw, verts_i) = &grid.faces[i];
-            let pi = norm3(*pi_raw);
+            let pi = cell_centers[i];
+            let verts_i = &grid.faces[i].1;
             for &j in &adjacency[i] {
                 if j <= i {
                     continue;
                 }
-                let (pj_raw, verts_j) = &grid.faces[j];
-                let pj = norm3(*pj_raw);
+                let pj = cell_centers[j];
+                let verts_j = &grid.faces[j].1;
 
                 // Find the 2 shared primal polygon vertices between face i and face j.
                 let mut shared: [Vec3; 2] = [[0.0; 3]; 2];
@@ -225,6 +314,8 @@ impl FiniteVolumeSphereGeom {
                 };
                 let center_dist_m = (geodesic_angle_rad(pi, pj) * radius_m).max(1.0);
                 dist_sum += center_dist_m;
+
+                let cell_mid = norm3([pi[0] + pj[0], pi[1] + pj[1], pi[2] + pj[2]]);
 
                 // Construct the unit 3D edge normal at the shared edge midpoint pointing `i -> j`.
                 let n3d = if shared_count >= 2 {
@@ -254,12 +345,11 @@ impl FiniteVolumeSphereGeom {
                         norm3(dp_tan)
                     }
                 } else {
-                    let mid = norm3([pi[0] + pj[0], pi[1] + pj[1], pi[2] + pj[2]]);
                     let dp = [pj[0] - pi[0], pj[1] - pi[1], pj[2] - pi[2]];
                     norm3([
-                        dp[0] - dot3(dp, mid) * mid[0],
-                        dp[1] - dot3(dp, mid) * mid[1],
-                        dp[2] - dot3(dp, mid) * mid[2],
+                        dp[0] - dot3(dp, cell_mid) * cell_mid[0],
+                        dp[1] - dot3(dp, cell_mid) * cell_mid[1],
+                        dp[2] - dot3(dp, cell_mid) * cell_mid[2],
                     ])
                 };
 
@@ -268,27 +358,42 @@ impl FiniteVolumeSphereGeom {
                 let (nx_left, ny_left) = project_unit_2d(n3d, east_i, north_i);
                 let (nx_right, ny_right) = project_unit_2d(n3d, east_j, north_j);
 
-                let edge_idx = edges.len() as u32;
-                edges.push(DirectedDualEdge {
-                    left: i as u32,
-                    right: j as u32,
-                    dual_len_m: dual_len_m as f32,
-                    center_dist_m: center_dist_m as f32,
-                    inv_center_dist_m: (1.0 / center_dist_m) as f32,
-                    nx_left: nx_left as f32,
-                    ny_left: ny_left as f32,
-                    nx_right: nx_right as f32,
-                    ny_right: ny_right as f32,
-                });
-                edge_lookup.insert((i as u32, j as u32), edge_idx);
+                keyed_edges.push((
+                    morton3d_unit_sphere(cell_mid),
+                    DirectedDualEdge {
+                        left: i as u32,
+                        right: j as u32,
+                        dual_len_m: dual_len_m as f32,
+                        center_dist_m: center_dist_m as f32,
+                        inv_center_dist_m: (1.0 / center_dist_m) as f32,
+                        nx_left: nx_left as f32,
+                        ny_left: ny_left as f32,
+                        nx_right: nx_right as f32,
+                        ny_right: ny_right as f32,
+                    },
+                ));
             }
         }
+
+        // Sort dual edges in 3D Morton order so edge sweeps keep endpoint cells hot in L1/L2 cache.
+        keyed_edges.sort_unstable_by_key(|&(m, ref e)| (m, e.left, e.right));
+        let edges: Vec<DirectedDualEdge> = keyed_edges.into_iter().map(|(_, e)| e).collect();
 
         let mean_edge_dist_m = if edges.is_empty() {
             1.0
         } else {
             (dist_sum / edges.len() as f64) as f32
         };
+
+        // Direct per-cell `(neighbor, edge_idx)` table without HashMap hashing overhead.
+        let mut cell_adj_edges: Vec<Vec<(u32, u32)>> = (0..n)
+            .map(|i| Vec::with_capacity(adjacency[i].len()))
+            .collect();
+        for (edge_idx, e) in edges.iter().enumerate() {
+            let e_u32 = edge_idx as u32;
+            cell_adj_edges[e.left as usize].push((e.right, e_u32));
+            cell_adj_edges[e.right as usize].push((e.left, e_u32));
+        }
 
         // Build CSR cell->edge incidence with Perot weights refined by the exact 2x2 cell metric
         // tensor so uniform tangent vector fields reconstruct to machine precision on every
@@ -300,18 +405,15 @@ impl FiniteVolumeSphereGeom {
         for i in 0..n {
             let area = areas_m2[i] as f64;
             let start = cell_edges.len();
+            let adj_edges_i = &cell_adj_edges[i];
 
             let mut m_xx = 0.0_f64;
             let mut m_xy = 0.0_f64;
             let mut m_yy = 0.0_f64;
 
             for &j in &adjacency[i] {
-                let key = if i < j {
-                    (i as u32, j as u32)
-                } else {
-                    (j as u32, i as u32)
-                };
-                let Some(&edge_idx) = edge_lookup.get(&key) else {
+                let j_u32 = j as u32;
+                let Some(&(_, edge_idx)) = adj_edges_i.iter().find(|&&(nb, _)| nb == j_u32) else {
                     continue;
                 };
                 let e = &edges[edge_idx as usize];
@@ -330,7 +432,7 @@ impl FiniteVolumeSphereGeom {
 
                 cell_edges.push(CellEdgeIncidence {
                     edge_idx,
-                    neighbor: j as u32,
+                    neighbor: j_u32,
                     sign: sign as f32,
                     flux_factor: (sign * (e.dual_len_m as f64) / area) as f32,
                     perot_wx: (w_perot * nx_dir) as f32,
@@ -354,6 +456,95 @@ impl FiniteVolumeSphereGeom {
             cell_edge_offsets.push(cell_edges.len());
         }
 
+        // Order cells by 30-bit 3D Morton code of cell centers.
+        let mut keyed_cells: Vec<(u32, u32)> = (0..n)
+            .map(|i| (morton3d_unit_sphere(cell_centers[i]), i as u32))
+            .collect();
+        keyed_cells.sort_unstable();
+        let morton_cells: Vec<u32> = keyed_cells.into_iter().map(|(_, i)| i).collect();
+
+        let mut cell_perot6 = Vec::with_capacity(if all_deg_le_6 { n } else { 0 });
+        let mut cell_div6 = Vec::with_capacity(if all_deg_le_6 { n } else { 0 });
+        let mut morton_perot6 = Vec::with_capacity(if all_deg_le_6 { n } else { 0 });
+        let mut morton_flux6 = Vec::with_capacity(if all_deg_le_6 { n } else { 0 });
+        let mut morton_div6 = Vec::with_capacity(if all_deg_le_6 { n } else { 0 });
+        let mut morton_lap6 = Vec::with_capacity(if all_deg_le_6 { n } else { 0 });
+        let mut morton_grad6 = Vec::with_capacity(if all_deg_le_6 { n } else { 0 });
+
+        if all_deg_le_6 {
+            for i in 0..n {
+                let start = cell_edge_offsets[i];
+                let end = cell_edge_offsets[i + 1];
+                let slice = &cell_edges[start..end];
+                let fallback_edge = slice.first().map_or(0, |inc| inc.edge_idx);
+                let mut edge_idx = [fallback_edge; 6];
+                let mut neighbor = [i as u32; 6];
+                let mut flux_factor = [0.0_f32; 6];
+                let mut perot_wx = [0.0_f32; 6];
+                let mut perot_wy = [0.0_f32; 6];
+                for (k, inc) in slice.iter().enumerate() {
+                    edge_idx[k] = inc.edge_idx;
+                    neighbor[k] = inc.neighbor;
+                    flux_factor[k] = inc.flux_factor;
+                    perot_wx[k] = inc.perot_wx;
+                    perot_wy[k] = inc.perot_wy;
+                }
+                cell_perot6.push(CellPerotStencil6 {
+                    edge_idx,
+                    perot_wx,
+                    perot_wy,
+                });
+                cell_div6.push(CellDivStencil6 {
+                    edge_idx,
+                    neighbor,
+                    flux_factor,
+                });
+            }
+
+            for &cell_u32 in &morton_cells {
+                let i = cell_u32 as usize;
+                let cp = cell_perot6[i];
+                let cd = cell_div6[i];
+                morton_perot6.push(MortonPerotStencil6 {
+                    cell: cell_u32,
+                    edge_idx: cp.edge_idx,
+                    perot_wx: cp.perot_wx,
+                    perot_wy: cp.perot_wy,
+                });
+                morton_flux6.push(cd.flux_factor);
+                morton_div6.push(MortonDivStencil6 {
+                    cell: cell_u32,
+                    edge_idx: cd.edge_idx,
+                    flux_factor: cd.flux_factor,
+                });
+
+                let start = cell_edge_offsets[i];
+                let end = cell_edge_offsets[i + 1];
+                let slice = &cell_edges[start..end];
+                let mut lap_w = [0.0_f32; 6];
+                let mut grad_wx = [0.0_f32; 6];
+                let mut grad_wy = [0.0_f32; 6];
+                for (k, inc) in slice.iter().enumerate() {
+                    let inv_d = edges[inc.edge_idx as usize].inv_center_dist_m;
+                    lap_w[k] = inc.flux_factor.abs() * inv_d;
+                    let signed_inv_d = inc.sign * inv_d;
+                    grad_wx[k] = signed_inv_d * inc.perot_wx;
+                    grad_wy[k] = signed_inv_d * inc.perot_wy;
+                }
+                morton_lap6.push(MortonLapStencil6 {
+                    cell: cell_u32,
+                    neighbor: cd.neighbor,
+                    weight: lap_w,
+                });
+                morton_grad6.push(MortonGradStencil6 {
+                    cell: cell_u32,
+                    neighbor: cd.neighbor,
+                    wx: grad_wx,
+                    wy: grad_wy,
+                });
+            }
+        }
+
         Self {
             num_cells: n,
             radius_m,
@@ -370,6 +561,15 @@ impl FiniteVolumeSphereGeom {
             cell_edges,
             edges,
             mean_edge_dist_m,
+            all_deg_le_6,
+            morton_cells,
+            morton_perot6,
+            morton_flux6,
+            morton_div6,
+            morton_lap6,
+            morton_grad6,
+            cell_perot6,
+            cell_div6,
         }
     }
 
@@ -400,53 +600,217 @@ impl FiniteVolumeSphereGeom {
         out_u_east: &mut [f32],
         out_v_north: &mut [f32],
     ) {
-        debug_assert_eq!(u_edge.len(), self.edges.len());
-        debug_assert_eq!(out_u_east.len(), self.num_cells);
-        debug_assert_eq!(out_v_north.len(), self.num_cells);
+        assert_eq!(u_edge.len(), self.edges.len());
+        assert_eq!(out_u_east.len(), self.num_cells);
+        assert_eq!(out_v_north.len(), self.num_cells);
 
-        for i in 0..self.num_cells {
-            let mut ux = 0.0_f32;
-            let mut vy = 0.0_f32;
-            for inc in self.incident_edges(i) {
-                let ue = u_edge[inc.edge_idx as usize];
-                ux += ue * inc.perot_wx;
-                vy += ue * inc.perot_wy;
+        if self.all_deg_le_6 {
+            for st in &self.morton_perot6 {
+                let mut ux = 0.0_f32;
+                let mut vy = 0.0_f32;
+                for k in 0..6 {
+                    let ue = u_edge[st.edge_idx[k] as usize];
+                    ux += ue * st.perot_wx[k];
+                    vy += ue * st.perot_wy[k];
+                }
+                let c = st.cell as usize;
+                out_u_east[c] = ux;
+                out_v_north[c] = vy;
             }
-            out_u_east[i] = ux;
-            out_v_north[i] = vy;
+        } else {
+            for i in 0..self.num_cells {
+                let mut ux = 0.0_f32;
+                let mut vy = 0.0_f32;
+                for inc in self.incident_edges(i) {
+                    let ue = u_edge[inc.edge_idx as usize];
+                    ux += ue * inc.perot_wx;
+                    vy += ue * inc.perot_wy;
+                }
+                out_u_east[i] = ux;
+                out_v_north[i] = vy;
+            }
+        }
+    }
+
+    /// Fused 2-layer Perot velocity reconstruction AND normal-velocity divergence in a single pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconstruct_and_div_2layer(
+        &self,
+        u1_edge: &[f32],
+        u2_edge: &[f32],
+        out_u1_east: &mut [f32],
+        out_v1_north: &mut [f32],
+        out_div1: &mut [f32],
+        out_u2_east: &mut [f32],
+        out_v2_north: &mut [f32],
+        out_div2: &mut [f32],
+    ) {
+        assert_eq!(u1_edge.len(), self.edges.len());
+        assert_eq!(u2_edge.len(), self.edges.len());
+        assert_eq!(out_u1_east.len(), self.num_cells);
+        assert_eq!(out_v1_north.len(), self.num_cells);
+        assert_eq!(out_div1.len(), self.num_cells);
+        assert_eq!(out_u2_east.len(), self.num_cells);
+        assert_eq!(out_v2_north.len(), self.num_cells);
+        assert_eq!(out_div2.len(), self.num_cells);
+
+        if self.all_deg_le_6 {
+            for (st, ff) in self.morton_perot6.iter().zip(self.morton_flux6.iter()) {
+                let mut u1x = 0.0_f32;
+                let mut v1y = 0.0_f32;
+                let mut d1 = 0.0_f32;
+                let mut u2x = 0.0_f32;
+                let mut v2y = 0.0_f32;
+                let mut d2 = 0.0_f32;
+                for k in 0..6 {
+                    let e = st.edge_idx[k] as usize;
+                    let ue1 = u1_edge[e];
+                    let ue2 = u2_edge[e];
+                    let wx = st.perot_wx[k];
+                    let wy = st.perot_wy[k];
+                    let f = ff[k];
+                    u1x += ue1 * wx;
+                    v1y += ue1 * wy;
+                    d1 += ue1 * f;
+                    u2x += ue2 * wx;
+                    v2y += ue2 * wy;
+                    d2 += ue2 * f;
+                }
+                let c = st.cell as usize;
+                out_u1_east[c] = u1x;
+                out_v1_north[c] = v1y;
+                out_div1[c] = d1;
+                out_u2_east[c] = u2x;
+                out_v2_north[c] = v2y;
+                out_div2[c] = d2;
+            }
+        } else {
+            self.reconstruct_cell_vectors(u1_edge, out_u1_east, out_v1_north);
+            self.reconstruct_cell_vectors(u2_edge, out_u2_east, out_v2_north);
+            self.divergence_from_edge_flux(u1_edge, out_div1);
+            self.divergence_from_edge_flux(u2_edge, out_div2);
         }
     }
 
     /// Computes conservative finite-volume divergence $(\nabla \cdot \mathbf{F})_i = \frac{1}{A_i}\sum_e s_{e,i} l_e F_e$,
     /// where `flux_edge[e]` is flux per unit edge length in direction `left -> right`.
     pub fn divergence_from_edge_flux(&self, flux_edge: &[f32], out_div: &mut [f32]) {
-        debug_assert_eq!(flux_edge.len(), self.edges.len());
-        debug_assert_eq!(out_div.len(), self.num_cells);
+        assert_eq!(flux_edge.len(), self.edges.len());
+        assert_eq!(out_div.len(), self.num_cells);
 
-        for i in 0..self.num_cells {
-            let mut div = 0.0_f32;
-            for inc in self.incident_edges(i) {
-                div += flux_edge[inc.edge_idx as usize] * inc.flux_factor;
+        if self.all_deg_le_6 {
+            for st in &self.morton_div6 {
+                let mut div = 0.0_f32;
+                for k in 0..6 {
+                    div += flux_edge[st.edge_idx[k] as usize] * st.flux_factor[k];
+                }
+                out_div[st.cell as usize] = div;
             }
-            out_div[i] = div;
+        } else {
+            for i in 0..self.num_cells {
+                let mut div = 0.0_f32;
+                for inc in self.incident_edges(i) {
+                    div += flux_edge[inc.edge_idx as usize] * inc.flux_factor;
+                }
+                out_div[i] = div;
+            }
+        }
+    }
+
+    /// Fused 2-layer conservative finite-volume divergence in a single pass.
+    pub fn divergence_2layer(
+        &self,
+        flux1_edge: &[f32],
+        flux2_edge: &[f32],
+        out_div1: &mut [f32],
+        out_div2: &mut [f32],
+    ) {
+        assert_eq!(flux1_edge.len(), self.edges.len());
+        assert_eq!(flux2_edge.len(), self.edges.len());
+        assert_eq!(out_div1.len(), self.num_cells);
+        assert_eq!(out_div2.len(), self.num_cells);
+
+        if self.all_deg_le_6 {
+            for st in &self.morton_div6 {
+                let mut d1 = 0.0_f32;
+                let mut d2 = 0.0_f32;
+                for k in 0..6 {
+                    let e = st.edge_idx[k] as usize;
+                    let f = st.flux_factor[k];
+                    d1 += flux1_edge[e] * f;
+                    d2 += flux2_edge[e] * f;
+                }
+                let c = st.cell as usize;
+                out_div1[c] = d1;
+                out_div2[c] = d2;
+            }
+        } else {
+            self.divergence_from_edge_flux(flux1_edge, out_div1);
+            self.divergence_from_edge_flux(flux2_edge, out_div2);
         }
     }
 
     /// Computes conservative spherical scalar Laplacian $(\nabla^2 \psi)_i = \frac{1}{A_i}\sum_{e \in \partial i} l_e \frac{\psi_j - \psi_i}{d_e}$.
     pub fn laplacian_scalar(&self, field: &[f32], out_lap: &mut [f32]) {
-        debug_assert_eq!(field.len(), self.num_cells);
-        debug_assert_eq!(out_lap.len(), self.num_cells);
+        assert_eq!(field.len(), self.num_cells);
+        assert_eq!(out_lap.len(), self.num_cells);
 
-        for i in 0..self.num_cells {
-            let fi = field[i];
-            let mut acc = 0.0_f32;
-            for inc in self.incident_edges(i) {
-                let e = &self.edges[inc.edge_idx as usize];
-                let fj = field[inc.neighbor as usize];
-                // Note `inc.flux_factor.abs() == dual_len_m / area_m2`.
-                acc += inc.flux_factor.abs() * (fj - fi) * e.inv_center_dist_m;
+        if self.all_deg_le_6 {
+            for st in &self.morton_lap6 {
+                let c = st.cell as usize;
+                let fi = field[c];
+                let mut acc = 0.0_f32;
+                for k in 0..6 {
+                    acc += (field[st.neighbor[k] as usize] - fi) * st.weight[k];
+                }
+                out_lap[c] = acc;
             }
-            out_lap[i] = acc;
+        } else {
+            for i in 0..self.num_cells {
+                let fi = field[i];
+                let mut acc = 0.0_f32;
+                for inc in self.incident_edges(i) {
+                    let e = &self.edges[inc.edge_idx as usize];
+                    let fj = field[inc.neighbor as usize];
+                    acc += inc.flux_factor.abs() * (fj - fi) * e.inv_center_dist_m;
+                }
+                out_lap[i] = acc;
+            }
+        }
+    }
+
+    /// Fused 2-field conservative spherical scalar Laplacian in a single stencil pass.
+    pub fn laplacian_2layer(
+        &self,
+        field1: &[f32],
+        field2: &[f32],
+        out_lap1: &mut [f32],
+        out_lap2: &mut [f32],
+    ) {
+        assert_eq!(field1.len(), self.num_cells);
+        assert_eq!(field2.len(), self.num_cells);
+        assert_eq!(out_lap1.len(), self.num_cells);
+        assert_eq!(out_lap2.len(), self.num_cells);
+
+        if self.all_deg_le_6 {
+            for st in &self.morton_lap6 {
+                let c = st.cell as usize;
+                let f1i = field1[c];
+                let f2i = field2[c];
+                let mut acc1 = 0.0_f32;
+                let mut acc2 = 0.0_f32;
+                for k in 0..6 {
+                    let nb = st.neighbor[k] as usize;
+                    let w = st.weight[k];
+                    acc1 += (field1[nb] - f1i) * w;
+                    acc2 += (field2[nb] - f2i) * w;
+                }
+                out_lap1[c] = acc1;
+                out_lap2[c] = acc2;
+            }
+        } else {
+            self.laplacian_scalar(field1, out_lap1);
+            self.laplacian_scalar(field2, out_lap2);
         }
     }
 
@@ -458,21 +822,38 @@ impl FiniteVolumeSphereGeom {
         out_gx: &mut [f32],
         out_gy: &mut [f32],
     ) {
-        debug_assert_eq!(field.len(), self.num_cells);
-        debug_assert_eq!(out_gx.len(), self.num_cells);
-        debug_assert_eq!(out_gy.len(), self.num_cells);
+        assert_eq!(field.len(), self.num_cells);
+        assert_eq!(out_gx.len(), self.num_cells);
+        assert_eq!(out_gy.len(), self.num_cells);
 
-        for i in 0..self.num_cells {
-            let mut gx = 0.0_f32;
-            let mut gy = 0.0_f32;
-            for inc in self.incident_edges(i) {
-                let e = &self.edges[inc.edge_idx as usize];
-                let df_dn = (field[e.right as usize] - field[e.left as usize]) * e.inv_center_dist_m;
-                gx += df_dn * inc.perot_wx;
-                gy += df_dn * inc.perot_wy;
+        if self.all_deg_le_6 {
+            for st in &self.morton_grad6 {
+                let c = st.cell as usize;
+                let fi = field[c];
+                let mut gx = 0.0_f32;
+                let mut gy = 0.0_f32;
+                for k in 0..6 {
+                    let df = field[st.neighbor[k] as usize] - fi;
+                    gx += df * st.wx[k];
+                    gy += df * st.wy[k];
+                }
+                out_gx[c] = gx;
+                out_gy[c] = gy;
             }
-            out_gx[i] = gx;
-            out_gy[i] = gy;
+        } else {
+            for i in 0..self.num_cells {
+                let mut gx = 0.0_f32;
+                let mut gy = 0.0_f32;
+                for inc in self.incident_edges(i) {
+                    let e = &self.edges[inc.edge_idx as usize];
+                    let df_dn =
+                        (field[e.right as usize] - field[e.left as usize]) * e.inv_center_dist_m;
+                    gx += df_dn * inc.perot_wx;
+                    gy += df_dn * inc.perot_wy;
+                }
+                out_gx[i] = gx;
+                out_gy[i] = gy;
+            }
         }
     }
 
@@ -486,10 +867,10 @@ impl FiniteVolumeSphereGeom {
         scratch_edge_tan: &mut [f32],
         out_zeta: &mut [f32],
     ) {
-        debug_assert_eq!(u_east.len(), self.num_cells);
-        debug_assert_eq!(v_north.len(), self.num_cells);
-        debug_assert_eq!(scratch_edge_tan.len(), self.edges.len());
-        debug_assert_eq!(out_zeta.len(), self.num_cells);
+        assert_eq!(u_east.len(), self.num_cells);
+        assert_eq!(v_north.len(), self.num_cells);
+        assert_eq!(scratch_edge_tan.len(), self.edges.len());
+        assert_eq!(out_zeta.len(), self.num_cells);
 
         for (e_idx, e) in self.edges.iter().enumerate() {
             let l = e.left as usize;
@@ -499,6 +880,40 @@ impl FiniteVolumeSphereGeom {
             scratch_edge_tan[e_idx] = 0.5 * (vt_l + vt_r);
         }
         self.divergence_from_edge_flux(scratch_edge_tan, out_zeta);
+    }
+
+    /// Fused 2-layer Stokes relative vorticity in a single edge pass + single Morton stencil pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn curl_2layer(
+        &self,
+        u1_east: &[f32],
+        v1_north: &[f32],
+        u2_east: &[f32],
+        v2_north: &[f32],
+        scratch_tan1: &mut [f32],
+        scratch_tan2: &mut [f32],
+        out_zeta1: &mut [f32],
+        out_zeta2: &mut [f32],
+    ) {
+        assert_eq!(u1_east.len(), self.num_cells);
+        assert_eq!(v1_north.len(), self.num_cells);
+        assert_eq!(u2_east.len(), self.num_cells);
+        assert_eq!(v2_north.len(), self.num_cells);
+        assert_eq!(scratch_tan1.len(), self.edges.len());
+        assert_eq!(scratch_tan2.len(), self.edges.len());
+
+        for (e_idx, e) in self.edges.iter().enumerate() {
+            let l = e.left as usize;
+            let r = e.right as usize;
+            let vt1_l = -u1_east[l] * e.ny_left + v1_north[l] * e.nx_left;
+            let vt1_r = -u1_east[r] * e.ny_right + v1_north[r] * e.nx_right;
+            scratch_tan1[e_idx] = 0.5 * (vt1_l + vt1_r);
+
+            let vt2_l = -u2_east[l] * e.ny_left + v2_north[l] * e.nx_left;
+            let vt2_r = -u2_east[r] * e.ny_right + v2_north[r] * e.nx_right;
+            scratch_tan2[e_idx] = 0.5 * (vt2_l + vt2_r);
+        }
+        self.divergence_2layer(scratch_tan1, scratch_tan2, out_zeta1, out_zeta2);
     }
 
     /// Converts local `(u_east, v_north)` velocity at `cell` into 3D `SphericalGrid` `[vx, vy, vz]`.
@@ -524,6 +939,7 @@ mod tests {
         let adj = grid.adjacency();
         let radius_m = 6_371_000.0_f64;
         let geom = FiniteVolumeSphereGeom::new(&grid, &adj, radius_m, 24.0);
+        assert!(geom.all_deg_le_6);
 
         // 1. Total spherical area matches 4 * pi * R^2 to high precision.
         let total_area: f64 = geom.areas_m2.iter().map(|&a| a as f64).sum();
@@ -559,8 +975,6 @@ mod tests {
         // 3. Perot vector reconstruction recovers solid-body zonal rotation U0 * cos(lat)
         // on both hexagons and pentagons.
         let u0 = 25.0_f64;
-        // Solid-body eastward velocity in 3D: v(p) = U0 * [y, -x, 0] (since r_xy = sqrt(x^2+y^2)
-        // and east = [y/r_xy, -x/r_xy, 0], so east * U0 * cos(lat) = U0 * [y, -x, 0]).
         let mut u_edge = vec![0.0_f32; geom.edges.len()];
         for (idx, e) in geom.edges.iter().enumerate() {
             let l = e.left as usize;
@@ -616,5 +1030,63 @@ mod tests {
             max_zeta_err < 1.5e-6,
             "expected accurate solid-body curl, got max_zeta_err={max_zeta_err}"
         );
+
+        // 5. Fused 2-layer operators match single-layer operators and constant fields give exact 0.
+        let u2_edge: Vec<f32> = u_edge.iter().enumerate().map(|(k, &v)| -0.6 * v + (k as f32 * 0.13).sin()).collect();
+        let mut rec_u2_ref = vec![0.0_f32; geom.num_cells];
+        let mut rec_v2_ref = vec![0.0_f32; geom.num_cells];
+        let mut div1_ref = vec![0.0_f32; geom.num_cells];
+        let mut div2_ref = vec![0.0_f32; geom.num_cells];
+        geom.reconstruct_cell_vectors(&u2_edge, &mut rec_u2_ref, &mut rec_v2_ref);
+        geom.divergence_from_edge_flux(&u_edge, &mut div1_ref);
+        geom.divergence_from_edge_flux(&u2_edge, &mut div2_ref);
+
+        let mut fu1 = vec![0.0_f32; geom.num_cells];
+        let mut fv1 = vec![0.0_f32; geom.num_cells];
+        let mut fd1 = vec![0.0_f32; geom.num_cells];
+        let mut fu2 = vec![0.0_f32; geom.num_cells];
+        let mut fv2 = vec![0.0_f32; geom.num_cells];
+        let mut fd2 = vec![0.0_f32; geom.num_cells];
+        geom.reconstruct_and_div_2layer(
+            &u_edge, &u2_edge, &mut fu1, &mut fv1, &mut fd1, &mut fu2, &mut fv2, &mut fd2,
+        );
+        for i in 0..geom.num_cells {
+            assert!((fu1[i] - rec_u[i]).abs() <= 1e-6);
+            assert!((fv1[i] - rec_v[i]).abs() <= 1e-6);
+            assert!((fd1[i] - div1_ref[i]).abs() <= 1e-9);
+            assert!((fu2[i] - rec_u2_ref[i]).abs() <= 1e-6);
+            assert!((fv2[i] - rec_v2_ref[i]).abs() <= 1e-6);
+            assert!((fd2[i] - div2_ref[i]).abs() <= 1e-9);
+        }
+
+        let mut zeta2_ref = vec![0.0_f32; geom.num_cells];
+        geom.curl_from_cell_vectors(&rec_u2_ref, &rec_v2_ref, &mut scratch_tan, &mut zeta2_ref);
+        let mut scratch_tan2 = vec![0.0_f32; geom.edges.len()];
+        let mut fz1 = vec![0.0_f32; geom.num_cells];
+        let mut fz2 = vec![0.0_f32; geom.num_cells];
+        geom.curl_2layer(
+            &rec_u,
+            &rec_v,
+            &rec_u2_ref,
+            &rec_v2_ref,
+            &mut scratch_tan,
+            &mut scratch_tan2,
+            &mut fz1,
+            &mut fz2,
+        );
+        for i in 0..geom.num_cells {
+            assert!((fz1[i] - zeta[i]).abs() <= 1e-9);
+            assert!((fz2[i] - zeta2_ref[i]).abs() <= 1e-9);
+        }
+
+        let const_field = vec![288.15_f32; geom.num_cells];
+        let mut lap_const = vec![1.0_f32; geom.num_cells];
+        let mut gx_const = vec![1.0_f32; geom.num_cells];
+        let mut gy_const = vec![1.0_f32; geom.num_cells];
+        geom.laplacian_scalar(&const_field, &mut lap_const);
+        geom.gradient_scalar(&const_field, &mut gx_const, &mut gy_const);
+        assert!(lap_const.iter().all(|&v| v == 0.0));
+        assert!(gx_const.iter().all(|&v| v == 0.0));
+        assert!(gy_const.iter().all(|&v| v == 0.0));
     }
 }
