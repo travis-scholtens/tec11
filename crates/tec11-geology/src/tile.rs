@@ -274,6 +274,43 @@ impl TileGeology {
             .unwrap_or(RockKind::Igneous)
     }
 
+    /// Near-surface regolith & soil fertility (`[0.55, 1.40]`) derived from the uppermost `0.30 km`
+    /// of this tile's rock column (`Rock::soil_fertility`), weighted exponentially toward the surface
+    /// (`exp(-depth / 0.12 km)`). Fresh basaltic hotspot shields and andesitic volcanic arcs weather
+    /// into fertile Andisols (`~1.24..1.38`), whereas coral-limestone atoll caps (`~0.72`) and granitic
+    /// cratons (`~0.85`) yield thinner, nutrient-limited soils.
+    pub fn surface_soil_fertility(&self) -> f32 {
+        if self.layers.is_empty() {
+            return 1.0;
+        }
+        let max_depth_km = 0.30f32;
+        let mut depth_km = 0.0f32;
+        let mut w_sum = 0.0f32;
+        let mut fert_sum = 0.0f32;
+        for layer in self.layers.iter().rev() {
+            if depth_km >= max_depth_km {
+                break;
+            }
+            let take = layer.thickness.clamp(0.0, max_depth_km - depth_km);
+            if take <= 1e-6 {
+                continue;
+            }
+            let mid_depth = depth_km + 0.5 * take;
+            let w = take * (-mid_depth / 0.12).exp();
+            w_sum += w;
+            fert_sum += w * layer.rock.soil_fertility();
+            depth_km += take;
+        }
+        if w_sum > 1e-7 {
+            (fert_sum / w_sum).clamp(0.55, 1.40)
+        } else {
+            self.layers
+                .last()
+                .map(|l| l.rock.soil_fertility())
+                .unwrap_or(1.0)
+        }
+    }
+
     /// Detect stratigraphic impact crater / ejecta breccia signature in the near-surface rock layers:
     /// - `>= 0.65`: Shock-metamorphosed `hornfels` (`0.82 <= toughness <= 0.94`) crater basin floor.
     ///   (Note: plutonic contact-metamorphic `hornfels` along subduction zones has `toughness == 1.0` and is excluded.)
@@ -3043,5 +3080,41 @@ mod tests {
         fragmented.compact();
         assert!(fragmented.layers.len() <= TileGeology::MAX_LAYERS);
         assert!((fragmented.thickness() - frag_thick).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_surface_soil_fertility_distinguishes_volcanic_andisols_from_atolls_and_cratons() {
+        let mut hotspot_tile = TileGeology::birth_seafloor();
+        hotspot_tile.layers.push(RockLayer {
+            rock: Rock::extrusive(0.44),
+            thickness: 2.0,
+        });
+        let mut arc_tile = TileGeology::birth_seafloor();
+        arc_tile.layers.push(RockLayer {
+            rock: Rock::intrusive(0.58),
+            thickness: 2.5,
+        });
+        let mut atoll_tile = hotspot_tile.clone();
+        atoll_tile.layers.push(RockLayer {
+            rock: Rock {
+                kind: RockKind::Sedimentary,
+                name: "limestone",
+                felsity: 0.50,
+                toughness: 0.45,
+                clasticity: Some(4.0),
+                calcity: Some(0.92),
+                bogginess: None,
+                quartzity: None,
+                sulfidity: None,
+                salinity: None,
+            },
+            thickness: 0.25,
+        });
+        let granite_tile = TileGeology::empty_land(Rock::intrusive(0.75), 0.5);
+
+        assert!(hotspot_tile.surface_soil_fertility() > 1.30);
+        assert!(arc_tile.surface_soil_fertility() > 1.20);
+        assert!(atoll_tile.surface_soil_fertility() < 0.80);
+        assert!(granite_tile.surface_soil_fertility() < 0.90);
     }
 }

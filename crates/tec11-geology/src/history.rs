@@ -1446,10 +1446,17 @@ impl HistorySimulation {
             }
         }
 
-        // 3. Carrying capacity on subdivided fine faces (`historysimulation.py:capacity`, 1/9 of coarse parent).
+        // 3. Carrying capacity on subdivided fine faces (`historysimulation.py:capacity`, 1/9 of coarse parent),
+        //    modulated by near-surface bedrock/regolith soil fertility (`TileGeology::surface_soil_fertility`:
+        //    basaltic/andesitic volcanic Andisols & organic siltstones vs. carbonate coral atolls & granitic shields).
         let ocean = main_ocean(&coarse_elevs, &coarse_adj);
+        let geo_tiles = self.prehistory.tiles();
         let mut coarse_caps = vec![0.0f32; num_coarse];
         for c in 0..num_coarse {
+            let soil_mult = geo_tiles
+                .get(c)
+                .map(|t| t.surface_soil_fertility())
+                .unwrap_or(1.0);
             if coarse_elevs[c] > 0.0 {
                 if !is_habitable(coarse_elevs[c], koeppen[c]) {
                     continue;
@@ -1462,7 +1469,7 @@ impl HistorySimulation {
                     1.0
                 };
                 let sp_mult = ((coarse_species[c].len() as f32).sqrt()).max(1.0);
-                coarse_caps[c] = (base * coast_mult * sp_mult).max(1.8);
+                coarse_caps[c] = (base * coast_mult * soil_mult * sp_mult).max(1.8);
             } else if let Some(isl_elev) = emergent_island_elev[c] {
                 if !is_passable(isl_elev, koeppen[c], false) {
                     continue;
@@ -1471,7 +1478,7 @@ impl HistorySimulation {
                     tile_population_thousands(koeppen[c], is_farmable(isl_elev, koeppen[c]));
                 let coast_mult = 1.25;
                 let sp_mult = ((coarse_species[c].len() as f32).sqrt()).max(1.0);
-                coarse_caps[c] = (base * coast_mult * sp_mult).max(1.8);
+                coarse_caps[c] = (base * coast_mult * soil_mult * sp_mult).max(1.8);
             }
         }
 

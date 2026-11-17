@@ -136,6 +136,63 @@ impl Rock {
         }
     }
 
+    /// Relative agricultural & ecological soil fertility (`[0.55, 1.40]`) produced when this rock
+    /// weathers into surface regolith:
+    /// - Mafic/intermediate volcanics (`basalt`, `dacite`, `andesite`) weather into Ca/Mg/P-rich Andisols (`~1.24..1.38`).
+    /// - Alluvial/loessic `siltstone` & `claystone` (especially organic or volcaniclastic) form rich loams (`~1.08..1.32`).
+    /// - Felsic `granite` (`> 0.63`) and coarse `conglomerate` weather into acidic/stony soils (`~0.82..0.85`).
+    /// - Pure carbonate `limestone`/`chalk` (e.g. coral-atoll caps) form thin, P/Fe-poor alkaline soils (`~0.72..0.82`).
+    /// - Saline evaporitic beds (`salinity`) suffer salt-toxicity penalties.
+    pub fn soil_fertility(&self) -> f32 {
+        let raw = match self.kind {
+            RockKind::Igneous => {
+                if self.felsity <= 0.35 {
+                    // Ultramafic / serpentine regolith (Mg/Ni-heavy, low Ca/P)
+                    0.78
+                } else if self.felsity <= 0.63 {
+                    if matches!(self.name, "basalt" | "dacite") {
+                        // Fine-grained extrusive volcanic lava/tephra -> fertile Andisols
+                        (1.38 - 0.50 * (self.felsity - 0.44).abs()).clamp(1.26, 1.38)
+                    } else {
+                        // Intermediate/mafic arc & plutonic rocks (`andesite`, `gabbro`)
+                        (1.26 - 0.45 * (self.felsity - 0.56).abs()).clamp(1.18, 1.26)
+                    }
+                } else if self.name == "rhyolite" {
+                    0.94
+                } else {
+                    // Felsic plutonic `granite` shield -> acidic quartz-feldspar regolith
+                    0.85
+                }
+            }
+            RockKind::Sedimentary => {
+                let cal = self.calcity.unwrap_or(0.0).clamp(0.0, 1.0);
+                let bog = self.bogginess.unwrap_or(0.0).clamp(0.0, 1.0);
+                let sal = self.salinity.unwrap_or(0.0).clamp(0.0, 1.0);
+                let volc_prov = (0.56 - self.felsity).clamp(0.0, 0.20);
+                let base_sed = if cal >= 0.75 || matches!(self.name, "limestone" | "chalk") {
+                    // Thin alkaline karst / coral-atoll carbonate sand (Fe & P limited)
+                    (0.92 - 0.22 * cal.max(0.75)).clamp(0.70, 0.82)
+                } else {
+                    match self.name {
+                        "siltstone" => (1.16 + 0.12 * bog + 0.45 * volc_prov).min(1.34),
+                        "claystone" => (1.08 + 0.08 * bog + 0.30 * volc_prov).min(1.24),
+                        "sandstone" => 0.94 + 0.25 * volc_prov,
+                        _ => 0.82, // conglomerate / breccia
+                    }
+                };
+                let salt_pen = (1.0 - 0.60 * sal).clamp(0.55, 1.0);
+                base_sed * salt_pen
+            }
+            RockKind::Metamorphic => match self.name {
+                "greenschist" | "amphibolite" => 1.02,
+                "pelite" => 0.98,
+                "marble" => 0.82,
+                _ => 0.84,
+            },
+        };
+        raw.clamp(0.55, 1.40)
+    }
+
     /// True for distinct event marker units (ultramafic kimberlite pipes, shocked impact hornfels,
     /// and impact breccia conglomerates) that should not be absorbed into ordinary host layers.
     #[inline]
