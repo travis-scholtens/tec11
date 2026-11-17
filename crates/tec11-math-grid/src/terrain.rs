@@ -131,6 +131,80 @@ pub fn compute_fine_land_elevation(pos: Vec3, clamped_base_elev_km: f32, norm_mo
     clamped_base_elev_km + norm_mount * noise
 }
 
+/// Evaluate whether a submarine coarse tile (`coarse_elev_km <= 0.0`) hosts a sub-grid volcanic island
+/// edifice (active mantle hotspot shield volcano, intra-oceanic island-arc stratovolcano, or shallow
+/// coral-capped atoll), returning its central summit elevation `> 0.0 km` if emergent.
+#[inline]
+pub fn compute_subgrid_volcanic_peak_km(
+    coarse_elev_km: f32,
+    coarse_thickness_km: f32,
+    coarse_mountainosity: f32,
+) -> Option<f32> {
+    if coarse_elev_km > 0.0 {
+        return None;
+    }
+    if coarse_thickness_km >= 7.0 && coarse_mountainosity >= 1.7 && coarse_elev_km >= -3.5 {
+        let excess_km = (coarse_thickness_km - 5.0).clamp(0.0, 16.0);
+        let cone_prominence_km = 0.50 * coarse_mountainosity.min(9.5) + 0.16 * excess_km;
+        let raw_peak = coarse_elev_km + cone_prominence_km;
+        if raw_peak > 0.04 {
+            return Some(raw_peak.clamp(0.06, 2.65));
+        }
+    }
+    if coarse_thickness_km >= 7.0 && (-0.75..=0.0).contains(&coarse_elev_km) {
+        return Some(0.018);
+    }
+    None
+}
+
+fn compute_volcanic_or_open_ocean_fine_elevation(
+    parentage: &FineParentage,
+    pos: Vec3,
+    ocean_base_km: f32,
+    mount_norm: f32,
+    volcanic_peaks: &[Option<f32>],
+) -> f32 {
+    match *parentage {
+        FineParentage::CoarseFace(c) => {
+            if let Some(peak_km) = volcanic_peaks.get(c).copied().flatten() {
+                let n = snoise3(pos[0] * 3.2, pos[1] * 3.2, pos[2] * 3.2, 6, 0.80);
+                return (peak_km * (1.0 + 0.22 * n)).clamp(0.012, 3.10);
+            }
+        }
+        FineParentage::CoarseEdge {
+            primary_coarse: c,
+            flanking_coarse_vertices: [v1, v2],
+        } => {
+            if let Some(peak_c) = volcanic_peaks.get(c).copied().flatten() {
+                let n = snoise3(pos[0] * 4.1, pos[1] * 4.1, pos[2] * 4.1, 5, 0.78);
+                // Check if the coarse neighbor across this edge also hosts an emergent volcanic edifice (island arc):
+                let mut across_peak: Option<f32> = None;
+                for &cand in &v1 {
+                    if cand != c && v2.contains(&cand) {
+                        across_peak = volcanic_peaks.get(cand).copied().flatten();
+                        break;
+                    }
+                }
+                if let Some(peak_nb) = across_peak {
+                    let bridge_peak = 0.5 * (peak_c + peak_nb);
+                    if bridge_peak >= 0.40 && n > 0.05 {
+                        return ((0.42 * bridge_peak) * (0.75 + 0.50 * n)).clamp(0.03, 1.35);
+                    }
+                    return (-0.04 - 0.18 * (1.0 - n.max(-1.0))).clamp(-0.95, -0.015);
+                }
+                if peak_c >= 1.25 && n > 0.52 {
+                    return (0.28 * peak_c).clamp(0.04, 0.65);
+                }
+                return (0.35 * ocean_base_km - 0.06 + 0.08 * n).clamp(-3.8, -0.018);
+            }
+        }
+        FineParentage::CoarseVertex(_) => {}
+    }
+    let bathy_noise = snoise3(pos[0] * 1.4, pos[1] * 1.4, pos[2] * 1.4, 5, 0.72);
+    let relief_amp = 0.075 + 0.34 * mount_norm;
+    (ocean_base_km + relief_amp * bathy_noise).clamp(-9.5, -0.020)
+}
+
 /// Shared coarse-to-fine river routing across any `N + 2` fine grid (`terrainmethod.py:41-86`).
 /// When `coarse_is_land` is `Some(mask)`, ocean mouths are identified via `!mask[next_coarse]`
 /// (needed on `FullSphereFineGrid` where ocean coarse centers also exist in `fine_grid.face_index`).
@@ -252,6 +326,7 @@ pub struct SubdividedTerrainGrid {
     pub coarse_to_fine_children: Vec<Vec<usize>>,
     pub fine_elevations: Vec<f32>,
     pub display_faces: Vec<DisplayFace>,
+    pub coarse_is_land: Vec<bool>,
 }
 
 impl SubdividedTerrainGrid {
@@ -262,12 +337,42 @@ impl SubdividedTerrainGrid {
         coarse_elevations: &[f32],
         coarse_mountainosities: &[f32],
     ) -> Self {
-        let num_coarse = coarse.faces.len();
+        Self::from_coarse_with_crust(coarse, coarse_elevations, coarse_mountainosities, None)
+    }
 
-        // Level 1 (`N + 1`): populate every coarse land tile (`elevation > 0.0`).
+    /// Subdivide all coarse land tiles (`coarse_elevations[c] > 0.0`) AND any shallow thickened
+    /// submarine volcanic edifices (hotspot islands, coral atolls, and intra-oceanic island arcs)
+    /// identified from `coarse_thicknesses_km` by 2 levels (`N -> N + 2`).
+    pub fn from_coarse_with_crust(
+        coarse: &SphericalGrid,
+        coarse_elevations: &[f32],
+        coarse_mountainosities: &[f32],
+        coarse_thicknesses_km: Option<&[f32]>,
+    ) -> Self {
+        let num_coarse = coarse.faces.len();
+        let coarse_is_land: Vec<bool> = coarse_elevations
+            .iter()
+            .take(num_coarse)
+            .map(|&e| e > 0.0)
+            .collect();
+        let volcanic_peaks: Vec<Option<f32>> = (0..num_coarse)
+            .map(|c| {
+                let thick = coarse_thicknesses_km
+                    .and_then(|ts| ts.get(c).copied())
+                    .unwrap_or(5.0);
+                compute_subgrid_volcanic_peak_km(
+                    coarse_elevations[c],
+                    thick,
+                    coarse_mountainosities[c],
+                )
+            })
+            .collect();
+
+        // Level 1 (`N + 1`): populate every coarse land tile (`elevation > 0.0`) and any ocean tile
+        // hosting an emergent sub-grid volcanic island / atoll edifice.
         let mut level1 = SphericalGrid::new_empty(coarse.size + 1);
-        for (c_idx, &elev) in coarse_elevations.iter().enumerate().take(num_coarse) {
-            if elev > 0.0 {
+        for c_idx in 0..num_coarse {
+            if coarse_is_land[c_idx] || volcanic_peaks[c_idx].is_some() {
                 level1.populate_from_parent(coarse, coarse.faces[c_idx].0);
             }
         }
@@ -365,6 +470,24 @@ impl SubdividedTerrainGrid {
                 }),
         );
 
+        let coarse_land_indicator: Vec<f32> = coarse_is_land
+            .iter()
+            .map(|&is_l| if is_l { 1.0 } else { 0.0 })
+            .collect();
+        let ocean_depths_km: Vec<f32> = coarse_elevations
+            .iter()
+            .take(num_coarse)
+            .map(|&e| {
+                if e > 0.0 {
+                    0.0
+                } else if e < -0.001 {
+                    e
+                } else {
+                    -3.6
+                }
+            })
+            .collect();
+
         let mut grid = Self {
             coarse_size: coarse.size,
             terrain_grid,
@@ -373,14 +496,27 @@ impl SubdividedTerrainGrid {
             coarse_to_fine_children,
             fine_elevations: Vec::new(),
             display_faces,
+            coarse_is_land,
         };
 
         grid.fine_elevations = (0..num_fine)
             .map(|fine_idx| {
-                let base_elev = grid.interpolate_coarse(fine_idx, &clamped_elevs);
-                let mount = grid.interpolate_coarse(fine_idx, &norm_mounts);
+                let land_w = grid.interpolate_coarse(fine_idx, &coarse_land_indicator);
                 let f = grid.terrain_grid.faces[fine_idx].0;
-                compute_fine_land_elevation(f, base_elev, mount)
+                let mount = grid.interpolate_coarse(fine_idx, &norm_mounts).clamp(0.0, 1.0);
+                if land_w > 1e-5 {
+                    let base_elev = grid.interpolate_coarse(fine_idx, &clamped_elevs);
+                    compute_fine_land_elevation(f, base_elev, mount)
+                } else {
+                    let ocean_base = grid.interpolate_coarse(fine_idx, &ocean_depths_km);
+                    compute_volcanic_or_open_ocean_fine_elevation(
+                        &grid.parentage[fine_idx],
+                        f,
+                        ocean_base,
+                        mount,
+                        &volcanic_peaks,
+                    )
+                }
             })
             .collect();
 
@@ -408,7 +544,7 @@ impl SubdividedTerrainGrid {
         route_coarse_rivers_on_fine_grid(
             coarse,
             coarse_rivers,
-            None,
+            Some(&self.coarse_is_land),
             &self.terrain_grid,
             &self.terrain_adj,
             &self.coarse_to_fine_children,
@@ -493,6 +629,22 @@ impl FullSphereFineGrid {
         coarse_elevations_km: &[f32],
         coarse_mountainosities: &[f32],
     ) -> Self {
+        Self::from_coarse_with_crust(
+            coarse,
+            coarse_elevations_km,
+            coarse_mountainosities,
+            None,
+        )
+    }
+
+    /// Subdivide the entire sphere uniformly from `coarse` (`N`) to `N + 2`, preserving exact
+    /// land and sub-grid volcanic island parity with [`SubdividedTerrainGrid::from_coarse_with_crust`].
+    pub fn from_coarse_with_crust(
+        coarse: &SphericalGrid,
+        coarse_elevations_km: &[f32],
+        coarse_mountainosities: &[f32],
+        coarse_thicknesses_km: Option<&[f32]>,
+    ) -> Self {
         let num_coarse = coarse.faces.len();
         assert_eq!(num_coarse, coarse_elevations_km.len());
         assert_eq!(num_coarse, coarse_mountainosities.len());
@@ -507,6 +659,18 @@ impl FullSphereFineGrid {
             classify_fine_parentage(coarse, &level1, &grid);
 
         let coarse_is_land: Vec<bool> = coarse_elevations_km.iter().map(|&e| e > 0.0).collect();
+        let volcanic_peaks: Vec<Option<f32>> = (0..num_coarse)
+            .map(|c| {
+                let thick = coarse_thicknesses_km
+                    .and_then(|ts| ts.get(c).copied())
+                    .unwrap_or(5.0);
+                compute_subgrid_volcanic_peak_km(
+                    coarse_elevations_km[c],
+                    thick,
+                    coarse_mountainosities[c],
+                )
+            })
+            .collect();
         let coarse_land_indicator: Vec<f32> = coarse_is_land
             .iter()
             .map(|&is_l| if is_l { 1.0 } else { 0.0 })
@@ -560,11 +724,14 @@ impl FullSphereFineGrid {
                 let shelf_km = -0.015 - 0.145 * s + 0.22 * ocean_base_km * s * s + 0.012 * shelf_noise;
                 shelf_km.clamp(-4.5, -0.006)
             } else {
-                // Open ocean basin: interpolated bathymetry + 5-octave abyssal hill / seamount relief,
-                // strictly submerged (`<= -20 m`) so phantom islands never appear in open ocean.
-                let bathy_noise = snoise3(pos[0] * 1.4, pos[1] * 1.4, pos[2] * 1.4, 5, 0.72);
-                let relief_amp = 0.075 + 0.34 * mount_norm;
-                (ocean_base_km + relief_amp * bathy_noise).clamp(-9.5, -0.020)
+                // Open ocean basin + any emergent sub-grid volcanic island / atoll edifices:
+                compute_volcanic_or_open_ocean_fine_elevation(
+                    p,
+                    pos,
+                    ocean_base_km,
+                    mount_norm,
+                    &volcanic_peaks,
+                )
             };
 
             fine_elevations_km.push(elev_km);
@@ -754,5 +921,86 @@ mod tests {
                 "Fine river steps must be edge-adjacent"
             );
         }
+    }
+
+    #[test]
+    fn test_subgrid_volcanic_islands_emerge_with_parity_and_leave_shelves_submerged() {
+        let coarse = SphericalGrid::with_size(4);
+        let n = coarse.faces.len();
+        let mut elevs = vec![-4.4f32; n];
+        let mut mounts = vec![0.2f32; n];
+        let mut thicks = vec![5.0f32; n];
+
+        // Continent around tile 0
+        elevs[0] = 3.2;
+        mounts[0] = 6.0;
+        thicks[0] = 32.0;
+
+        // Passive continental shelf neighbor (shallow -1.15 km, but 5.0 km MORB crust -> must NOT form island!)
+        let shelf_c = coarse.adjacency()[0][0];
+        elevs[shelf_c] = -1.15;
+        mounts[shelf_c] = 0.0;
+        thicks[shelf_c] = 5.0;
+
+        // Far open-ocean active hotspot tile (e.g. Hawaiʻi: -2.2 km swell, 11.5 km OIB crust, 4.6 mountainosity)
+        let hotspot_c = (0..n)
+            .find(|&c| c != 0 && !coarse.adjacency()[0].contains(&c) && coarse.adjacency()[c].iter().all(|&nb| nb != 0))
+            .unwrap();
+        elevs[hotspot_c] = -2.2;
+        mounts[hotspot_c] = 4.6;
+        thicks[hotspot_c] = 11.5;
+
+        // Adjacent island-arc coarse tile next to `hotspot_c`
+        let arc_nb = coarse.adjacency()[hotspot_c]
+            .iter()
+            .copied()
+            .find(|&nb| nb != 0 && !coarse.adjacency()[0].contains(&nb))
+            .unwrap();
+        elevs[arc_nb] = -1.4;
+        mounts[arc_nb] = 5.2;
+        thicks[arc_nb] = 14.0;
+
+        let sub = SubdividedTerrainGrid::from_coarse_with_crust(&coarse, &elevs, &mounts, Some(&thicks));
+        let full = FullSphereFineGrid::from_coarse_with_crust(&coarse, &elevs, &mounts, Some(&thicks));
+
+        // Hotspot and arc coarse tiles must subdivide and produce 1..=4 emergent fine faces (`> 0.0 km`),
+        // surrounded by submerged fine flank faces (`<= 0.0 km`), matching bit-for-bit between `sub` and `full`:
+        for &vc in &[hotspot_c, arc_nb] {
+            let sub_children = &sub.coarse_to_fine_children[vc];
+            assert!(!sub_children.is_empty(), "Expected volcanic ocean tile {vc} to subdivide");
+            let emergent: Vec<usize> = sub_children
+                .iter()
+                .copied()
+                .filter(|&fi| sub.fine_elevations[fi] > 0.0)
+                .collect();
+            let submerged: Vec<usize> = sub_children
+                .iter()
+                .copied()
+                .filter(|&fi| sub.fine_elevations[fi] <= 0.0)
+                .collect();
+            assert!(
+                (1..=5).contains(&emergent.len()),
+                "Expected 1..=5 emergent fine island faces on {vc}, got {}",
+                emergent.len()
+            );
+            assert!(
+                !submerged.is_empty(),
+                "Expected surrounding fine reef/flank faces on {vc} to remain submerged"
+            );
+            for &sub_fi in sub_children {
+                let key = Vec3Key::from_vec3(sub.terrain_grid.faces[sub_fi].0);
+                let full_fi = full.grid.face_index[&key];
+                assert_eq!(
+                    sub.fine_elevations[sub_fi],
+                    full.fine_elevations_km[full_fi],
+                    "Volcanic island fine elevation must match FullSphereFineGrid exactly"
+                );
+            }
+        }
+
+        // Passive shelf center (`5.0 km` crust) must remain submerged in `FullSphereFineGrid`:
+        let shelf_key = Vec3Key::from_vec3(coarse.faces[shelf_c].0);
+        let shelf_full_fi = full.grid.face_index[&shelf_key];
+        assert!(full.fine_elevations_km[shelf_full_fi] < 0.0);
     }
 }

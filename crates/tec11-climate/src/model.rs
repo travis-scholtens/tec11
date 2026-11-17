@@ -348,6 +348,39 @@ impl ClimateModel {
         &self.classifications
     }
 
+    /// Classify a sub-grid island of emergent elevation `island_elev_km` (`> 0.0`) on coarse tile `v`
+    /// directly from this `ClimateModel`'s solved seasonal insolation, Stommel-Ekman SST influence,
+    /// atmospheric circulation cells, sea-breeze moisture, axial tilt, and glaciation state.
+    pub fn classify_emergent_island(
+        &self,
+        v: usize,
+        island_elev_km: f32,
+        has_life: bool,
+    ) -> TileClimateClassification {
+        if self.seasons.is_empty() || v >= self.tile_count() {
+            return TileClimateClassification {
+                mean_temperature: 0.0,
+                mean_precipitation: 0.0,
+                koeppen: crate::koeppen::KoeppenCode::Ocean,
+                life: false,
+            };
+        }
+        let eff_elev = island_elev_km.max(0.005);
+        let prev_elev_atten = ((self.elevations[v].max(0.0) as f64) / 10.0).min(1.0);
+        let new_elev_atten = ((eff_elev as f64) / 10.0).min(1.0);
+        let delta_atten = prev_elev_atten - new_elev_atten;
+
+        let mut rts = Vec::with_capacity(self.seasons.len());
+        let mut rps = Vec::with_capacity(self.seasons.len());
+        for snap in &self.seasons {
+            let ins = snap.insolation[v] as f64;
+            let rt = (snap.temperature[v] as f64) + ins * delta_atten;
+            rts.push(rt);
+            rps.push(snap.precipitation[v] as f64);
+        }
+        classify_tile(eff_elev, &rts, &rps, MEAN_TEMPRANGE_C, has_life)
+    }
+
     pub fn koeppen_ids(&self) -> Vec<u8> {
         self.classifications
             .iter()
@@ -1010,6 +1043,50 @@ mod tests {
             mean_delta < 0.035,
             "Expected smooth transition across 24h -> 25h boundary (no step cliff at spin=1.0), got mean_delta = {:.4}",
             mean_delta
+        );
+    }
+
+    #[test]
+    fn classify_emergent_island_uses_climate_model_seasons_sst_and_lapse_rate() {
+        let model = ClimateModel::new_earth(3, EARTH_GLACIATION);
+        let elevs = model.elevations();
+
+        // 1. On any existing land tile, `classify_emergent_island(v, elevs[v], true)` matches `classifications()[v]`
+        for (v, &e) in elevs.iter().enumerate().take(500) {
+            if e > 0.01 {
+                let c_ref = model.classifications()[v];
+                let c_isl = model.classify_emergent_island(v, e, true);
+                assert_eq!(c_isl.koeppen, c_ref.koeppen);
+                assert_eq!(c_isl.life, c_ref.life);
+            }
+        }
+
+        // 2. Equatorial ocean tile classifies as tropical (`Af`/`Am`/`Aw`) at low island height,
+        //    and cools via lapse rate on a high volcanic cone (`4.8 km`)
+        let eq_ocean = (0..model.tile_count())
+            .find(|&v| elevs[v] <= 0.0 && model.lats_deg()[v].abs() < 4.0)
+            .expect("equatorial ocean tile");
+        let low_isl = model.classify_emergent_island(eq_ocean, 0.08, true);
+        let tall_cone = model.classify_emergent_island(eq_ocean, 4.8, true);
+        assert!(
+            matches!(
+                low_isl.koeppen,
+                KoeppenCode::Af | KoeppenCode::Am | KoeppenCode::Aw
+            ),
+            "Expected tropical Köppen on low equatorial island, got {:?}",
+            low_isl.koeppen
+        );
+        assert!(tall_cone.mean_temperature < low_isl.mean_temperature);
+
+        // 3. Polar ocean tile classifies as polar (`ET` or `EF`), never `Ocean`
+        let polar_ocean = (0..model.tile_count())
+            .find(|&v| elevs[v] <= 0.0 && model.lats_deg()[v] > 78.0)
+            .expect("high-arctic ocean tile");
+        let polar_isl = model.classify_emergent_island(polar_ocean, 0.25, true);
+        assert!(
+            matches!(polar_isl.koeppen, KoeppenCode::ET | KoeppenCode::EF),
+            "Expected polar Köppen on Arctic island, got {:?}",
+            polar_isl.koeppen
         );
     }
 }

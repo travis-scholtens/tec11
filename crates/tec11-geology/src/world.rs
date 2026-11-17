@@ -1224,7 +1224,7 @@ impl WorldSimulation {
                     let pre_snap = hist.to_snapshot();
                     if let Some(pre) = PrehistorySimulation::from_snapshot(&pre_snap, 42) {
                         let coarse_elevs = pre.tile_elevations();
-                        let koeppen = pre.tile_koeppen_ids();
+                        let koeppen = hist.coarse_koeppen();
                         let terrain = hist.terrain();
                         terrain
                             .display_faces
@@ -1252,8 +1252,8 @@ impl WorldSimulation {
                     if let Some(pre) = PrehistorySimulation::from_snapshot(&pre_snap, 42) {
                         let coarse_elevs = pre.tile_elevations();
                         let tiles = pre.tiles();
-                        let koeppen = pre.tile_koeppen_ids();
-                        let life = pre.tile_life();
+                        let koeppen = hist.coarse_koeppen();
+                        let life = hist.coarse_life();
                         let terrain = hist.terrain();
                         terrain
                             .display_faces

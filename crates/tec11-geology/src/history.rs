@@ -1054,6 +1054,7 @@ pub struct HistorySimulation {
     fine_adj: std::sync::Arc<Vec<Vec<usize>>>,
     coarse_elevs: Vec<f32>,
     coarse_koeppen: Vec<u8>,
+    coarse_life: Vec<f32>,
     coarse_rocks: Vec<BTreeSet<u32>>,
     coarse_workable_minerals: Vec<BTreeSet<u32>>,
     coarse_export_minerals: Vec<BTreeSet<u32>>,
@@ -1141,8 +1142,15 @@ impl HistorySimulation {
         let _span_subdiv = crate::profile::span(crate::profile::ProfilePhase::HistInitSubdivideAndKdTree);
         let coarse_elevs: Vec<f32> = prehistory.tiles().iter().map(|t| t.elevation()).collect();
         let coarse_mounts: Vec<f32> = prehistory.tiles().iter().map(|t| t.mountainosity).collect();
-        let terrain =
-            SubdividedTerrainGrid::from_coarse(prehistory.grid(), &coarse_elevs, &coarse_mounts);
+        let coarse_thicks: Option<Vec<f32>> = prehistory
+            .is_custom_planet()
+            .then(|| prehistory.tiles().iter().map(|t| t.thickness()).collect());
+        let terrain = SubdividedTerrainGrid::from_coarse_with_crust(
+            prehistory.grid(),
+            &coarse_elevs,
+            &coarse_mounts,
+            coarse_thicks.as_deref(),
+        );
         let num_fine = terrain.terrain_grid.faces.len();
 
         let indexed_pts: Vec<(Vec3, usize)> = terrain
@@ -1180,6 +1188,7 @@ impl HistorySimulation {
             fine_adj,
             coarse_elevs,
             coarse_koeppen: Vec::new(),
+            coarse_life: Vec::new(),
             coarse_rocks: Vec::new(),
             coarse_workable_minerals: Vec::new(),
             coarse_export_minerals: Vec::new(),
@@ -1214,6 +1223,10 @@ impl HistorySimulation {
         self.initialize_terrain_and_polities();
     }
 
+    pub fn prehistory(&self) -> &PrehistorySimulation {
+        &self.prehistory
+    }
+
     /// Mutable access to coarse geological tiles (used by tests or world editors, followed by `refresh_mineral_caches`).
     pub fn prehistory_tiles_mut(&mut self) -> &mut [crate::tile::TileGeology] {
         self.prehistory.tiles_mut()
@@ -1237,16 +1250,72 @@ impl HistorySimulation {
         self.coarse_export_minerals = export_vec;
     }
 
+    pub fn coarse_koeppen(&self) -> &[u8] {
+        if !self.coarse_koeppen.is_empty() {
+            &self.coarse_koeppen
+        } else {
+            self.prehistory.tile_koeppen_ids()
+        }
+    }
+
+    pub fn coarse_life(&self) -> &[f32] {
+        if !self.coarse_life.is_empty() {
+            &self.coarse_life
+        } else {
+            self.prehistory.tile_life()
+        }
+    }
+
+    #[inline]
+    fn region_or_continent_name(&self, coarse_idx: usize) -> &str {
+        if let Some(name) = self.geography.continent_name(coarse_idx) {
+            name
+        } else if self.coarse_elevs.get(coarse_idx).copied().unwrap_or(1.0) <= 0.0 {
+            "Oceanic Island"
+        } else {
+            "Mainland"
+        }
+    }
+
     fn initialize_terrain_and_polities(&mut self) {
         let coarse_adj = self.prehistory.adjacency().to_vec();
         let coarse_elevs = self.prehistory.tile_elevations();
-        let koeppen = self.prehistory.tile_koeppen_ids().to_vec();
+        let mut koeppen = self.prehistory.tile_koeppen_ids().to_vec();
+        let mut coarse_life = self.prehistory.tile_life().to_vec();
         let precip = self.prehistory.tile_precip_norm().to_vec();
         let num_coarse = coarse_elevs.len();
         let num_fine = self.terrain.terrain_grid.faces.len();
         let fine_adj = std::sync::Arc::clone(&self.fine_adj);
+
+        // Identify submarine coarse tiles (`coarse_elevs[c] <= 0.0`) that host emergent sub-grid
+        // volcanic seamount, island-arc, or coral-atoll summits (`CoarseFace(c)` > 0 km), and classify
+        // their Köppen climate & vegetation directly through `ClimateModel::classify_emergent_island`.
+        let mut emergent_island_elev: Vec<Option<f32>> = vec![None; num_coarse];
+        for c in 0..num_coarse {
+            if coarse_elevs[c] <= 0.0 {
+                if let Some(&summit_f) = self.terrain.coarse_to_fine_children[c].iter().find(|&&f| {
+                    matches!(self.terrain.parentage[f], FineParentage::CoarseFace(_))
+                        && self.terrain.fine_elevations[f] > 0.0
+                }) {
+                    let isl_elev = self.terrain.fine_elevations[summit_f];
+                    emergent_island_elev[c] = Some(isl_elev);
+                    let isl_clim = self
+                        .prehistory
+                        .climate_model()
+                        .classify_emergent_island(c, isl_elev, true);
+                    if c < koeppen.len() {
+                        koeppen[c] = isl_clim.koeppen as u8;
+                    }
+                    if c < coarse_life.len() {
+                        coarse_life[c] = if isl_clim.life { 1.0 } else { 0.0 };
+                    }
+                }
+            }
+        }
+
         self.coarse_elevs = coarse_elevs.clone();
         self.coarse_koeppen = koeppen.clone();
+        self.coarse_life = coarse_life;
         self.refresh_mineral_caches();
         self.fine_primary_coarse = (0..num_fine)
             .map(|f_idx| self.terrain.primary_coarse_tile(f_idx, &coarse_elevs))
@@ -1264,8 +1333,39 @@ impl HistorySimulation {
         let _span_bio = crate::profile::span(crate::profile::ProfilePhase::HistInitBiosphereAndSpecies);
         let biosphere = self.prehistory.take_or_settle_biosphere(&coarse_elevs);
         self.geography = biosphere.geography;
-        let coarse_species = biosphere.tile_all_species;
+        let mut coarse_species = biosphere.tile_all_species;
         self.settled_species = biosphere.species;
+
+        // Disperse terrestrial plant & animal colonists onto emergent oceanic islands from the nearest
+        // climatically compatible mainland tile, combined with local coastal/marine species.
+        let coarse_faces = &self.prehistory.grid().faces;
+        for c in 0..num_coarse {
+            if emergent_island_elev[c].is_none() || koeppen[c] == 12 {
+                continue;
+            }
+            let p = coarse_faces[c].0;
+            let target_k = koeppen[c];
+            let mut best_donor: Option<(f64, usize)> = None;
+            for (cand, &(q, _)) in coarse_faces.iter().enumerate() {
+                if coarse_elevs[cand] <= 0.0 || koeppen[cand] == 0 || koeppen[cand] == 12 {
+                    continue;
+                }
+                let dot = p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+                let klim_bonus = if koeppen[cand] == target_k { 0.18 } else { 0.0 };
+                let score = dot + klim_bonus;
+                if best_donor.is_none_or(|(best_s, _)| score > best_s) {
+                    best_donor = Some((score, cand));
+                }
+            }
+            if let Some((_, donor)) = best_donor {
+                let mut merged: BTreeSet<usize> = coarse_species[c].iter().copied().collect();
+                for &sp_id in &coarse_species[donor] {
+                    merged.insert(sp_id);
+                }
+                coarse_species[c] = merged.into_iter().collect();
+            }
+        }
+
         self.coarse_total_species_counts = coarse_species
             .iter()
             .map(|v| v.len().min(u16::MAX as usize) as u16)
@@ -1350,18 +1450,29 @@ impl HistorySimulation {
         let ocean = main_ocean(&coarse_elevs, &coarse_adj);
         let mut coarse_caps = vec![0.0f32; num_coarse];
         for c in 0..num_coarse {
-            if coarse_elevs[c] <= 0.0 || !is_habitable(coarse_elevs[c], koeppen[c]) {
-                continue;
+            if coarse_elevs[c] > 0.0 {
+                if !is_habitable(coarse_elevs[c], koeppen[c]) {
+                    continue;
+                }
+                let base =
+                    tile_population_thousands(koeppen[c], is_farmable(coarse_elevs[c], koeppen[c]));
+                let coast_mult = if coarse_adj[c].iter().any(|nb| ocean.contains(nb)) {
+                    1.25
+                } else {
+                    1.0
+                };
+                let sp_mult = ((coarse_species[c].len() as f32).sqrt()).max(1.0);
+                coarse_caps[c] = (base * coast_mult * sp_mult).max(1.8);
+            } else if let Some(isl_elev) = emergent_island_elev[c] {
+                if !is_passable(isl_elev, koeppen[c], false) {
+                    continue;
+                }
+                let base =
+                    tile_population_thousands(koeppen[c], is_farmable(isl_elev, koeppen[c]));
+                let coast_mult = 1.25;
+                let sp_mult = ((coarse_species[c].len() as f32).sqrt()).max(1.0);
+                coarse_caps[c] = (base * coast_mult * sp_mult).max(1.8);
             }
-            let base =
-                tile_population_thousands(koeppen[c], is_farmable(coarse_elevs[c], koeppen[c]));
-            let coast_mult = if coarse_adj[c].iter().any(|nb| ocean.contains(nb)) {
-                1.25
-            } else {
-                1.0
-            };
-            let sp_mult = ((coarse_species[c].len() as f32).sqrt()).max(1.0);
-            coarse_caps[c] = (base * coast_mult * sp_mult).max(1.8);
         }
 
         self.capacities = vec![0.0; num_fine];
@@ -1373,25 +1484,25 @@ impl HistorySimulation {
             let river_mult = if self.river_tiles[f_idx] { 1.75 } else { 1.0 };
             match self.terrain.parentage[f_idx] {
                 FineParentage::CoarseVertex(cs) => {
-                    let elevated: Vec<usize> = cs
+                    let hab_parents: Vec<usize> = cs
                         .iter()
                         .copied()
-                        .filter(|&c| coarse_elevs[c] > 0.0)
+                        .filter(|&c| coarse_caps[c] > 0.0)
                         .collect();
-                    if !elevated.is_empty() {
-                        let sum_cap: f32 = elevated.iter().map(|&c| coarse_caps[c]).sum();
+                    if !hab_parents.is_empty() {
+                        let sum_cap: f32 = hab_parents.iter().map(|&c| coarse_caps[c]).sum();
                         self.capacities[f_idx] =
-                            (sum_cap / (9.0 * elevated.len() as f32)) * river_mult;
+                            (sum_cap / (9.0 * hab_parents.len() as f32)) * river_mult;
                     }
                 }
                 FineParentage::CoarseFace(c) => {
                     self.capacities[f_idx] = (coarse_caps[c] / 9.0) * river_mult;
                 }
                 FineParentage::CoarseEdge { primary_coarse, .. } => {
-                    if coarse_elevs[primary_coarse] <= 0.0 {
-                        coast_fine.push(f_idx);
-                    } else {
+                    if coarse_caps[primary_coarse] > 0.0 {
                         self.capacities[f_idx] = (coarse_caps[primary_coarse] / 9.0) * river_mult;
+                    } else {
+                        coast_fine.push(f_idx);
                     }
                 }
             }
@@ -1434,11 +1545,18 @@ impl HistorySimulation {
         self.next_state_id = 0;
         self.next_language_id = 0;
 
+        let any_mainland_habitable = (0..num_fine).any(|f_idx| {
+            let c = self.fine_primary_coarse[f_idx];
+            coarse_elevs[c] > 0.0
+                && self.terrain.fine_elevations[f_idx] > 0.0
+                && self.capacities[f_idx] >= 0.5
+        });
         let mut candidate_tiles: Vec<usize> = (0..num_fine)
             .filter(|&f_idx| {
                 let c = self.fine_primary_coarse[f_idx];
                 let fe = self.terrain.fine_elevations[f_idx];
                 fe > 0.0
+                    && (!any_mainland_habitable || coarse_elevs[c] > 0.0)
                     && (is_farmable(fe, koeppen[c])
                         || self.river_tiles[f_idx]
                         || self.is_coastal_fine[f_idx])
@@ -1773,6 +1891,7 @@ impl HistorySimulation {
             }
         }
         let mut is_coastal_coarse = vec![false; num_coarse];
+        let mut is_oceanic_island_port = vec![false; num_coarse];
         for c in 0..num_coarse {
             if coarse_elevs[c] > 0.0
                 && is_passable(coarse_elevs[c], koeppen[c], true)
@@ -1781,6 +1900,17 @@ impl HistorySimulation {
                     .any(|&nb| ocean_set.contains(&nb) || coarse_elevs[nb] <= 0.0)
             {
                 is_coastal_coarse[c] = true;
+            } else if coarse_elevs[c] <= 0.0
+                && ocean_set.contains(&c)
+                && is_passable(0.35, koeppen[c], true)
+                && self.terrain.coarse_to_fine_children[c].iter().any(|&f| {
+                    matches!(self.terrain.parentage[f], FineParentage::CoarseFace(_))
+                        && fine_elevs[f] > 0.0
+                        && self.capacities[f] > 0.05
+                })
+            {
+                is_coastal_coarse[c] = true;
+                is_oceanic_island_port[c] = true;
             }
         }
 
@@ -1841,7 +1971,10 @@ impl HistorySimulation {
                             .fold(0.45 * wind_dot, f32::max);
 
                         let v_touches_land = coarse_elevs[v] > 0.0
-                            || coarse_adj[v].iter().any(|&nb| coarse_elevs[nb] > 0.0);
+                            || is_oceanic_island_port[v]
+                            || coarse_adj[v]
+                                .iter()
+                                .any(|&nb| coarse_elevs[nb] > 0.0 || is_oceanic_island_port[nb]);
                         (best_align >= 0.06 || (v_touches_land && best_align >= -0.20)).then(|| {
                             let cost = if best_align >= 0.06 {
                                 (1.0 - 0.55 * best_align).clamp(0.35, 0.95)
@@ -1881,11 +2014,19 @@ impl HistorySimulation {
         let stride = (coastal_ports.len() / 90).max(1);
         for (port_idx, &(c_start, f_start)) in coastal_ports.iter().enumerate() {
             let is_river_mouth = on_coarse_river[c_start];
-            if port_idx % stride != 0 && !is_river_mouth {
+            let start_is_island = is_oceanic_island_port[c_start];
+            if port_idx % stride != 0 && !is_river_mouth && !start_is_island {
                 continue;
             }
-            let direct_land_nbs: BTreeSet<usize> =
-                coarse_adj[c_start].iter().copied().collect();
+            let direct_mainland_nbs: BTreeSet<usize> = if coarse_elevs[c_start] > 0.0 {
+                coarse_adj[c_start]
+                    .iter()
+                    .copied()
+                    .filter(|&nb| coarse_elevs[nb] > 0.0)
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
 
             // (a) Wind & Ocean-Current Streamline Tracing (long-distance pelagic gyre voyages)
             for &o_start in &coarse_adj[c_start] {
@@ -1904,7 +2045,7 @@ impl HistorySimulation {
                     if steps >= 2 {
                         if let Some(&edge) = nav_edges[curr].iter().find(|edge| {
                             edge.target != c_start
-                                && !direct_land_nbs.contains(&edge.target)
+                                && !direct_mainland_nbs.contains(&edge.target)
                                 && self
                                     .coarse_port_fine_face
                                     .get(edge.target)
@@ -1980,21 +2121,35 @@ impl HistorySimulation {
             // (b) Bounded Dijkstra search for nearby coastal/island/monsoon sea lanes (up to 7 ocean steps)
             let mut best_ocean_cost: BTreeMap<usize, OceanSearchNode> = BTreeMap::new();
             let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
-            for &o_nb in &coarse_adj[c_start] {
-                if coarse_elevs[o_nb] <= 0.0 {
-                    best_ocean_cost.insert(
-                        o_nb,
-                        OceanSearchNode {
-                            cost_int: 60,
-                            prev_tile: c_start,
-                            sum_alignment: 0.70,
-                            hops: 1,
-                        },
-                    );
-                    heap.push(Reverse((60, o_nb)));
+            if start_is_island {
+                best_ocean_cost.insert(
+                    c_start,
+                    OceanSearchNode {
+                        cost_int: 0,
+                        prev_tile: c_start,
+                        sum_alignment: 0.0,
+                        hops: 0,
+                    },
+                );
+                heap.push(Reverse((0, c_start)));
+            } else {
+                for &o_nb in &coarse_adj[c_start] {
+                    if coarse_elevs[o_nb] <= 0.0 {
+                        best_ocean_cost.insert(
+                            o_nb,
+                            OceanSearchNode {
+                                cost_int: 60,
+                                prev_tile: c_start,
+                                sum_alignment: 0.70,
+                                hops: 1,
+                            },
+                        );
+                        heap.push(Reverse((60, o_nb)));
+                    }
                 }
             }
-            let mut found_destinations = 0usize;
+            let mut found_mainland_destinations = 0usize;
+            let mut found_island_destinations = 0usize;
             while let Some(Reverse((cost_int, u))) = heap.pop() {
                 let Some(&node) = best_ocean_cost.get(&u) else {
                     continue;
@@ -2005,48 +2160,60 @@ impl HistorySimulation {
                 for &edge in &nav_edges[u] {
                     let v = edge.target;
                     let next_cost = cost_int + (edge.cost * 100.0) as u32;
-                    if coarse_elevs[v] > 0.0 {
-                        if node.hops >= 2
+                    let dest_is_island = is_oceanic_island_port[v];
+                    let can_land = if dest_is_island {
+                        v != c_start && found_island_destinations < 2
+                    } else {
+                        coarse_elevs[v] > 0.0
+                            && (start_is_island || node.hops >= 2)
                             && v != c_start
-                            && !direct_land_nbs.contains(&v)
-                            && found_destinations < 2
-                        {
-                            if let Some(f_end) = self.coarse_port_fine_face[v] {
-                                let key = (c_start, v);
-                                if !routes_by_pair.contains_key(&key) {
-                                    // Reconstruct coarse path
-                                    let mut rev_path = vec![v, u];
-                                    let mut trace = u;
-                                    while let Some(&prev_node) = best_ocean_cost.get(&trace) {
-                                        rev_path.push(prev_node.prev_tile);
-                                        if prev_node.prev_tile == c_start || rev_path.len() > 12 {
-                                            break;
-                                        }
-                                        trace = prev_node.prev_tile;
+                            && !direct_mainland_nbs.contains(&v)
+                            && found_mainland_destinations < 2
+                    };
+                    if can_land {
+                        if let Some(f_end) = self.coarse_port_fine_face[v] {
+                            let key = (c_start, v);
+                            if !routes_by_pair.contains_key(&key) {
+                                // Reconstruct coarse path
+                                let mut rev_path = vec![v, u];
+                                let mut trace = u;
+                                while trace != c_start {
+                                    let Some(&prev_node) = best_ocean_cost.get(&trace) else {
+                                        break;
+                                    };
+                                    rev_path.push(prev_node.prev_tile);
+                                    if prev_node.prev_tile == c_start || rev_path.len() > 12 {
+                                        break;
                                     }
-                                    rev_path.reverse();
-                                    let eff_cost = (next_cost as f32) / 100.0;
-                                    let mean_align = ((node.sum_alignment + edge.alignment)
-                                        / (node.hops as f32 + 1.0))
-                                        .clamp(0.1, 1.0);
-                                    routes_by_pair.insert(
-                                        key,
-                                        TravelRoute {
-                                            from_fine_face: f_start,
-                                            to_fine_face: f_end,
-                                            from_coarse_tile: c_start,
-                                            to_coarse_tile: v,
-                                            coarse_path: rev_path,
-                                            effective_cost: eff_cost,
-                                            wind_current_alignment: mean_align,
-                                            route_kind: TravelRouteKind::CoastalSeaLane,
-                                        },
-                                    );
-                                    found_destinations += 1;
+                                    trace = prev_node.prev_tile;
+                                }
+                                rev_path.reverse();
+                                let eff_cost = (next_cost as f32) / 100.0;
+                                let mean_align = ((node.sum_alignment + edge.alignment)
+                                    / (node.hops as f32 + 1.0))
+                                    .clamp(0.1, 1.0);
+                                routes_by_pair.insert(
+                                    key,
+                                    TravelRoute {
+                                        from_fine_face: f_start,
+                                        to_fine_face: f_end,
+                                        from_coarse_tile: c_start,
+                                        to_coarse_tile: v,
+                                        coarse_path: rev_path,
+                                        effective_cost: eff_cost,
+                                        wind_current_alignment: mean_align,
+                                        route_kind: TravelRouteKind::CoastalSeaLane,
+                                    },
+                                );
+                                if dest_is_island {
+                                    found_island_destinations += 1;
+                                } else {
+                                    found_mainland_destinations += 1;
                                 }
                             }
                         }
-                    } else if node.hops < 7 && next_cost <= 520 {
+                    }
+                    if coarse_elevs[v] <= 0.0 && v != c_start && node.hops < 7 && next_cost <= 520 {
                         let is_better = best_ocean_cost
                             .get(&v)
                             .is_none_or(|old| next_cost < old.cost_int);
@@ -3219,7 +3386,7 @@ impl HistorySimulation {
         state_species: &BTreeMap<u32, BTreeSet<usize>>,
     ) {
         let coarse_elevs = self.prehistory.tile_elevations();
-        let koeppen = self.prehistory.tile_koeppen_ids().to_vec();
+        let koeppen = self.coarse_koeppen().to_vec();
         let mut state_langs: BTreeMap<u32, Option<u32>> = BTreeMap::new();
         let mut state_visible_constellations: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut state_continents: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
@@ -5412,10 +5579,7 @@ impl HistorySimulation {
             return format!("Coastal Bay / Sea Face #{fine_idx} ({ocean_label}, {fine_elev:.2} km)");
         }
 
-        let cont_name = self
-            .geography
-            .continent_name(primary_c)
-            .unwrap_or("Mainland");
+        let cont_name = self.region_or_continent_name(primary_c);
         let mut lines = Vec::new();
         let tile_pop: f32 = self
             .tile_communities
@@ -5648,6 +5812,12 @@ impl HistorySimulation {
         preferred_lang: Option<u32>,
     ) -> String {
         let Some(cid) = self.geography.tile_continent.get(coarse_idx).copied().flatten() else {
+            if self.coarse_elevs.get(coarse_idx).copied().unwrap_or(1.0) <= 0.0 {
+                return format!(
+                    "Oceanic Island ({})",
+                    self.ocean_and_sea_label_for_tile(coarse_idx, preferred_lang)
+                );
+            }
             return "Mainland".to_string();
         };
         let desc = self
@@ -6608,12 +6778,8 @@ impl HistorySimulation {
         ]);
 
         let tiles = self.prehistory.tiles();
-        let life_slice = self.prehistory.tile_life();
-        let koeppen_slice = if !self.coarse_koeppen.is_empty() {
-            self.coarse_koeppen.as_slice()
-        } else {
-            self.prehistory.tile_koeppen_ids()
-        };
+        let life_slice = self.coarse_life();
+        let koeppen_slice = self.coarse_koeppen();
         let norm_mounts: Vec<f32> = tiles.iter().map(|t| t.mountainosity_norm()).collect();
 
         let describe_face = |d_idx: usize| -> (f32, f32, bool, bool, u8, f32, f32, String, String, f64) {
@@ -7076,8 +7242,7 @@ impl HistorySimulation {
         }
 
         let koeppen_code = self
-            .prehistory
-            .tile_koeppen_ids()
+            .coarse_koeppen()
             .get(primary_c)
             .copied()
             .unwrap_or(0);
@@ -7347,11 +7512,7 @@ impl HistorySimulation {
                 total_tiles += 1;
                 let sid_opt = self.tile_states.get(&f_idx).copied();
                 let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
-                let cont = self
-                    .geography
-                    .continent_name(c_idx)
-                    .unwrap_or("Mainland")
-                    .to_string();
+                let cont = self.region_or_continent_name(c_idx).to_string();
                 let entry = by_location.entry((sid_opt, cont)).or_insert((0.0, 0));
                 entry.0 += tile_lang_pop;
                 entry.1 += 1;
@@ -7460,11 +7621,7 @@ impl HistorySimulation {
                 total_tiles += 1;
                 let sid_opt = self.tile_states.get(&f_idx).copied();
                 let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
-                let cont = self
-                    .geography
-                    .continent_name(c_idx)
-                    .unwrap_or("Mainland")
-                    .to_string();
+                let cont = self.region_or_continent_name(c_idx).to_string();
                 let entry = by_location.entry((sid_opt, cont)).or_insert((0.0, 0));
                 entry.0 += tile_nat_pop;
                 entry.1 += 1;
@@ -7500,7 +7657,7 @@ impl HistorySimulation {
         let origin_summary = if let Some(founding_state) = self.states.get(&nat_id) {
             let cap_f = founding_state.capital_tile;
             let c_idx = self.terrain.primary_coarse_tile(cap_f, &coarse_elevs);
-            let cont = self.geography.continent_name(c_idx).unwrap_or("Mainland");
+            let cont = self.region_or_continent_name(c_idx);
             let lat_deg = self.fine_face_latitude_deg(cap_f);
             let lat_label = if lat_deg >= 0.0 {
                 format!("{:.0}°N", lat_deg)
@@ -7610,8 +7767,8 @@ impl HistorySimulation {
     ) -> Vec<f32> {
         let coarse_elevs = self.prehistory.tile_elevations();
         let felsities = self.prehistory.tile_felsities();
-        let koeppen = self.prehistory.tile_koeppen_ids();
-        let life = self.prehistory.tile_life();
+        let koeppen = self.coarse_koeppen();
+        let life = self.coarse_life();
         let num_display = self.terrain.display_faces.len();
 
         let ocean_rgb = if let Some(op) = optics {

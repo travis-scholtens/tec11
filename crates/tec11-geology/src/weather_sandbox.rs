@@ -91,7 +91,7 @@ impl WeatherSandbox {
         }
 
         // 2. Initial Manabe soil moisture & perennial icecap/tundra snowpack from coarse Köppen & precip:
-        let koeppen_ids = base.prehistory.tile_koeppen_ids();
+        let koeppen_ids = &base.effective_coarse_koeppen;
         let precip_norm = base.prehistory.tile_precip_norm();
         let mut coarse_soil = vec![0.45_f32; nc];
         let mut coarse_snow_m = vec![0.0_f32; nc];
@@ -566,8 +566,7 @@ impl WeatherSandbox {
         let elev_m = self.base.fine.fine_bed_m[fine_idx];
         let koeppen = self
             .base
-            .prehistory
-            .tile_koeppen_ids()
+            .effective_coarse_koeppen
             .get(c_idx)
             .copied()
             .unwrap_or(0);
@@ -676,8 +675,8 @@ impl WeatherSandbox {
                 fine_is_river: &self.base.fine_is_river,
                 fine_primary_coarse: &self.base.fine_primary_coarse,
                 coarse_tiles: self.base.prehistory.tiles(),
-                coarse_koeppen_ids: self.base.prehistory.tile_koeppen_ids(),
-                coarse_tile_life: self.base.prehistory.tile_life(),
+                coarse_koeppen_ids: &self.base.effective_coarse_koeppen,
+                coarse_tile_life: &self.base.effective_coarse_life,
                 radius_km: self.base.prehistory.radius_km(),
                 day_hours: self.base.day_hours(),
                 tilt_deg: self.base.prehistory.tilt_deg(),

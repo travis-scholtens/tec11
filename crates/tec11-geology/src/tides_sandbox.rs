@@ -28,6 +28,8 @@ pub struct FinePlanetBase {
     pub fine_is_land: Vec<bool>,
     pub fine_is_river: Vec<bool>,
     pub fine_primary_coarse: Vec<usize>,
+    pub effective_coarse_koeppen: Vec<u8>,
+    pub effective_coarse_life: Vec<f32>,
     pub river_routes: Vec<Vec<usize>>,
     pub home_star: HomeStar,
     pub atmosphere: AtmosphereType,
@@ -85,11 +87,15 @@ impl FinePlanetBase {
                 tiles.iter().map(|t| t.elevation()).collect()
             };
         let coarse_mounts: Vec<f32> = tiles.iter().map(|t| t.mountainosity).collect();
+        let coarse_thicks: Option<Vec<f32>> = prehistory
+            .is_custom_planet()
+            .then(|| tiles.iter().map(|t| t.thickness()).collect());
 
-        let fine = FullSphereFineGrid::from_coarse(
+        let fine = FullSphereFineGrid::from_coarse_with_crust(
             coarse_grid,
             &physical_coarse_elev_km,
             &coarse_mounts,
+            coarse_thicks.as_deref(),
         );
 
         // Route coarse rivers onto the fine grid using `PrehistorySimulation`'s climate elevations.
@@ -189,6 +195,30 @@ impl FinePlanetBase {
             )
         };
 
+        // Classify any submarine coarse tile that hosts an emergent sub-grid island (`CoarseFace(c)` > 0 km)
+        // directly through `ClimateModel::classify_emergent_island` at its emergent summit elevation.
+        let mut effective_coarse_koeppen = koeppen_ids.to_vec();
+        let mut effective_coarse_life = prehistory.tile_life().to_vec();
+        for c in 0..coarse_grid.faces.len() {
+            if effective_coarse_koeppen.get(c).copied().unwrap_or(0) == 0 {
+                if let Some(&summit_f) = fine.coarse_to_fine_children[c].iter().find(|&&f| {
+                    matches!(fine.parentage[f], FineParentage::CoarseFace(_)) && fine_is_land[f]
+                }) {
+                    let isl_clim = prehistory.climate_model().classify_emergent_island(
+                        c,
+                        fine.fine_elevations_km[summit_f],
+                        has_life,
+                    );
+                    if c < effective_coarse_koeppen.len() {
+                        effective_coarse_koeppen[c] = isl_clim.koeppen as u8;
+                    }
+                    if c < effective_coarse_life.len() {
+                        effective_coarse_life[c] = if isl_clim.life { 1.0 } else { 0.0 };
+                    }
+                }
+            }
+        }
+
         Self {
             prehistory,
             fine,
@@ -196,6 +226,8 @@ impl FinePlanetBase {
             fine_is_land,
             fine_is_river,
             fine_primary_coarse,
+            effective_coarse_koeppen,
+            effective_coarse_life,
             river_routes,
             home_star,
             atmosphere,
@@ -255,8 +287,54 @@ impl FinePlanetBase {
         if !self.has_atmosphere || !self.has_life {
             return (Vec::new(), Vec::new());
         }
-        self.prehistory
-            .salient_flora_and_fauna_for_tile(c_idx, 8, 8)
+        let (mut flora, mut fauna) = self
+            .prehistory
+            .salient_flora_and_fauna_for_tile(c_idx, 8, 8);
+        // If `c_idx` is a submarine coarse tile with an emergent sub-grid volcanic/atoll island,
+        // disperse terrestrial island flora & fauna from the nearest compatible mainland tile.
+        let is_island_parent = self
+            .prehistory
+            .tiles()
+            .get(c_idx)
+            .is_some_and(|t| t.elevation() <= 0.0)
+            && self.effective_coarse_koeppen.get(c_idx).copied().unwrap_or(0) != 0;
+        if is_island_parent {
+            let target_k = self.effective_coarse_koeppen[c_idx];
+            if target_k != 12 {
+                let faces = &self.prehistory.grid().faces;
+                let p = faces.get(c_idx).map(|f| f.0).unwrap_or([1.0, 0.0, 0.0]);
+                let raw_k = self.prehistory.tile_koeppen_ids();
+                let mut best_land: Option<(f64, usize)> = None;
+                for (cand, &(q, _)) in faces.iter().enumerate() {
+                    let ck = raw_k.get(cand).copied().unwrap_or(0);
+                    if ck == 0 || ck == 12 {
+                        continue;
+                    }
+                    let dot = p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+                    let klim_bonus = if ck == target_k { 0.18 } else { 0.0 };
+                    let score = dot + klim_bonus;
+                    if best_land.is_none_or(|(best_s, _)| score > best_s) {
+                        best_land = Some((score, cand));
+                    }
+                }
+                if let Some((_, donor)) = best_land {
+                    let (d_fl, d_fa) = self
+                        .prehistory
+                        .salient_flora_and_fauna_for_tile(donor, 5, 4);
+                    for s in d_fl {
+                        if flora.len() < 8 && !flora.contains(&s) {
+                            flora.push(s);
+                        }
+                    }
+                    for s in d_fa {
+                        if fauna.len() < 8 && !fauna.contains(&s) {
+                            fauna.push(s);
+                        }
+                    }
+                }
+            }
+        }
+        (flora, fauna)
     }
 
     /// True-color surface RGB (`[0..1]`) for fine cell `fine_idx` based on Köppen biome, rock felsity,
@@ -286,8 +364,7 @@ impl FinePlanetBase {
 
         let c_idx = self.fine_primary_coarse[fine_idx];
         let koeppen = self
-            .prehistory
-            .tile_koeppen_ids()
+            .effective_coarse_koeppen
             .get(c_idx)
             .copied()
             .unwrap_or(0);
@@ -657,8 +734,7 @@ impl TidesSandbox {
         let spd = self.solver.speed_mps[fine_idx];
         let koeppen = self
             .base
-            .prehistory
-            .tile_koeppen_ids()
+            .effective_coarse_koeppen
             .get(c_idx)
             .copied()
             .unwrap_or(0);
@@ -731,8 +807,8 @@ impl TidesSandbox {
                 fine_is_river: &self.base.fine_is_river,
                 fine_primary_coarse: &self.base.fine_primary_coarse,
                 coarse_tiles: self.base.prehistory.tiles(),
-                coarse_koeppen_ids: self.base.prehistory.tile_koeppen_ids(),
-                coarse_tile_life: self.base.prehistory.tile_life(),
+                coarse_koeppen_ids: &self.base.effective_coarse_koeppen,
+                coarse_tile_life: &self.base.effective_coarse_life,
                 radius_km: self.base.prehistory.radius_km(),
                 day_hours: self.base.day_hours(),
                 tilt_deg: self.base.prehistory.tilt_deg(),
