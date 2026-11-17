@@ -847,7 +847,7 @@ pub fn expand_population(
     cmemo: &mut BTreeMap<(usize, bool), bool>,
 ) -> bool {
     let empty_set = BTreeSet::new();
-    expand_population_with_technologies(
+    expand_population_impl(
         elevations,
         koeppen_ids,
         adjacency,
@@ -858,13 +858,14 @@ pub fn expand_population(
         &empty_set,
         travel_range,
         coastal_proximity,
+        true,
         cmemo,
     )
 }
 
 /// Expand `populated` map by one migration step taking into account `agricultural_heritages`,
 /// `rivergoing_heritages` (extended range along river corridors), and `seafaring_heritages`
-/// (extended range across coastal and sea tiles).
+/// (required to traverse open-ocean tiles `elevation <= 0.0`, with extended coastal & sea range).
 pub fn expand_population_with_technologies(
     elevations: &[f32],
     koeppen_ids: &[u8],
@@ -876,6 +877,36 @@ pub fn expand_population_with_technologies(
     seafaring_heritages: &BTreeSet<u32>,
     travel_range: usize,
     coastal_proximity: usize,
+    cmemo: &mut BTreeMap<(usize, bool), bool>,
+) -> bool {
+    expand_population_impl(
+        elevations,
+        koeppen_ids,
+        adjacency,
+        river_tiles,
+        populated,
+        agricultural_heritages,
+        rivergoing_heritages,
+        seafaring_heritages,
+        travel_range,
+        coastal_proximity,
+        false,
+        cmemo,
+    )
+}
+
+fn expand_population_impl(
+    elevations: &[f32],
+    koeppen_ids: &[u8],
+    adjacency: &[Vec<usize>],
+    river_tiles: &[bool],
+    populated: &mut BTreeMap<usize, u32>,
+    agricultural_heritages: &BTreeSet<u32>,
+    rivergoing_heritages: &BTreeSet<u32>,
+    seafaring_heritages: &BTreeSet<u32>,
+    travel_range: usize,
+    coastal_proximity: usize,
+    allow_unassisted_sea: bool,
     cmemo: &mut BTreeMap<(usize, bool), bool>,
 ) -> bool {
     if populated.is_empty() {
@@ -911,9 +942,18 @@ pub fn expand_population_with_technologies(
         let farms = agricultural_heritages.contains(&heritage_id);
         let rivers_tech = rivergoing_heritages.contains(&heritage_id);
         let seas_tech = seafaring_heritages.contains(&heritage_id);
+        let can_cross_sea = seas_tech || allow_unassisted_sea;
         let eff_range = travel_range
             + usize::from(rivers_tech && river_tiles.get(t).copied().unwrap_or(false))
             + usize::from(seas_tech);
+        let can_hop_through = |tile: usize| -> bool {
+            if elevations[tile] <= 0.0 {
+                can_cross_sea
+            } else {
+                (rivers_tech && river_tiles.get(tile).copied().unwrap_or(false))
+                    || is_passable(elevations[tile], koeppen_ids[tile], farms)
+            }
+        };
 
         stamp = stamp.wrapping_add(1);
         if stamp == 0 {
@@ -924,7 +964,7 @@ pub fn expand_population_with_technologies(
 
         curr_frontier.clear();
         for &nb in &adjacency[t] {
-            if visited_stamp[nb] != stamp {
+            if visited_stamp[nb] != stamp && (elevations[nb] > 0.0 || can_cross_sea) {
                 visited_stamp[nb] = stamp;
                 curr_frontier.push(nb);
             }
@@ -989,18 +1029,11 @@ pub fn expand_population_with_technologies(
 
             next_frontier.clear();
             for &u in &curr_frontier {
-                let u_ok = (rivers_tech && river_tiles.get(u).copied().unwrap_or(false))
-                    || is_hoppable(elevations[u], koeppen_ids[u], farms);
-                if u_ok {
+                if can_hop_through(u) {
                     for &a in &adjacency[u] {
-                        if visited_stamp[a] != stamp {
-                            let a_ok = (rivers_tech
-                                && river_tiles.get(a).copied().unwrap_or(false))
-                                || is_hoppable(elevations[a], koeppen_ids[a], farms);
-                            if a_ok {
-                                visited_stamp[a] = stamp;
-                                next_frontier.push(a);
-                            }
+                        if visited_stamp[a] != stamp && can_hop_through(a) {
+                            visited_stamp[a] = stamp;
+                            next_frontier.push(a);
                         }
                     }
                 }
@@ -1324,5 +1357,54 @@ mod tests {
                 assert!(geo.continent_name(t).is_none());
             }
         }
+    }
+
+    #[test]
+    fn test_open_ocean_hopping_requires_seafaring() {
+        // Linear 5-tile chain: [Land 0] -- [Sea 1] -- [Sea 2] -- [Land 3] -- [Land 4]
+        let elevations = vec![0.5, -3.2, -3.5, 0.4, 0.6];
+        let koeppen_ids = vec![3, 0, 0, 3, 6];
+        let adjacency = vec![vec![1], vec![0, 2], vec![1, 3], vec![2, 4], vec![3]];
+        let river_tiles = vec![false; 5];
+        let mut populated = BTreeMap::from([(0usize, 0u32)]);
+        let ag = BTreeSet::from([0u32]);
+        let riv = BTreeSet::from([0u32]);
+        let no_sea = BTreeSet::new();
+        let mut memo = BTreeMap::new();
+
+        // Without seafaring, even agricultural + rivergoing populations cannot cross open ocean:
+        let moved_without_sea = expand_population_with_technologies(
+            &elevations,
+            &koeppen_ids,
+            &adjacency,
+            &river_tiles,
+            &mut populated,
+            &ag,
+            &riv,
+            &no_sea,
+            6,
+            2,
+            &mut memo,
+        );
+        assert!(!moved_without_sea);
+        assert_eq!(populated.len(), 1);
+
+        // Once seafaring is acquired, the population crosses the sea tiles to settle Land 3:
+        let with_sea = BTreeSet::from([0u32]);
+        let moved_with_sea = expand_population_with_technologies(
+            &elevations,
+            &koeppen_ids,
+            &adjacency,
+            &river_tiles,
+            &mut populated,
+            &ag,
+            &riv,
+            &with_sea,
+            6,
+            2,
+            &mut memo,
+        );
+        assert!(moved_with_sea);
+        assert_eq!(populated.get(&3), Some(&0));
     }
 }
