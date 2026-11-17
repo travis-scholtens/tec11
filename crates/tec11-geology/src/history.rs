@@ -1122,16 +1122,11 @@ impl HistorySimulation {
         constellations: Vec<Constellation>,
         seed: u128,
     ) -> Self {
-        // Ensure prehistory has populated technological tiles if starting directly on Earth or an unpopulated planet.
-        if prehistory.active_agricultural_race_count() == 0
-            && prehistory.active_rivergoing_race_count() == 0
-            && prehistory.active_seafaring_race_count() == 0
-        {
+        // Ensure prehistory has populated agricultural tiles if starting directly on Earth or an unpopulated planet.
+        if prehistory.active_agricultural_race_count() == 0 {
             for _ in 0..8 {
                 prehistory.step();
-                if (prehistory.active_agricultural_race_count() > 0
-                    || prehistory.active_rivergoing_race_count() > 0
-                    || prehistory.active_seafaring_race_count() > 0)
+                if prehistory.active_agricultural_race_count() > 0
                     && prehistory.populated_count() > 80
                 {
                     break;

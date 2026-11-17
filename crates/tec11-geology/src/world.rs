@@ -474,10 +474,9 @@ impl WorldSimulation {
                 let _span = crate::profile::span(crate::profile::ProfilePhase::StagePrehistory);
                 pre.step();
                 self.prehistory_ticks = pre.prehistory_ticks();
-                let has_civilization_tech = pre.active_agricultural_race_count() > 0
-                    || pre.active_rivergoing_race_count() > 0
-                    || pre.active_seafaring_race_count() > 0;
-                if self.prehistory_ticks >= 32 && has_civilization_tech {
+                // Rivergoing and seafaring let prehistoric peoples disperse along rivers and across seas,
+                // while transitioning to urban History requires the invention of agriculture.
+                if self.prehistory_ticks >= 32 && pre.active_agricultural_race_count() > 0 {
                     StageTransition::ToHistory
                 } else {
                     StageTransition::None
@@ -1798,6 +1797,81 @@ mod tests {
         assert!(
             hist_sea_with_flora_and_fauna > 20,
             "Expected >20 History sea tiles with marine flora & fauna, got {hist_sea_with_flora_and_fauna}"
+        );
+    }
+
+    #[test]
+    fn test_prehistory_water_tech_does_not_trigger_history_until_agriculture() {
+        let params = WorldCreateParams {
+            grid_size: 4,
+            day_hours: 24,
+            tilt_deg: 23,
+            land_pct: 29,
+            atm_dt_myr: 5,
+            life_dt_myr: 5,
+            people_dt_myr: 5,
+            moon_count: 1,
+            moon_mass: 1.0,
+            moon_dist_radii: 60,
+            meteor_freq: 1.0,
+        };
+        let mut world = WorldSimulation::new(params, 42);
+        while world.stage_index() == 0 {
+            world.step();
+        }
+        assert_eq!(world.stage_index(), 1);
+        for _ in 0..4 {
+            if world.stage_index() == 1 {
+                world.step();
+            }
+        }
+
+        // Build a Prehistory snapshot at tick 32 (`glaciation_tick = 32` -> `glaciation = 0.0` so `gfactor = 0.0`)
+        // where all active heritages have BOTH rivergoing and seafaring, but ZERO agriculture:
+        let mut snap = tec11_proto::PlanetSnapshot::decode_bytes(&world.encode_snapshot()).unwrap();
+        if let Some(tec11_proto::PlanetStageOneof::Prehistory(ref mut pre_proto)) = snap.stage {
+            pre_proto.prehistory_ticks = 32;
+            pre_proto.glaciation_tick = 32;
+            for h in &mut pre_proto.heritages {
+                h.agricultural = false;
+                h.rivergoing = true;
+                h.seafaring = true;
+            }
+        }
+        assert!(world.load_snapshot_bytes(&snap.encode_bytes()));
+        assert_eq!(world.stage_index(), 1);
+
+        // Stepping at `prehistory_ticks >= 32` with active rivergoing & seafaring (and 0 agriculture)
+        // must keep the world in Prehistory (`stage_index == 1`), not flip to History:
+        world.step();
+        assert_eq!(
+            world.stage_index(),
+            1,
+            "Rivergoing and seafaring alone must not transition Prehistory into History"
+        );
+        if let WorldStageState::Prehistory(pre) = world.stage() {
+            assert_eq!(pre.active_agricultural_race_count(), 0);
+            assert!(pre.active_rivergoing_race_count() > 0);
+            assert!(pre.active_seafaring_race_count() > 0);
+        } else {
+            panic!("Expected Prehistory stage");
+        }
+
+        // Once an active heritage develops agriculture, the next Prehistory step transitions to History (`stage_index == 2`):
+        let mut ag_snap =
+            tec11_proto::PlanetSnapshot::decode_bytes(&world.encode_snapshot()).unwrap();
+        if let Some(tec11_proto::PlanetStageOneof::Prehistory(ref mut pre_proto)) = ag_snap.stage {
+            pre_proto.glaciation_tick = 32;
+            for h in &mut pre_proto.heritages {
+                h.agricultural = true;
+            }
+        }
+        assert!(world.load_snapshot_bytes(&ag_snap.encode_bytes()));
+        world.step();
+        assert_eq!(
+            world.stage_index(),
+            2,
+            "Developing agriculture after >= 32 Prehistory ticks must transition into History"
         );
     }
 }
