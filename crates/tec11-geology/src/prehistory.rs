@@ -8,8 +8,8 @@ use tec11_proto::PlanetSnapshotExt;
 use crate::lifeforms::{settle_species_on_climate, SettledBiosphere, SpeciesKind};
 use crate::pangea::PangeaWorld;
 use crate::population::{
-    eden_tile, expand_population_with_technologies, is_farmable, is_habitable,
-    tile_population_thousands_with_water_tech, DisjointSet,
+    eden_tile, expand_population_with_technologies_and_islands, is_farmable, is_habitable,
+    is_subgrid_island_habitable, tile_population_thousands_with_water_tech, DisjointSet,
 };
 use crate::racination::{racinate_with_technologies, racination_shades, Heritage};
 use crate::rivers::trace_coarse_rivers;
@@ -121,6 +121,7 @@ pub struct PrehistorySimulation {
     groups: Vec<LithosphericGroup>,
     climate_model: ClimateModel,
     tile_koeppen: Vec<u8>,
+    subgrid_island_koeppen: Vec<u8>,
     tile_life: Vec<f32>,
     tile_precip_norm: Vec<f32>,
     tile_ag_potential: Vec<f32>,
@@ -327,7 +328,8 @@ impl PrehistorySimulation {
             groups,
             climate_model,
             tile_koeppen: vec![0; n],
-            tile_life: vec![0.0; n],
+            subgrid_island_koeppen: vec![0; n],
+            tile_life: vec![0; n].into_iter().map(|_| 0.0).collect(),
             tile_precip_norm: vec![0.0; n],
             tile_ag_potential: vec![1.0; n],
             rivers: Vec::new(),
@@ -388,7 +390,8 @@ impl PrehistorySimulation {
             groups,
             climate_model,
             tile_koeppen: vec![0; n],
-            tile_life: vec![0.0; n],
+            subgrid_island_koeppen: vec![0; n],
+            tile_life: vec![0; n].into_iter().map(|_| 0.0).collect(),
             tile_precip_norm: vec![0.0; n],
             tile_ag_potential: vec![1.0; n],
             rivers: Vec::new(),
@@ -470,6 +473,7 @@ impl PrehistorySimulation {
             groups,
             climate_model,
             tile_koeppen: std::mem::take(&mut self.tile_koeppen),
+            subgrid_island_koeppen: std::mem::take(&mut self.subgrid_island_koeppen),
             tile_life: std::mem::take(&mut self.tile_life),
             tile_precip_norm: std::mem::take(&mut self.tile_precip_norm),
             tile_ag_potential: std::mem::take(&mut self.tile_ag_potential),
@@ -538,8 +542,18 @@ impl PrehistorySimulation {
 
         // 3. Recompute climate and remove populated tiles that became uninhabitable (`prehistorysimulation.py:110-114`).
         self.refresh_climate();
-        self.populated.retain(|&t, _| {
-            is_habitable(self.tiles[t].elevation(), self.tile_koeppen[t])
+        let ag_heritages = &self.agricultural_heritages;
+        let subgrid_koeppen = &self.subgrid_island_koeppen;
+        let tile_koeppen = &self.tile_koeppen;
+        let tiles_ref = &self.tiles;
+        self.populated.retain(|&t, &mut hid| {
+            let e = tiles_ref[t].elevation();
+            let is_ag = ag_heritages.contains(&hid);
+            if e > 0.0 {
+                is_habitable(e, tile_koeppen[t]) || (is_ag && is_farmable(e, tile_koeppen[t]))
+            } else {
+                is_subgrid_island_habitable(subgrid_koeppen[t], is_ag)
+            }
         });
 
         // 4. Glacio-isostasy per continent group (`prehistorysimulation.py:117-121`).
@@ -614,11 +628,22 @@ impl PrehistorySimulation {
         let populated_snapshot: Vec<(usize, u32)> =
             self.populated.iter().map(|(&t, &h)| (t, h)).collect();
         for (t, hid) in populated_snapshot {
+            let is_subgrid_island = elevations[t] <= 0.0 && self.subgrid_island_koeppen[t] != 0;
+            let eff_koeppen = if is_subgrid_island {
+                self.subgrid_island_koeppen[t]
+            } else {
+                self.tile_koeppen[t]
+            };
+            let can_rainfed_farm = if is_subgrid_island {
+                is_subgrid_island_habitable(eff_koeppen, true)
+            } else {
+                is_farmable(elevations[t], eff_koeppen)
+            };
             // Low-probability rainfed crop domestication on humid farmable non-river tiles so low-relief
             // cratons or archipelagos without major mountain-fed rivers can still invent agriculture.
             if !self.agricultural_heritages.contains(&hid)
                 && !self.river_tiles.get(t).copied().unwrap_or(false)
-                && is_farmable(elevations[t], self.tile_koeppen[t])
+                && can_rainfed_farm
                 && self.tile_precip_norm.get(t).copied().unwrap_or(0.0) >= 0.30
             {
                 let ag_mult = self.tile_ag_potential.get(t).copied().unwrap_or(1.0) as f64;
@@ -639,7 +664,7 @@ impl PrehistorySimulation {
                         1.0
                     };
                     let s_prob = (0.25 + 0.75 * gfactor)
-                        * seafaring_spark_prob(self.tile_koeppen[t], sea_nbs)
+                        * seafaring_spark_prob(eff_koeppen, sea_nbs)
                         * riv_synergy;
                     if s_prob > 0.0 && self.rng.uniform(0.0, 1.0) < s_prob {
                         self.seafaring_heritages.insert(hid);
@@ -653,7 +678,7 @@ impl PrehistorySimulation {
         // 9. Run up to `PREHISTORY_ANTHROGLACIAL_STEPS` (6) migration steps (`prehistorysimulation.py:140-143`).
         let mut popcache: BTreeMap<(usize, bool), bool> = BTreeMap::new();
         for _ in 0..PREHISTORY_ANTHROGLACIAL_STEPS {
-            if !expand_population_with_technologies(
+            if !expand_population_with_technologies_and_islands(
                 &elevations,
                 &self.tile_koeppen,
                 &self.adjacency,
@@ -664,6 +689,7 @@ impl PrehistorySimulation {
                 &self.seafaring_heritages,
                 PREHISTORY_TRAVEL_RANGE,
                 PREHISTORY_COAST_PROX,
+                Some(&self.subgrid_island_koeppen),
                 &mut popcache,
             ) {
                 break;
@@ -712,6 +738,7 @@ impl PrehistorySimulation {
     fn sync_classification_arrays(&mut self) {
         let n = self.tiles.len();
         self.tile_koeppen.resize(n, 0);
+        self.subgrid_island_koeppen.resize(n, 0);
         self.tile_life.resize(n, 0.0);
         self.tile_precip_norm.resize(n, 0.0);
 
@@ -719,6 +746,21 @@ impl PrehistorySimulation {
             self.tile_koeppen[v] = c.koeppen as u8;
             self.tile_life[v] = if c.life { 1.0 } else { 0.0 };
             self.tile_precip_norm[v] = c.mean_precipitation as f32;
+        }
+        if self.is_custom {
+            for v in 0..n {
+                if self.tiles[v].elevation() <= 0.0 {
+                    if let Some(pk) = tec11_math_grid::compute_subgrid_volcanic_peak_km(
+                        self.tiles[v].elevation(),
+                        self.tiles[v].thickness(),
+                        self.tiles[v].mountainosity,
+                    ) {
+                        let isl_c = self.climate_model.classify_emergent_island(v, pk, true);
+                        self.subgrid_island_koeppen[v] = isl_c.koeppen as u8;
+                        self.tile_precip_norm[v] = isl_c.mean_precipitation as f32;
+                    }
+                }
+            }
         }
     }
 
@@ -772,7 +814,11 @@ impl PrehistorySimulation {
                 }
             }
             self.tile_ag_potential[t] = if plant_count == 0 {
-                0.0
+                if self.subgrid_island_koeppen.get(t).copied().unwrap_or(0) != 0 {
+                    self.tiles[t].surface_soil_fertility().clamp(0.6, 1.5)
+                } else {
+                    0.0
+                }
             } else {
                 (0.5 + (plant_count as f32) / 30.0 + (herbivore_count as f32) / 20.0).clamp(0.5, 2.0)
             };
@@ -974,6 +1020,7 @@ impl PrehistorySimulation {
                     groups,
                     climate_model,
                     tile_koeppen: vec![0; n],
+                    subgrid_island_koeppen: vec![0; n],
                     tile_life: vec![0.0; n],
                     tile_precip_norm: vec![0.0; n],
                     tile_ag_potential: vec![1.0; n],
@@ -1137,7 +1184,8 @@ impl PrehistorySimulation {
             groups,
             climate_model,
             tile_koeppen: vec![0; n],
-            tile_life: vec![0.0; n],
+            subgrid_island_koeppen: vec![0; n],
+            tile_life: vec![0; n].into_iter().map(|_| 0.0).collect(),
             tile_precip_norm: vec![0.0; n],
             tile_ag_potential: vec![1.0; n],
             rivers: Vec::new(),
@@ -1299,26 +1347,43 @@ impl PrehistorySimulation {
         active_sea.len()
     }
 
+    /// Population in thousands on coarse tile `t` for `heritage_id` (scaling emergent sub-grid
+    /// volcanic/arc/atoll islands by `1/6` of a full coarse tile).
+    pub fn tile_population_for_heritage_thousands(&self, t: usize, heritage_id: u32) -> f32 {
+        let is_ag = self.agricultural_heritages.contains(&heritage_id);
+        let is_riv_fish = self.rivergoing_heritages.contains(&heritage_id)
+            && self.river_tiles.get(t).copied().unwrap_or(false);
+        let is_sea_fish = self.seafaring_heritages.contains(&heritage_id)
+            && self.adjacency.get(t).is_some_and(|nbs| {
+                self.tiles[t].elevation() <= 0.0
+                    || nbs.iter().any(|&nb| self.tiles[nb].elevation() <= 0.0)
+            });
+        let is_subgrid_island = self.tiles[t].elevation() <= 0.0
+            && self.subgrid_island_koeppen.get(t).copied().unwrap_or(0) != 0;
+        let eff_koeppen = if is_subgrid_island {
+            self.subgrid_island_koeppen[t]
+        } else {
+            self.tile_koeppen[t]
+        };
+        let raw = tile_population_thousands_with_water_tech(
+            eff_koeppen,
+            is_ag,
+            is_riv_fish,
+            is_sea_fish,
+        );
+        if is_subgrid_island {
+            raw * (1.0 / 6.0)
+        } else {
+            raw
+        }
+    }
+
     /// Total planet population in thousands (`prehistorysimulation.py:93`), including freshwater
     /// and coastal fishing carrying capacity bonuses from rivergoing and seafaring technologies.
     pub fn total_population_thousands(&self) -> f32 {
         self.populated
             .iter()
-            .map(|(&t, &h)| {
-                let is_ag = self.agricultural_heritages.contains(&h);
-                let is_riv_fish = self.rivergoing_heritages.contains(&h)
-                    && self.river_tiles.get(t).copied().unwrap_or(false);
-                let is_sea_fish = self.seafaring_heritages.contains(&h)
-                    && self.adjacency[t]
-                        .iter()
-                        .any(|&nb| self.tiles[nb].elevation() <= 0.0);
-                tile_population_thousands_with_water_tech(
-                    self.tile_koeppen[t],
-                    is_ag,
-                    is_riv_fish,
-                    is_sea_fish,
-                )
-            })
+            .map(|(&t, &h)| self.tile_population_for_heritage_thousands(t, h))
             .sum()
     }
 
@@ -1332,6 +1397,10 @@ impl PrehistorySimulation {
 
     pub fn tile_koeppen_ids(&self) -> &[u8] {
         &self.tile_koeppen
+    }
+
+    pub fn subgrid_island_koeppen_ids(&self) -> &[u8] {
+        &self.subgrid_island_koeppen
     }
 
     pub fn tile_life(&self) -> &[f32] {
@@ -1388,11 +1457,24 @@ impl PrehistorySimulation {
             return String::new();
         };
         let elev = tile.elevation();
-        let koeppen = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
-        let mut lines = vec![format!(
-            "Coarse Tile #{tile_idx} | Elevation: {elev:+.2} km | Climate: {}",
-            crate::world::koeppen_climate_name(koeppen)
-        )];
+        let isl_k = self.subgrid_island_koeppen.get(tile_idx).copied().unwrap_or(0);
+        let is_subgrid_island = elev <= 0.0 && isl_k != 0;
+        let koeppen = if is_subgrid_island {
+            isl_k
+        } else {
+            self.tile_koeppen.get(tile_idx).copied().unwrap_or(0)
+        };
+        let mut lines = vec![if is_subgrid_island {
+            format!(
+                "Coarse Tile #{tile_idx} (Sub-grid Island) | Bathymetry: {elev:+.2} km | Island Climate: {}",
+                crate::world::koeppen_climate_name(koeppen)
+            )
+        } else {
+            format!(
+                "Coarse Tile #{tile_idx} | Elevation: {elev:+.2} km | Climate: {}",
+                crate::world::koeppen_climate_name(koeppen)
+            )
+        }];
         if let Some(top) = tile.layers.last() {
             lines.push(format!(
                 "Surface Rock: {} ({}, {:.1} km)",
@@ -1405,17 +1487,7 @@ impl PrehistorySimulation {
             let is_ag = self.agricultural_heritages.contains(&hid);
             let is_riv = self.rivergoing_heritages.contains(&hid);
             let is_sea = self.seafaring_heritages.contains(&hid);
-            let has_river = self.river_tiles.get(tile_idx).copied().unwrap_or(false);
-            let is_coastal = self
-                .adjacency
-                .get(tile_idx)
-                .is_some_and(|nbs| nbs.iter().any(|&nb| self.tiles[nb].elevation() <= 0.0));
-            let pop_k = crate::population::tile_population_thousands_with_water_tech(
-                koeppen,
-                is_ag,
-                is_riv && has_river,
-                is_sea && is_coastal,
-            );
+            let pop_k = self.tile_population_for_heritage_thousands(tile_idx, hid);
             let mut tech = Vec::new();
             if is_ag {
                 tech.push("Agricultural");
@@ -1434,7 +1506,7 @@ impl PrehistorySimulation {
                 pop_k,
                 tech.join(" · ")
             ));
-        } else if elev > 0.0 {
+        } else if elev > 0.0 || is_subgrid_island {
             lines.push("Population: Uninhabited Land".to_string());
         } else {
             lines.push("Marine Basin".to_string());
@@ -1503,8 +1575,19 @@ impl PrehistorySimulation {
                 (home_star, optics, solar_system, constellations, 1)
             };
         let elev = tile.elevation();
-        let koeppen = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
-        let loc_summary = if elev <= 0.0 {
+        let isl_k = self.subgrid_island_koeppen.get(tile_idx).copied().unwrap_or(0);
+        let is_subgrid_island = elev <= 0.0 && isl_k != 0;
+        let koeppen = if is_subgrid_island {
+            isl_k
+        } else {
+            self.tile_koeppen.get(tile_idx).copied().unwrap_or(0)
+        };
+        let loc_summary = if is_subgrid_island {
+            format!(
+                "Sub-grid Island ({}) | Bathymetry: {elev:.2} km",
+                crate::world::koeppen_climate_name(koeppen)
+            )
+        } else if elev <= 0.0 {
             format!("Marine Basin | Bathymetry: {elev:.2} km")
         } else {
             format!(
@@ -1516,17 +1599,7 @@ impl PrehistorySimulation {
             let is_ag = self.agricultural_heritages.contains(&hid);
             let is_riv = self.rivergoing_heritages.contains(&hid);
             let is_sea = self.seafaring_heritages.contains(&hid);
-            let has_river = self.river_tiles.get(tile_idx).copied().unwrap_or(false);
-            let is_coastal = self
-                .adjacency
-                .get(tile_idx)
-                .is_some_and(|nbs| nbs.iter().any(|&nb| self.tiles[nb].elevation() <= 0.0));
-            let pop_k = crate::population::tile_population_thousands_with_water_tech(
-                koeppen,
-                is_ag,
-                is_riv && has_river,
-                is_sea && is_coastal,
-            );
+            let pop_k = self.tile_population_for_heritage_thousands(tile_idx, hid);
             let mut tech = Vec::new();
             if is_ag {
                 tech.push("Agricultural");
@@ -1644,6 +1717,85 @@ mod tests {
         assert!(
             pre.river_tiles().iter().any(|&b| b),
             "Custom Prehistory planets with 2.0..3.8 km mountain ranges should trace coarse rivers"
+        );
+    }
+
+    #[test]
+    fn test_seafaring_settles_and_hops_across_subgrid_islands_in_prehistory() {
+        // Synthetic 1D ring/corridor of 19 tiles:
+        //   0 (Continent A) -- [1..5 sea] -- 6 (Sub-grid Island 1, 6 hops from 0)
+        //   -- [7..11 sea] -- 12 (Sub-grid Island 2, 6 hops from 6)
+        //   -- [13..17 sea] -- 18 (Continent B, 6 hops from 12, 18 hops from 0!)
+        let n = 19usize;
+        let mut adj = vec![Vec::new(); n];
+        for i in 0..(n - 1) {
+            adj[i].push(i + 1);
+            adj[i + 1].push(i);
+        }
+        let mut elevs = vec![-3.0f32; n];
+        elevs[0] = 0.5;
+        elevs[6] = -0.35; // submerged coarse tile with emergent sub-grid island
+        elevs[12] = -0.25; // submerged coarse tile with emergent sub-grid island
+        elevs[18] = 0.5;
+
+        let mut koeppen = vec![0u8; n];
+        koeppen[0] = 6; // Cf
+        koeppen[18] = 6; // Cf
+
+        let mut subgrid_isl_k = vec![0u8; n];
+        subgrid_isl_k[6] = 1; // Af tropical wet volcanic island
+        subgrid_isl_k[12] = 2; // Am tropical monsoon island
+
+        let rivers = vec![false; n];
+        let ag = BTreeSet::new();
+        let riv = BTreeSet::new();
+        let no_sea = BTreeSet::new();
+        let mut with_sea = BTreeSet::new();
+        with_sea.insert(0u32);
+
+        let mut pop = BTreeMap::new();
+        pop.insert(0usize, 0u32);
+        let mut memo = BTreeMap::new();
+
+        // Non-seafaring heritage cannot settle sub-grid islands or cross open water
+        assert!(!expand_population_with_technologies_and_islands(
+            &elevs,
+            &koeppen,
+            &adj,
+            &rivers,
+            &mut pop,
+            &ag,
+            &riv,
+            &no_sea,
+            6,
+            2,
+            Some(&subgrid_isl_k),
+            &mut memo,
+        ));
+        assert_eq!(pop.len(), 1);
+
+        // Seafaring heritage hops 0 -> 6 (Island 1) -> 12 (Island 2) -> 18 (Continent B) across 18 sea tiles!
+        for _ in 0..3 {
+            assert!(expand_population_with_technologies_and_islands(
+                &elevs,
+                &koeppen,
+                &adj,
+                &rivers,
+                &mut pop,
+                &ag,
+                &riv,
+                &with_sea,
+                6,
+                2,
+                Some(&subgrid_isl_k),
+                &mut memo,
+            ));
+        }
+        assert!(pop.contains_key(&6), "Sub-grid Island 1 should be settled");
+        assert!(pop.contains_key(&12), "Sub-grid Island 2 should be settled via Island 1");
+        assert!(
+            pop.contains_key(&18),
+            "Distant Continent B (18 hops away) should be reached via sub-grid island stepping stones"
         );
     }
 }

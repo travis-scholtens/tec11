@@ -1681,6 +1681,156 @@ impl HistorySimulation {
             }
         }
 
+        // Preserve Prehistory-settled emergent sub-grid islands (`emergent_island_elev[c].is_some()`
+        // and `pre_pop.contains_key(&c)`) that lie beyond continental state expansion as indigenous
+        // seafaring archipelagic polities so prehistoric island settlers persist into History.
+        let mut settled_subgrid_islands: Vec<(usize, Vec<usize>, f32)> = Vec::new();
+        let mut settled_island_slot: BTreeMap<usize, usize> = BTreeMap::new();
+        for c in 0..num_coarse {
+            if emergent_island_elev[c].is_none() || !pre_pop.contains_key(&c) {
+                continue;
+            }
+            let isl_fine: Vec<usize> = self.terrain.coarse_to_fine_children[c]
+                .iter()
+                .copied()
+                .filter(|&f| {
+                    self.terrain.fine_elevations[f] > 0.0
+                        && self.capacities[f] > 0.05
+                        && !self.tile_states.contains_key(&f)
+                })
+                .collect();
+            if !isl_fine.is_empty() {
+                let cap_sum: f32 = isl_fine.iter().map(|&f| self.capacities[f]).sum();
+                let slot = settled_subgrid_islands.len();
+                settled_island_slot.insert(c, slot);
+                settled_subgrid_islands.push((c, isl_fine, cap_sum));
+            }
+        }
+        if !settled_subgrid_islands.is_empty() {
+            let m = settled_subgrid_islands.len();
+            let mut parent: Vec<usize> = (0..m).collect();
+            fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+                while parent[x] != x {
+                    parent[x] = parent[parent[x]];
+                    x = parent[x];
+                }
+                x
+            }
+            for i in 0..m {
+                let start_c = settled_subgrid_islands[i].0;
+                let mut vis = BTreeSet::new();
+                let mut sea_q = VecDeque::new();
+                vis.insert(start_c);
+                sea_q.push_back((start_c, 0usize));
+                while let Some((curr_c, d)) = sea_q.pop_front() {
+                    if let Some(&j) = settled_island_slot.get(&curr_c) {
+                        let ri = uf_find(&mut parent, i);
+                        let rj = uf_find(&mut parent, j);
+                        if ri != rj {
+                            parent[rj] = ri;
+                        }
+                    }
+                    if d < 5 {
+                        for &nb_c in &coarse_adj[curr_c] {
+                            if coarse_elevs[nb_c] <= 0.0 && vis.insert(nb_c) {
+                                sea_q.push_back((nb_c, d + 1));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cluster_map: BTreeMap<usize, (usize, Vec<usize>, f32)> = BTreeMap::new();
+            for i in 0..m {
+                let root = uf_find(&mut parent, i);
+                let (c, ref fine_list, cap_sum) = settled_subgrid_islands[i];
+                let entry = cluster_map.entry(root).or_insert((c, Vec::new(), 0.0));
+                entry.1.extend_from_slice(fine_list);
+                entry.2 += cap_sum;
+            }
+            let mut clusters: Vec<(usize, Vec<usize>, f32)> = cluster_map.into_values().collect();
+            clusters.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            if clusters.len() > 8 {
+                let extras = clusters.split_off(8);
+                for (ext_c, ext_fines, ext_cap) in extras {
+                    let ext_hid = pre_pop.get(&ext_c).copied();
+                    let ext_pos = coarse_faces[ext_c].0;
+                    let best_idx = (0..clusters.len())
+                        .max_by(|&ia, &ib| {
+                            let ca = clusters[ia].0;
+                            let cb = clusters[ib].0;
+                            let sa = (if pre_pop.get(&ca).copied() == ext_hid {
+                                0.5
+                            } else {
+                                0.0
+                            }) + (ext_pos[0] * coarse_faces[ca].0[0]
+                                + ext_pos[1] * coarse_faces[ca].0[1]
+                                + ext_pos[2] * coarse_faces[ca].0[2]);
+                            let sb = (if pre_pop.get(&cb).copied() == ext_hid {
+                                0.5
+                            } else {
+                                0.0
+                            }) + (ext_pos[0] * coarse_faces[cb].0[0]
+                                + ext_pos[1] * coarse_faces[cb].0[1]
+                                + ext_pos[2] * coarse_faces[cb].0[2]);
+                            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .unwrap_or(0);
+                    clusters[best_idx].1.extend(ext_fines);
+                    clusters[best_idx].2 += ext_cap;
+                }
+            }
+            for (_, fine_list, _) in clusters {
+                let Some(&cap_f) = fine_list.iter().max_by(|&&a, &&b| {
+                    self.capacities[a]
+                        .partial_cmp(&self.capacities[b])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }) else {
+                    continue;
+                };
+                let sid = self.next_state_id;
+                self.next_state_id += 1;
+                let lid = self.next_language_id;
+                self.next_language_id += 1;
+
+                let cap_c = self.fine_primary_coarse[cap_f];
+                let cap_hid = pre_pop.get(&cap_c).copied();
+                let has_ag = cap_hid.is_some_and(|h| pre_ag.contains(&h))
+                    || is_farmable(self.terrain.fine_elevations[cap_f], koeppen[cap_c]);
+                let has_riv =
+                    cap_hid.is_some_and(|h| pre_riv.contains(&h)) || self.river_tiles[cap_f];
+                state_init_tech.insert(sid, (has_ag, has_riv, true));
+
+                let mut lang = LanguageRecord::new_for_state_with_system(
+                    lid,
+                    sid,
+                    &self.tile_species[cap_f],
+                    self.moon_count,
+                    &self.solar_system,
+                    &mut self.rng,
+                );
+                for &f_idx in &fine_list {
+                    self.tile_states.insert(f_idx, sid);
+                    if lang.lexicon.len() < 48 {
+                        for &sp_idx in &self.tile_species[f_idx] {
+                            lang.coin_concept(ConceptKey::Species(sp_idx as u32), &mut self.rng);
+                        }
+                    }
+                }
+                self.languages.insert(lid, lang);
+                self.nationalities.insert(sid);
+                self.states.insert(
+                    sid,
+                    StateRecord {
+                        id: sid,
+                        capital_tile: cap_f,
+                        color_idx: (sid as usize) % NATION_PALETTE.len(),
+                        active: true,
+                        asabiya: 0.55,
+                    },
+                );
+            }
+        }
+
         // Coin all constellations visible at some point in the year, local geographic features (continents, oceans,
         // seas, rivers, mountain ranges), experienced seasons & weather, and initial cultural concepts:
         let mut init_extents: BTreeMap<u32, Vec<usize>> = BTreeMap::new();

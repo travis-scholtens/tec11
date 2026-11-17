@@ -763,6 +763,19 @@ pub fn is_farmable(elevation: f32, koeppen: u8) -> bool {
     elevation > 0.0 && (matches!(koeppen, 2..=4) || (6..=11).contains(&koeppen))
 }
 
+/// Habitable by seafaring peoples on emergent sub-grid volcanic, arc, or atoll islands
+/// (`elevation <= 0.0` on the coarse grid with an emergent `> 0.0 km` fine-grid summit).
+/// Maritime fisher-foragers (`!is_agricultural`) can inhabit wet/monsoon/savanna tropical (`Af`, `Am`, `Aw`)
+/// and temperate/subpolar (`C*`, `D*`) islands; agricultural islanders can also farm semi-arid (`BS`) islands.
+#[inline]
+pub fn is_subgrid_island_habitable(island_koeppen: u8, is_agricultural: bool) -> bool {
+    if is_agricultural {
+        matches!(island_koeppen, 1..=4 | 6..=11)
+    } else {
+        matches!(island_koeppen, 1..=3 | 6..=11)
+    }
+}
+
 /// Squattable by pre-agricultural people (coastal habitat or on a river),
 /// matching `populationmethod.squattable(t, adj, coastalproximity, rivers)` (`populationmethod.py:41-43`).
 pub fn is_squattable(
@@ -859,6 +872,7 @@ pub fn expand_population(
         travel_range,
         coastal_proximity,
         true,
+        None,
         cmemo,
     )
 }
@@ -891,6 +905,42 @@ pub fn expand_population_with_technologies(
         travel_range,
         coastal_proximity,
         false,
+        None,
+        cmemo,
+    )
+}
+
+/// Expand `populated` map by one migration step with technology-gated ocean navigation and
+/// settleable emergent sub-grid volcanic/arc/atoll islands (`subgrid_island_koeppen[t] != 0` on
+/// `elevations[t] <= 0.0`), enabling seafaring heritages to use oceanic islands and archipelagos
+/// as permanent settlements and stepping stones across wide oceans.
+pub fn expand_population_with_technologies_and_islands(
+    elevations: &[f32],
+    koeppen_ids: &[u8],
+    adjacency: &[Vec<usize>],
+    river_tiles: &[bool],
+    populated: &mut BTreeMap<usize, u32>,
+    agricultural_heritages: &BTreeSet<u32>,
+    rivergoing_heritages: &BTreeSet<u32>,
+    seafaring_heritages: &BTreeSet<u32>,
+    travel_range: usize,
+    coastal_proximity: usize,
+    subgrid_island_koeppen: Option<&[u8]>,
+    cmemo: &mut BTreeMap<(usize, bool), bool>,
+) -> bool {
+    expand_population_impl(
+        elevations,
+        koeppen_ids,
+        adjacency,
+        river_tiles,
+        populated,
+        agricultural_heritages,
+        rivergoing_heritages,
+        seafaring_heritages,
+        travel_range,
+        coastal_proximity,
+        false,
+        subgrid_island_koeppen,
         cmemo,
     )
 }
@@ -907,6 +957,7 @@ fn expand_population_impl(
     travel_range: usize,
     coastal_proximity: usize,
     allow_unassisted_sea: bool,
+    subgrid_island_koeppen: Option<&[u8]>,
     cmemo: &mut BTreeMap<(usize, bool), bool>,
 ) -> bool {
     if populated.is_empty() {
@@ -975,7 +1026,13 @@ fn expand_population_impl(
             let mut added = false;
             for &n in &curr_frontier {
                 if !is_pop[n] {
-                    let cand = if farms {
+                    let cand = if elevations[n] <= 0.0 {
+                        seas_tech
+                            && subgrid_island_koeppen
+                                .and_then(|s| s.get(n))
+                                .copied()
+                                .is_some_and(|isl_k| is_subgrid_island_habitable(isl_k, farms))
+                    } else if farms {
                         let cached = farm_memo[n];
                         if cached != 0 {
                             cached == 2

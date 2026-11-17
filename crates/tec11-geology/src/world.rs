@@ -717,11 +717,21 @@ impl WorldSimulation {
                 let Some(tile) = pre.tiles().get(tile_idx) else {
                     return String::new();
                 };
+                let isl_k = pre
+                    .subgrid_island_koeppen_ids()
+                    .get(tile_idx)
+                    .copied()
+                    .unwrap_or(0);
+                let eff_k = if tile.elevation() <= 0.0 && isl_k != 0 {
+                    isl_k
+                } else {
+                    pre.tile_koeppen_ids()[tile_idx]
+                };
                 let mut text = Self::format_geology_and_climate_tree(
                     tile_idx,
                     tile,
                     true,
-                    pre.tile_koeppen_ids()[tile_idx],
+                    eff_k,
                     None,
                     Some(pre.tile_precip_norm()[tile_idx]),
                 );
@@ -729,17 +739,7 @@ impl WorldSimulation {
                     let is_ag = pre.agricultural_heritages().contains(&hid);
                     let is_riv = pre.rivergoing_heritages().contains(&hid);
                     let is_sea = pre.seafaring_heritages().contains(&hid);
-                    let has_river = pre.river_tiles().get(tile_idx).copied().unwrap_or(false);
-                    let is_coastal = pre
-                        .adjacency()
-                        .get(tile_idx)
-                        .is_some_and(|nbs| nbs.iter().any(|&nb| pre.tiles()[nb].elevation() <= 0.0));
-                    let pop_k = tile_population_thousands_with_water_tech(
-                        pre.tile_koeppen_ids()[tile_idx],
-                        is_ag,
-                        is_riv && has_river,
-                        is_sea && is_coastal,
-                    );
+                    let pop_k = pre.tile_population_for_heritage_thousands(tile_idx, hid);
                     let mut tech_labels = Vec::new();
                     if is_ag {
                         tech_labels.push("Agricultural");
