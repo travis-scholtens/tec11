@@ -720,13 +720,20 @@ impl PrehistorySimulation {
     }
 
     fn refresh_rivers(&mut self, elevations: &[f32]) {
+        // Custom planets store true physical km elevations (typical ranges ~2.0..4.8 km, matching History's
+        // `2.0 km` / `0.25` threshold), whereas canned Earth scales `EARTH_SIZE6_ELEVATIONS_M / 550.0`.
+        let (hmin, pmin) = if self.is_custom {
+            (2.0, 0.25)
+        } else {
+            (PREHISTORY_MIN_RIVER_ELEV, PREHISTORY_MIN_RIVER_PRECIP)
+        };
         self.rivers = trace_coarse_rivers(
             elevations,
             &self.tile_precip_norm,
             &self.tile_koeppen,
             &self.adjacency,
-            PREHISTORY_MIN_RIVER_ELEV,
-            PREHISTORY_MIN_RIVER_PRECIP,
+            hmin,
+            pmin,
         );
         self.river_tiles.resize(elevations.len(), false);
         self.river_tiles.fill(false);
@@ -1601,5 +1608,29 @@ mod tests {
         assert_eq!(restored.prehistory_ticks(), 4);
         assert_eq!(restored.populated_count(), sim.populated_count());
         assert_eq!(restored.active_race_count(), sim.active_race_count());
+    }
+
+    #[test]
+    fn test_custom_planet_prehistory_rivers_use_physical_km_threshold() {
+        let mut tec = TectonicsSimulation::new(4, 30.0, 2026);
+        for _ in 0..35 {
+            tec.step();
+        }
+        let snap = tec.to_snapshot();
+        let mut pre = PrehistorySimulation::from_snapshot(&snap, 42).unwrap();
+        // Cap all land elevations at 3.8 km (< 5.0 km scaled Earth threshold, >= 2.0 km physical range)
+        for t in &mut pre.tiles {
+            let e = t.elevation();
+            if e > 3.8 {
+                t.bottom -= e - 3.8;
+            }
+        }
+        let elevs = pre.tile_elevations();
+        pre.refresh_rivers(&elevs);
+        assert!(pre.is_custom_planet());
+        assert!(
+            pre.river_tiles().iter().any(|&b| b),
+            "Custom Prehistory planets with 2.0..3.8 km mountain ranges should trace coarse rivers"
+        );
     }
 }
