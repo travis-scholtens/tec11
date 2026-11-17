@@ -8,7 +8,7 @@ use tec11_proto::PlanetSnapshotExt;
 use crate::lifeforms::{settle_species_on_climate, SettledBiosphere, SpeciesKind};
 use crate::pangea::PangeaWorld;
 use crate::population::{
-    eden_tile, expand_population_with_technologies, is_habitable,
+    eden_tile, expand_population_with_technologies, is_farmable, is_habitable,
     tile_population_thousands_with_water_tech, DisjointSet,
 };
 use crate::racination::{racinate_with_technologies, racination_shades, Heritage};
@@ -614,6 +614,19 @@ impl PrehistorySimulation {
         let populated_snapshot: Vec<(usize, u32)> =
             self.populated.iter().map(|(&t, &h)| (t, h)).collect();
         for (t, hid) in populated_snapshot {
+            // Low-probability rainfed crop domestication on humid farmable non-river tiles so low-relief
+            // cratons or archipelagos without major mountain-fed rivers can still invent agriculture.
+            if !self.agricultural_heritages.contains(&hid)
+                && !self.river_tiles.get(t).copied().unwrap_or(false)
+                && is_farmable(elevations[t], self.tile_koeppen[t])
+                && self.tile_precip_norm.get(t).copied().unwrap_or(0.0) >= 0.30
+            {
+                let ag_mult = self.tile_ag_potential.get(t).copied().unwrap_or(1.0) as f64;
+                let rainfed_prob = gfactor * 0.0003 * ag_mult;
+                if rainfed_prob > 0.0 && self.rng.uniform(0.0, 1.0) < rainfed_prob {
+                    self.agricultural_heritages.insert(hid);
+                }
+            }
             if !self.seafaring_heritages.contains(&hid) {
                 let sea_nbs = self.adjacency[t]
                     .iter()
