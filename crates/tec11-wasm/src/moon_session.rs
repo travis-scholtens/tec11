@@ -118,6 +118,10 @@ impl WasmMoonSession {
         self.sim.inspect_tile_stratigraphy_json(tile_idx)
     }
 
+    pub fn orbital_system_json(&self) -> String {
+        self.sim.orbital_system_json()
+    }
+
     pub fn tile_colors_rgb(
         &self,
         aspect: &str,

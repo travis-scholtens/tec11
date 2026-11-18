@@ -5674,6 +5674,643 @@ function computeMoonVertexColors(view) {
   return colors;
 }
 
+const MOON_ORBIT_LAYOUT = {
+  W: 560,
+  H: 460,
+  cx: 280,
+  cy: 226,
+  rHelio: 124,
+};
+
+const MOON_TRAIL_PALETTE = [
+  { fill: "#e2e8f0", stroke: "rgba(226, 232, 240, 0.72)", rgb: [226, 232, 240] },
+  { fill: "#fcd34d", stroke: "rgba(252, 211, 77, 0.72)", rgb: [252, 211, 77] },
+  { fill: "#67e8f9", stroke: "rgba(103, 232, 249, 0.72)", rgb: [103, 232, 249] },
+  { fill: "#f9a8d4", stroke: "rgba(249, 168, 212, 0.72)", rgb: [249, 168, 212] },
+];
+
+const MOON_BG_STARS = (() => {
+  const out = [];
+  let s = 0x5eed1234;
+  const next = () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 4294967296.0;
+  };
+  for (let i = 0; i < 115; i++) {
+    out.push({
+      x: next() * MOON_ORBIT_LAYOUT.W,
+      y: 36 + next() * (MOON_ORBIT_LAYOUT.H - 76),
+      r: 0.45 + next() * 0.95,
+      a: 0.16 + next() * 0.42,
+      warm: next() < 0.35,
+    });
+  }
+  return out;
+})();
+
+function moonDistRpToOrbitPx(distRp) {
+  const clamped = Math.max(12.0, Math.min(410.0, distRp));
+  return 15.0 + 41.0 * Math.pow((clamped - 10.0) / 400.0, 0.56);
+}
+
+function lunarPhaseNameFromElong(elongRad) {
+  const norm = ((elongRad % (Math.PI * 2.0)) + Math.PI * 2.0) % (Math.PI * 2.0);
+  const deg = (norm * 180.0) / Math.PI;
+  if (deg < 22.5 || deg >= 337.5) return "New Moon";
+  if (deg < 67.5) return "Waxing Crescent";
+  if (deg < 112.5) return "First Quarter";
+  if (deg < 157.5) return "Waxing Gibbous";
+  if (deg < 202.5) return "Full Moon";
+  if (deg < 247.5) return "Waning Gibbous";
+  if (deg < 292.5) return "Third Quarter";
+  return "Waning Crescent";
+}
+
+function ensureMoonOrbitalData(view) {
+  if (view.orbitalSystemData) {
+    return view.orbitalSystemData;
+  }
+  let parsed = {
+    sun: {
+      spectralType: "G2V",
+      classDesc: "Yellow Main-Sequence Dwarf",
+      tempK: 5778,
+      massSolar: 1.0,
+      radiusSolar: 1.0,
+      luminositySolar: 1.0,
+      orbitAu: 1.0,
+      yearDays: 365.25,
+      rgb: [1.0, 0.96, 0.84],
+    },
+    planet: {
+      isCustom: false,
+      geoticks: 0,
+      landPct: 29,
+      dayHours: 24.0,
+      spin: 1.0,
+      tiltDeg: 23.0,
+      cells: 3,
+      tidalStrength: 1.0,
+      maxTidalRangeM: 4.5,
+      coastalScourKm: 0.004,
+      tidalSharePct: 35.0,
+    },
+    epochPct: 100,
+    moonCount: 1,
+    primaryMassLunar: 1.0,
+    moons: [],
+  };
+  try {
+    parsed = JSON.parse(view.session.orbital_system_json());
+  } catch (_err) {
+    // Use fallback above
+  }
+  view.orbitalSystemData = parsed;
+  return parsed;
+}
+
+function computeMoonOrbitalFrame(orb, simDays) {
+  const { cx, cy, rHelio } = MOON_ORBIT_LAYOUT;
+  const yearDays = Math.max(8.0, orb.sun?.yearDays || 365.25);
+  const thetaPlanet = ((simDays / yearDays) * Math.PI * 2.0) % (Math.PI * 2.0);
+  const px = cx + rHelio * Math.cos(thetaPlanet);
+  const py = cy - rHelio * Math.sin(thetaPlanet);
+  const sunDirAngle = Math.atan2(cy - py, cx - px); // screen-space angle from planet -> sun
+
+  // World-space angle from planet -> sun (with +y_world = -y_screen):
+  const thetaSunFromPlanet = (thetaPlanet + Math.PI) % (Math.PI * 2.0);
+
+  const moonsState = [];
+  const moons = Array.isArray(orb.moons) ? orb.moons : [];
+  for (let k = 0; k < moons.length; k++) {
+    const m = moons[k];
+    const period = Math.max(1.2, m.periodDays || 27.32);
+    const phiWorld =
+      ((simDays / period) * Math.PI * 2.0 + (m.phaseOffsetRad || 0.0)) % (Math.PI * 2.0);
+    const rPx = moonDistRpToOrbitPx(m.distRp || 60.0);
+    const mx = px + rPx * Math.cos(phiWorld);
+    const my = py - rPx * Math.sin(phiWorld);
+    // Elongation `0` = New Moon (between Planet and Sun), `PI` = Full Moon (opposite Sun):
+    const elongRad =
+      (((phiWorld - thetaSunFromPlanet) % (Math.PI * 2.0)) + Math.PI * 2.0) %
+      (Math.PI * 2.0);
+    const tideWeight =
+      (m.massLunar || 1.0) * Math.pow(60.0 / Math.max(12.0, m.distRp || 60.0), 3.0);
+    moonsState.push({
+      meta: m,
+      index: k,
+      phiWorld,
+      rPx,
+      x: mx,
+      y: my,
+      elongRad,
+      phaseName: lunarPhaseNameFromElong(elongRad),
+      tideWeight,
+    });
+  }
+
+  return {
+    yearDays,
+    thetaPlanet,
+    px,
+    py,
+    sunDirAngle,
+    thetaSunFromPlanet,
+    moonsState,
+  };
+}
+
+function formatMoonOrbitalSelectionReport(view) {
+  const orb = ensureMoonOrbitalData(view);
+  const frame = computeMoonOrbitalFrame(orb, view.orbitSimDays || 0.0);
+  const sel = view.selectedOrbitBody || null;
+  const sun = orb.sun;
+  const pl = orb.planet;
+
+  if (sel === "sun") {
+    return (
+      `Selected Body: Host Star (${sun.spectralType} — ${sun.classDesc})\n` +
+      `Effective Temp: ${Math.round(sun.tempK)} K | Mass: ${sun.massSolar.toFixed(2)} M☉ | Radius: ${sun.radiusSolar.toFixed(2)} R☉ | Luminosity: ${sun.luminositySolar.toFixed(2)} L☉\n` +
+      `Planet Heliocentric Orbit: ${sun.orbitAu.toFixed(2)} AU | Year Length: ${sun.yearDays.toFixed(1)} Earth days (${(sun.yearDays / Math.max(0.1, pl.dayHours / 24.0)).toFixed(0)} local solar days/yr)\n` +
+      `Solar Tide Contribution: 0.15x Earth baseline (drives spring/neap modulation as moons cross syzygy & quadrature)`
+    );
+  }
+  if (sel === "planet") {
+    const pLabel = pl.isCustom
+      ? `Loaded Planet (${pl.geoticks * 5} Myr, ${pl.landPct}% land)`
+      : "Earth (ETOPO2)";
+    return (
+      `Selected Body: ${pLabel}\n` +
+      `Rotation Day: ${pl.dayHours.toFixed(1)} h (${pl.cells} Hadley/Ferrel/Polar cells) | Axial Obliquity: ${pl.tiltDeg.toFixed(1)}°\n` +
+      `Total Tidal Forcing: ${pl.tidalStrength.toFixed(2)}x Earth | Peak Coastal Range: ${pl.maxTidalRangeM.toFixed(1)} m\n` +
+      `Coastal Tidal Scour: ${pl.coastalScourKm.toFixed(4)} km/tick (${pl.tidalSharePct.toFixed(1)}% of total coastal erosion)`
+    );
+  }
+  if (typeof sel === "string" && sel.startsWith("moon_")) {
+    const k = parseInt(sel.slice(5), 10);
+    const ms = frame.moonsState[k];
+    if (ms) {
+      const m = ms.meta;
+      const synodicDays =
+        Math.abs(frame.yearDays - m.periodDays) > 0.05
+          ? (frame.yearDays * m.periodDays) / Math.abs(frame.yearDays - m.periodDays)
+          : m.periodDays;
+      return (
+        `Selected Body: Moon M${m.number} (${m.resonanceRatio}:1 Laplace Harmonic Orbit) — Current Phase: ${ms.phaseName}\n` +
+        `Orbital Distance: ${m.distRp.toFixed(1)} Rp (Hadean birth ${m.initialDistRp.toFixed(1)} Rp → Mature target ${m.targetDistRp.toFixed(1)} Rp at Epoch ${orb.epochPct}%)\n` +
+        `Sidereal Period: ${m.periodDays.toFixed(2)} Earth days | Synodic Phase Cycle: ${synodicDays.toFixed(2)} days | Mass: ${m.massLunar.toFixed(2)}x Lunar\n` +
+        `Tidal Share: ${m.tideSharePct.toFixed(1)}% of lunar tidal forcing (scales as M / a³)`
+      );
+    }
+  }
+  return (
+    "Live Sun–Planet–Moons Orrery: Watch the moons orbit the planet (forming braided epitrochoid trails, lit lunar phases, and live spring/neap ocean tidal bulges) while the planet orbits its Sun. " +
+    "Adjust Harmonic Moons, Mass, Target Distance, or Hadean→Mature Epoch on the right, or click the Sun, Planet, or any Moon to inspect it."
+  );
+}
+
+function drawLitBodyDisc(ctx, x, y, radius, sunAngleScreen, litCss, shadowCss) {
+  // Base lit sphere:
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = litCss;
+  ctx.fill();
+
+  // Night-side hemisphere opposite `sunAngleScreen`:
+  ctx.beginPath();
+  ctx.arc(
+    x,
+    y,
+    radius + 0.25,
+    sunAngleScreen + Math.PI * 0.5,
+    sunAngleScreen + Math.PI * 1.5
+  );
+  ctx.closePath();
+  ctx.fillStyle = shadowCss;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMoonOrbitalSystem(view) {
+  const canvas = view.moonOrbitCanvas || document.getElementById("moon-orbit-canvas");
+  if (!canvas || !view.session) return;
+
+  const { W, H, cx, cy, rHelio } = MOON_ORBIT_LAYOUT;
+  const dpr = Math.min(2.5, Math.max(1.0, window.devicePixelRatio || 1.0));
+  const targetW = Math.round(W * dpr);
+  const targetH = Math.round(H * dpr);
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const orb = ensureMoonOrbitalData(view);
+  const simDays = view.orbitSimDays || 0.0;
+  const frame = computeMoonOrbitalFrame(orb, simDays);
+  view.lastOrbitFrame = frame;
+
+  // 1. Deep-space radial gradient + subtle starfield:
+  const bg = ctx.createRadialGradient(cx, cy, 12, cx, cy, W * 0.68);
+  bg.addColorStop(0.0, "#0b132b");
+  bg.addColorStop(0.55, "#060b19");
+  bg.addColorStop(1.0, "#030610");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const st of MOON_BG_STARS) {
+    ctx.fillStyle = st.warm
+      ? `rgba(255, 236, 205, ${st.a})`
+      : `rgba(210, 228, 255, ${st.a})`;
+    ctx.beginPath();
+    ctx.arc(st.x, st.y, st.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 2. Heliocentric Planet Orbit ring + Equinox/Solstice ticks + Planet wake arc:
+  ctx.save();
+  ctx.setLineDash([5, 5]);
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.28)";
+  ctx.lineWidth = 1.1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rHelio, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.font = "500 8.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "rgba(148, 163, 184, 0.50)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const seasonLabels = [
+    [0.0, "Vernal Eq", rHelio + 14, 0],
+    [Math.PI * 0.5, "Solstice", 0, -(rHelio + 11)],
+    [Math.PI, "Autumnal Eq", -(rHelio + 16), 0],
+    [Math.PI * 1.5, "Solstice", 0, rHelio + 11],
+  ];
+  for (const [ang, lbl, ox, oy] of seasonLabels) {
+    const tx = cx + rHelio * Math.cos(ang);
+    const ty = cy - rHelio * Math.sin(ang);
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+    ctx.beginPath();
+    ctx.arc(tx, ty, 2.0, 0, Math.PI * 2);
+    ctx.stroke();
+    if (orb.moons.length <= 2 || oy !== 0) {
+      ctx.fillText(lbl, cx + ox, cy + oy);
+    }
+  }
+
+  // Fading blue heliocentric wake arc behind the planet (~55° of its orbit):
+  const wakeSegs = 28;
+  const wakeSpan = 0.95;
+  for (let i = 0; i < wakeSegs; i++) {
+    const f0 = i / wakeSegs;
+    const f1 = (i + 1) / wakeSegs;
+    const a0 = frame.thetaPlanet - wakeSpan * (1.0 - f0);
+    const a1 = frame.thetaPlanet - wakeSpan * (1.0 - f1);
+    ctx.strokeStyle = `rgba(59, 130, 246, ${(0.05 + 0.42 * f1).toFixed(3)})`;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.moveTo(cx + rHelio * Math.cos(a0), cy - rHelio * Math.sin(a0));
+    ctx.lineTo(cx + rHelio * Math.cos(a1), cy - rHelio * Math.sin(a1));
+    ctx.stroke();
+  }
+
+  // 3. Central Home Star (Sun) with glowing corona in true spectral B-V color:
+  const sRgb = orb.sun?.rgb || [1.0, 0.96, 0.84];
+  const sr = Math.min(255, Math.round(sRgb[0] * 255));
+  const sg = Math.min(255, Math.round(sRgb[1] * 255));
+  const sb = Math.min(255, Math.round(sRgb[2] * 255));
+  const sunRad = Math.max(14.0, Math.min(24.0, 18.0 * Math.sqrt(orb.sun?.radiusSolar || 1.0)));
+
+  const corona = ctx.createRadialGradient(cx, cy, sunRad * 0.35, cx, cy, sunRad * 3.4);
+  corona.addColorStop(0.0, `rgba(${sr}, ${sg}, ${sb}, 0.92)`);
+  corona.addColorStop(0.35, `rgba(${sr}, ${sg}, ${sb}, 0.34)`);
+  corona.addColorStop(1.0, `rgba(${sr}, ${sg}, ${sb}, 0.0)`);
+  ctx.fillStyle = corona;
+  ctx.beginPath();
+  ctx.arc(cx, cy, sunRad * 3.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  const sunCore = ctx.createRadialGradient(
+    cx - sunRad * 0.25,
+    cy - sunRad * 0.25,
+    sunRad * 0.1,
+    cx,
+    cy,
+    sunRad
+  );
+  sunCore.addColorStop(0.0, "#ffffff");
+  sunCore.addColorStop(0.55, `rgb(${sr}, ${sg}, ${sb})`);
+  sunCore.addColorStop(
+    1.0,
+    `rgb(${Math.round(sr * 0.78)}, ${Math.round(sg * 0.72)}, ${Math.round(sb * 0.65)})`
+  );
+  ctx.fillStyle = sunCore;
+  ctx.beginPath();
+  ctx.arc(cx, cy, sunRad, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (view.selectedOrbitBody === "sun") {
+    ctx.strokeStyle = "#34d399";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, sunRad + 5.5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.font = "600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "rgba(248, 250, 252, 0.85)";
+  ctx.fillText(
+    `${orb.sun.spectralType} (${orb.sun.orbitAu.toFixed(2)} AU)`,
+    cx,
+    cy + sunRad + 12
+  );
+
+  // 4. Braided Epitrochoid Trails of Each Moon Around the Sun + Planet:
+  const trailSpanDays = Math.min(frame.yearDays * 0.26, 72.0);
+  const trailSteps = 84;
+  for (let k = 0; k < frame.moonsState.length; k++) {
+    const ms = frame.moonsState[k];
+    const pal = MOON_TRAIL_PALETTE[k % MOON_TRAIL_PALETTE.length];
+    const period = Math.max(1.2, ms.meta.periodDays || 27.32);
+    const phaseOff = ms.meta.phaseOffsetRad || 0.0;
+    let prevX = 0;
+    let prevY = 0;
+    for (let s = 0; s <= trailSteps; s++) {
+      const frac = s / trailSteps;
+      const tDay = simDays - trailSpanDays * (1.0 - frac);
+      const thP = (tDay / frame.yearDays) * Math.PI * 2.0;
+      const pxt = cx + rHelio * Math.cos(thP);
+      const pyt = cy - rHelio * Math.sin(thP);
+      const phiM = (tDay / period) * Math.PI * 2.0 + phaseOff;
+      const mxt = pxt + ms.rPx * Math.cos(phiM);
+      const myt = pyt - ms.rPx * Math.sin(phiM);
+      if (s > 0) {
+        const alpha = 0.04 + 0.48 * Math.pow(frac, 1.5);
+        ctx.strokeStyle = `rgba(${pal.rgb[0]}, ${pal.rgb[1]}, ${pal.rgb[2]}, ${alpha.toFixed(3)})`;
+        ctx.lineWidth = 1.15;
+        ctx.beginPath();
+        ctx.moveTo(prevX, prevY);
+        ctx.lineTo(mxt, myt);
+        ctx.stroke();
+      }
+      prevX = mxt;
+      prevY = myt;
+    }
+  }
+
+  // 5. Instantaneous Concentric Lunar Orbit Rings Around Moving Planet:
+  for (let k = 0; k < frame.moonsState.length; k++) {
+    const ms = frame.moonsState[k];
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.24)";
+    ctx.lineWidth = 0.85;
+    ctx.beginPath();
+    ctx.arc(frame.px, frame.py, ms.rPx, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // 6. Live Quadrupolar Ocean Tidal Bulge Envelope Around the Planet:
+  const planetRad = 9.0;
+  let maxBulgeP2 = 0.0;
+  ctx.save();
+  ctx.beginPath();
+  const bulgeSegs = 56;
+  for (let i = 0; i <= bulgeSegs; i++) {
+    const aWorld = (i / bulgeSegs) * Math.PI * 2.0;
+    const cosSun = Math.cos(aWorld - frame.thetaSunFromPlanet);
+    let p2 = 0.18 * 0.5 * (3.0 * cosSun * cosSun - 1.0);
+    for (const ms of frame.moonsState) {
+      const cosM = Math.cos(aWorld - ms.phiWorld);
+      p2 += Math.min(2.6, ms.tideWeight) * 0.5 * (3.0 * cosM * cosM - 1.0);
+    }
+    if (p2 > maxBulgeP2) maxBulgeP2 = p2;
+    const bulgePx = Math.max(-1.8, Math.min(8.5, 2.2 + 3.4 * p2));
+    const rEnv = planetRad + bulgePx;
+    const bx = frame.px + rEnv * Math.cos(aWorld);
+    const by = frame.py - rEnv * Math.sin(aWorld);
+    if (i === 0) ctx.moveTo(bx, by);
+    else ctx.lineTo(bx, by);
+  }
+  ctx.closePath();
+  ctx.fillStyle = "rgba(56, 189, 248, 0.28)";
+  ctx.strokeStyle = "rgba(125, 211, 252, 0.72)";
+  ctx.lineWidth = 1.0;
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+
+  // 7. Moving Planet Disc (with Rotating Continent Spot, Axial Tilt Axis & Day/Night Terminator):
+  const tiltRad = ((orb.planet?.tiltDeg || 23.0) * Math.PI) / 180.0;
+  ctx.strokeStyle = "rgba(248, 250, 252, 0.52)";
+  ctx.lineWidth = 1.0;
+  ctx.beginPath();
+  ctx.moveTo(
+    frame.px - (planetRad + 4.5) * Math.sin(tiltRad),
+    frame.py - (planetRad + 4.5) * Math.cos(tiltRad)
+  );
+  ctx.lineTo(
+    frame.px + (planetRad + 4.5) * Math.sin(tiltRad),
+    frame.py + (planetRad + 4.5) * Math.cos(tiltRad)
+  );
+  ctx.stroke();
+
+  drawLitBodyDisc(
+    ctx,
+    frame.px,
+    frame.py,
+    planetRad,
+    frame.sunDirAngle,
+    "#2563eb",
+    "rgba(4, 9, 24, 0.76)"
+  );
+  // Subtle rotating continent patch on the planet to convey spin rate (`24 / dayHours`):
+  const spinPhase = simDays * (orb.planet?.spin || 1.0) * 0.85;
+  const contOff = Math.sin(spinPhase) * (planetRad * 0.48);
+  ctx.fillStyle = "rgba(52, 211, 153, 0.72)";
+  ctx.beginPath();
+  ctx.arc(frame.px + contOff, frame.py - 1.5, 2.7, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (view.selectedOrbitBody === "planet") {
+    ctx.strokeStyle = "#34d399";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(frame.px, frame.py, planetRad + 6.5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // 8. Moving Moons M1..M4 with Sunlit Lunar Phases:
+  for (let k = 0; k < frame.moonsState.length; k++) {
+    const ms = frame.moonsState[k];
+    const pal = MOON_TRAIL_PALETTE[k % MOON_TRAIL_PALETTE.length];
+    const mRad = Math.max(
+      3.4,
+      Math.min(6.4, 4.3 * Math.cbrt(Math.max(0.15, ms.meta.massLunar || 1.0)))
+    );
+    const moonToSunScreen = Math.atan2(cy - ms.y, cx - ms.x);
+    drawLitBodyDisc(
+      ctx,
+      ms.x,
+      ms.y,
+      mRad,
+      moonToSunScreen,
+      pal.fill,
+      "rgba(8, 12, 26, 0.82)"
+    );
+    ctx.strokeStyle = pal.stroke;
+    ctx.lineWidth = 0.85;
+    ctx.beginPath();
+    ctx.arc(ms.x, ms.y, mRad, 0, Math.PI * 2);
+    ctx.stroke();
+
+    if (view.selectedOrbitBody === `moon_${k}`) {
+      ctx.strokeStyle = "#34d399";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(ms.x, ms.y, mRad + 4.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.font = "600 8.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.fillStyle = pal.fill;
+    ctx.fillText(`M${ms.meta.number}`, ms.x + mRad + 7.5, ms.y - mRad - 2.0);
+  }
+
+  // 9. Top Status HUD Bar (Year/Day Clock + Live Spring/Neap Syzygy Indicator):
+  const yrNum = Math.floor(simDays / frame.yearDays) + 1;
+  const dayInYr = Math.floor(((simDays % frame.yearDays) + frame.yearDays) % frame.yearDays) + 1;
+
+  let tideStateLabel = "Solar Tide Only (Moonless)";
+  let tideBadgeColor = "#94a3b8";
+  if (frame.moonsState.length > 0) {
+    const m1 = frame.moonsState[0];
+    const alignCos = Math.abs(Math.cos(m1.elongRad)); // 1.0 at New/Full syzygy, 0.0 at Quarter quadrature
+    if (alignCos >= 0.91) {
+      tideStateLabel = `Spring Tide (Syzygy · ${m1.phaseName})`;
+      tideBadgeColor = "#fbbf24";
+    } else if (alignCos <= 0.36) {
+      tideStateLabel = `Neap Tide (Quadrature · ${m1.phaseName})`;
+      tideBadgeColor = "#60a5fa";
+    } else {
+      tideStateLabel = `${m1.phaseName} Tide`;
+      tideBadgeColor = "#cbd5e1";
+    }
+  }
+
+  ctx.textAlign = "left";
+  ctx.font = "600 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "#e2e8f0";
+  ctx.fillText(
+    `Year ${yrNum} · Day ${String(dayInYr).padStart(3, " ")}/${Math.round(frame.yearDays)}`,
+    14,
+    18
+  );
+  ctx.font = "500 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText(
+    `Spin Day: ${orb.planet.dayHours.toFixed(1)}h · Tilt: ${orb.planet.tiltDeg.toFixed(1)}° · Epoch: ${orb.epochPct}%`,
+    14,
+    32
+  );
+
+  ctx.textAlign = "right";
+  ctx.font = "600 10.5px Inter, system-ui, sans-serif";
+  ctx.fillStyle = tideBadgeColor;
+  ctx.fillText(tideStateLabel, W - 14, 18);
+  ctx.font = "500 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "#7dd3fc";
+  ctx.fillText(
+    `Peak Range: ${orb.planet.maxTidalRangeM.toFixed(1)}m (${orb.planet.tidalStrength.toFixed(2)}x Earth)`,
+    W - 14,
+    32
+  );
+
+  // 10. Bottom Harmonic Resonance Legend Strip:
+  ctx.fillStyle = "rgba(15, 23, 42, 0.80)";
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.22)";
+  ctx.lineWidth = 1.0;
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(12, H - 31, W - 24, 23, 6);
+  } else {
+    ctx.rect(12, H - 31, W - 24, 23);
+  }
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.textAlign = "left";
+  ctx.font = "500 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+  if (frame.moonsState.length === 0) {
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText(
+      `0 Moons — Planet orbits ${orb.sun.spectralType} Sun (${Math.round(frame.yearDays)}d yr) with unbraked ${orb.planet.dayHours.toFixed(1)}h spin`,
+      22,
+      H - 19
+    );
+  } else {
+    let lx = 20;
+    const ly = H - 19;
+    for (let k = 0; k < frame.moonsState.length; k++) {
+      const ms = frame.moonsState[k];
+      const pal = MOON_TRAIL_PALETTE[k % MOON_TRAIL_PALETTE.length];
+      ctx.fillStyle = pal.fill;
+      ctx.beginPath();
+      ctx.arc(lx + 4, ly - 0.5, 3.4, 0, Math.PI * 2);
+      ctx.fill();
+      const entry = `M${ms.meta.number}(${ms.meta.resonanceRatio}:1): ${ms.meta.periodDays.toFixed(1)}d @ ${ms.meta.distRp.toFixed(0)}Rp`;
+      ctx.fillText(entry, lx + 11, ly);
+      lx += ctx.measureText(entry).width + 21;
+    }
+  }
+
+  ctx.restore();
+}
+
+function stopMoonOrbitLoop(view) {
+  if (view && view.orbitRafId !== null && view.orbitRafId !== undefined) {
+    cancelAnimationFrame(view.orbitRafId);
+    view.orbitRafId = null;
+  }
+  if (view) {
+    view.orbitLastTs = null;
+  }
+}
+
+function syncMoonOrbitLoop(view) {
+  if (!view) return;
+  if (view.aspect !== "orbit_system" || !view.orbitPlaying) {
+    stopMoonOrbitLoop(view);
+    if (view.aspect === "orbit_system") {
+      drawMoonOrbitalSystem(view);
+    }
+    return;
+  }
+  if (view.orbitRafId !== null && view.orbitRafId !== undefined) {
+    return;
+  }
+  const tick = (ts) => {
+    if (activeView !== view || view.aspect !== "orbit_system" || !view.orbitPlaying) {
+      view.orbitRafId = null;
+      view.orbitLastTs = null;
+      return;
+    }
+    if (view.orbitLastTs !== null && view.orbitLastTs !== undefined) {
+      const dtSec = Math.min(0.08, Math.max(0.0, (ts - view.orbitLastTs) / 1000.0));
+      // Base rate `18` Earth days / sec (~20s per Earth year, ~1.5s per lunar month at 1x):
+      view.orbitSimDays = (view.orbitSimDays || 0.0) + dtSec * 18.0 * (view.orbitSpeed || 1.0);
+    }
+    view.orbitLastTs = ts;
+    drawMoonOrbitalSystem(view);
+    view.orbitRafId = requestAnimationFrame(tick);
+  };
+  view.orbitRafId = requestAnimationFrame(tick);
+}
+
 function updateMoonDataBuffers(view, rebuildGeometry = false) {
   const { session, geometry } = view;
   if (rebuildGeometry) {
@@ -5684,6 +6321,13 @@ function updateMoonDataBuffers(view, rebuildGeometry = false) {
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
     geometry.computeBoundingSphere();
   }
+  view.orbitalSystemData = null;
+  if (view.aspect === "orbit_system") {
+    drawMoonOrbitalSystem(view);
+    syncMoonOrbitLoop(view);
+    return;
+  }
+  stopMoonOrbitLoop(view);
   view.tileColors = session.tile_colors_rgb(
     view.aspect,
     Boolean(view.showTidalScour),
@@ -5702,10 +6346,14 @@ function buildMoonInfo(view) {
     ? `Loaded Planet (${s.loaded_geoticks() * 5} Myr, ${s.loaded_land_percent()}% land)`
     : "Earth (ETOPO2)";
   const selectedReport =
-    view.selectedTileIdx >= 0
+    view.aspect === "orbit_system"
+      ? formatMoonOrbitalSelectionReport(view)
+      : view.selectedTileIdx >= 0
       ? s.inspect_tile(view.selectedTileIdx)
       : "Click any coastal, ocean, or inland tile on the globe to inspect local tidal range (m), tidal scour vs. rainfall erosion rates, shelf deposition, and rock strata.";
-  scheduleStratigraphySidePaint(view, view.selectedTileIdx);
+  if (view.aspect !== "orbit_system") {
+    scheduleStratigraphySidePaint(view, view.selectedTileIdx);
+  }
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -5736,6 +6384,16 @@ export const mountMoonView =
     }
 
     const view = createBaseSphereView(canvas, false);
+    const moonOrbitCanvas = document.getElementById("moon-orbit-canvas");
+    view.moonOrbitCanvas = moonOrbitCanvas;
+    view.orbitalSystemData = null;
+    view.orbitSimDays = 0.0;
+    view.orbitPlaying = true;
+    view.orbitSpeed = 1.0;
+    view.orbitRafId = null;
+    view.orbitLastTs = null;
+    view.selectedOrbitBody = null;
+
     view.session = new WasmMoonSession(
       moonCount,
       moonMassTenths / 10.0,
@@ -5780,14 +6438,51 @@ export const mountMoonView =
       }
     };
 
+    const handleOrbitCanvasClick = (ev) => {
+      if (!view.session || !moonOrbitCanvas) return;
+      const rect = moonOrbitCanvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const mx = ((ev.clientX - rect.left) / rect.width) * MOON_ORBIT_LAYOUT.W;
+      const my = ((ev.clientY - rect.top) / rect.height) * MOON_ORBIT_LAYOUT.H;
+      const orb = ensureMoonOrbitalData(view);
+      const frame = view.lastOrbitFrame || computeMoonOrbitalFrame(orb, view.orbitSimDays || 0.0);
+
+      let picked = null;
+      let bestDist = 18.0;
+      for (let k = 0; k < frame.moonsState.length; k++) {
+        const ms = frame.moonsState[k];
+        const d = Math.hypot(mx - ms.x, my - ms.y);
+        if (d < bestDist) {
+          bestDist = d;
+          picked = `moon_${k}`;
+        }
+      }
+      if (!picked && Math.hypot(mx - frame.px, my - frame.py) <= 18.0) {
+        picked = "planet";
+      }
+      if (!picked && Math.hypot(mx - MOON_ORBIT_LAYOUT.cx, my - MOON_ORBIT_LAYOUT.cy) <= 28.0) {
+        picked = "sun";
+      }
+      view.selectedOrbitBody = picked;
+      drawMoonOrbitalSystem(view);
+      view.setMoonInfo(buildMoonInfo(view))();
+    };
+
     canvas.addEventListener("click", handleCanvasClick);
+    if (moonOrbitCanvas) {
+      moonOrbitCanvas.addEventListener("click", handleOrbitCanvasClick);
+    }
 
     activeView = view;
     updateMoonDataBuffers(view, true);
     setMoonInfo(buildMoonInfo(view))();
 
     return () => {
+      stopMoonOrbitLoop(view);
       canvas.removeEventListener("click", handleCanvasClick);
+      if (moonOrbitCanvas) {
+        moonOrbitCanvas.removeEventListener("click", handleOrbitCanvasClick);
+      }
       if (activeView === view) {
         activeView = null;
       }
@@ -5826,6 +6521,22 @@ export const setMoonDisplayOptions =
     activeView.showFluvial = showFluvial;
     activeView.showDeposition = showDeposition;
     updateMoonDataBuffers(activeView, false);
+    if (activeView.setMoonInfo) {
+      activeView.setMoonInfo(buildMoonInfo(activeView))();
+    }
+  };
+
+export const setMoonOrbitAnimControls =
+  (playing) =>
+  (speed) =>
+  () => {
+    if (!activeView || !activeView.session) return;
+    activeView.orbitPlaying = Boolean(playing);
+    activeView.orbitSpeed = Math.max(0.1, speed || 1.0);
+    syncMoonOrbitLoop(activeView);
+    if (activeView.setMoonInfo) {
+      activeView.setMoonInfo(buildMoonInfo(activeView))();
+    }
   };
 
 export const stepMoonErode = (setMoonInfo) => () => {

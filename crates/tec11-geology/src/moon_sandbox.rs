@@ -8,6 +8,7 @@ use crate::prehistory::PrehistorySimulation;
 use crate::rock::{
     deposit_sedimentary, DepositClimate, ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
+use crate::sun_sky::HomeStar;
 use crate::tectonics::TectonicsSimulation;
 use crate::tile::TileGeology;
 use crate::world::{koeppen_climate_name, koeppen_rgb};
@@ -25,6 +26,7 @@ pub struct MoonSandbox {
     base_tiles: Vec<TileGeology>,
     tiles: Vec<TileGeology>,
     climate_model: ClimateModel,
+    home_star: HomeStar,
     moon_count: u32,
     moon_mass: f64,
     target_moon_dist_radii: f64,
@@ -105,6 +107,7 @@ impl MoonSandbox {
             base_tiles: tiles.clone(),
             tiles,
             climate_model,
+            home_star: HomeStar::sol(),
             moon_count: 1,
             moon_mass: 1.0,
             target_moon_dist_radii: 60.0,
@@ -186,6 +189,12 @@ impl MoonSandbox {
         self.grid = grid.clone();
         self.base_tiles = tiles.clone();
         self.tiles = tiles;
+        self.home_star = snap
+            .environment
+            .as_ref()
+            .and_then(|e| e.home_star.as_ref())
+            .map(HomeStar::from_proto)
+            .unwrap_or_else(HomeStar::sol);
         self.target_day_hours = day_hours;
         self.base_tilt_deg = tilt_deg;
         self.climate_model = ClimateModel::new_for_tectonics(grid, 3, 24.0 / day_hours, tilt_deg);
@@ -717,6 +726,76 @@ impl MoonSandbox {
         t.to_stratigraphy_json(idx, None)
     }
 
+    /// Physical parameters of the coupled Sun–Planet–Moons orbital system as JSON for the live 2D
+    /// orbital animation (`"orbit_system"` view): host star spectral properties & orbital period,
+    /// planet spin/tilt/tidal regime, and each moon's 2:1 Laplace resonance distance, period, & tidal share.
+    pub fn orbital_system_json(&self) -> String {
+        let hs = &self.home_star;
+        let a0 = self.initial_moon_dist_radii();
+        let a1 = self.current_moon_dist_radii();
+        let a_tgt = self.target_moon_dist_radii;
+        let p1_days = if self.moon_count > 0 && a1 > 0.0 {
+            27.3217 * (a1 / 60.0).powf(1.5) / (1.0 + 0.0123 * self.moon_mass).sqrt()
+        } else {
+            0.0
+        };
+        let h_mult = TectonicsSimulation::harmonic_tidal_multiplier(self.moon_count).max(1e-6);
+        let mut moon_entries = Vec::new();
+        for k in 0..self.moon_count.min(4) {
+            let ratio = 1u32 << k;
+            let scale_a = 2.0f64.powf((2 * k) as f64 / 3.0);
+            let ak = a1 * scale_a;
+            let ak0 = a0 * scale_a;
+            let ak_tgt = a_tgt * scale_a;
+            let pk_days = p1_days * (ratio as f64);
+            let tide_pct = 100.0 * 4.0f64.powi(-(k as i32)) / h_mult;
+            let phase_off = (k as f64) * 0.35;
+            moon_entries.push(format!(
+                "{{\"number\":{},\"resonanceRatio\":{},\"distRp\":{:.2},\"initialDistRp\":{:.2},\"targetDistRp\":{:.2},\"periodDays\":{:.2},\"massLunar\":{:.2},\"tideSharePct\":{:.1},\"phaseOffsetRad\":{:.3}}}",
+                k + 1,
+                ratio,
+                ak,
+                ak0,
+                ak_tgt,
+                pk_days,
+                self.moon_mass,
+                tide_pct,
+                phase_off
+            ));
+        }
+        format!(
+            "{{\"sun\":{{\"spectralType\":\"{}\",\"classDesc\":\"{}\",\"tempK\":{:.0},\"massSolar\":{:.3},\"radiusSolar\":{:.3},\"luminositySolar\":{:.3},\"orbitAu\":{:.3},\"yearDays\":{:.2},\"rgb\":[{:.3},{:.3},{:.3}]}},\
+              \"planet\":{{\"isCustom\":{},\"geoticks\":{},\"landPct\":{},\"dayHours\":{:.2},\"spin\":{:.3},\"tiltDeg\":{:.2},\"cells\":{},\"tidalStrength\":{:.3},\"maxTidalRangeM\":{:.2},\"coastalScourKm\":{:.5},\"tidalSharePct\":{:.1}}},\
+              \"epochPct\":{},\"moonCount\":{},\"primaryMassLunar\":{:.2},\"moons\":[{}]}}",
+            hs.spectral_type,
+            hs.class_description,
+            hs.temp_k,
+            hs.mass_solar,
+            hs.radius_solar,
+            hs.luminosity_solar,
+            hs.habitable_au,
+            hs.orbital_period_days.max(5.0),
+            hs.rgb[0],
+            hs.rgb[1],
+            hs.rgb[2],
+            self.is_custom_planet(),
+            self.loaded_geoticks(),
+            self.loaded_land_percent(),
+            self.current_day_hours(),
+            self.current_spin(),
+            self.current_tilt_deg(),
+            self.current_cells(),
+            self.current_tidal_strength(),
+            self.max_tidal_range_m(),
+            self.mean_coastal_tidal_scour(),
+            self.coastal_tidal_erosion_share_pct(),
+            self.epoch_pct,
+            self.moon_count.min(4),
+            self.moon_mass,
+            moon_entries.join(",")
+        )
+    }
+
     /// Compute RGB vertex/tile colors for the Moon Sandbox:
     /// - `"tidal_erosion"`: Natural terrain + amber/gold coastal tidal scour + cyan shelf deposition + magenta fluvial erosion
     /// - `"tidal_range"`: Global tidal range & live quadrupolar tidal bulge heatmap
@@ -858,5 +937,8 @@ mod tests {
         assert_eq!(sandbox.steps(), 1);
         let colors = sandbox.tile_colors_rgb("tidal_erosion", true, true, true, Some(0));
         assert_eq!(colors.len(), 7292 * 3);
+        let orb_json = sandbox.orbital_system_json();
+        assert!(orb_json.contains("\"moonCount\":2"));
+        assert!(orb_json.contains("\"resonanceRatio\":2"));
     }
 }

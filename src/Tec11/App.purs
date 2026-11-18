@@ -622,6 +622,7 @@ foreign import loadFilePlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect U
 foreign import mountMoonView :: Int -> Int -> Int -> Int -> String -> Boolean -> Boolean -> Boolean -> (MoonInfo -> Effect Unit) -> Effect (Effect Unit)
 foreign import setMoonParams :: Int -> Int -> Int -> Int -> (MoonInfo -> Effect Unit) -> Effect Unit
 foreign import setMoonDisplayOptions :: String -> Boolean -> Boolean -> Boolean -> Effect Unit
+foreign import setMoonOrbitAnimControls :: Boolean -> Number -> Effect Unit
 foreign import stepMoonErode :: (MoonInfo -> Effect Unit) -> Effect Unit
 foreign import resetMoonLayers :: (MoonInfo -> Effect Unit) -> Effect Unit
 foreign import loadEarthIntoMoon :: (MoonInfo -> Effect Unit) -> Effect Unit
@@ -1479,7 +1480,9 @@ mkApp = do
     moonMassTenths /\ setMoonMassTenthsState <- useState' 10
     moonDistRadii /\ setMoonDistRadiiState <- useState' 60
     moonEpochPct /\ setMoonEpochPctState <- useState' 100
-    moonAspect /\ setMoonAspectState <- useState' "tidal_erosion"
+    moonAspect /\ setMoonAspectState <- useState' "orbit_system"
+    moonOrbitPlaying /\ setMoonOrbitPlaying <- useState' true
+    moonOrbitSpeedPct /\ setMoonOrbitSpeedPct <- useState' 100
     moonShowTidalScour /\ setMoonShowTidalScour <- useState' true
     moonShowFluvial /\ setMoonShowFluvial <- useState' true
     moonShowDeposition /\ setMoonShowDeposition <- useState' true
@@ -2087,6 +2090,19 @@ mkApp = do
         Just asp -> do
           setMoonAspectState asp
           setMoonDisplayOptions asp moonShowTidalScour moonShowFluvial moonShowDeposition
+
+      handleToggleMoonOrbitPlaying :: Effect Unit
+      handleToggleMoonOrbitPlaying = do
+        let next = not moonOrbitPlaying
+        setMoonOrbitPlaying next
+        setMoonOrbitAnimControls next (Int.toNumber moonOrbitSpeedPct / 100.0)
+
+      handleMoonOrbitSpeedChange :: Maybe String -> Effect Unit
+      handleMoonOrbitSpeedChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just pct -> do
+          setMoonOrbitSpeedPct pct
+          setMoonOrbitAnimControls moonOrbitPlaying (Int.toNumber pct / 100.0)
 
       handleToggleMoonTidalScour :: Effect Unit
       handleToggleMoonTidalScour = do
@@ -5799,63 +5815,109 @@ mkApp = do
                               [ R.canvas
                                   { id: "sphere-canvas"
                                   , className: "sphere-canvas interactive-canvas"
+                                  , style: R.css { display: if moonAspect == "orbit_system" then "none" else "block" }
+                                  }
+                              , R.canvas
+                                  { id: "moon-orbit-canvas"
+                                  , className: "moon-orbit-canvas interactive-canvas"
+                                  , style: R.css { display: if moonAspect == "orbit_system" then "block" else "none" }
                                   }
                               ]
                           }
                       , R.div
                           { className: "slider-row"
                           , children:
-                              [ R.input
-                                  { id: "rotate-slider"
-                                  , className: "rotate-slider"
-                                  , type: "range"
-                                  , min: "-180"
-                                  , max: "180"
-                                  , step: "1"
-                                  , value: show rotationDeg
-                                  , onChange: handler targetValue handleRotateChange
-                                  }
-                              , R.span
-                                  { id: "rotation-label"
-                                  , className: "rotation-label"
-                                  , children: [ R.text (show rotationDeg <> "°") ]
-                                  }
-                              , R.select
-                                  { id: "moon-aspect-select"
-                                  , className: "control-select"
-                                  , value: moonAspect
-                                  , onChange: handler targetValue handleMoonAspectChange
-                                  , children:
-                                      [ R.option
-                                          { value: "tidal_erosion"
-                                          , children: [ R.text "Tidal Scour & Shelf Deposition" ]
-                                          }
-                                      , R.option
-                                          { value: "tidal_range"
-                                          , children: [ R.text "Tidal Range (m) & Bulge" ]
-                                          }
-                                      , R.option
-                                          { value: "climate"
-                                          , children: [ R.text "Climate (Spin & Tilt)" ]
-                                          }
-                                      ]
-                                  }
-                              ]
+                              ( if moonAspect == "orbit_system" then
+                                  [ R.button
+                                      { id: "moon-orbit-play-btn"
+                                      , className: if moonOrbitPlaying then "action-btn secondary" else "action-btn"
+                                      , style: R.css { width: "auto", padding: "0.45rem 0.85rem", fontSize: "0.85rem" }
+                                      , onClick: capture_ handleToggleMoonOrbitPlaying
+                                      , children: [ R.text (if moonOrbitPlaying then "Pause Orbit" else "Play Orbit") ]
+                                      }
+                                  , R.select
+                                      { id: "moon-orbit-speed-select"
+                                      , className: "control-select"
+                                      , style: R.css { flex: "0 0 auto", width: "92px" }
+                                      , value: show moonOrbitSpeedPct
+                                      , onChange: handler targetValue handleMoonOrbitSpeedChange
+                                      , children:
+                                          [ R.option { value: "40", children: [ R.text "0.4x" ] }
+                                          , R.option { value: "100", children: [ R.text "1x" ] }
+                                          , R.option { value: "300", children: [ R.text "3x" ] }
+                                          , R.option { value: "800", children: [ R.text "8x" ] }
+                                          ]
+                                      }
+                                  ]
+                                else
+                                  [ R.input
+                                      { id: "rotate-slider"
+                                      , className: "rotate-slider"
+                                      , type: "range"
+                                      , min: "-180"
+                                      , max: "180"
+                                      , step: "1"
+                                      , value: show rotationDeg
+                                      , onChange: handler targetValue handleRotateChange
+                                      }
+                                  , R.span
+                                      { id: "rotation-label"
+                                      , className: "rotation-label"
+                                      , children: [ R.text (show rotationDeg <> "°") ]
+                                      }
+                                  ]
+                              )
+                                <>
+                                  [ R.select
+                                      { id: "moon-aspect-select"
+                                      , className: "control-select"
+                                      , value: moonAspect
+                                      , onChange: handler targetValue handleMoonAspectChange
+                                      , children:
+                                          [ R.option
+                                              { value: "orbit_system"
+                                              , children: [ R.text "Orbital Animation (Sun, Planet & Moons)" ]
+                                              }
+                                          , R.option
+                                              { value: "tidal_erosion"
+                                              , children: [ R.text "Tidal Scour & Shelf Deposition" ]
+                                              }
+                                          , R.option
+                                              { value: "tidal_range"
+                                              , children: [ R.text "Tidal Range (m) & Bulge" ]
+                                              }
+                                          , R.option
+                                              { value: "climate"
+                                              , children: [ R.text "Climate (Spin & Tilt)" ]
+                                              }
+                                          ]
+                                      }
+                                  ]
                           }
                       , R.div
                           { className: "control-group"
+                          , style: R.css { width: if moonAspect == "orbit_system" then "560px" else "460px", maxWidth: "100%" }
                           , children:
                               [ R.label
                                   { className: "control-label"
-                                  , children: [ R.text "Tile Inspection (Local Tidal Range, Coastal Scour vs. Rain Erosion & Strata)" ]
-                                  }
-                              , renderStratigraphySideViewBox
-                              , R.div
-                                  { id: "moon-details-box"
-                                  , className: "tile-details-box"
-                                  , children: [ R.text moonInfo.selectedReport ]
+                                  , children:
+                                      [ R.text
+                                          ( if moonAspect == "orbit_system" then
+                                              "Orbital Mechanics, Laplace Resonance & Tidal Inspection"
+                                            else
+                                              "Tile Inspection (Local Tidal Range, Coastal Scour vs. Rain Erosion & Strata)"
+                                          )
+                                      ]
                                   }
                               ]
+                                <> (if moonAspect == "orbit_system" then [] else [ renderStratigraphySideViewBox ])
+                                <>
+                                  [ R.div
+                                      { id: "moon-details-box"
+                                      , className: "tile-details-box"
+                                      , children: [ R.text moonInfo.selectedReport ]
+                                      }
+                                  ]
                           }
                       ]
                   }
