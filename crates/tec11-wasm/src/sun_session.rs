@@ -195,6 +195,36 @@ impl WasmSunSession {
         self.sandbox.inspect_aspect_tile(aspect, tile_idx)
     }
 
+    pub fn star_map_stars_data(&self) -> Vec<f32> {
+        self.sandbox.star_map_stars_data()
+    }
+
+    pub fn star_map_constellation_edges(&self) -> Vec<u32> {
+        self.sandbox.star_map_constellation_edges()
+    }
+
+    pub fn star_map_metadata_json(&self) -> String {
+        self.sandbox.star_map_metadata_json()
+    }
+
+    pub fn find_nearest_star_ra_dec(&self, ra_rad: f64, dec_deg: f64) -> i32 {
+        self.sandbox
+            .find_nearest_star_ra_dec(ra_rad, dec_deg)
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    }
+
+    pub fn star_constellation_index(&self, star_idx: usize) -> i32 {
+        self.sandbox
+            .star_constellation_index(star_idx)
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    }
+
+    pub fn inspect_star_index(&self, star_idx: usize) -> String {
+        self.sandbox.inspect_star_index(star_idx)
+    }
+
     pub fn star_points_data(&self, aspect: &str) -> Vec<f32> {
         self.sandbox.star_points_data(aspect)
     }

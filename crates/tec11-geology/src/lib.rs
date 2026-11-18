@@ -62,7 +62,8 @@ pub use rivers::{trace_coarse_rivers, RiversSandbox};
 pub use rock::{Rock, RockKind, RockLayer};
 pub use split_sandbox::SplitSandbox;
 pub use sun_sky::{
-    build_constellations_from_stars, bv_to_rgb, bv_to_temp_k, classify_star,
+    build_constellations_from_stars, build_constellations_from_stars_with_limit, bv_to_rgb,
+    bv_to_temp_k, classify_star,
     format_solar_system_summary, generate_default_constellations, generate_solar_system_with_rng,
     recompute_planet_visibility_from_home, sample_atmosphere_with_rng,
     sample_galactic_home_with_rng, sample_home_star_with_rng, substitute_simulated_planet,

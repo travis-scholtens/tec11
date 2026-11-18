@@ -2179,7 +2179,10 @@ mkApp = do
         Nothing -> pure unit
         Just asp -> do
           setSunAspectState asp
-          setSunDisplayOptions asp sunShowGalacticPlane sunShowConstellations
+          let nextConst = if asp == "star_map" then true else sunShowConstellations
+          when (asp == "star_map" && not sunShowConstellations) do
+            setSunShowConstellations true
+          setSunDisplayOptions asp sunShowGalacticPlane nextConst
 
       handleToggleSunGalacticPlane :: Effect Unit
       handleToggleSunGalacticPlane = do
@@ -6376,6 +6379,12 @@ mkApp = do
                               [ R.canvas
                                   { id: "sphere-canvas"
                                   , className: "sphere-canvas interactive-canvas"
+                                  , style: R.css { display: if sunAspect == "star_map" then "none" else "block" }
+                                  }
+                              , R.canvas
+                                  { id: "sun-starmap-canvas"
+                                  , className: "star-map-canvas interactive-canvas"
+                                  , style: R.css { display: if sunAspect == "star_map" then "block" else "none" }
                                   }
                               ]
                           }
@@ -6408,6 +6417,10 @@ mkApp = do
                                           , children: [ R.text "Night Sky (Celestial Sphere)" ]
                                           }
                                       , R.option
+                                          { value: "star_map"
+                                          , children: [ R.text "Star Map (2D Northern & Southern Hemispheres)" ]
+                                          }
+                                      , R.option
                                           { value: "solar_system"
                                           , children: [ R.text "Planetary System & Orbits (Rocky, Gas Giant, Rings)" ]
                                           }
@@ -6429,6 +6442,7 @@ mkApp = do
                           }
                       , R.div
                           { className: "control-group"
+                          , style: R.css { width: if sunAspect == "star_map" then "760px" else "460px", maxWidth: "100%" }
                           , children:
                               [ R.label
                                   { className: "control-label"

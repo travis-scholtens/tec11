@@ -2187,9 +2187,18 @@ pub fn generate_default_constellations(seed: u64) -> Vec<Constellation> {
 }
 
 /// Build constellation edges and extract connected `Constellation` asterisms (`3..7` stars each)
-/// directly from the 3D `stars` catalog on the celestial sphere.
+/// directly from the 3D `stars` catalog on the celestial sphere (up to `16` major cultural constellations).
 pub fn build_constellations_from_stars(
     stars: &[CelestialStar],
+) -> (Vec<(usize, usize)>, Vec<Constellation>) {
+    build_constellations_from_stars_with_limit(stars, 16)
+}
+
+/// Build constellation edges and extract up to `max_constellations` connected `Constellation` asterisms
+/// (`3..7` stars each) distributed across both Northern and Southern celestial hemispheres.
+pub fn build_constellations_from_stars_with_limit(
+    stars: &[CelestialStar],
+    max_constellations: usize,
 ) -> (Vec<(usize, usize)>, Vec<Constellation>) {
     if stars.is_empty() {
         return (Vec::new(), Vec::new());
@@ -2378,15 +2387,17 @@ pub fn build_constellations_from_stars(
         });
     }
 
-    // Rank by visual prominence (NEVER north-first!) and select up to 16 well-separated constellations
-    // across the celestial sphere, preserving circumpolar anchors (`|dec| > 60°`) when present in the sky.
+    // Rank by visual prominence (NEVER north-first!) and select up to `max_constellations` well-separated
+    // constellations across the celestial sphere, preserving circumpolar anchors (`|dec| > 60°`).
     candidates.sort_by(|a, b| {
         b.prominence
             .partial_cmp(&a.prominence)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mut chosen: Vec<Constellation> = Vec::with_capacity(16);
+    let max_c = max_constellations.max(4);
+    let min_sep_cos = if max_c > 16 { 0.946 } else { 0.925 };
+    let mut chosen: Vec<Constellation> = Vec::with_capacity(max_c);
     // Reserve the brightest deep-north (> +60°) and deep-south (< -60°) asterisms if physically present
     // in the star catalog so circumpolar skies aren't crowded out solely by low-declination giants:
     if let Some(nc) = candidates
@@ -2403,18 +2414,20 @@ pub fn build_constellations_from_stars(
     }
 
     for cand in &candidates {
-        if chosen.len() >= 16 {
+        if chosen.len() >= max_c {
             break;
         }
         let c_dir = cand.constellation.center_dir;
-        let too_close = chosen.iter().any(|existing| dot(existing.center_dir, c_dir) > 0.925);
+        let too_close = chosen
+            .iter()
+            .any(|existing| dot(existing.center_dir, c_dir) > min_sep_cos);
         if !too_close {
             chosen.push(cand.constellation.clone());
         }
     }
-    if chosen.len() < 12 {
+    if chosen.len() < (max_c * 3) / 4 {
         for cand in &candidates {
-            if chosen.len() >= 14 {
+            if chosen.len() >= max_c.saturating_sub(2).max(4) {
                 break;
             }
             let c_dir = cand.constellation.center_dir;
@@ -2712,12 +2725,13 @@ impl SunSandbox {
             let bv: f32 = parts[5].parse().unwrap_or(0.5);
             let offset: f32 = parts[6].parse().unwrap_or(0.5);
 
-            // Exact spherical coordinate conversion from `hipparcos.py:624-630`:
+            // Standard J2000 equatorial unit vector (`+Z` = North Celestial Pole `+90°`, `-Z` = South Celestial Pole `-90°`),
+            // matching `parsed_hipparcos_equatorial_stars` and `self.galactic_pole` / `self.ecliptic_pole`:
             let r_ly = (3.26 / pi_arcsec.max(1e-5)) as f32;
-            let theta = (delta_deg + 90.0) * PI / 180.0;
-            let phi = -alpha_deg * PI / 180.0;
-            let sin_th = theta.sin();
-            let dir = normal([sin_th * phi.cos(), sin_th * phi.sin(), theta.cos()]);
+            let ra_rad = alpha_deg * PI / 180.0;
+            let dec_rad = delta_deg * PI / 180.0;
+            let cos_d = dec_rad.cos();
+            let dir = normal([cos_d * ra_rad.cos(), cos_d * ra_rad.sin(), dec_rad.sin()]);
             let abs_mag = vmag + 5.0 * ((pi_arcsec.max(1e-5).log10() as f32) + 1.0);
             let base_rgb = bv_to_rgb(bv);
             let scale = (1.0 - (vmag + 40.0) / 45.0).clamp(0.08, 1.0);
@@ -3061,10 +3075,10 @@ impl SunSandbox {
         }
     }
 
-    /// Build automatic constellation / asterism lines connecting neighboring bright stars (`app_mag <= 2.85`)
-    /// and extract connected `Constellation` groups with celestial declinations.
+    /// Build automatic constellation / asterism lines connecting neighboring bright stars (`app_mag <= 3.55`)
+    /// and extract up to `24` connected `Constellation` groups across both Northern and Southern hemispheres.
     fn build_constellation_edges(&mut self) {
-        let (edges, constellations) = build_constellations_from_stars(&self.stars);
+        let (edges, constellations) = build_constellations_from_stars_with_limit(&self.stars, 24);
         self.constellation_edges = edges;
         self.constellations = constellations;
     }
@@ -3848,36 +3862,213 @@ impl SunSandbox {
         }
     }
 
-    /// Detailed multi-line inspection of the selected star on the celestial sphere, the Home Sun,
-    /// the generated Planetary System, and the planet's Sky, Sunset, and Photosynthetic Plant Foliage colors.
-    pub fn inspect_tile(&self, tile_idx: usize) -> String {
-        let hs = &self.home_star;
-        let op = &self.optics;
-        let Some(star_idx) = self.nearest_star_to_tile(tile_idx) else {
+    /// Flat star buffer `[ra_rad, dec_deg, app_mag, base_r, base_g, base_b, ...]` (`6` floats per star)
+    /// for rendering the 2D Northern & Southern Celestial Hemisphere Star Maps.
+    pub fn star_map_stars_data(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.stars.len() * 6);
+        for s in &self.stars {
+            let (ra_deg, dec_deg) = star_dir_to_ra_dec_deg(s.dir);
+            out.extend_from_slice(&[
+                ra_deg.to_radians(),
+                dec_deg,
+                s.app_mag,
+                s.base_rgb[0],
+                s.base_rgb[1],
+                s.base_rgb[2],
+            ]);
+        }
+        out
+    }
+
+    /// Flat constellation edge buffer `[star_idx_a, star_idx_b, constellation_idx, ...]` (`3` `u32`s per edge)
+    /// for the 2D Northern & Southern Celestial Hemisphere Star Maps.
+    pub fn star_map_constellation_edges(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(self.constellation_edges.len() * 3);
+        for c in &self.constellations {
+            for &(ia, ib) in &c.edges {
+                out.extend_from_slice(&[ia as u32, ib as u32, c.index]);
+            }
+        }
+        out
+    }
+
+    /// Metadata JSON for the 2D Northern & Southern Celestial Hemisphere Star Maps:
+    /// galactic & ecliptic plane poles, diffuse galaxy band mode, current Sun & naked-eye planet
+    /// equatorial positions, and constellation centroids/labels.
+    pub fn star_map_metadata_json(&self) -> String {
+        let galaxy_band_mode: u8 = match (self.galaxy_type, self.vantage) {
+            (_, GalacticVantage::GalacticHalo) => 1,
+            (GalaxyType::Elliptical | GalaxyType::GlobularCluster, _)
+            | (_, GalacticVantage::GalacticBulge) => 2,
+            (GalaxyType::Irregular, _) => 3,
+            _ => 0,
+        };
+        let warm_glow = matches!(
+            self.galaxy_type,
+            GalaxyType::Elliptical | GalaxyType::Lenticular | GalaxyType::GlobularCluster
+        );
+        let (sun_ra_deg, sun_dec_deg) = star_dir_to_ra_dec_deg(self.sun_dir);
+        let sr = self.home_star.rgb;
+
+        let mut planet_entries = Vec::new();
+        for p in &self.planets {
+            if p.is_home_world || !p.is_naked_eye_visible() {
+                continue;
+            }
+            let (p_ra, p_dec) = star_dir_to_ra_dec_deg(p.sky_dir);
+            planet_entries.push(format!(
+                "{{\"number\":{},\"raRad\":{:.5},\"decDeg\":{:.3},\"appMag\":{:.2},\"rgb\":[{:.3},{:.3},{:.3}]}}",
+                p.index + 1,
+                p_ra.to_radians(),
+                p_dec,
+                p.apparent_mag,
+                p.rgb[0],
+                p.rgb[1],
+                p.rgb[2]
+            ));
+        }
+
+        let mut const_entries = Vec::new();
+        for c in &self.constellations {
+            const_entries.push(format!(
+                "{{\"index\":{},\"number\":{},\"raRad\":{:.5},\"decDeg\":{:.3},\"starCount\":{},\"brightestMag\":{:.2},\"band\":\"{}\"}}",
+                c.index,
+                c.index + 1,
+                c.right_ascension_deg.to_radians(),
+                c.declination_deg,
+                c.star_count,
+                c.brightest_mag,
+                c.hemisphere_band_label()
+            ));
+        }
+
+        let gp = self.galactic_pole;
+        let gc = self.galactic_center_dir;
+        let ep = self.ecliptic_pole;
+        format!(
+            "{{\"isRealHipparcos\":{},\"starCount\":{},\"constellationCount\":{},\"galaxyBandMode\":{},\"warmGlow\":{},\"galacticPole\":[{:.5},{:.5},{:.5}],\"galacticCenterDir\":[{:.5},{:.5},{:.5}],\"eclipticPole\":[{:.5},{:.5},{:.5}],\"sun\":{{\"raRad\":{:.5},\"decDeg\":{:.3},\"rgb\":[{:.3},{:.3},{:.3}]}},\"planets\":[{}],\"constellations\":[{}]}}",
+            self.is_real_hipparcos,
+            self.stars.len(),
+            self.constellations.len(),
+            galaxy_band_mode,
+            warm_glow,
+            gp[0],
+            gp[1],
+            gp[2],
+            gc[0],
+            gc[1],
+            gc[2],
+            ep[0],
+            ep[1],
+            ep[2],
+            sun_ra_deg.to_radians(),
+            sun_dec_deg,
+            sr[0],
+            sr[1],
+            sr[2],
+            planet_entries.join(","),
+            const_entries.join(",")
+        )
+    }
+
+    /// Return the 0-based `Constellation` index containing `star_idx`, if any.
+    pub fn star_constellation_index(&self, star_idx: usize) -> Option<u32> {
+        self.constellations
+            .iter()
+            .find(|c| c.star_indices.contains(&star_idx))
+            .map(|c| c.index)
+    }
+
+    /// Find the star nearest to equatorial coordinates `(ra_rad, dec_deg)` on the celestial sphere,
+    /// gently favoring brighter / constellation stars within `2.6°` of the clicked point.
+    pub fn find_nearest_star_ra_dec(&self, ra_rad: f64, dec_deg: f64) -> Option<usize> {
+        if self.stars.is_empty() {
+            return None;
+        }
+        let dec_rad = dec_deg.clamp(-90.0, 90.0) * PI / 180.0;
+        let cos_d = dec_rad.cos();
+        let target = normal([cos_d * ra_rad.cos(), cos_d * ra_rad.sin(), dec_rad.sin()]);
+
+        // First check if a bright / constellation star lies within ~2.6° (`cos >= 0.9989`) of the click:
+        let mut best_bright: Option<(usize, f64)> = None;
+        for (idx, st) in self.stars.iter().enumerate() {
+            let cos_ang = dot(target, st.dir);
+            if cos_ang >= 0.9989 && st.app_mag <= 4.2 {
+                let score = cos_ang + 0.00022 * ((4.5 - st.app_mag as f64).max(0.0));
+                if best_bright.is_none_or(|(_, bs)| score > bs) {
+                    best_bright = Some((idx, score));
+                }
+            }
+        }
+        if let Some((idx, _)) = best_bright {
+            return Some(idx);
+        }
+
+        self.stars
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
+                dot(target, a.dir)
+                    .partial_cmp(&dot(target, b.dir))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+    }
+
+    /// Detailed multi-line inspection of `stars[star_idx]` including equatorial coordinates (`RA`, `Dec`),
+    /// hemisphere, constellation membership, spectral class, luminosity, and Home Sun context.
+    pub fn inspect_star_index(&self, star_idx: usize) -> String {
+        let Some(st) = self.stars.get(star_idx) else {
             return String::new();
         };
-        let st = &self.stars[star_idx];
+        let hs = &self.home_star;
+        let op = &self.optics;
         let cls = classify_star(st.bv_color, st.abs_mag);
         let st_temp = bv_to_temp_k(st.bv_color);
         let st_lum = 10.0_f32.powf((4.83 - st.abs_mag) / 2.5);
+        let (ra_deg, dec_deg) = star_dir_to_ra_dec_deg(st.dir);
+        let ra_total_min = ((ra_deg as f64) / 15.0 * 60.0).round() as u32;
+        let ra_h = (ra_total_min / 60) % 24;
+        let ra_m = ra_total_min % 60;
+        let hemi = if dec_deg >= 0.0 {
+            "Northern Celestial Hemisphere"
+        } else {
+            "Southern Celestial Hemisphere"
+        };
+        let const_line = if let Some(c_idx) = self.star_constellation_index(star_idx) {
+            let c = &self.constellations[c_idx as usize];
+            format!(
+                "Constellation C{} ({} stars, {}, brightest m_V = {:+.2})",
+                c.index + 1,
+                c.star_count,
+                c.hemisphere_band_label(),
+                c.brightest_mag
+            )
+        } else {
+            "Ungrouped Field Star".to_string()
+        };
         let gal_lat_deg = (90.0 - (st.galactic_offset_rad as f64 * 180.0 / PI)).abs();
         let cat_prefix = if self.is_real_hipparcos { "HIP " } else { "Star #" };
         let sys_summary = self.planets_summary_text();
 
         format!(
-            "Selected Night-Sky Star: {cat_prefix}{} — {}{}{} ({})\n\
-             Apparent Magnitude: m_V = {:+.2} (naked-eye limit ≤ +6.0) | Absolute Magnitude: M_V = {:+.2} ({:.1} L☉)\n\
-             Distance: {:.1} light-years ({:.1} pc) | Color Index: B-V = {:+.2} (T_eff ≈ {:.0} K) | Galactic Latitude: {:.1}°\n\
-             Home Sun: {} ({}) — {:.0} K, {:.2} M☉, {:.2} R☉, {:.2} L☉ | Habitable Orbit: {:.2} AU ({:.0} Earth days/yr, Solar Tides {:.2}x)\n\
-             Solar System ({} Planets): {}\n\
-             Atmosphere: {} — Daytime Sky: {} ({})\n\
-             Sunset: {} ({})\n\
-             Main Plant Foliage: {} — {}",
+            "Selected Star: {cat_prefix}{} — {}{}{} ({}) | {}\n\
+             Coordinates: RA {:02}h {:02}m ({:.1}°), Dec {:+.2}° ({hemi}) | Galactic Lat: {:.1}°\n\
+             Apparent Magnitude: m_V = {:+.2} (naked-eye ≤ +6.0) | Absolute Magnitude: M_V = {:+.2} ({:.1} L☉)\n\
+             Distance: {:.1} light-years ({:.1} pc) | Color Index: B-V = {:+.2} (T_eff ≈ {:.0} K)\n\
+             Home Sun: {} ({}) — {:.0} K, {:.2} M☉, {:.2} R☉, {:.2} L☉ | Planets ({}): {}\n\
+             Atmosphere: {} — Sky: {} | Sunset: {} | Plants: {}",
             st.id,
             cls.spectral_letter,
             cls.subclass,
             cls.luminosity_class,
             cls.description,
+            const_line,
+            ra_h,
+            ra_m,
+            ra_deg,
+            dec_deg,
+            gal_lat_deg,
             st.app_mag,
             st.abs_mag,
             st_lum,
@@ -3885,26 +4076,28 @@ impl SunSandbox {
             st.distance_ly / 3.26156,
             st.bv_color,
             st_temp,
-            gal_lat_deg,
             hs.spectral_type,
             hs.class_description,
             hs.temp_k,
             hs.mass_solar,
             hs.radius_solar,
             hs.luminosity_solar,
-            hs.habitable_au,
-            hs.orbital_period_days,
-            hs.solar_tide_factor,
             self.planets.len(),
             sys_summary,
             self.atmosphere.name(),
             op.sky_color_name,
-            op.sky_mechanism,
             op.sunset_color_name,
-            op.sunset_mechanism,
-            op.plant_color_name,
-            op.plant_pigment_desc
+            op.plant_color_name
         )
+    }
+
+    /// Detailed multi-line inspection of the selected star on the celestial sphere, the Home Sun,
+    /// the generated Planetary System, and the planet's Sky, Sunset, and Photosynthetic Plant Foliage colors.
+    pub fn inspect_tile(&self, tile_idx: usize) -> String {
+        let Some(star_idx) = self.nearest_star_to_tile(tile_idx) else {
+            return String::new();
+        };
+        self.inspect_star_index(star_idx)
     }
 }
 
@@ -4307,5 +4500,64 @@ mod tests {
             "Expected SpiralArm bright field stars to concentrate toward galactic plane (uniform=0.350, got {:.3})",
             near_plane_frac
         );
+    }
+
+    #[test]
+    fn test_sun_sandbox_dual_hemisphere_star_map_data() {
+        let mut sb = SunSandbox::new(42);
+        let stars_buf = sb.star_map_stars_data();
+        assert_eq!(stars_buf.len(), sb.star_count() * 6);
+        let edges_buf = sb.star_map_constellation_edges();
+        assert!(edges_buf.len() >= 30 && edges_buf.len() % 3 == 0);
+        let meta = sb.star_map_metadata_json();
+        assert!(meta.contains("\"constellations\":["));
+        assert!(meta.contains("\"galacticPole\":["));
+
+        // Verify real Hipparcos Sol places Polaris (HIP 11767) in the Northern Hemisphere (> +88°)
+        // and Sirius (HIP 32349) in the Southern Hemisphere (< -15°), with constellations in both hemispheres:
+        sb.load_real_hipparcos_sol();
+        let hip_buf = sb.star_map_stars_data();
+        assert_eq!(hip_buf.len(), 5179 * 6);
+        let polaris_idx = sb
+            .stars()
+            .iter()
+            .position(|s| s.id == 11767)
+            .expect("Expected Polaris (HIP 11767) in Hipparcos catalog");
+        let polaris_dec = hip_buf[polaris_idx * 6 + 1];
+        assert!(
+            polaris_dec > 88.0,
+            "Expected Polaris in deep Northern Hemisphere, got dec = {polaris_dec}"
+        );
+
+        let sirius_idx = sb
+            .stars()
+            .iter()
+            .position(|s| s.id == 32349)
+            .expect("Expected Sirius (HIP 32349) in Hipparcos catalog");
+        let sirius_dec = hip_buf[sirius_idx * 6 + 1];
+        assert!(
+            sirius_dec < -15.0 && sirius_dec > -18.0,
+            "Expected Sirius in Southern Hemisphere (~-16.7°), got dec = {sirius_dec}"
+        );
+
+        let north_consts = sb
+            .constellations()
+            .iter()
+            .filter(|c| c.declination_deg >= 0.0)
+            .count();
+        let south_consts = sb
+            .constellations()
+            .iter()
+            .filter(|c| c.declination_deg < 0.0)
+            .count();
+        assert!(north_consts >= 6 && south_consts >= 6);
+
+        let hit = sb
+            .find_nearest_star_ra_dec(hip_buf[polaris_idx * 6] as f64, polaris_dec as f64)
+            .expect("Expected star hit near Polaris");
+        assert_eq!(hit, polaris_idx);
+        let report = sb.inspect_star_index(hit);
+        assert!(report.contains("HIP 11767"));
+        assert!(report.contains("Northern Celestial Hemisphere"));
     }
 }

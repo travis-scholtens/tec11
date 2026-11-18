@@ -6354,6 +6354,638 @@ function drawSkyPlants2dPicture(view) {
   drawBadge(10, H - 32, plantFol, `Plants: ${session.plant_color_name()}`);
 }
 
+const STAR_MAP_LAYOUT = {
+  W: 760,
+  H: 430,
+  cxN: 196,
+  cyN: 214,
+  cxS: 564,
+  cyS: 214,
+  R: 154,
+};
+
+function buildHemisphereGlowCanvas(isNorth, meta) {
+  const S = 112;
+  const cnv = document.createElement("canvas");
+  cnv.width = S;
+  cnv.height = S;
+  const ctx = cnv.getContext("2d");
+  if (!ctx) return cnv;
+
+  const img = ctx.createImageData(S, S);
+  const data = img.data;
+  const gp = meta.galacticPole || [-0.86767, -0.19808, 0.45598];
+  const gc = meta.galacticCenterDir || [-0.05488, -0.87344, -0.48384];
+  const mode = meta.galaxyBandMode || 0;
+  const tint = meta.warmGlow ? [242, 198, 138] : [150, 188, 252];
+  const half = S * 0.5;
+
+  for (let py = 0; py < S; py++) {
+    const ny = (py + 0.5 - half) / half;
+    for (let px = 0; px < S; px++) {
+      const nx = (px + 0.5 - half) / half;
+      const rFrac = Math.hypot(nx, ny);
+      const off = (py * S + px) * 4;
+      if (rFrac > 1.03) {
+        data[off + 3] = 0;
+        continue;
+      }
+      const clampedR = Math.min(1.0, rFrac);
+      const decDeg = isNorth ? 90.0 * (1.0 - clampedR) : -90.0 * (1.0 - clampedR);
+      const raRad = isNorth ? Math.atan2(nx, -ny) : Math.atan2(-nx, -ny);
+      const decRad = (decDeg * Math.PI) / 180.0;
+      const cosD = Math.cos(decRad);
+      const dx = cosD * Math.cos(raRad);
+      const dy = cosD * Math.sin(raRad);
+      const dz = Math.sin(decRad);
+
+      const sinB = dx * gp[0] + dy * gp[1] + dz * gp[2];
+      const cosCore = dx * gc[0] + dy * gc[1] + dz * gc[2];
+      let glow = 0.0;
+      if (mode === 1) {
+        const diskHemi = Math.pow(Math.max(0.0, -sinB), 1.45) * (0.4 + 0.6 * Math.max(0.0, cosCore));
+        glow = 0.24 * diskHemi;
+      } else if (mode === 2) {
+        const coreHemi = Math.pow(Math.max(0.0, cosCore + 0.35) / 1.35, 2.0);
+        glow = 0.20 * coreHemi;
+      } else {
+        const band = Math.exp(-Math.pow(sinB / 0.19, 2.0));
+        const bulge = Math.pow(Math.max(0.0, cosCore), 4.0) * Math.exp(-Math.pow(sinB / 0.33, 2.0));
+        glow = 0.15 * band + 0.19 * bulge;
+      }
+
+      const limb = 0.03 * Math.pow(clampedR, 2.2);
+      data[off] = Math.min(255, Math.round(5 + limb * 28 + glow * tint[0]));
+      data[off + 1] = Math.min(255, Math.round(9 + limb * 42 + glow * tint[1]));
+      data[off + 2] = Math.min(255, Math.round(22 + limb * 76 + glow * tint[2]));
+      data[off + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cnv;
+}
+
+function sampleGreatCircleEquatorial(poleVec, refVec, count = 160) {
+  const pLen = Math.hypot(poleVec[0], poleVec[1], poleVec[2]) || 1.0;
+  const n = [poleVec[0] / pLen, poleVec[1] / pLen, poleVec[2] / pLen];
+  let ref = refVec && refVec.length === 3 ? refVec : [0, 0, 1];
+  const dotNR = n[0] * ref[0] + n[1] * ref[1] + n[2] * ref[2];
+  let u = [ref[0] - dotNR * n[0], ref[1] - dotNR * n[1], ref[2] - dotNR * n[2]];
+  let uLen = Math.hypot(u[0], u[1], u[2]);
+  if (uLen < 1e-4) {
+    const alt = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+    u = [
+      n[1] * alt[2] - n[2] * alt[1],
+      n[2] * alt[0] - n[0] * alt[2],
+      n[0] * alt[1] - n[1] * alt[0],
+    ];
+    uLen = Math.hypot(u[0], u[1], u[2]) || 1.0;
+  }
+  u = [u[0] / uLen, u[1] / uLen, u[2] / uLen];
+  const v = [
+    n[1] * u[2] - n[2] * u[1],
+    n[2] * u[0] - n[0] * u[2],
+    n[0] * u[1] - n[1] * u[0],
+  ];
+  const pts = [];
+  for (let i = 0; i <= count; i++) {
+    const a = (i / count) * Math.PI * 2.0;
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    const x = ca * u[0] + sa * v[0];
+    const y = ca * u[1] + sa * v[1];
+    const z = Math.max(-1.0, Math.min(1.0, ca * u[2] + sa * v[2]));
+    pts.push({
+      raRad: Math.atan2(y, x),
+      decDeg: (Math.asin(z) * 180.0) / Math.PI,
+    });
+  }
+  return pts;
+}
+
+function ensureStarMapCache(view) {
+  if (view.starMapCache) {
+    return view.starMapCache;
+  }
+  const { session } = view;
+  const starsRaw = session.star_map_stars_data();
+  const edgesRaw = session.star_map_constellation_edges();
+  let meta = {
+    isRealHipparcos: false,
+    starCount: 0,
+    constellationCount: 0,
+    galaxyBandMode: 0,
+    warmGlow: false,
+    galacticPole: [-0.86767, -0.19808, 0.45598],
+    galacticCenterDir: [-0.05488, -0.87344, -0.48384],
+    eclipticPole: [0.0, -0.398, 0.917],
+    planets: [],
+    constellations: [],
+  };
+  try {
+    meta = JSON.parse(session.star_map_metadata_json());
+  } catch (_err) {
+    // Fallback metadata above
+  }
+
+  const starCount = Math.floor(starsRaw.length / 6);
+  const drawOrder = new Uint32Array(starCount);
+  for (let i = 0; i < starCount; i++) {
+    drawOrder[i] = i;
+  }
+  // Sort faintest (highest numeric magnitude) first so bright stars paint crisply on top:
+  const orderArr = Array.from(drawOrder);
+  orderArr.sort((a, b) => starsRaw[b * 6 + 2] - starsRaw[a * 6 + 2]);
+
+  const galCurve = sampleGreatCircleEquatorial(meta.galacticPole, meta.galacticCenterDir, 180);
+  const eclCurve = sampleGreatCircleEquatorial(meta.eclipticPole, [1, 0, 0], 180);
+  const gc = meta.galacticCenterDir || [-0.055, -0.873, -0.484];
+  const gcDecDeg = (Math.asin(Math.max(-1.0, Math.min(1.0, gc[2]))) * 180.0) / Math.PI;
+  const gcRaRad = Math.atan2(gc[1], gc[0]);
+
+  const cache = {
+    starsRaw,
+    edgesRaw,
+    meta,
+    starCount,
+    orderArr,
+    galCurve,
+    eclCurve,
+    gcRaRad,
+    gcDecDeg,
+    northGlow: buildHemisphereGlowCanvas(true, meta),
+    southGlow: buildHemisphereGlowCanvas(false, meta),
+  };
+  view.starMapCache = cache;
+  return cache;
+}
+
+function projectToHemisphere(raRad, decDeg, rotRad, isNorth, cx, cy, R) {
+  const rFrac = isNorth ? (90.0 - decDeg) / 90.0 : (90.0 + decDeg) / 90.0;
+  const phi = raRad + rotRad;
+  const sp = Math.sin(phi);
+  const cp = Math.cos(phi);
+  return {
+    x: isNorth ? cx + R * rFrac * sp : cx - R * rFrac * sp,
+    y: cy - R * rFrac * cp,
+    rFrac,
+  };
+}
+
+function drawDualHemisphereStarMap(view) {
+  const canvas = view.starMapCanvas || document.getElementById("sun-starmap-canvas");
+  if (!canvas || !view.session) return;
+
+  const { W, H, cxN, cyN, cxS, cyS, R } = STAR_MAP_LAYOUT;
+  const dpr = Math.min(2.5, Math.max(1.0, window.devicePixelRatio || 1.0));
+  const targetW = Math.round(W * dpr);
+  const targetH = Math.round(H * dpr);
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const cache = ensureStarMapCache(view);
+  const { starsRaw, edgesRaw, meta, orderArr, galCurve, eclCurve } = cache;
+  const rotRad = view.rotationAngleRad || 0.0;
+  const selStarIdx = typeof view.selectedStarIdx === "number" ? view.selectedStarIdx : -1;
+  const selConstIdx =
+    selStarIdx >= 0 ? view.session.star_constellation_index(selStarIdx) : -1;
+
+  // 1. Deep midnight celestial atlas backdrop:
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0.0, "#050814");
+  bgGrad.addColorStop(1.0, "#080d1d");
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Title headers above Northern & Southern discs:
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "700 12px Inter, system-ui, sans-serif";
+  ctx.fillStyle = "#e2e8f0";
+  ctx.fillText("NORTHERN CELESTIAL HEMISPHERE", cxN, 17);
+  ctx.fillText("SOUTHERN CELESTIAL HEMISPHERE", cxS, 17);
+  ctx.font = "500 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText("Pole +90° (Center) · Equator 0° (Rim)", cxN, 32);
+  ctx.fillText("Pole −90° (Center) · Equator 0° (Rim)", cxS, 32);
+
+  const drawSingleHemisphere = (isNorth, cx, cy, glowCanvas) => {
+    // Outer graduation bezel ring:
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R + 15, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(15, 23, 42, 0.72)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.28)";
+    ctx.lineWidth = 1.0;
+    ctx.stroke();
+    ctx.restore();
+
+    // Clipped celestial hemisphere interior (`r <= R`):
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.clip();
+
+    // Rotated diffuse Milky Way / host-galaxy glow texture:
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(isNorth ? rotRad : -rotRad);
+    ctx.drawImage(glowCanvas, -R - 2, -R - 2, (R + 2) * 2, (R + 2) * 2);
+    ctx.restore();
+
+    // Subtle Right Ascension hour spokes (every 2h = 30°) & Declination circles (±60°, ±30°):
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.14)";
+    ctx.lineWidth = 0.75;
+    for (let h = 0; h < 24; h += 2) {
+      const ra = (h * 15.0 * Math.PI) / 180.0;
+      const pOuter = projectToHemisphere(ra, 0.0, rotRad, isNorth, cx, cy, R);
+      const pInner = projectToHemisphere(
+        ra,
+        isNorth ? 80.0 : -80.0,
+        rotRad,
+        isNorth,
+        cx,
+        cy,
+        R
+      );
+      ctx.beginPath();
+      ctx.moveTo(pInner.x, pInner.y);
+      ctx.lineTo(pOuter.x, pOuter.y);
+      ctx.stroke();
+    }
+
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.19)";
+    for (const rRing of [R / 3.0, (2.0 * R) / 3.0]) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, rRing, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // Polar crosshair at +90° / -90°:
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(cx - 4.5, cy);
+    ctx.lineTo(cx + 4.5, cy);
+    ctx.moveTo(cx, cy - 4.5);
+    ctx.lineTo(cx, cy + 4.5);
+    ctx.stroke();
+
+    // Helper to stroke great-circle curves (Galactic Equator & Ecliptic):
+    const strokeGreatCircle = (pts, strokeStyle, lineWidth, dash) => {
+      ctx.save();
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = lineWidth;
+      if (dash) ctx.setLineDash(dash);
+      ctx.beginPath();
+      let pen = false;
+      let prevX = 0;
+      let prevY = 0;
+      for (let i = 0; i < pts.length; i++) {
+        const pt = pts[i];
+        const inHemi = isNorth ? pt.decDeg >= -6.0 : pt.decDeg <= 6.0;
+        if (!inHemi) {
+          pen = false;
+          continue;
+        }
+        const pr = projectToHemisphere(pt.raRad, pt.decDeg, rotRad, isNorth, cx, cy, R);
+        if (!pen || Math.hypot(pr.x - prevX, pr.y - prevY) > R * 0.45) {
+          ctx.moveTo(pr.x, pr.y);
+          pen = true;
+        } else {
+          ctx.lineTo(pr.x, pr.y);
+        }
+        prevX = pr.x;
+        prevY = pr.y;
+      }
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    // Galactic Equator curve + Galactic Center diamond marker:
+    if (view.showGalacticPlane) {
+      strokeGreatCircle(galCurve, "rgba(56, 189, 248, 0.42)", 1.15, [5, 4]);
+      const gcInHemi = isNorth ? cache.gcDecDeg >= 0.0 : cache.gcDecDeg < 0.0;
+      if (gcInHemi) {
+        const gcp = projectToHemisphere(
+          cache.gcRaRad,
+          cache.gcDecDeg,
+          rotRad,
+          isNorth,
+          cx,
+          cy,
+          R
+        );
+        ctx.save();
+        ctx.strokeStyle = "rgba(56, 189, 248, 0.85)";
+        ctx.fillStyle = "rgba(14, 116, 144, 0.45)";
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.moveTo(gcp.x, gcp.y - 4.5);
+        ctx.lineTo(gcp.x + 4.5, gcp.y);
+        ctx.lineTo(gcp.x, gcp.y + 4.5);
+        ctx.lineTo(gcp.x - 4.5, gcp.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = "600 8.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+        ctx.fillStyle = "rgba(125, 211, 252, 0.9)";
+        ctx.fillText("GC", gcp.x + 11, gcp.y - 5);
+        ctx.restore();
+      }
+    }
+
+    // Ecliptic curve (zodiac path of Sun & planets):
+    strokeGreatCircle(eclCurve, "rgba(251, 191, 36, 0.34)", 1.0, [3, 4]);
+
+    // Constellation asterism lines (clipping cleanly across the 0° equator rim):
+    if (view.showConstellations && edgesRaw.length >= 3) {
+      const edgeCount = Math.floor(edgesRaw.length / 3);
+      ctx.lineCap = "round";
+      for (let pass = 0; pass < 2; pass++) {
+        for (let e = 0; e < edgeCount; e++) {
+          const ia = edgesRaw[e * 3];
+          const ib = edgesRaw[e * 3 + 1];
+          const cIdx = edgesRaw[e * 3 + 2];
+          const isSelConst = cIdx === selConstIdx;
+          if ((pass === 0 && isSelConst) || (pass === 1 && !isSelConst)) {
+            continue;
+          }
+          const raA = starsRaw[ia * 6];
+          const decA = starsRaw[ia * 6 + 1];
+          const raB = starsRaw[ib * 6];
+          const decB = starsRaw[ib * 6 + 1];
+          const visible = isNorth
+            ? decA >= -14.0 && decB >= -14.0 && (decA >= 0.0 || decB >= 0.0)
+            : decA <= 14.0 && decB <= 14.0 && (decA <= 0.0 || decB <= 0.0);
+          if (!visible) continue;
+
+          const pA = projectToHemisphere(raA, decA, rotRad, isNorth, cx, cy, R);
+          const pB = projectToHemisphere(raB, decB, rotRad, isNorth, cx, cy, R);
+          if (Math.hypot(pA.x - pB.x, pA.y - pB.y) > R * 0.72) continue;
+
+          ctx.strokeStyle = isSelConst
+            ? "rgba(52, 211, 153, 0.95)"
+            : "rgba(96, 165, 250, 0.58)";
+          ctx.lineWidth = isSelConst ? 2.1 : 1.25;
+          ctx.beginPath();
+          ctx.moveTo(pA.x, pA.y);
+          ctx.lineTo(pB.x, pB.y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // All naked-eye stars in this hemisphere (faintest -> brightest):
+    for (let k = 0; k < orderArr.length; k++) {
+      const idx = orderArr[k];
+      const base = idx * 6;
+      const decDeg = starsRaw[base + 1];
+      if (isNorth ? decDeg < -0.6 : decDeg > 0.6) {
+        continue;
+      }
+      const raRad = starsRaw[base];
+      const mag = starsRaw[base + 2];
+      const r255 = Math.min(255, Math.round(starsRaw[base + 3] * 255));
+      const g255 = Math.min(255, Math.round(starsRaw[base + 4] * 255));
+      const b255 = Math.min(255, Math.round(starsRaw[base + 5] * 255));
+      const pt = projectToHemisphere(raRad, decDeg, rotRad, isNorth, cx, cy, R);
+
+      const radius =
+        mag <= 0.5
+          ? 3.35 - 0.35 * mag
+          : mag <= 2.5
+          ? 2.65 - 0.42 * (mag - 0.5)
+          : Math.max(0.58, 1.81 - 0.34 * (mag - 2.5));
+      const alpha =
+        mag <= 2.5
+          ? 0.98
+          : Math.max(0.28, Math.min(0.92, 0.92 - 0.175 * (mag - 2.5)));
+
+      if (mag <= 1.85) {
+        const glowR = radius * 3.1;
+        const grad = ctx.createRadialGradient(pt.x, pt.y, radius * 0.25, pt.x, pt.y, glowR);
+        grad.addColorStop(0.0, `rgba(${r255}, ${g255}, ${b255}, 0.55)`);
+        grad.addColorStop(1.0, `rgba(${r255}, ${g255}, ${b255}, 0.0)`);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, glowR, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = `rgba(${r255}, ${g255}, ${b255}, ${alpha})`;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (mag <= 0.65) {
+        const spk = radius * 2.35;
+        ctx.strokeStyle = `rgba(${r255}, ${g255}, ${b255}, 0.55)`;
+        ctx.lineWidth = 0.75;
+        ctx.beginPath();
+        ctx.moveTo(pt.x - spk, pt.y);
+        ctx.lineTo(pt.x + spk, pt.y);
+        ctx.moveTo(pt.x, pt.y - spk);
+        ctx.lineTo(pt.x, pt.y + spk);
+        ctx.stroke();
+      }
+    }
+
+    // Naked-eye Solar System planets along the ecliptic:
+    if (Array.isArray(meta.planets)) {
+      for (const pl of meta.planets) {
+        const inHemi = isNorth ? pl.decDeg >= 0.0 : pl.decDeg < 0.0;
+        if (!inHemi) continue;
+        const pp = projectToHemisphere(pl.raRad, pl.decDeg, rotRad, isNorth, cx, cy, R);
+        const pr = Math.round((pl.rgb?.[0] ?? 0.95) * 255);
+        const pg = Math.round((pl.rgb?.[1] ?? 0.82) * 255);
+        const pb = Math.round((pl.rgb?.[2] ?? 0.58) * 255);
+        ctx.fillStyle = `rgb(${pr}, ${pg}, ${pb})`;
+        ctx.strokeStyle = "rgba(251, 191, 36, 0.88)";
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.arc(pp.x, pp.y, 3.1, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = "600 8.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+        ctx.fillStyle = "rgba(253, 230, 138, 0.92)";
+        ctx.fillText(`P${pl.number}`, pp.x + 9, pp.y - 5);
+      }
+    }
+
+    // Constellation labels (`C1..CN`):
+    if (view.showConstellations && Array.isArray(meta.constellations)) {
+      ctx.font = "700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+      for (const c of meta.constellations) {
+        const inHemi = isNorth ? c.decDeg >= 0.0 : c.decDeg < 0.0;
+        if (!inHemi) continue;
+        const cp = projectToHemisphere(c.raRad, c.decDeg, rotRad, isNorth, cx, cy, R);
+        const lx = Math.max(cx - R + 16, Math.min(cx + R - 16, cp.x));
+        const ly = Math.max(cy - R + 12, Math.min(cy + R - 12, cp.y - 8));
+        const isSel = c.index === selConstIdx;
+        const label = `C${c.number}`;
+        ctx.fillStyle = isSel ? "rgba(6, 78, 59, 0.85)" : "rgba(10, 16, 34, 0.72)";
+        const tw = ctx.measureText(label).width + 6;
+        ctx.fillRect(lx - tw * 0.5, ly - 6, tw, 12);
+        ctx.fillStyle = isSel ? "#6ee7b7" : "rgba(147, 197, 253, 0.92)";
+        ctx.fillText(label, lx, ly + 0.5);
+      }
+    }
+
+    // Declination tick labels (+60°, +30° / -60°, -30°):
+    ctx.font = "500 8.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.fillStyle = "rgba(148, 163, 184, 0.62)";
+    ctx.fillText(isNorth ? "+60°" : "−60°", cx, cy - R / 3.0 + 8);
+    ctx.fillText(isNorth ? "+30°" : "−30°", cx, cy - (2.0 * R) / 3.0 + 8);
+
+    // Selected star reticle highlight:
+    if (selStarIdx >= 0 && selStarIdx * 6 + 5 < starsRaw.length) {
+      const sRa = starsRaw[selStarIdx * 6];
+      const sDec = starsRaw[selStarIdx * 6 + 1];
+      if (isNorth ? sDec >= -2.0 : sDec <= 2.0) {
+        const sp = projectToHemisphere(sRa, sDec, rotRad, isNorth, cx, cy, R);
+        ctx.strokeStyle = "#34d399";
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, 7.5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(sp.x - 11, sp.y);
+        ctx.lineTo(sp.x - 5, sp.y);
+        ctx.moveTo(sp.x + 5, sp.y);
+        ctx.lineTo(sp.x + 11, sp.y);
+        ctx.moveTo(sp.x, sp.y - 11);
+        ctx.lineTo(sp.x, sp.y - 5);
+        ctx.moveTo(sp.x, sp.y + 5);
+        ctx.lineTo(sp.x, sp.y + 11);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore(); // End hemisphere clip
+
+    // Crisp Celestial Equator rim & Right Ascension hour ticks/labels around bezel:
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.68)";
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.font = "600 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.fillStyle = "#cbd5e1";
+    for (let h = 0; h < 24; h++) {
+      const ra = (h * 15.0 * Math.PI) / 180.0;
+      const p0 = projectToHemisphere(ra, 0.0, rotRad, isNorth, cx, cy, R);
+      const tickLen = h % 2 === 0 ? 4.5 : 2.5;
+      const p1 = projectToHemisphere(ra, 0.0, rotRad, isNorth, cx, cy, R + tickLen);
+      ctx.strokeStyle =
+        h % 2 === 0 ? "rgba(203, 213, 225, 0.65)" : "rgba(148, 163, 184, 0.35)";
+      ctx.lineWidth = 1.0;
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+
+      if (h % 2 === 0) {
+        const pl = projectToHemisphere(ra, 0.0, rotRad, isNorth, cx, cy, R + 10.5);
+        ctx.fillText(`${h}h`, pl.x, pl.y);
+      }
+    }
+  };
+
+  drawSingleHemisphere(true, cxN, cyN, cache.northGlow);
+  drawSingleHemisphere(false, cxS, cyS, cache.southGlow);
+
+  // Bottom Legend Bar (`y = 398..424`):
+  ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.22)";
+  ctx.lineWidth = 1.0;
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(18, H - 32, W - 36, 24, 6);
+  } else {
+    ctx.rect(18, H - 32, W - 36, 24);
+  }
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.textAlign = "left";
+  ctx.font = "500 10px Inter, system-ui, sans-serif";
+  let lx = 30;
+  const ly = H - 20;
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText("Mag:", lx, ly);
+  lx += 30;
+  for (const [mLabel, rad] of [
+    ["0", 3.3],
+    ["2", 2.0],
+    ["4", 1.25],
+    ["6", 0.7],
+  ]) {
+    ctx.fillStyle = "#f8fafc";
+    ctx.beginPath();
+    ctx.arc(lx + rad, ly - 0.5, rad, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#cbd5e1";
+    ctx.fillText(mLabel, lx + rad * 2 + 3, ly);
+    lx += rad * 2 + 17;
+  }
+
+  lx += 10;
+  ctx.strokeStyle = "rgba(96, 165, 250, 0.85)";
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(lx, ly);
+  ctx.lineTo(lx + 16, ly);
+  ctx.stroke();
+  ctx.fillStyle = "#cbd5e1";
+  ctx.fillText(`Constellations (${meta.constellationCount || 0})`, lx + 21, ly);
+  lx += 132;
+
+  ctx.save();
+  ctx.setLineDash([4, 3]);
+  ctx.strokeStyle = "rgba(56, 189, 248, 0.85)";
+  ctx.beginPath();
+  ctx.moveTo(lx, ly);
+  ctx.lineTo(lx + 16, ly);
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillText("Galactic Plane", lx + 21, ly);
+  lx += 108;
+
+  ctx.save();
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = "rgba(251, 191, 36, 0.85)";
+  ctx.beginPath();
+  ctx.moveTo(lx, ly);
+  ctx.lineTo(lx + 16, ly);
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillText("Ecliptic & Planets", lx + 21, ly);
+
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#93c5fd";
+  ctx.fillText(
+    meta.isRealHipparcos
+      ? `Sol · Hipparcos (${meta.starCount} stars)`
+      : `${view.session.galaxy_type_name()} (${meta.starCount} stars)`,
+    W - 28,
+    ly
+  );
+
+  ctx.restore();
+}
+
 function updateSunDataBuffers(view, rebuildGeometry = false) {
   const {
     session,
@@ -6374,6 +7006,11 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
     geometry.computeBoundingSphere();
+  }
+
+  if (view.aspect === "star_map") {
+    drawDualHemisphereStarMap(view);
+    return;
   }
 
   if (view.aspect === "sky_plants") {
@@ -6488,7 +7125,9 @@ function updateSunDataBuffers(view, rebuildGeometry = false) {
 function buildSunInfo(view) {
   const s = view.session;
   const defaultPrompt =
-    view.aspect === "sky_plants"
+    view.aspect === "star_map"
+      ? "2D Dual-Hemisphere Star Map: Left = Northern Celestial Hemisphere (+90° pole at center, 0° equator at rim), Right = Southern Celestial Hemisphere (−90° pole at center, 0° equator at rim). Drag the rotation slider to spin the planisphere dials, or click any star/constellation to inspect it."
+      : view.aspect === "sky_plants"
       ? "2D Exoplanet Landscape: Left/Top = Daytime Sky & Home Sun, Right Horizon = Sunset & Twilight Glow over the Ocean, Foreground = Rolling Hills & Photosynthetic Plant Foliage. Click the sky, sunset, or plants to inspect their optical physics."
       : view.aspect === "galaxy"
       ? "3D Host Galaxy View: Shows the full 3D galaxy star cloud (tilted 38°), with a bright green 3D crosshair & orbit circle marking your Home Star's galactocentric location. Click or rotate to inspect."
@@ -6498,7 +7137,11 @@ function buildSunInfo(view) {
       ? "3D Home Sun Photosphere: Scaled to true solar radius (dashed blue circle = 1.00 R☉ Sol reference) in its true B-V blackbody color. Click the photosphere to inspect."
       : "Click any star on the celestial sphere to inspect its catalog ID, spectral class, apparent & absolute magnitude, and distance in light-years.";
   const selectedReport =
-    view.selectedTileIdx >= 0
+    view.aspect === "star_map"
+      ? typeof view.selectedStarIdx === "number" && view.selectedStarIdx >= 0
+        ? s.inspect_star_index(view.selectedStarIdx)
+        : defaultPrompt
+      : view.selectedTileIdx >= 0
       ? s.inspect_aspect_tile(view.aspect || "night_sky", view.selectedTileIdx)
       : defaultPrompt;
   return {
@@ -6578,6 +7221,19 @@ export const mountSunView =
     view.pic2dTexture = pic2dTexture;
     view.quad2dMesh = quad2dMesh;
 
+    const starMapCanvas = document.getElementById("sun-starmap-canvas");
+    view.starMapCanvas = starMapCanvas;
+    view.starMapCache = null;
+    view.selectedStarIdx = -1;
+    const basePaint = view.paint.bind(view);
+    view.paint = function () {
+      if (this.aspect === "star_map") {
+        drawDualHemisphereStarMap(this);
+      } else {
+        basePaint();
+      }
+    };
+
     view.session = new WasmSunSession();
     view.session.generate_galaxy_and_sun(galaxyTypeId, vantageId, starFilter);
     view.aspect = aspect;
@@ -6607,7 +7263,50 @@ export const mountSunView =
       }
     };
 
+    const handleStarMapClick = (ev) => {
+      if (!view.session || !starMapCanvas) return;
+      const rect = starMapCanvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const mx = ((ev.clientX - rect.left) / rect.width) * STAR_MAP_LAYOUT.W;
+      const my = ((ev.clientY - rect.top) / rect.height) * STAR_MAP_LAYOUT.H;
+      const { cxN, cyN, cxS, cyS, R } = STAR_MAP_LAYOUT;
+      const rotRad = view.rotationAngleRad || 0.0;
+
+      const dxN = mx - cxN;
+      const dyN = my - cyN;
+      const distN = Math.hypot(dxN, dyN);
+      const dxS = mx - cxS;
+      const dyS = my - cyS;
+      const distS = Math.hypot(dxS, dyS);
+
+      let raRad = null;
+      let decDeg = null;
+      if (distN <= R + 5) {
+        const rFrac = Math.min(1.0, distN / R);
+        decDeg = 90.0 * (1.0 - rFrac);
+        const phi = Math.atan2(dxN, -dyN);
+        raRad = ((phi - rotRad) % (Math.PI * 2.0) + Math.PI * 2.0) % (Math.PI * 2.0);
+      } else if (distS <= R + 5) {
+        const rFrac = Math.min(1.0, distS / R);
+        decDeg = -90.0 * (1.0 - rFrac);
+        const phi = Math.atan2(-dxS, -dyS);
+        raRad = ((phi - rotRad) % (Math.PI * 2.0) + Math.PI * 2.0) % (Math.PI * 2.0);
+      }
+
+      if (raRad !== null && decDeg !== null) {
+        const hitIdx = view.session.find_nearest_star_ra_dec(raRad, decDeg);
+        if (hitIdx >= 0) {
+          view.selectedStarIdx = hitIdx;
+          drawDualHemisphereStarMap(view);
+          view.setSunInfo(buildSunInfo(view))();
+        }
+      }
+    };
+
     canvas.addEventListener("click", handleCanvasClick);
+    if (starMapCanvas) {
+      starMapCanvas.addEventListener("click", handleStarMapClick);
+    }
 
     activeView = view;
     updateSunDataBuffers(view, true);
@@ -6615,6 +7314,9 @@ export const mountSunView =
 
     return () => {
       canvas.removeEventListener("click", handleCanvasClick);
+      if (starMapCanvas) {
+        starMapCanvas.removeEventListener("click", handleStarMapClick);
+      }
       if (activeView === view) {
         activeView = null;
       }
@@ -6639,6 +7341,8 @@ export const generateSunGalaxy =
       starFilter
     );
     activeView.selectedTileIdx = -1;
+    activeView.selectedStarIdx = -1;
+    activeView.starMapCache = null;
     updateSunDataBuffers(activeView, false);
     setSunInfo(buildSunInfo(activeView))();
   };
@@ -6647,6 +7351,8 @@ export const chooseNewSunInGalaxy = (starFilter) => (setSunInfo) => () => {
   if (!activeView || !activeView.session) return;
   activeView.session.choose_sun_in_current_galaxy(starFilter);
   activeView.selectedTileIdx = -1;
+  activeView.selectedStarIdx = -1;
+  activeView.starMapCache = null;
   updateSunDataBuffers(activeView, false);
   setSunInfo(buildSunInfo(activeView))();
 };
@@ -6655,6 +7361,8 @@ export const loadHipparcosIntoSun = (setSunInfo) => () => {
   if (!activeView || !activeView.session) return;
   activeView.session.load_real_hipparcos_sol();
   activeView.selectedTileIdx = -1;
+  activeView.selectedStarIdx = -1;
+  activeView.starMapCache = null;
   updateSunDataBuffers(activeView, false);
   setSunInfo(buildSunInfo(activeView))();
 };
