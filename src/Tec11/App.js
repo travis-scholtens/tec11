@@ -4667,9 +4667,6 @@ function buildHistoryInfo(view) {
       ? s.inspect_tile(view.selectedTileIdx)
       : "Click any state on the globe to open its zoomed-in State Map, demographics, imports & exports, and diplomacy, or click any tile in the state to inspect its local population and native flora & fauna.";
   const bundle = buildHistoryInspectorBundle(view);
-  if (s.stage_index() !== 2) {
-    scheduleStratigraphySidePaint(view, view.selectedTileIdx);
-  }
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -4917,9 +4914,6 @@ function buildTravelInfo(view) {
       ? s.inspect_travel_tile(view.selectedTileIdx)
       : "Click any coastal port, ocean tile, or river corridor on the globe to inspect prevailing wind & current vectors and travel routes (yellow = active trade, red = naval conflict, cyan/emerald = connected sea/river lane, violet = hypothetical/unconnected drift).";
   const bundle = buildHistoryInspectorBundle(view);
-  if (s.stage_index() !== 2) {
-    scheduleStratigraphySidePaint(view, view.selectedTileIdx);
-  }
   return {
     planetName,
     tileCount: s.tile_count(),
@@ -5198,9 +5192,6 @@ function buildWorldInfo(view) {
       ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`
       : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`;
   const bundle = buildHistoryInspectorBundle(view);
-  if (s.stage_index() !== 2) {
-    scheduleStratigraphySidePaint(view, view.selectedTileIdx);
-  }
   return {
     stageIndex: s.stage_index(),
     stageName: s.stage_name(),

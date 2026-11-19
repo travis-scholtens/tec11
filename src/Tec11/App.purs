@@ -5284,41 +5284,6 @@ mkApp = do
                                   }
                               ]
                           }
-                      , R.div
-                          { className: "control-group"
-                          , children:
-                              [ R.label
-                                  { className: "control-label"
-                                  , children:
-                                      [ R.text
-                                          ( if worldInfo.stageIndex == 2 then
-                                              "State & Tile Inspector (click globe or zoomed state map)"
-                                            else
-                                              "Tile Details (Layers, Climate, Population & Ancestry)"
-                                          )
-                                      ]
-                                  }
-                              , if worldInfo.stageIndex == 2 then
-                                  renderHistoryTwoLevelInspector
-                                    worldInfo.stateView
-                                    worldInfo.tileView
-                                    worldInfo.languageDetail
-                                    worldInfo.nationDetail
-                                    worldInfo.selectedReport
-                                else
-                                  R.div
-                                    { children:
-                                        [ renderStratigraphySideViewBox
-                                        , R.div
-                                            { id: "world-details-box"
-                                            , className: "tile-details-box"
-                                            , children: [ R.text worldInfo.selectedReport ]
-                                            }
-                                        , renderTileSkyAndVantageBox worldInfo.tileView
-                                        ]
-                                    }
-                              ]
-                          }
                       ]
                   }
               , R.div
@@ -5712,51 +5677,14 @@ mkApp = do
                                   , children: [ R.text worldInfo.stageName ]
                                   }
                               , R.div
+                                  { id: "world-years-label"
+                                  , className: "stat-line"
+                                  , children: [ R.text (worldInfo.yearsText <> " years · " <> worldInfo.populationText <> " people") ]
+                                  }
+                              , R.div
                                   { id: "world-orbital-label"
                                   , className: "stat-line"
                                   , children: [ R.text worldInfo.orbitalSummaryText ]
-                                  }
-                              , R.div
-                                  { id: "world-optics-label"
-                                  , className: "stat-line"
-                                  , style: R.css { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }
-                                  , children:
-                                      [ R.span
-                                          { style: R.css { display: "inline-block", width: "11px", height: "11px", borderRadius: "50%", backgroundColor: worldInfo.sunColorCss, boxShadow: "0 0 5px " <> worldInfo.sunColorCss }
-                                          , children: []
-                                          }
-                                      , R.span { children: [ R.text (worldInfo.sunSpectralType <> " |") ] }
-                                      , R.span
-                                          { style: R.css { display: "inline-block", width: "11px", height: "11px", borderRadius: "50%", backgroundColor: worldInfo.skyColorCss }
-                                          , children: []
-                                          }
-                                      , R.span { children: [ R.text ("Sky: " <> worldInfo.skyColorName <> " |") ] }
-                                      , R.span
-                                          { style: R.css { display: "inline-block", width: "11px", height: "11px", borderRadius: "50%", backgroundColor: worldInfo.sunsetColorCss }
-                                          , children: []
-                                          }
-                                      , R.span { children: [ R.text ("Sunset: " <> worldInfo.sunsetColorName <> " |") ] }
-                                      , R.span
-                                          { style: R.css { display: "inline-block", width: "11px", height: "11px", borderRadius: "50%", backgroundColor: worldInfo.plantColorCss }
-                                          , children: []
-                                          }
-                                      , R.span { children: [ R.text ("Flora: " <> worldInfo.plantColorName) ] }
-                                      ]
-                                  }
-                              , R.div
-                                  { id: "world-planets-label"
-                                  , className: "stat-line"
-                                  , children: [ R.text ("System: " <> worldInfo.planetsSummaryText) ]
-                                  }
-                              , R.div
-                                  { id: "world-years-label"
-                                  , className: "stat-line"
-                                  , children: [ R.text (worldInfo.yearsText <> " years") ]
-                                  }
-                              , R.div
-                                  { id: "world-population-label"
-                                  , className: "stat-line"
-                                  , children: [ R.text (worldInfo.populationText <> " people") ]
                                   }
                               ]
                           }
