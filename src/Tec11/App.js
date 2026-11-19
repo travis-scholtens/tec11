@@ -6168,6 +6168,14 @@ export const clearWorldSelectedTile = (setWorldInfo) => () => {
   setWorldInfo(buildWorldInfo(activeView))();
 };
 
+export const notifyWorldGeologyModalOpen = () => {
+  if (!activeView) return;
+  if (typeof window !== "undefined") {
+    window.requestAnimationFrame(() => paintStratigraphySideCanvas(activeView));
+    setTimeout(() => paintStratigraphySideCanvas(activeView), 40);
+  }
+};
+
 export const setWorldSunAndAtmosphere =
   (starFilter) =>
   (atmosphereId) =>

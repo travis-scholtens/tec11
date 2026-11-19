@@ -53,6 +53,7 @@ derive instance eqScreen :: Eq Screen
 
 data WorldModal
   = CosmosModal
+  | GeologyModal
 
 derive instance eqWorldModal :: Eq WorldModal
 
@@ -624,6 +625,7 @@ foreign import loadSavedPlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect 
 foreign import loadFilePlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import setWorldCosmosModalActive :: Boolean -> Effect Unit
 foreign import clearWorldSelectedTile :: (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import notifyWorldGeologyModalOpen :: Effect Unit
 
 -- Moons & Tidal Erosion Sandbox mode FFI (`MoonScreen`)
 foreign import mountMoonView :: Int -> Int -> Int -> Int -> String -> Boolean -> Boolean -> Boolean -> (MoonInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -1750,6 +1752,7 @@ mkApp = do
     useEffect (screen /\ worldActiveModal) do
       let isCosmos = screen == WorldScreen && worldActiveModal == Just CosmosModal
       setWorldCosmosModalActive isCosmos
+      when (screen == WorldScreen && worldActiveModal == Just GeologyModal) notifyWorldGeologyModalOpen
       pure (setWorldCosmosModalActive false)
 
     let
@@ -5843,6 +5846,18 @@ mkApp = do
                                               }
                                           ]
                                       }
+                                  , R.div
+                                      { className: "button-row"
+                                      , style: R.css { flexWrap: "wrap", marginTop: "0.25rem" }
+                                      , children:
+                                          [ R.button
+                                              { id: "world-geology-btn"
+                                              , className: "action-btn secondary"
+                                              , onClick: capture_ (setWorldActiveModal (Just GeologyModal))
+                                              , children: [ R.text "Geology" ]
+                                              }
+                                          ]
+                                      }
                                   ]
                               }
                           ]
@@ -5965,6 +5980,58 @@ mkApp = do
                                                             }
                                                       , children: [ R.text worldInfo.planetsSummaryText ]
                                                       }
+                                                  ]
+                                              }
+                                          ]
+                                      }
+                                  ]
+                              }
+                          ]
+                      }
+                  Just GeologyModal ->
+                    R.div
+                      { id: "world-geology-modal"
+                      , className: "world-modal-backdrop"
+                      , children:
+                          [ R.div
+                              { style: R.css { position: "fixed", inset: "0" }
+                              , onClick: capture_ (setWorldActiveModal Nothing)
+                              , children: []
+                              }
+                          , R.div
+                              { className: "world-modal-card"
+                              , style: R.css { position: "relative", zIndex: "1", maxWidth: "min(680px, 95vw)" }
+                              , children:
+                                  [ R.div
+                                      { className: "world-modal-header"
+                                      , children:
+                                          [ R.div
+                                              { className: "world-modal-title"
+                                              , children: [ R.text ("Geology & Rock Layers — " <> worldInfo.tileView.title) ]
+                                              }
+                                          , R.button
+                                              { id: "world-modal-close-btn"
+                                              , className: "world-modal-close-btn"
+                                              , onClick: capture_ (setWorldActiveModal Nothing)
+                                              , children: [ R.text "Close ×" ]
+                                              }
+                                          ]
+                                      }
+                                  , R.div
+                                      { className: "world-modal-body"
+                                      , children:
+                                          [ renderStratigraphySideViewBox
+                                          , R.div
+                                              { className: "tile-details-box"
+                                              , style: R.css { maxHeight: "260px" }
+                                              , children:
+                                                  [ R.div
+                                                      { style: R.css { fontWeight: "700", color: "#fde047", marginBottom: "6px" }
+                                                      , children: [ R.text worldInfo.tileView.stratigraphySummary ]
+                                                      }
+                                                  , renderStringBulletList
+                                                      worldInfo.tileView.stratigraphyLines
+                                                      "No rock layers recorded on this tile."
                                                   ]
                                               }
                                           ]
