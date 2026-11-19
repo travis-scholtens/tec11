@@ -56,6 +56,7 @@ data WorldModal
   | GeologyModal
   | SkyModal
   | LifeModal
+  | StateModal
 
 derive instance eqWorldModal :: Eq WorldModal
 
@@ -629,6 +630,7 @@ foreign import setWorldCosmosModalActive :: Boolean -> Effect Unit
 foreign import clearWorldSelectedTile :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import notifyWorldGeologyModalOpen :: Effect Unit
 foreign import notifyWorldSkyModalOpen :: Effect Unit
+foreign import notifyWorldStateModalOpen :: Effect Unit
 
 -- Moons & Tidal Erosion Sandbox mode FFI (`MoonScreen`)
 foreign import mountMoonView :: Int -> Int -> Int -> Int -> String -> Boolean -> Boolean -> Boolean -> (MoonInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -1757,6 +1759,7 @@ mkApp = do
       setWorldCosmosModalActive isCosmos
       when (screen == WorldScreen && worldActiveModal == Just GeologyModal) notifyWorldGeologyModalOpen
       when (screen == WorldScreen && worldActiveModal == Just SkyModal) notifyWorldSkyModalOpen
+      when (screen == WorldScreen && worldActiveModal == Just StateModal) notifyWorldStateModalOpen
       pure (setWorldCosmosModalActive false)
 
     let
@@ -5878,6 +5881,15 @@ mkApp = do
                                                 }
                                             else
                                               React.empty
+                                          , if worldInfo.stageIndex == 2 && worldInfo.stateView.hasState then
+                                              R.button
+                                                { id: "world-state-btn"
+                                                , className: "action-btn"
+                                                , onClick: capture_ (setWorldActiveModal (Just StateModal))
+                                                , children: [ R.text ("State: " <> worldInfo.stateView.stateName) ]
+                                                }
+                                            else
+                                              React.empty
                                           ]
                                       }
                                   ]
@@ -6218,6 +6230,212 @@ mkApp = do
                               }
                           ]
                       }
+                  Just StateModal ->
+                    let
+                      st = worldInfo.stateView
+                      lang = worldInfo.languageDetail
+                      nat = worldInfo.nationDetail
+                    in
+                      R.div
+                        { id: "world-state-modal"
+                        , className: "world-modal-backdrop"
+                        , children:
+                            [ R.div
+                                { style: R.css { position: "fixed", inset: "0" }
+                                , onClick: capture_ (setWorldActiveModal Nothing)
+                                , children: []
+                                }
+                            , R.div
+                                { className: "world-modal-card"
+                                , style: R.css { position: "relative", zIndex: "1", maxWidth: "min(860px, 96vw)" }
+                                , children:
+                                    [ R.div
+                                        { className: "world-modal-header"
+                                        , children:
+                                            [ R.div
+                                                { style: R.css { display: "flex", alignItems: "center", gap: "0.55rem" }
+                                                , children:
+                                                    [ R.span
+                                                        { style:
+                                                            R.css
+                                                              { width: "13px"
+                                                              , height: "13px"
+                                                              , borderRadius: "50%"
+                                                              , backgroundColor: st.colorCss
+                                                              , border: "1px solid #f8fafc"
+                                                              , display: "inline-block"
+                                                              }
+                                                        }
+                                                    , R.div
+                                                        { className: "world-modal-title"
+                                                        , children: [ R.text (if st.hasState then "State of " <> st.stateName else "No Active State on Selected Tile") ]
+                                                        }
+                                                    ]
+                                                }
+                                            , R.button
+                                                { id: "world-modal-close-btn"
+                                                , className: "world-modal-close-btn"
+                                                , onClick: capture_ (setWorldActiveModal Nothing)
+                                                , children: [ R.text "Close ×" ]
+                                                }
+                                            ]
+                                        }
+                                    , R.div
+                                        { className: "world-modal-body"
+                                        , children:
+                                            if not st.hasState then
+                                              [ R.div
+                                                  { style: R.css { color: "#94a3b8", fontSize: "0.88rem" }
+                                                  , children: [ R.text "This tile does not currently belong to a sovereign state." ]
+                                                  }
+                                              ]
+                                            else
+                                              [ R.div
+                                                  { style:
+                                                      R.css
+                                                        { display: "grid"
+                                                        , gridTemplateColumns: "repeat(auto-fit, minmax(290px, 1fr))"
+                                                        , gap: "0.9rem"
+                                                        , alignItems: "start"
+                                                        }
+                                                  , children:
+                                                      [ R.div
+                                                          { style: R.css { display: "flex", flexDirection: "column", gap: "0.35rem" }
+                                                          , children:
+                                                              [ R.div
+                                                                  { style: R.css { fontSize: "0.75rem", color: "#94a3b8" }
+                                                                  , children: [ R.text "Zoomed State Map (click any tile in state to inspect):" ]
+                                                                  }
+                                                              , R.canvas
+                                                                  { id: "state-zoom-canvas"
+                                                                  , style:
+                                                                      R.css
+                                                                        { width: "100%"
+                                                                        , height: "235px"
+                                                                        , borderRadius: "8px"
+                                                                        , border: "1px solid #334155"
+                                                                        , background: "#081224"
+                                                                        , cursor: "pointer"
+                                                                        , display: "block"
+                                                                        }
+                                                                  }
+                                                              , R.div
+                                                                  { style: R.css { fontSize: "0.78rem", color: "#cbd5e1" }
+                                                                  , children:
+                                                                      [ R.text
+                                                                          ( show st.tileCount
+                                                                              <> " tiles · Pop "
+                                                                              <> st.populationText
+                                                                              <> " / "
+                                                                              <> st.capacityText
+                                                                              <> " · Solidarity "
+                                                                              <> st.asabiyaText
+                                                                          )
+                                                                      ]
+                                                                  }
+                                                              ]
+                                                          }
+                                                      , R.div
+                                                          { style: R.css { display: "flex", flexDirection: "column", gap: "0.45rem" }
+                                                          , children:
+                                                              [ R.div
+                                                                  { style: R.css { fontSize: "0.80rem", color: "#cbd5e1" }
+                                                                  , children: [ R.text ("Continent(s): " <> st.continents) ]
+                                                                  }
+                                                              , R.div
+                                                                  { style: R.css { fontSize: "0.80rem", color: "#86efac" }
+                                                                  , children: [ R.text ("Technology: " <> st.technology) ]
+                                                                  }
+                                                              , R.div
+                                                                  { style: R.css { fontSize: "0.76rem", fontWeight: "600", color: "#cbd5e1", marginTop: "4px" }
+                                                                  , children: [ R.text "Nationalities in State (click for origin & diaspora):" ]
+                                                                  }
+                                                              , renderDemographicPills st.nationalities (if nat.hasNation then nat.natId else -1) selectInspectorNation "None"
+                                                              , R.div
+                                                                  { style: R.css { fontSize: "0.76rem", fontWeight: "600", color: "#cbd5e1", marginTop: "6px" }
+                                                                  , children: [ R.text "Languages in State (click for lexicon & speakers):" ]
+                                                                  }
+                                                              , renderDemographicPills st.languages (if lang.hasLanguage then lang.langId else -1) selectInspectorLanguage "None"
+                                                              ]
+                                                          }
+                                                      ]
+                                                  }
+                                              , R.div
+                                                  { style:
+                                                      R.css
+                                                        { display: "grid"
+                                                        , gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))"
+                                                        , gap: "0.75rem"
+                                                        }
+                                                  , children:
+                                                      [ R.div
+                                                          { className: "tile-details-box"
+                                                          , style: R.css { maxHeight: "175px" }
+                                                          , children:
+                                                              [ R.div
+                                                                  { style: R.css { fontWeight: "700", color: "#fde047", marginBottom: "4px" }
+                                                                  , children: [ R.text ("Trading Partners (" <> show (Array.length st.tradePartners) <> ")") ]
+                                                                  }
+                                                              , renderStringBulletList st.tradePartners "None"
+                                                              ]
+                                                          }
+                                                      , R.div
+                                                          { className: "tile-details-box"
+                                                          , style: R.css { maxHeight: "175px" }
+                                                          , children:
+                                                              [ R.div
+                                                                  { style: R.css { fontWeight: "700", color: "#f87171", marginBottom: "4px" }
+                                                                  , children: [ R.text ("Active Conflicts (" <> show (Array.length st.conflicts) <> ")") ]
+                                                                  }
+                                                              , renderStringBulletList st.conflicts "At Peace"
+                                                              ]
+                                                          }
+                                                      , R.div
+                                                          { className: "tile-details-box"
+                                                          , style: R.css { maxHeight: "175px" }
+                                                          , children:
+                                                              [ R.div
+                                                                  { style: R.css { fontWeight: "700", color: "#6ee7b7", marginBottom: "4px" }
+                                                                  , children: [ R.text ("Exports (" <> show (Array.length st.exports) <> ")") ]
+                                                                  }
+                                                              , renderStringBulletList st.exports "None"
+                                                              ]
+                                                          }
+                                                      , R.div
+                                                          { className: "tile-details-box"
+                                                          , style: R.css { maxHeight: "175px" }
+                                                          , children:
+                                                              [ R.div
+                                                                  { style: R.css { fontWeight: "700", color: "#93c5fd", marginBottom: "4px" }
+                                                                  , children: [ R.text ("Imports (" <> show (Array.length st.imports) <> ")") ]
+                                                                  }
+                                                              , renderStringBulletList st.imports "None"
+                                                              ]
+                                                          }
+                                                      ]
+                                                  }
+                                              , if Array.null st.waterRoutes then
+                                                  React.empty
+                                                else
+                                                  R.div
+                                                    { className: "tile-details-box"
+                                                    , style: R.css { maxHeight: "145px" }
+                                                    , children:
+                                                        [ R.div
+                                                            { style: R.css { fontWeight: "700", color: "#7dd3fc", marginBottom: "4px" }
+                                                            , children: [ R.text ("Maritime & River Routes (" <> show (Array.length st.waterRoutes) <> ")") ]
+                                                            }
+                                                        , renderStringBulletList st.waterRoutes "None"
+                                                        ]
+                                                    }
+                                              , renderNationDetailCard nat (if lang.hasLanguage then lang.langId else -1)
+                                              , renderLanguageDetailCard lang (if nat.hasNation then nat.natId else -1)
+                                              ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
                   Nothing -> React.empty
               ]
           }

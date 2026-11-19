@@ -5388,6 +5388,9 @@ function buildWorldInfo(view) {
     moonCount === 0
       ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`
       : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`;
+  // Reset `selectedStateId` before inspecting `selectedTileIdx` so `stateView.hasState` always reflects
+  // whether the currently selected tile belongs to an active state on this tick:
+  view.selectedStateId = -1;
   const bundle = buildHistoryInspectorBundle(view);
   return {
     stageIndex: s.stage_index(),
@@ -6179,6 +6182,14 @@ export const notifyWorldGeologyModalOpen = () => {
 export const notifyWorldSkyModalOpen = () => {
   if (!activeView || !activeView.tileSky) return;
   scheduleTileSkyAndVantagePaint(activeView);
+};
+
+export const notifyWorldStateModalOpen = () => {
+  if (!activeView) return;
+  if (typeof window !== "undefined") {
+    window.requestAnimationFrame(() => paintStateZoomCanvas(activeView));
+    setTimeout(() => paintStateZoomCanvas(activeView), 40);
+  }
 };
 
 export const setWorldSunAndAtmosphere =
