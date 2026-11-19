@@ -924,6 +924,10 @@ impl TectonicsSimulation {
         &self.groups
     }
 
+    pub fn climate_model(&self) -> &ClimateModel {
+        &self.climate_model
+    }
+
     pub fn tile_koeppen_ids(&self) -> &[u8] {
         &self.tile_koeppen
     }

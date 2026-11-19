@@ -5153,7 +5153,10 @@ function updateWorldDataBuffers(view, rebuildGeometry = false) {
   view.tileColors = session.tile_colors_rgb(view.aspect, view.selectedTileIdx);
   const colors = computeWorldVertexColors(view);
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-  if (view.aspect === "travel" && session.stage_index() === 2) {
+  if (view.aspect === "climate") {
+    const oceanSegs = session.ocean_current_segments_colored();
+    setColoredArrowSegments(view, [oceanSegs]);
+  } else if (view.aspect === "borders" && session.stage_index() === 2) {
     const routeSegs = session.travel_route_segments_colored();
     setColoredArrowSegments(view, [routeSegs]);
   } else {

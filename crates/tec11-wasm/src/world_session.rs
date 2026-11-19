@@ -317,4 +317,8 @@ impl WasmWorldSession {
             _ => Vec::new(),
         }
     }
+
+    pub fn ocean_current_segments_colored(&self) -> Vec<f32> {
+        self.sim.ocean_current_segments_colored()
+    }
 }

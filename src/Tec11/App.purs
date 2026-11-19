@@ -5261,24 +5261,12 @@ mkApp = do
                                           , children: [ R.text "Climate" ]
                                           }
                                       , R.option
+                                          { value: "borders"
+                                          , children: [ R.text "Borders" ]
+                                          }
+                                      , R.option
                                           { value: "population"
                                           , children: [ R.text "Population" ]
-                                          }
-                                      , R.option
-                                          { value: "nations"
-                                          , children: [ R.text "Nations" ]
-                                          }
-                                      , R.option
-                                          { value: "metallurgy"
-                                          , children: [ R.text "Metallurgy & Ores" ]
-                                          }
-                                      , R.option
-                                          { value: "travel"
-                                          , children: [ R.text "Travel Routes" ]
-                                          }
-                                      , R.option
-                                          { value: "meteors"
-                                          , children: [ R.text "Meteors & Craters" ]
                                           }
                                       ]
                                   }

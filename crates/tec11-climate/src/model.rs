@@ -308,6 +308,16 @@ impl ClimateModel {
         &self.ocean_seasons[idx]
     }
 
+    /// Return the equinox/baseline ocean circulation if seasons have been evaluated,
+    /// or `None` on pre-atmospheric Hadean models before climate seasons exist.
+    pub fn try_ocean(&self) -> Option<&OceanCirculation> {
+        if self.ocean_seasons.len() > 2 {
+            self.ocean_seasons.get(2)
+        } else {
+            self.ocean_seasons.first()
+        }
+    }
+
     /// Return the ocean circulation for a specific `season_idx` (`0..season_count()`).
     pub fn ocean_for_season(&self, season_idx: usize) -> Option<&OceanCirculation> {
         self.ocean_seasons.get(season_idx)

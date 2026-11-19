@@ -1222,6 +1222,29 @@ impl HistorySimulation {
         &self.prehistory
     }
 
+    pub fn river_tiles(&self) -> &[bool] {
+        &self.river_tiles
+    }
+
+    pub fn population_heat_rgb(s: f32) -> [f32; 3] {
+        let u = s.clamp(0.0, 1.0);
+        if u < 0.5 {
+            let t = u / 0.5;
+            [
+                0.28 + 0.64 * t,
+                0.10 + 0.34 * t,
+                0.16 * (1.0 - 0.5 * t),
+            ]
+        } else {
+            let t = (u - 0.5) / 0.5;
+            [
+                0.92 + 0.08 * t,
+                0.44 + 0.50 * t,
+                0.08 + 0.58 * t * t,
+            ]
+        }
+    }
+
     /// Mutable access to coarse geological tiles (used by tests or world editors, followed by `refresh_mineral_caches`).
     pub fn prehistory_tiles_mut(&mut self) -> &mut [crate::tile::TileGeology] {
         self.prehistory.tiles_mut()
@@ -7957,34 +7980,55 @@ impl HistorySimulation {
             .unwrap_or(1)
             .max(1) as f32;
 
-        let active_ports: BTreeSet<usize> = if aspect == "travel" || aspect == "winds_currents" {
-            self.travel_routes
-                .iter()
-                .flat_map(|r| [r.from_fine_face, r.to_fine_face])
-                .filter(|f_idx| self.tile_states.contains_key(f_idx))
-                .collect()
-        } else {
-            BTreeSet::new()
-        };
+        let active_ports: BTreeSet<usize> =
+            if aspect == "travel" || aspect == "winds_currents" || aspect == "borders" {
+                self.travel_routes
+                    .iter()
+                    .flat_map(|r| [r.from_fine_face, r.to_fine_face])
+                    .filter(|f_idx| self.tile_states.contains_key(f_idx))
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
         let ocean = self.prehistory.climate_model().ocean();
+
+        let default_op = crate::sun_sky::PlanetaryOptics::compute(
+            &crate::sun_sky::HomeStar::sol(),
+            crate::sun_sky::AtmosphereType::EarthLikeN2O2,
+        );
+        let op_ref = optics.unwrap_or(&default_op);
 
         let mut out = Vec::with_capacity(num_display * 3);
         for face in &self.terrain.display_faces {
             let f_idx = match face.source {
                 DisplayFaceSource::OceanCoarse(c_idx) => {
-                    if aspect == "winds_currents" || aspect == "travel" {
+                    if aspect == "color" {
+                        let h = coarse_elevs.get(c_idx).copied().unwrap_or(-3.0).min(-0.01);
+                        let rgb = crate::world::WorldSimulation::natural_color_shaded(
+                            h,
+                            0.0,
+                            felsities.get(c_idx).copied().unwrap_or(0.5),
+                            koeppen.get(c_idx).copied().unwrap_or(0),
+                            0.0,
+                            true,
+                            op_ref,
+                        );
+                        out.extend_from_slice(&rgb);
+                    } else if aspect == "population" {
+                        out.extend_from_slice(&[0.03, 0.06, 0.14]);
+                    } else if aspect == "winds_currents" || aspect == "travel" {
                         let spd = ocean.speed.get(c_idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
                         let sst = ocean.sst_anomaly.get(c_idx).copied().unwrap_or(0.0);
                         let (r, g, b) = if aspect == "winds_currents" {
                             if sst >= 0.0 {
-                                let warm = (sst / 6.0).clamp(0.0, 1.0);
+                                let warm = sst.clamp(0.0, 1.0);
                                 (
                                     (ocean_rgb[0] + 0.55 * spd + 0.25 * warm).clamp(0.0, 1.0),
                                     (ocean_rgb[1] + 0.35 * spd + 0.10 * warm).clamp(0.0, 1.0),
                                     (ocean_rgb[2] + 0.15 * spd).clamp(0.0, 1.0),
                                 )
                             } else {
-                                let cold = (-sst / 6.0).clamp(0.0, 1.0);
+                                let cold = (-sst).clamp(0.0, 1.0);
                                 (
                                     (ocean_rgb[0] + 0.08 * spd).clamp(0.0, 1.0),
                                     (ocean_rgb[1] + 0.45 * spd + 0.18 * cold).clamp(0.0, 1.0),
@@ -8009,7 +8053,22 @@ impl HistorySimulation {
             };
 
             if self.terrain.fine_elevations[f_idx] <= 0.0 {
-                if aspect == "winds_currents" || aspect == "travel" {
+                if aspect == "color" {
+                    let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                    let h = self.terrain.fine_elevations[f_idx].min(-0.01);
+                    let rgb = crate::world::WorldSimulation::natural_color_shaded(
+                        h,
+                        0.0,
+                        felsities[c_idx],
+                        koeppen[c_idx],
+                        0.0,
+                        true,
+                        op_ref,
+                    );
+                    out.extend_from_slice(&rgb);
+                } else if aspect == "population" {
+                    out.extend_from_slice(&[0.03, 0.06, 0.14]);
+                } else if aspect == "winds_currents" || aspect == "travel" {
                     let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
                     let spd = ocean.speed.get(c_idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
                     out.extend_from_slice(&[
@@ -8026,7 +8085,7 @@ impl HistorySimulation {
                 out.extend_from_slice(&[1.0, 0.92, 0.25]);
                 continue;
             }
-            if show_rivers && self.river_tiles[f_idx] {
+            if show_rivers && aspect != "population" && self.river_tiles[f_idx] {
                 out.extend_from_slice(&[0.35, 0.88, 0.96]);
                 continue;
             }
@@ -8034,6 +8093,25 @@ impl HistorySimulation {
             let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
 
             match aspect {
+                "color" => {
+                    let h = self.terrain.fine_elevations[f_idx];
+                    let mount = self
+                        .prehistory
+                        .tiles()
+                        .get(c_idx)
+                        .map(|t| t.mountainosity)
+                        .unwrap_or(0.0);
+                    let rgb = crate::world::WorldSimulation::natural_color_shaded(
+                        h,
+                        mount,
+                        felsities[c_idx],
+                        koeppen[c_idx],
+                        life[c_idx],
+                        true,
+                        op_ref,
+                    );
+                    out.extend_from_slice(&rgb);
+                }
                 "species" => {
                     let total_sp = self
                         .coarse_total_species_counts
@@ -8049,8 +8127,12 @@ impl HistorySimulation {
                         .get(&f_idx)
                         .map(|cs| cs.iter().map(|c| c.thousands).sum())
                         .unwrap_or(0.0);
-                    let s = ((1.0 + pop).ln() / (1.0 + max_cap).ln()).clamp(0.0, 1.0);
-                    out.extend_from_slice(&[s, 0.35 * s, 0.1 * (1.0 - s)]);
+                    if pop <= 0.01 {
+                        out.extend_from_slice(&[0.13, 0.16, 0.19]);
+                    } else {
+                        let s = ((1.0 + pop).ln() / (1.0 + max_cap).ln()).clamp(0.05, 1.0);
+                        out.extend_from_slice(&Self::population_heat_rgb(s));
+                    }
                 }
                 "capacity" => {
                     let s = (self.capacities[f_idx] / max_cap).clamp(0.0, 1.0);
@@ -8095,7 +8177,13 @@ impl HistorySimulation {
                     }
                 }
                 _ => {
-                    // "nations" aspect (`historydisplay.py:39-72`)
+                    // "nations" / "borders" aspect: sovereign states in distinct palette colors,
+                    // stateless populated settlements in burnt-amber/terracotta, uninhabited land muted.
+                    let stateless_pop = !self.tile_states.contains_key(&f_idx)
+                        && self
+                            .tile_communities
+                            .get(&f_idx)
+                            .is_some_and(|cs| cs.iter().map(|c| c.thousands).sum::<f32>() > 0.01);
                     if let Some(&sid) = self.tile_states.get(&f_idx) {
                         if selected_state == Some(sid) {
                             out.extend_from_slice(&[0.15, 0.95, 0.35]); // Selected state: bright green
@@ -8111,6 +8199,8 @@ impl HistorySimulation {
                                 .unwrap_or((sid as usize) % NATION_PALETTE.len());
                             out.extend_from_slice(&NATION_PALETTE[cidx]);
                         }
+                    } else if stateless_pop {
+                        out.extend_from_slice(&[0.82, 0.56, 0.28]);
                     } else if koeppen[c_idx] == 12 || koeppen[c_idx] == 13 {
                         out.extend_from_slice(&[0.95, 0.97, 1.0]);
                     } else if let Some(op) = optics {

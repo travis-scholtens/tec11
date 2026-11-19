@@ -1050,8 +1050,11 @@ impl WorldSimulation {
         out
     }
 
-    /// Compute RGB vertex/tile colors for `"color"`, `"climate"`, `"population"`, `"nations"`, or `"meteors"`
-    /// (`worlddisplay.py:7-62`).
+    /// Compute RGB vertex/tile colors for the four World globe modes:
+    /// `"color"` (physical terrain with elevation darkening and no political borders),
+    /// `"climate"` (Köppen climate zones + annual-mean ocean current/SST shading),
+    /// `"borders"` (sovereign states + distinct terracotta for stateless populations),
+    /// and `"population"` (log-density population heatmap).
     pub fn tile_colors_rgb(&self, aspect: &str, selected_tile: Option<usize>) -> Vec<f32> {
         let mut out = match &self.stage {
             WorldStageState::Tectonics(tec) => {
@@ -1061,6 +1064,7 @@ impl WorldSimulation {
                 let life = tec.tile_life();
                 let scars = tec.tile_impact_scars();
                 let has_atm = tec.has_atmosphere();
+                let ocean = has_atm.then(|| tec.climate_model().try_ocean()).flatten();
                 (0..n)
                     .flat_map(|t| {
                         let h = tiles[t].elevation();
@@ -1068,19 +1072,49 @@ impl WorldSimulation {
                             "climate" => {
                                 if !has_atm {
                                     if h > 0.0 {
-                                        [0.5, 0.5, 0.5]
+                                        [0.45, 0.45, 0.48]
                                     } else {
-                                        [0.0, 0.0, 0.0]
+                                        [0.05, 0.07, 0.12]
                                     }
                                 } else if h > 0.0 {
                                     koeppen_rgb(koeppen[t])
                                 } else {
-                                    [0.0, 0.0, 0.0]
+                                    let sst = ocean
+                                        .and_then(|o| o.sst_anomaly.get(t).copied())
+                                        .unwrap_or(0.0);
+                                    let spd = ocean
+                                        .and_then(|o| o.speed.get(t).copied())
+                                        .unwrap_or(0.0);
+                                    Self::climate_ocean_rgb(sst, spd)
+                                }
+                            }
+                            "population" => {
+                                if h > 0.0 {
+                                    [0.13, 0.16, 0.19]
+                                } else {
+                                    [0.03, 0.06, 0.14]
+                                }
+                            }
+                            "borders" | "nations" => {
+                                let base = Self::natural_color_shaded(
+                                    h,
+                                    tiles[t].mountainosity,
+                                    tiles[t].top_felsity(),
+                                    koeppen[t],
+                                    life[t],
+                                    has_atm,
+                                    &self.optics,
+                                );
+                                if h > 0.0 {
+                                    [base[0] * 0.72, base[1] * 0.72, base[2] * 0.72]
+                                } else {
+                                    base
                                 }
                             }
                             "meteors" => {
-                                let base = Self::natural_color_with_optics(
+                                let base = Self::natural_color_shaded(
                                     h,
+                                    tiles[t].mountainosity,
                                     tiles[t].top_felsity(),
                                     koeppen[t],
                                     life[t],
@@ -1090,39 +1124,9 @@ impl WorldSimulation {
                                 let scar = scars[t].max(tiles[t].impact_signature());
                                 Self::blend_impact_scar_color(base, scar)
                             }
-                            "metallurgy" => {
-                                if h <= 0.0 {
-                                    Self::natural_color_with_optics(
-                                        h,
-                                        tiles[t].top_felsity(),
-                                        koeppen[t],
-                                        life[t],
-                                        has_atm,
-                                        &self.optics,
-                                    )
-                                } else {
-                                    use crate::tile::{MineralKind, WORKABLE_GRADE};
-                                    let mins = tiles[t].accessible_mineral_abundances_with_elev(0.5, h);
-                                    let workable = |mk: MineralKind| {
-                                        mins.get(&mk)
-                                            .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.006)
-                                    };
-                                    if workable(MineralKind::Tin) {
-                                        [0.42, 0.68, 0.62]
-                                    } else if workable(MineralKind::Copper) {
-                                        [0.24, 0.60, 0.40]
-                                    } else if mins
-                                        .get(&MineralKind::Iron)
-                                        .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.020)
-                                    {
-                                        [0.52, 0.30, 0.22]
-                                    } else {
-                                        [0.20, 0.24, 0.20]
-                                    }
-                                }
-                            }
-                            _ => Self::natural_color_with_optics(
+                            _ => Self::natural_color_shaded(
                                 h,
+                                tiles[t].mountainosity,
                                 tiles[t].top_felsity(),
                                 koeppen[t],
                                 life[t],
@@ -1137,36 +1141,76 @@ impl WorldSimulation {
                 let n = pre.tile_count();
                 let tiles = pre.tiles();
                 let koeppen = pre.tile_koeppen_ids();
+                let island_koeppen = pre.subgrid_island_koeppen_ids();
                 let life = pre.tile_life();
-                let overlay = pre.population_overlay_colors();
+                let rivers = pre.river_tiles();
+                let populated = pre.populated();
+                let ocean = pre.climate_model().try_ocean();
                 (0..n)
                     .flat_map(|t| {
                         let h = tiles[t].elevation();
+                        let island_k = island_koeppen.get(t).copied().unwrap_or(0);
                         match aspect {
                             "climate" => {
                                 if h > 0.0 {
                                     koeppen_rgb(koeppen[t])
+                                } else if island_k != 0 {
+                                    koeppen_rgb(island_k)
                                 } else {
-                                    [0.0, 0.0, 0.0]
+                                    let sst = ocean
+                                        .and_then(|o| o.sst_anomaly.get(t).copied())
+                                        .unwrap_or(0.0);
+                                    let spd = ocean
+                                        .and_then(|o| o.speed.get(t).copied())
+                                        .unwrap_or(0.0);
+                                    Self::climate_ocean_rgb(sst, spd)
                                 }
                             }
-                            "population" | "nations" => {
-                                if overlay[t * 3] >= 0.0 {
-                                    [overlay[t * 3], overlay[t * 3 + 1], overlay[t * 3 + 2]]
+                            "population" => {
+                                if let Some(&hid) = populated.get(&t) {
+                                    let pop_k = pre.tile_population_for_heritage_thousands(t, hid);
+                                    if pop_k > 0.01 {
+                                        let s = ((1.0 + pop_k).ln() / (1.0 + 220.0_f32).ln())
+                                            .clamp(0.05, 1.0);
+                                        HistorySimulation::population_heat_rgb(s)
+                                    } else if h > 0.0 || island_k != 0 {
+                                        [0.13, 0.16, 0.19]
+                                    } else {
+                                        [0.03, 0.06, 0.14]
+                                    }
+                                } else if h > 0.0 || island_k != 0 {
+                                    [0.13, 0.16, 0.19]
                                 } else {
-                                    Self::natural_color_with_optics(
+                                    [0.03, 0.06, 0.14]
+                                }
+                            }
+                            "borders" | "nations" => {
+                                if populated.contains_key(&t) {
+                                    // Stateless prehistoric populations: distinct warm terracotta
+                                    [0.82, 0.56, 0.28]
+                                } else if h > 0.0 && rivers.get(t).copied().unwrap_or(false) {
+                                    [0.30, 0.78, 0.88]
+                                } else {
+                                    let base = Self::natural_color_shaded(
                                         h,
+                                        tiles[t].mountainosity,
                                         tiles[t].top_felsity(),
                                         koeppen[t],
                                         life[t],
                                         true,
                                         &self.optics,
-                                    )
+                                    );
+                                    if h > 0.0 {
+                                        [base[0] * 0.75, base[1] * 0.75, base[2] * 0.75]
+                                    } else {
+                                        base
+                                    }
                                 }
                             }
                             "meteors" => {
-                                let base = Self::natural_color_with_optics(
+                                let base = Self::natural_color_shaded(
                                     h,
+                                    tiles[t].mountainosity,
                                     tiles[t].top_felsity(),
                                     koeppen[t],
                                     life[t],
@@ -1175,133 +1219,82 @@ impl WorldSimulation {
                                 );
                                 Self::blend_impact_scar_color(base, tiles[t].impact_signature())
                             }
-                            "metallurgy" => {
-                                if h <= 0.0 {
-                                    Self::natural_color_with_optics(
+                            _ => {
+                                if h > 0.0 && rivers.get(t).copied().unwrap_or(false) {
+                                    [0.35, 0.88, 0.96]
+                                } else {
+                                    Self::natural_color_shaded(
                                         h,
+                                        tiles[t].mountainosity,
                                         tiles[t].top_felsity(),
                                         koeppen[t],
                                         life[t],
                                         true,
                                         &self.optics,
                                     )
-                                } else {
-                                    use crate::tile::{MineralKind, WORKABLE_GRADE};
-                                    let mins = tiles[t].accessible_mineral_abundances_with_elev(0.5, h);
-                                    let workable = |mk: MineralKind| {
-                                        mins.get(&mk)
-                                            .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.006)
-                                    };
-                                    if workable(MineralKind::Tin) {
-                                        [0.42, 0.68, 0.62]
-                                    } else if workable(MineralKind::Copper) {
-                                        [0.24, 0.60, 0.40]
-                                    } else if mins
-                                        .get(&MineralKind::Iron)
-                                        .is_some_and(|&(g, a)| g >= WORKABLE_GRADE && a >= 0.020)
-                                    {
-                                        [0.52, 0.30, 0.22]
-                                    } else {
-                                        [0.20, 0.24, 0.20]
-                                    }
                                 }
                             }
-                            _ => Self::natural_color_with_optics(
-                                h,
-                                tiles[t].top_felsity(),
-                                koeppen[t],
-                                life[t],
-                                true,
-                                &self.optics,
-                            ),
                         }
                     })
                     .collect()
             }
             WorldStageState::History(hist) => match aspect {
+                "color" => hist.tile_colors_rgb_with_optics(
+                    "color",
+                    true,
+                    selected_tile,
+                    Some(&self.optics),
+                ),
                 "climate" => {
-                    let pre_snap = hist.to_snapshot();
-                    if let Some(pre) = PrehistorySimulation::from_snapshot(&pre_snap, 42) {
-                        let coarse_elevs = pre.tile_elevations();
-                        let koeppen = hist.coarse_koeppen();
-                        let terrain = hist.terrain();
-                        terrain
-                            .display_faces
-                            .iter()
-                            .flat_map(|face| match face.source {
-                                tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
-                                    if terrain.fine_elevations[f_idx] > 0.0 {
-                                        let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
-                                        koeppen_rgb(koeppen[c])
+                    let pre = hist.prehistory();
+                    let coarse_elevs = pre.tile_elevations();
+                    let koeppen = hist.coarse_koeppen();
+                    let island_koeppen = pre.subgrid_island_koeppen_ids();
+                    let ocean = pre.climate_model().try_ocean();
+                    let terrain = hist.terrain();
+                    terrain
+                        .display_faces
+                        .iter()
+                        .flat_map(|face| match face.source {
+                            tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
+                                let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
+                                if terrain.fine_elevations[f_idx] > 0.0 {
+                                    let k = if koeppen[c] != 0 {
+                                        koeppen[c]
                                     } else {
-                                        [0.0, 0.0, 0.0]
-                                    }
+                                        island_koeppen.get(c).copied().unwrap_or(0)
+                                    };
+                                    koeppen_rgb(k)
+                                } else {
+                                    let sst = ocean
+                                        .and_then(|o| o.sst_anomaly.get(c).copied())
+                                        .unwrap_or(0.0);
+                                    let spd = ocean
+                                        .and_then(|o| o.speed.get(c).copied())
+                                        .unwrap_or(0.0);
+                                    Self::climate_ocean_rgb(sst, spd)
                                 }
-                                tec11_math_grid::DisplayFaceSource::OceanCoarse(_) => {
-                                    [0.0, 0.0, 0.0]
-                                }
-                            })
-                            .collect()
-                    } else {
-                        hist.tile_colors_rgb("nations", true, selected_tile)
-                    }
-                }
-                "meteors" => {
-                    let pre_snap = hist.to_snapshot();
-                    if let Some(pre) = PrehistorySimulation::from_snapshot(&pre_snap, 42) {
-                        let coarse_elevs = pre.tile_elevations();
-                        let tiles = pre.tiles();
-                        let koeppen = hist.coarse_koeppen();
-                        let life = hist.coarse_life();
-                        let terrain = hist.terrain();
-                        terrain
-                            .display_faces
-                            .iter()
-                            .flat_map(|face| match face.source {
-                                tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
-                                    let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
-                                    let h = terrain.fine_elevations[f_idx];
-                                    let base = Self::natural_color_with_optics(
-                                        h,
-                                        tiles[c].top_felsity(),
-                                        koeppen[c],
-                                        life[c],
-                                        true,
-                                        &self.optics,
-                                    );
-                                    Self::blend_impact_scar_color(
-                                        base,
-                                        tiles[c].impact_signature(),
-                                    )
-                                }
-                                tec11_math_grid::DisplayFaceSource::OceanCoarse(c_idx) => {
-                                    let h = tiles[c_idx].elevation();
-                                    let base = Self::natural_color_with_optics(
-                                        h,
-                                        tiles[c_idx].top_felsity(),
-                                        koeppen[c_idx],
-                                        life[c_idx],
-                                        true,
-                                        &self.optics,
-                                    );
-                                    Self::blend_impact_scar_color(
-                                        base,
-                                        tiles[c_idx].impact_signature(),
-                                    )
-                                }
-                            })
-                            .collect()
-                    } else {
-                        hist.tile_colors_rgb_with_optics(
-                            "nations",
-                            true,
-                            selected_tile,
-                            Some(&self.optics),
-                        )
-                    }
+                            }
+                            tec11_math_grid::DisplayFaceSource::OceanCoarse(c_idx) => {
+                                let sst = ocean
+                                    .and_then(|o| o.sst_anomaly.get(c_idx).copied())
+                                    .unwrap_or(0.0);
+                                let spd = ocean
+                                    .and_then(|o| o.speed.get(c_idx).copied())
+                                    .unwrap_or(0.0);
+                                Self::climate_ocean_rgb(sst, spd)
+                            }
+                        })
+                        .collect()
                 }
                 "population" => hist.tile_colors_rgb_with_optics(
                     "population",
+                    false,
+                    selected_tile,
+                    Some(&self.optics),
+                ),
+                "borders" | "nations" => hist.tile_colors_rgb_with_optics(
+                    "borders",
                     true,
                     selected_tile,
                     Some(&self.optics),
@@ -1319,7 +1312,7 @@ impl WorldSimulation {
                     Some(&self.optics),
                 ),
                 _ => hist.tile_colors_rgb_with_optics(
-                    "nations",
+                    "color",
                     true,
                     selected_tile,
                     Some(&self.optics),
@@ -1332,6 +1325,149 @@ impl WorldSimulation {
                 out[sel * 3] = 1.0;
                 out[sel * 3 + 1] = 0.0;
                 out[sel * 3 + 2] = 0.0;
+            }
+        }
+        out
+    }
+
+    /// Annual-mean ocean surface color in `"climate"` mode, combining current speed `[0, 1]`
+    /// and sea-surface temperature anomaly `[-1, 1]` (warm poleward vs. cold equatorward/upwelling).
+    pub fn climate_ocean_rgb(sst_anom: f32, speed: f32) -> [f32; 3] {
+        let spd = speed.clamp(0.0, 1.0);
+        let base_r = 0.03 + 0.06 * spd;
+        let base_g = 0.08 + 0.12 * spd;
+        let base_b = 0.18 + 0.16 * spd;
+        if sst_anom >= 0.0 {
+            let warm = sst_anom.clamp(0.0, 1.0) * (0.35 + 0.65 * spd);
+            [
+                (base_r + 0.42 * warm).clamp(0.0, 1.0),
+                (base_g + 0.18 * warm).clamp(0.0, 1.0),
+                (base_b + 0.04 * warm).clamp(0.0, 1.0),
+            ]
+        } else {
+            let cold = (-sst_anom).clamp(0.0, 1.0) * (0.35 + 0.65 * spd);
+            [
+                (base_r + 0.02 * cold).clamp(0.0, 1.0),
+                (base_g + 0.28 * cold).clamp(0.0, 1.0),
+                (base_b + 0.42 * cold).clamp(0.0, 1.0),
+            ]
+        }
+    }
+
+    /// Colored 3D line-segment buffer (`[x0, y0, z0, x1, y1, z1, r, g, b, ...]`, 9 floats per segment)
+    /// for annual-mean surface ocean current arrows (shaft + 2 barbs per active coarse ocean tile)
+    /// rendered on the 3D globe in `"climate"` mode.
+    pub fn ocean_current_segments_colored(&self) -> Vec<f32> {
+        let (grid, ocean, elevs): (&SphericalGrid, &tec11_climate::OceanCirculation, Vec<f32>) =
+            match &self.stage {
+                WorldStageState::Tectonics(tec) => {
+                    if !tec.has_atmosphere() {
+                        return Vec::new();
+                    }
+                    let Some(ocean) = tec.climate_model().try_ocean() else {
+                        return Vec::new();
+                    };
+                    (
+                        tec.grid(),
+                        ocean,
+                        tec.tiles().iter().map(|t| t.elevation()).collect(),
+                    )
+                }
+                WorldStageState::Prehistory(pre) => {
+                    let Some(ocean) = pre.climate_model().try_ocean() else {
+                        return Vec::new();
+                    };
+                    (pre.grid(), ocean, pre.tile_elevations())
+                }
+                WorldStageState::History(hist) => {
+                    let pre = hist.prehistory();
+                    let Some(ocean) = pre.climate_model().try_ocean() else {
+                        return Vec::new();
+                    };
+                    (pre.grid(), ocean, pre.tile_elevations())
+                }
+            };
+
+        let rotate_axes = |v: [f64; 3]| -> [f32; 3] { [-v[1] as f32, v[2] as f32, v[0] as f32] };
+
+        let n = grid.faces.len();
+        let mut out = Vec::with_capacity(n * 27);
+        for v in 0..n {
+            if elevs.get(v).copied().unwrap_or(1.0) > 0.0 {
+                continue;
+            }
+            let spd = ocean.speed.get(v).copied().unwrap_or(0.0);
+            if spd < 0.05 {
+                continue;
+            }
+            let vel = ocean.velocity_xyz[v];
+            let vmag = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+            if vmag < 1e-6 {
+                continue;
+            }
+            let dx = (vel[0] / vmag) as f64;
+            let dy = (vel[1] / vmag) as f64;
+            let dz = (vel[2] / vmag) as f64;
+
+            let ([nx, ny, nz], _) = grid.faces[v];
+            let px = ny * dz - nz * dy;
+            let py = nz * dx - nx * dz;
+            let pz = nx * dy - ny * dx;
+
+            let r_lift = 1.004;
+            let cx = nx * r_lift;
+            let cy = ny * r_lift;
+            let cz = nz * r_lift;
+
+            let half_len = 0.007 + 0.013 * (spd as f64).sqrt();
+            let tail = [
+                cx - half_len * dx,
+                cy - half_len * dy,
+                cz - half_len * dz,
+            ];
+            let tip = [
+                cx + half_len * dx,
+                cy + half_len * dy,
+                cz + half_len * dz,
+            ];
+            let barb_back = 0.65 * half_len;
+            let barb_wing = 0.42 * half_len;
+            let left = [
+                tip[0] - barb_back * dx + barb_wing * px,
+                tip[1] - barb_back * dy + barb_wing * py,
+                tip[2] - barb_back * dz + barb_wing * pz,
+            ];
+            let right = [
+                tip[0] - barb_back * dx - barb_wing * px,
+                tip[1] - barb_back * dy - barb_wing * py,
+                tip[2] - barb_back * dz - barb_wing * pz,
+            ];
+
+            let sst = ocean.sst_anomaly.get(v).copied().unwrap_or(0.0);
+            let rgb = if sst >= 0.08 {
+                let w = ((sst - 0.08) / 0.72).clamp(0.0, 1.0);
+                [
+                    0.88 + 0.12 * w,
+                    0.68 - 0.20 * w,
+                    0.34 - 0.18 * w,
+                ]
+            } else if sst <= -0.08 {
+                let c = ((-sst - 0.08) / 0.72).clamp(0.0, 1.0);
+                [
+                    0.42 - 0.22 * c,
+                    0.82 + 0.12 * c,
+                    0.96 + 0.04 * c,
+                ]
+            } else {
+                [0.68, 0.82, 0.92]
+            };
+
+            for (a, b) in [(tail, tip), (tip, left), (tip, right)] {
+                let ra = rotate_axes(a);
+                let rb = rotate_axes(b);
+                out.extend_from_slice(&[
+                    ra[0], ra[1], ra[2], rb[0], rb[1], rb[2], rgb[0], rgb[1], rgb[2],
+                ]);
             }
         }
         out
@@ -1364,6 +1500,42 @@ impl WorldSimulation {
                 base[0] * (1.0 - w) + 0.85 * w,
                 base[1] * (1.0 - w) + 0.45 * w,
                 base[2] * (1.0 - w) + 0.20 * w,
+            ]
+        }
+    }
+
+    /// Physical surface color with elevation and ruggedness darkening so mountain ranges
+    /// and high cordilleras stand out clearly in `"color"` mode across all stages.
+    pub fn natural_color_shaded(
+        h: f32,
+        mountainosity: f32,
+        felsity: f32,
+        koeppen: u8,
+        life: f32,
+        has_atm: bool,
+        optics: &PlanetaryOptics,
+    ) -> [f32; 3] {
+        if h <= 0.0 {
+            return Self::natural_color_with_optics(h, felsity, koeppen, life, has_atm, optics);
+        }
+        let u_elev = ((h - 0.45).max(0.0) / 4.8).clamp(0.0, 1.0);
+        let u_mount = (mountainosity / 12.0).clamp(0.0, 1.0);
+        if has_atm && (koeppen == 12 || koeppen == 13) {
+            let shade = (1.0 - 0.30 * u_elev - 0.08 * u_mount).clamp(0.58, 1.0);
+            [0.96 * shade, 0.98 * shade, 1.0 * (shade + 0.02).min(1.0)]
+        } else {
+            let rock_r = (0.5 * 128.0) / 255.0;
+            let rock_g = (0.5 * (64.0 + 64.0 * felsity)) / 255.0;
+            let rock_b = (0.5 * (128.0 * felsity)) / 255.0;
+            // Taper alpine foliage above 1.8 km so high ridges expose darker craggy rock:
+            let alpine_taper = (1.0 - ((h - 1.8).max(0.0) / 2.6)).clamp(0.0, 1.0);
+            let veg = life.clamp(0.0, 1.0) * alpine_taper;
+            let pf = optics.plant_foliage_rgb;
+            let shade = (1.0 - 0.52 * u_elev.powf(0.85) - 0.12 * u_mount).clamp(0.32, 1.0);
+            [
+                ((rock_r * (1.0 - 0.55 * veg) + pf[0] * 0.85 * veg) * shade).clamp(0.0, 1.0),
+                ((rock_g * (1.0 - 0.55 * veg) + pf[1] * 0.85 * veg) * shade).clamp(0.0, 1.0),
+                ((rock_b * (1.0 - 0.55 * veg) + pf[2] * 0.85 * veg) * shade).clamp(0.0, 1.0),
             ]
         }
     }
@@ -1872,6 +2044,92 @@ mod tests {
             world.stage_index(),
             2,
             "Developing agriculture after >= 32 Prehistory ticks must transition into History"
+        );
+    }
+
+    #[test]
+    fn test_world_four_globe_modes_color_climate_borders_population() {
+        let mut p = WorldCreateParams::default();
+        p.grid_size = 3;
+        p.atm_dt_myr = 5;
+        p.life_dt_myr = 5;
+        p.people_dt_myr = 5;
+        let mut world = WorldSimulation::new(p, 909);
+
+        // Verify tick-0 pre-atmospheric Hadean world renders all four modes without panicking:
+        assert_eq!(world.stage_index(), 0);
+        let n_tec = world.tile_count();
+        for mode in ["color", "climate", "borders", "population"] {
+            let c0 = world.tile_colors_rgb(mode, Some(0));
+            assert_eq!(c0.len(), n_tec * 3);
+        }
+        assert!(world.ocean_current_segments_colored().is_empty());
+
+        // Verify higher elevations are shaded darker in natural_color_shaded:
+        let low = WorldSimulation::natural_color_shaded(
+            0.2,
+            0.5,
+            0.5,
+            5,
+            0.7,
+            true,
+            world.optics(),
+        );
+        let high = WorldSimulation::natural_color_shaded(
+            4.2,
+            10.0,
+            0.5,
+            5,
+            0.7,
+            true,
+            world.optics(),
+        );
+        assert!(
+            high[0] + high[1] + high[2] < low[0] + low[1] + low[2],
+            "Mountain elevations should be shaded darker than lowland tiles in Color mode"
+        );
+
+        while world.stage_index() == 0 {
+            world.step();
+        }
+        assert_eq!(world.stage_index(), 1);
+        world.step();
+
+        let n_pre = world.tile_count();
+        for mode in ["color", "climate", "borders", "population"] {
+            let c = world.tile_colors_rgb(mode, None);
+            assert_eq!(c.len(), n_pre * 3);
+        }
+        let ocean_segs = world.ocean_current_segments_colored();
+        assert_eq!(ocean_segs.len() % 9, 0);
+        assert!(!ocean_segs.is_empty(), "Climate mode should emit colored 3D ocean current arrows");
+
+        // Advance into History and ensure Color mode does NOT paint sovereign state palette colors:
+        let mut snap = tec11_proto::PlanetSnapshot::decode_bytes(&world.encode_snapshot()).unwrap();
+        if let Some(tec11_proto::PlanetStageOneof::Prehistory(ref mut pre_proto)) = snap.stage {
+            pre_proto.prehistory_ticks = 32;
+            pre_proto.glaciation_tick = 32;
+            for h in &mut pre_proto.heritages {
+                h.agricultural = true;
+            }
+        }
+        assert!(world.load_snapshot_bytes(&snap.encode_bytes()));
+        world.step();
+        assert_eq!(world.stage_index(), 2);
+        for _ in 0..8 {
+            world.step();
+        }
+        let c_color = world.tile_colors_rgb("color", None);
+        let c_borders = world.tile_colors_rgb("borders", None);
+        let c_pop = world.tile_colors_rgb("population", None);
+        let c_clim = world.tile_colors_rgb("climate", None);
+        assert_eq!(c_color.len(), world.tile_count() * 3);
+        assert_eq!(c_borders.len(), world.tile_count() * 3);
+        assert_eq!(c_pop.len(), world.tile_count() * 3);
+        assert_eq!(c_clim.len(), world.tile_count() * 3);
+        assert_ne!(
+            c_color, c_borders,
+            "Color mode in History must show physical terrain rather than political Borders"
         );
     }
 }
