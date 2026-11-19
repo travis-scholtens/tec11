@@ -55,6 +55,7 @@ data WorldModal
   = CosmosModal
   | GeologyModal
   | SkyModal
+  | LifeModal
 
 derive instance eqWorldModal :: Eq WorldModal
 
@@ -5865,6 +5866,18 @@ mkApp = do
                                               , onClick: capture_ (setWorldActiveModal (Just SkyModal))
                                               , children: [ R.text "Sky" ]
                                               }
+                                          , if worldInfo.stageIndex >= 1
+                                              || worldInfo.tileView.technology == "Biosphere"
+                                              || not (Array.null worldInfo.tileView.flora)
+                                              || not (Array.null worldInfo.tileView.fauna) then
+                                              R.button
+                                                { id: "world-life-btn"
+                                                , className: "action-btn secondary"
+                                                , onClick: capture_ (setWorldActiveModal (Just LifeModal))
+                                                , children: [ R.text "Life" ]
+                                                }
+                                            else
+                                              React.empty
                                           ]
                                       }
                                   ]
@@ -6095,6 +6108,110 @@ mkApp = do
                                                   ]
                                               }
                                           , renderTileSkyAndVantageBox worldInfo.tileView
+                                          ]
+                                      }
+                                  ]
+                              }
+                          ]
+                      }
+                  Just LifeModal ->
+                    R.div
+                      { id: "world-life-modal"
+                      , className: "world-modal-backdrop"
+                      , children:
+                          [ R.div
+                              { style: R.css { position: "fixed", inset: "0" }
+                              , onClick: capture_ (setWorldActiveModal Nothing)
+                              , children: []
+                              }
+                          , R.div
+                              { className: "world-modal-card"
+                              , style: R.css { position: "relative", zIndex: "1", maxWidth: "min(680px, 95vw)" }
+                              , children:
+                                  [ R.div
+                                      { className: "world-modal-header"
+                                      , children:
+                                          [ R.div
+                                              { className: "world-modal-title"
+                                              , children: [ R.text ("Native Flora & Fauna — " <> worldInfo.tileView.title) ]
+                                              }
+                                          , R.button
+                                              { id: "world-modal-close-btn"
+                                              , className: "world-modal-close-btn"
+                                              , onClick: capture_ (setWorldActiveModal Nothing)
+                                              , children: [ R.text "Close ×" ]
+                                              }
+                                          ]
+                                      }
+                                  , R.div
+                                      { className: "world-modal-body"
+                                      , children:
+                                          [ R.div
+                                              { style:
+                                                  R.css
+                                                    { display: "flex"
+                                                    , alignItems: "center"
+                                                    , gap: "0.55rem"
+                                                    , fontSize: "0.82rem"
+                                                    , color: "#cbd5e1"
+                                                    }
+                                              , children:
+                                                  [ R.span
+                                                      { style:
+                                                          R.css
+                                                            { width: "12px"
+                                                            , height: "12px"
+                                                            , borderRadius: "50%"
+                                                            , backgroundColor: worldInfo.plantColorCss
+                                                            , border: "1px solid #94a3b8"
+                                                            , display: "inline-block"
+                                                            , flexShrink: "0"
+                                                            }
+                                                      }
+                                                  , R.text
+                                                      ( "Photosynthetic Pigment: "
+                                                          <> worldInfo.plantColorName
+                                                          <> " · "
+                                                          <> worldInfo.tileView.locationSummary
+                                                      )
+                                                  ]
+                                              }
+                                          , R.div
+                                              { style:
+                                                  R.css
+                                                    { display: "grid"
+                                                    , gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))"
+                                                    , gap: "0.85rem"
+                                                    }
+                                              , children:
+                                                  [ R.div
+                                                      { className: "tile-details-box"
+                                                      , style: R.css { maxHeight: "320px" }
+                                                      , children:
+                                                          [ R.div
+                                                              { style: R.css { fontWeight: "700", color: "#86efac", marginBottom: "6px", fontSize: "0.85rem" }
+                                                              , children: [ R.text ("Native Flora (" <> show (Array.length worldInfo.tileView.flora) <> ")") ]
+                                                              }
+                                                          , renderStringBulletList
+                                                              worldInfo.tileView.flora
+                                                              "No native flora in this habitat."
+                                                          ]
+                                                      }
+                                                  , R.div
+                                                      { className: "tile-details-box"
+                                                      , style: R.css { maxHeight: "320px" }
+                                                      , children:
+                                                          [ R.div
+                                                              { style: R.css { fontWeight: "700", color: "#fcd34d", marginBottom: "6px", fontSize: "0.85rem" }
+                                                              , children: [ R.text ("Native Fauna (" <> show (Array.length worldInfo.tileView.fauna) <> ")") ]
+                                                              }
+                                                          , renderStringBulletList
+                                                              worldInfo.tileView.fauna
+                                                              "No native fauna in this habitat."
+                                                          ]
+                                                      }
+                                                  ]
+                                              }
                                           ]
                                       }
                                   ]
