@@ -5138,9 +5138,202 @@ function computeWorldVertexColors(view) {
   return colors;
 }
 
+function paintWorldRegionalCanvas(view) {
+  const canvas = document.getElementById("world-regional-canvas");
+  if (!canvas || !view || !view.regionalMapData || !view.regionalMapData.hasTile) {
+    return;
+  }
+  const data = view.regionalMapData;
+  const polys = Array.isArray(data.polygons) ? data.polygons : [];
+  if (polys.length === 0) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const cssW = Math.max(240, Math.round(rect.width || 340));
+  const cssH = Math.max(190, Math.round(rect.height || 235));
+  const dpr = Math.min(2.5, Math.max(1.0, window.devicePixelRatio || 1.0));
+  const tw = Math.round(cssW * dpr);
+  const th = Math.round(cssH * dpr);
+  if (canvas.width !== tw || canvas.height !== th) {
+    canvas.width = tw;
+    canvas.height = th;
+  }
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  ctx.fillStyle = "#060b19";
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  // Use Math.max(cssW, cssH) so the centered tangent patch fills the rectangular frame edge-to-edge
+  // with `centerTileIdx` dead-center at `(cssW * 0.5, cssH * 0.5)`:
+  const scale = Math.max(cssW, cssH);
+  const ox = (cssW - scale) * 0.5;
+  const oy = (cssH - scale) * 0.5;
+
+  const tracePoly = (pts) => {
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const px = ox + pts[i][0] * scale;
+      const py = oy + pts[i][1] * scale;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  };
+
+  // Pass 1: Fill & stroke all polygons using active globe mode colors:
+  const isBorders = data.aspect === "borders" || data.aspect === "nations";
+  for (const poly of polys) {
+    if (!poly.pts || poly.pts.length < 3) continue;
+    tracePoly(poly.pts);
+    ctx.fillStyle = rgbFloatToCss(poly.rgb, 30, 41, 59);
+    ctx.fill();
+    if (poly.isRiver) {
+      ctx.strokeStyle = "rgba(56, 189, 248, 0.85)";
+      ctx.lineWidth = 1.05;
+    } else if (isBorders && poly.stateId >= 0) {
+      ctx.strokeStyle = "rgba(226, 232, 240, 0.42)";
+      ctx.lineWidth = 0.85;
+    } else {
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.48)";
+      ctx.lineWidth = 0.65;
+    }
+    ctx.stroke();
+  }
+
+  // Pass 2: Mode-specific vector overlays (`Climate` ocean currents or `Borders` travel routes):
+  if (data.aspect === "climate" && Array.isArray(data.currents)) {
+    ctx.lineCap = "round";
+    for (const cur of data.currents) {
+      const [u, v, dx, dy, spd, sst] = cur;
+      const cx = ox + u * scale;
+      const cy = oy + v * scale;
+      const half = 4.5 + 7.5 * Math.sqrt(Math.max(0.05, spd || 0.2));
+      const x0 = cx - dx * half;
+      const y0 = cy - dy * half;
+      const x1 = cx + dx * half;
+      const y1 = cy + dy * half;
+      const px = -dy;
+      const py = dx;
+      const col =
+        sst >= 0.08
+          ? "rgba(251, 191, 36, 0.90)"
+          : sst <= -0.08
+          ? "rgba(103, 232, 249, 0.90)"
+          : "rgba(203, 213, 225, 0.82)";
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.35;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x1 - dx * half * 0.55 + px * half * 0.38, y1 - dy * half * 0.55 + py * half * 0.38);
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x1 - dx * half * 0.55 - px * half * 0.38, y1 - dy * half * 0.55 - py * half * 0.38);
+      ctx.stroke();
+    }
+  } else if (isBorders && Array.isArray(data.routes)) {
+    ctx.lineCap = "round";
+    for (const rt of data.routes) {
+      const [u0, v0, u1, v1, r, g, b] = rt;
+      ctx.strokeStyle = rgbFloatToCss([r, g, b], 250, 204, 21);
+      ctx.lineWidth = 1.9;
+      ctx.beginPath();
+      ctx.moveTo(ox + u0 * scale, oy + v0 * scale);
+      ctx.lineTo(ox + u1 * scale, oy + v1 * scale);
+      ctx.stroke();
+    }
+  }
+
+  // Pass 3: Capital city markers (in `Borders`) & crisp gold outline around centered selected tile:
+  for (const poly of polys) {
+    if (!poly.pts || poly.pts.length < 3) continue;
+    if (poly.isCapital) {
+      let mx = 0;
+      let my = 0;
+      for (const pt of poly.pts) {
+        mx += pt[0];
+        my += pt[1];
+      }
+      mx = ox + (mx / poly.pts.length) * scale;
+      my = oy + (my / poly.pts.length) * scale;
+      ctx.fillStyle = "#fef08a";
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.arc(mx, my, 3.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    if (poly.isSelected) {
+      tracePoly(poly.pts);
+      ctx.strokeStyle = "#facc15";
+      ctx.lineWidth = 2.6;
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+
+  canvas.onclick = (ev) => {
+    if (!view || !view.regionalMapData || !Array.isArray(view.regionalMapData.polygons)) return;
+    const r = canvas.getBoundingClientRect();
+    const clickX = ev.clientX - r.left;
+    const clickY = ev.clientY - r.top;
+    const w = Math.max(1, r.width);
+    const h = Math.max(1, r.height);
+    const sc = Math.max(w, h);
+    const offX = (w - sc) * 0.5;
+    const offY = (h - sc) * 0.5;
+    const u = (clickX - offX) / sc;
+    const v = (clickY - offY) / sc;
+
+    let hit = null;
+    for (const poly of view.regionalMapData.polygons) {
+      if (poly.pts && pointInPolygon2D(u, v, poly.pts)) {
+        hit = poly;
+        break;
+      }
+    }
+    if (hit && hit.tileIdx >= 0) {
+      view.selectedTileIdx = hit.tileIdx;
+      view.selectedStateId = -1;
+      updateWorldDataBuffers(view, false);
+      if (view.setWorldInfo) {
+        view.setWorldInfo(buildWorldInfo(view))();
+      }
+    }
+  };
+}
+
+function scheduleWorldRegionalPaint(view) {
+  if (!view || !view.session) return;
+  if (view.selectedTileIdx >= 0) {
+    try {
+      view.regionalMapData = JSON.parse(
+        view.session.regional_tile_map_json(view.selectedTileIdx, view.aspect)
+      );
+    } catch (_err) {
+      view.regionalMapData = null;
+    }
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => paintWorldRegionalCanvas(view));
+      setTimeout(() => paintWorldRegionalCanvas(view), 40);
+    }
+  } else {
+    view.regionalMapData = null;
+  }
+}
+
 function updateWorldDataBuffers(view, rebuildGeometry = false) {
   const { session, geometry } = view;
   const currentTileCount = session.tile_count();
+  if (view.selectedTileIdx >= currentTileCount) {
+    view.selectedTileIdx = -1;
+    view.selectedStateId = -1;
+  }
   if (rebuildGeometry || view.lastTileCount !== currentTileCount) {
     view.lastTileCount = currentTileCount;
     const positions = session.mesh_positions();
@@ -5162,6 +5355,7 @@ function updateWorldDataBuffers(view, rebuildGeometry = false) {
   } else {
     view.arrowLines.visible = false;
   }
+  scheduleWorldRegionalPaint(view);
   view.paint();
 }
 
@@ -5962,6 +6156,16 @@ export const setWorldAspect = (aspect) => () => {
   if (!activeView || !activeView.session) return;
   activeView.aspect = aspect;
   updateWorldDataBuffers(activeView, false);
+};
+
+export const clearWorldSelectedTile = (setWorldInfo) => () => {
+  if (!activeView || !activeView.session) return;
+  activeView.selectedTileIdx = -1;
+  activeView.selectedStateId = -1;
+  activeView.selectedLangId = -1;
+  activeView.selectedNationId = -1;
+  updateWorldDataBuffers(activeView, false);
+  setWorldInfo(buildWorldInfo(activeView))();
 };
 
 export const setWorldSunAndAtmosphere =

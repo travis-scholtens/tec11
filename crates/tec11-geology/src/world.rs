@@ -1645,6 +1645,344 @@ impl WorldSimulation {
         }
     }
 
+    /// Build a tangent-plane regional polygon map JSON centered dead-on `center_idx` (`u = 0.5, v = 0.5`),
+    /// rendered using the active globe mode (`"color"`, `"climate"`, `"borders"`, `"population"`),
+    /// including 2D ocean current arrows in `"climate"` mode and active travel routes in `"borders"` mode.
+    pub fn regional_tile_map_json(&self, center_idx: usize, aspect: &str) -> String {
+        let dot = |a: [f64; 3], b: [f64; 3]| -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] };
+        let cross = |a: [f64; 3], b: [f64; 3]| -> [f64; 3] {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let norm3 = |v: [f64; 3]| -> [f64; 3] {
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            if l > 1e-12 {
+                [v[0] / l, v[1] / l, v[2] / l]
+            } else {
+                [1.0, 0.0, 0.0]
+            }
+        };
+
+        let (center, n_coarse) = match &self.stage {
+            WorldStageState::Tectonics(tec) => {
+                let Some((c, _)) = tec.grid().faces.get(center_idx) else {
+                    return "{\"hasTile\":false}".to_string();
+                };
+                (norm3(*c), tec.tile_count().max(1))
+            }
+            WorldStageState::Prehistory(pre) => {
+                let Some((c, _)) = pre.grid().faces.get(center_idx) else {
+                    return "{\"hasTile\":false}".to_string();
+                };
+                (norm3(*c), pre.tile_count().max(1))
+            }
+            WorldStageState::History(hist) => {
+                let Some(df) = hist.terrain().display_faces.get(center_idx) else {
+                    return "{\"hasTile\":false}".to_string();
+                };
+                (norm3(df.center), hist.prehistory().tile_count().max(1))
+            }
+        };
+
+        let ref_up = if center[2].abs() < 0.95 {
+            [0.0, 0.0, 1.0]
+        } else {
+            [1.0, 0.0, 0.0]
+        };
+        let east = norm3(cross(ref_up, center));
+        let north = norm3(cross(center, east));
+
+        let is_history = matches!(self.stage, WorldStageState::History(_));
+        let half_span: f32 = if is_history {
+            (2.25 / (n_coarse as f32).sqrt()).clamp(0.14, 0.36)
+        } else {
+            (2.90 / (n_coarse as f32).sqrt()).clamp(0.18, 0.44)
+        };
+        let span = 2.0 * half_span;
+        let cos_cutoff = ((half_span * 1.65).min(1.15) as f64).cos();
+
+        let project_uv = |v: [f64; 3]| -> [f32; 2] {
+            let x = -dot(v, east) as f32;
+            let y = -dot(v, north) as f32;
+            [0.5 + x / span, 0.5 + y / span]
+        };
+
+        // Compute true mode colors without overwriting `center_idx` with solid selection red:
+        let raw_unselected = self.tile_colors_rgb(aspect, None);
+        let mut colors = if is_history && (aspect == "borders" || aspect == "nations") {
+            let mut c = self.tile_colors_rgb(aspect, Some(center_idx));
+            if center_idx * 3 + 2 < c.len() && center_idx * 3 + 2 < raw_unselected.len() {
+                // Keep diplomatic green/yellow/red state shading while restoring `center_idx` from `[1,0,0]`
+                // if `center_idx` belongs to a state, or its true terrain/stateless color otherwise:
+                if let WorldStageState::History(hist) = &self.stage {
+                    let is_in_state = hist
+                        .terrain()
+                        .display_faces
+                        .get(center_idx)
+                        .is_some_and(|df| match df.source {
+                            tec11_math_grid::DisplayFaceSource::Fine(f) => {
+                                hist.state_at_tile(f).is_some()
+                            }
+                            _ => false,
+                        });
+                    if is_in_state {
+                        c[center_idx * 3] = 0.15;
+                        c[center_idx * 3 + 1] = 0.95;
+                        c[center_idx * 3 + 2] = 0.35;
+                    } else {
+                        c[center_idx * 3] = raw_unselected[center_idx * 3];
+                        c[center_idx * 3 + 1] = raw_unselected[center_idx * 3 + 1];
+                        c[center_idx * 3 + 2] = raw_unselected[center_idx * 3 + 2];
+                    }
+                }
+            }
+            c
+        } else {
+            raw_unselected
+        };
+        if colors.len() < 3 {
+            colors = vec![0.2, 0.3, 0.4];
+        }
+
+        let mut poly_entries = Vec::new();
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => {
+                let grid = tec.grid();
+                for (t, (fc, verts)) in grid.faces.iter().enumerate() {
+                    if dot(*fc, center) < cos_cutoff || verts.len() < 3 {
+                        continue;
+                    }
+                    let mut u_min = f32::INFINITY;
+                    let mut u_max = f32::NEG_INFINITY;
+                    let mut v_min = f32::INFINITY;
+                    let mut v_max = f32::NEG_INFINITY;
+                    let mut pts_str = Vec::with_capacity(verts.len());
+                    for &vv in verts {
+                        let [u, v] = project_uv(vv);
+                        u_min = u_min.min(u);
+                        u_max = u_max.max(u);
+                        v_min = v_min.min(v);
+                        v_max = v_max.max(v);
+                        pts_str.push(format!("[{:.4},{:.4}]", u, v));
+                    }
+                    if u_max < -0.08 || u_min > 1.08 || v_max < -0.08 || v_min > 1.08 {
+                        continue;
+                    }
+                    let b = t * 3;
+                    let rgb = if b + 2 < colors.len() {
+                        [colors[b], colors[b + 1], colors[b + 2]]
+                    } else {
+                        [0.2, 0.2, 0.2]
+                    };
+                    poly_entries.push(format!(
+                        "{{\"tileIdx\":{},\"rgb\":[{:.3},{:.3},{:.3}],\"isSelected\":{},\"isRiver\":false,\"isCapital\":false,\"stateId\":-1,\"pts\":[{}]}}",
+                        t,
+                        rgb[0],
+                        rgb[1],
+                        rgb[2],
+                        t == center_idx,
+                        pts_str.join(",")
+                    ));
+                }
+            }
+            WorldStageState::Prehistory(pre) => {
+                let grid = pre.grid();
+                let rivers = pre.river_tiles();
+                for (t, (fc, verts)) in grid.faces.iter().enumerate() {
+                    if dot(*fc, center) < cos_cutoff || verts.len() < 3 {
+                        continue;
+                    }
+                    let mut u_min = f32::INFINITY;
+                    let mut u_max = f32::NEG_INFINITY;
+                    let mut v_min = f32::INFINITY;
+                    let mut v_max = f32::NEG_INFINITY;
+                    let mut pts_str = Vec::with_capacity(verts.len());
+                    for &vv in verts {
+                        let [u, v] = project_uv(vv);
+                        u_min = u_min.min(u);
+                        u_max = u_max.max(u);
+                        v_min = v_min.min(v);
+                        v_max = v_max.max(v);
+                        pts_str.push(format!("[{:.4},{:.4}]", u, v));
+                    }
+                    if u_max < -0.08 || u_min > 1.08 || v_max < -0.08 || v_min > 1.08 {
+                        continue;
+                    }
+                    let b = t * 3;
+                    let rgb = if b + 2 < colors.len() {
+                        [colors[b], colors[b + 1], colors[b + 2]]
+                    } else {
+                        [0.2, 0.2, 0.2]
+                    };
+                    let is_riv = rivers.get(t).copied().unwrap_or(false) && aspect != "population";
+                    poly_entries.push(format!(
+                        "{{\"tileIdx\":{},\"rgb\":[{:.3},{:.3},{:.3}],\"isSelected\":{},\"isRiver\":{},\"isCapital\":false,\"stateId\":-1,\"pts\":[{}]}}",
+                        t,
+                        rgb[0],
+                        rgb[1],
+                        rgb[2],
+                        t == center_idx,
+                        is_riv,
+                        pts_str.join(",")
+                    ));
+                }
+            }
+            WorldStageState::History(hist) => {
+                let terrain = hist.terrain();
+                let rivers = hist.river_tiles();
+                for (d_idx, df) in terrain.display_faces.iter().enumerate() {
+                    if dot(df.center, center) < cos_cutoff || df.vertices.len() < 3 {
+                        continue;
+                    }
+                    let mut u_min = f32::INFINITY;
+                    let mut u_max = f32::NEG_INFINITY;
+                    let mut v_min = f32::INFINITY;
+                    let mut v_max = f32::NEG_INFINITY;
+                    let mut pts_str = Vec::with_capacity(df.vertices.len());
+                    for &vv in &df.vertices {
+                        let [u, v] = project_uv(vv);
+                        u_min = u_min.min(u);
+                        u_max = u_max.max(u);
+                        v_min = v_min.min(v);
+                        v_max = v_max.max(v);
+                        pts_str.push(format!("[{:.4},{:.4}]", u, v));
+                    }
+                    if u_max < -0.08 || u_min > 1.08 || v_max < -0.08 || v_min > 1.08 {
+                        continue;
+                    }
+                    let b = d_idx * 3;
+                    let rgb = if b + 2 < colors.len() {
+                        [colors[b], colors[b + 1], colors[b + 2]]
+                    } else {
+                        [0.2, 0.2, 0.2]
+                    };
+                    let (state_id, is_riv, is_cap) = match df.source {
+                        tec11_math_grid::DisplayFaceSource::Fine(f) => (
+                            hist.state_at_tile(f).map(|s| s as i32).unwrap_or(-1),
+                            rivers.get(f).copied().unwrap_or(false) && aspect != "population",
+                            (aspect == "borders" || aspect == "nations")
+                                && hist.is_state_capital_fine_face(f),
+                        ),
+                        tec11_math_grid::DisplayFaceSource::OceanCoarse(_) => (-1, false, false),
+                    };
+                    poly_entries.push(format!(
+                        "{{\"tileIdx\":{},\"rgb\":[{:.3},{:.3},{:.3}],\"isSelected\":{},\"isRiver\":{},\"isCapital\":{},\"stateId\":{},\"pts\":[{}]}}",
+                        d_idx,
+                        rgb[0],
+                        rgb[1],
+                        rgb[2],
+                        d_idx == center_idx,
+                        is_riv,
+                        is_cap,
+                        state_id,
+                        pts_str.join(",")
+                    ));
+                }
+            }
+        }
+
+        // Mode-specific 2D vector overlays:
+        let mut current_entries = Vec::new();
+        if aspect == "climate" {
+            let opt_ocean = match &self.stage {
+                WorldStageState::Tectonics(tec) => {
+                    if tec.has_atmosphere() {
+                        tec.climate_model().try_ocean().map(|ocean| {
+                            (
+                                tec.grid(),
+                                ocean,
+                                tec.tiles().iter().map(|t| t.elevation()).collect::<Vec<_>>(),
+                            )
+                        })
+                    } else {
+                        None
+                    }
+                }
+                WorldStageState::Prehistory(pre) => pre
+                    .climate_model()
+                    .try_ocean()
+                    .map(|ocean| (pre.grid(), ocean, pre.tile_elevations())),
+                WorldStageState::History(hist) => {
+                    let pre = hist.prehistory();
+                    pre.climate_model()
+                        .try_ocean()
+                        .map(|ocean| (pre.grid(), ocean, pre.tile_elevations()))
+                }
+            };
+            if let Some((c_grid, ocean, elevs)) = opt_ocean {
+                for (c_idx, (fc, _)) in c_grid.faces.iter().enumerate() {
+                    if elevs.get(c_idx).copied().unwrap_or(1.0) > 0.0 || dot(*fc, center) < cos_cutoff {
+                        continue;
+                    }
+                    let spd = ocean.speed.get(c_idx).copied().unwrap_or(0.0);
+                    if spd < 0.05 {
+                        continue;
+                    }
+                    let [u, v] = project_uv(*fc);
+                    if !(-0.02..=1.02).contains(&u) || !(-0.02..=1.02).contains(&v) {
+                        continue;
+                    }
+                    let vel = ocean.velocity_xyz[c_idx];
+                    let v3 = [vel[0] as f64, vel[1] as f64, vel[2] as f64];
+                    let vx = -dot(v3, east) as f32;
+                    let vy = -dot(v3, north) as f32;
+                    let vlen = (vx * vx + vy * vy).sqrt();
+                    if vlen < 1e-5 {
+                        continue;
+                    }
+                    let sst = ocean.sst_anomaly.get(c_idx).copied().unwrap_or(0.0);
+                    current_entries.push(format!(
+                        "[{:.4},{:.4},{:.4},{:.4},{:.3},{:.3}]",
+                        u,
+                        v,
+                        vx / vlen,
+                        vy / vlen,
+                        spd.clamp(0.0, 1.0),
+                        sst.clamp(-1.0, 1.0)
+                    ));
+                }
+            }
+        }
+
+        let mut route_entries = Vec::new();
+        if aspect == "borders" || aspect == "nations" {
+            if let WorldStageState::History(hist) = &self.stage {
+                for (pts, rgb) in hist.active_route_polylines_grid() {
+                    for seg in pts.windows(2) {
+                        let a = seg[0];
+                        let b = seg[1];
+                        if dot(a, center) < cos_cutoff && dot(b, center) < cos_cutoff {
+                            continue;
+                        }
+                        let [u0, v0] = project_uv(a);
+                        let [u1, v1] = project_uv(b);
+                        if (u0.max(u1) < -0.05 || u0.min(u1) > 1.05)
+                            || (v0.max(v1) < -0.05 || v0.min(v1) > 1.05)
+                        {
+                            continue;
+                        }
+                        route_entries.push(format!(
+                            "[{:.4},{:.4},{:.4},{:.4},{:.3},{:.3},{:.3}]",
+                            u0, v0, u1, v1, rgb[0], rgb[1], rgb[2]
+                        ));
+                    }
+                }
+            }
+        }
+
+        format!(
+            "{{\"hasTile\":true,\"centerTileIdx\":{},\"aspect\":\"{}\",\"polygons\":[{}],\"currents\":[{}],\"routes\":[{}]}}",
+            center_idx,
+            aspect,
+            poly_entries.join(","),
+            current_entries.join(","),
+            route_entries.join(",")
+        )
+    }
+
     /// Physical surface color with elevation and ruggedness darkening so mountain ranges
     /// and high cordilleras stand out clearly in `"color"` mode across all stages.
     pub fn natural_color_shaded(
@@ -2197,12 +2535,14 @@ mod tests {
         p.people_dt_myr = 5;
         let mut world = WorldSimulation::new(p, 909);
 
-        // Verify tick-0 pre-atmospheric Hadean world renders all four modes without panicking:
+        // Verify tick-0 pre-atmospheric Hadean world renders all four modes and regional maps without panicking:
         assert_eq!(world.stage_index(), 0);
         let n_tec = world.tile_count();
         for mode in ["color", "climate", "borders", "population"] {
             let c0 = world.tile_colors_rgb(mode, Some(0));
             assert_eq!(c0.len(), n_tec * 3);
+            let r0 = world.regional_tile_map_json(0, mode);
+            assert!(r0.contains("\"hasTile\":true"));
         }
         assert!(world.ocean_current_segments_colored().is_empty());
 
@@ -2301,5 +2641,26 @@ mod tests {
         assert_eq!(custom_stars.len() % 6, 0);
         let custom_overview = world.cosmos_overview_json();
         assert!(custom_overview.contains("\"planets\":["));
+    }
+
+    #[test]
+    fn test_world_regional_tile_map_centered_and_mode_synced() {
+        let mut p = WorldCreateParams::default();
+        p.grid_size = 3;
+        p.atm_dt_myr = 5;
+        p.life_dt_myr = 5;
+        p.people_dt_myr = 5;
+        let mut world = WorldSimulation::new(p, 77);
+        while world.stage_index() == 0 {
+            world.step();
+        }
+        world.step();
+
+        for mode in ["color", "climate", "borders", "population"] {
+            let rj = world.regional_tile_map_json(10, mode);
+            assert!(rj.contains("\"hasTile\":true"));
+            assert!(rj.contains(&format!("\"aspect\":\"{mode}\"")));
+            assert!(rj.contains("\"isSelected\":true"));
+        }
     }
 }

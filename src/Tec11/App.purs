@@ -623,6 +623,7 @@ foreign import saveWorldPlanet :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import setWorldCosmosModalActive :: Boolean -> Effect Unit
+foreign import clearWorldSelectedTile :: (WorldInfo -> Effect Unit) -> Effect Unit
 
 -- Moons & Tidal Erosion Sandbox mode FFI (`MoonScreen`)
 foreign import mountMoonView :: Int -> Int -> Int -> Int -> String -> Boolean -> Boolean -> Boolean -> (MoonInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -5227,20 +5228,23 @@ mkApp = do
 
       WorldScreen ->
         R.div
-          { className: "mode-layout"
+          { style: R.css { display: "flex", flexDirection: "column", gap: "1.15rem", alignItems: "stretch" }
           , children:
               [ R.div
-                  { className: "viewport-column"
+                  { className: "mode-layout"
                   , children:
                       [ R.div
-                          { className: "canvas-container"
+                          { className: "viewport-column"
                           , children:
-                              [ R.canvas
-                                  { id: "sphere-canvas"
-                                  , className: "sphere-canvas interactive-canvas"
+                              [ R.div
+                                  { className: "canvas-container"
+                                  , children:
+                                      [ R.canvas
+                                          { id: "sphere-canvas"
+                                          , className: "sphere-canvas interactive-canvas"
+                                          }
+                                      ]
                                   }
-                              ]
-                          }
                       , R.div
                           { className: "slider-row"
                           , children:
@@ -5743,6 +5747,106 @@ mkApp = do
                           }
                       ]
                   }
+              ]
+          }
+              , if not worldInfo.tileView.hasTile then
+                  React.empty
+                else
+                  let
+                    aspectBadge = case worldAspect of
+                      "climate" -> "Climate & Ocean Currents"
+                      "borders" -> "Borders & Travel Routes"
+                      "population" -> "Population Density"
+                      _ -> "Physical Color"
+                  in
+                    R.div
+                      { id: "world-regional-panel"
+                      , className: "mode-layout"
+                      , style: R.css { padding: "1.25rem 1.5rem", gap: "1.5rem", alignItems: "stretch" }
+                      , children:
+                          [ R.div
+                              { style: R.css { display: "flex", flexDirection: "column", gap: "0.45rem", flexShrink: "0" }
+                              , children:
+                                  [ R.div
+                                      { style: R.css { fontSize: "0.78rem", fontWeight: "700", color: "#93c5fd" }
+                                      , children: [ R.text ("Regional View — Centered · " <> aspectBadge) ]
+                                      }
+                                  , R.canvas
+                                      { id: "world-regional-canvas"
+                                      , className: "interactive-canvas"
+                                      , style:
+                                          R.css
+                                            { width: "340px"
+                                            , height: "230px"
+                                            , display: "block"
+                                            , borderRadius: "10px"
+                                            , border: "1px solid #334155"
+                                            , background: "#060b19"
+                                            }
+                                      }
+                                  , R.div
+                                      { style: R.css { fontSize: "0.72rem", color: "#94a3b8" }
+                                      , children: [ R.text "Click any neighboring tile to recenter" ]
+                                      }
+                                  ]
+                              }
+                          , R.div
+                              { style:
+                                  R.css
+                                    { display: "flex"
+                                    , flexDirection: "column"
+                                    , justifyContent: "space-between"
+                                    , gap: "0.75rem"
+                                    , flex: "1"
+                                    , minWidth: "260px"
+                                    }
+                              , children:
+                                  [ R.div
+                                      { style: R.css { display: "flex", flexDirection: "column", gap: "0.45rem" }
+                                      , children:
+                                          [ R.div
+                                              { style: R.css { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }
+                                              , children:
+                                                  [ R.div
+                                                      { style: R.css { fontSize: "1.0rem", fontWeight: "700", color: "#f8fafc" }
+                                                      , children: [ R.text worldInfo.tileView.title ]
+                                                      }
+                                                  , R.button
+                                                      { id: "world-clear-tile-btn"
+                                                      , className: "action-btn secondary"
+                                                      , style: R.css { padding: "0.25rem 0.65rem", fontSize: "0.78rem" }
+                                                      , onClick: capture_ (clearWorldSelectedTile setWorldInfo)
+                                                      , children: [ R.text "Close ×" ]
+                                                      }
+                                                  ]
+                                              }
+                                          , R.div
+                                              { style: R.css { fontSize: "0.83rem", color: "#cbd5e1" }
+                                              , children: [ R.text worldInfo.tileView.locationSummary ]
+                                              }
+                                          , R.div
+                                              { style: R.css { fontSize: "0.80rem", color: "#93c5fd" }
+                                              , children: [ R.text worldInfo.tileView.skyLatLonSummary ]
+                                              }
+                                          , R.div
+                                              { style:
+                                                  R.css
+                                                    { fontSize: "0.82rem"
+                                                    , color: "#e2e8f0"
+                                                    , padding: "0.55rem 0.7rem"
+                                                    , background: "#0b1021"
+                                                    , border: "1px solid #1e293b"
+                                                    , borderRadius: "8px"
+                                                    }
+                                              , children:
+                                                  [ R.text (worldInfo.tileView.populationSummary <> " · Tech: " <> worldInfo.tileView.technology) ]
+                                              }
+                                          ]
+                                      }
+                                  ]
+                              }
+                          ]
+                      }
               , case worldActiveModal of
                   Just CosmosModal ->
                     R.div

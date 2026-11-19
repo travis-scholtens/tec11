@@ -5271,6 +5271,52 @@ impl HistorySimulation {
         self.tile_states.get(&tile_idx).copied()
     }
 
+    pub fn is_state_capital_fine_face(&self, fine_idx: usize) -> bool {
+        self.tile_states
+            .get(&fine_idx)
+            .and_then(|sid| self.states.get(sid))
+            .is_some_and(|st| st.capital_tile == fine_idx)
+    }
+
+    /// 3D unit-sphere polylines and `[r, g, b]` colors for all active travel routes (in grid coordinates).
+    pub fn active_route_polylines_grid(&self) -> Vec<(Vec<Vec3>, [f32; 3])> {
+        let grid = self.prehistory.grid();
+        let mut out = Vec::with_capacity(self.travel_routes.len());
+        for route in &self.travel_routes {
+            let status = self.route_status(route, true);
+            let rgb = status.rgb(route.route_kind);
+            let interior_coarse = if route.coarse_path.len() >= 2 {
+                &route.coarse_path[1..route.coarse_path.len() - 1]
+            } else {
+                &[][..]
+            };
+            let pts: Vec<Vec3> = self
+                .terrain
+                .terrain_grid
+                .faces
+                .get(route.from_fine_face)
+                .map(|&(c, _)| c)
+                .into_iter()
+                .chain(
+                    interior_coarse
+                        .iter()
+                        .filter_map(|&c_idx| grid.faces.get(c_idx).map(|&(c, _)| c)),
+                )
+                .chain(
+                    self.terrain
+                        .terrain_grid
+                        .faces
+                        .get(route.to_fine_face)
+                        .map(|&(c, _)| c),
+                )
+                .collect();
+            if pts.len() >= 2 {
+                out.push((pts, rgb));
+            }
+        }
+        out
+    }
+
     pub fn solar_system(&self) -> &[SolarSystemPlanet] {
         &self.solar_system
     }

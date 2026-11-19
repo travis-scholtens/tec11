@@ -341,4 +341,8 @@ impl WasmWorldSession {
     pub fn cosmos_overview_json(&self) -> String {
         self.sim.cosmos_overview_json()
     }
+
+    pub fn regional_tile_map_json(&self, center_idx: usize, aspect: &str) -> String {
+        self.sim.regional_tile_map_json(center_idx, aspect)
+    }
 }
