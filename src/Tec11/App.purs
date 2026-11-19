@@ -51,6 +51,11 @@ data Screen
 
 derive instance eqScreen :: Eq Screen
 
+data WorldModal
+  = CosmosModal
+
+derive instance eqWorldModal :: Eq WorldModal
+
 type GridInfo =
   { size :: Int
   , tileCount :: Int
@@ -617,6 +622,7 @@ foreign import setWorldSunAndAtmosphere :: Int -> Int -> (WorldInfo -> Effect Un
 foreign import saveWorldPlanet :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import loadSavedPlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import loadFilePlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import setWorldCosmosModalActive :: Boolean -> Effect Unit
 
 -- Moons & Tidal Erosion Sandbox mode FFI (`MoonScreen`)
 foreign import mountMoonView :: Int -> Int -> Int -> Int -> String -> Boolean -> Boolean -> Boolean -> (MoonInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -1436,6 +1442,7 @@ mkApp = do
     worldAtmosphereId /\ setWorldAtmosphereId <- useState' 0
     worldRandomize /\ setWorldRandomize <- useState' true
     worldAspect /\ setWorldAspectState <- useState' "color"
+    worldActiveModal /\ setWorldActiveModal <- useState' (Nothing :: Maybe WorldModal)
     worldInfo /\ setWorldInfo <- useState'
       { stageIndex: 0
       , stageName: "Tectonics (Hadean / Early Crust)"
@@ -1721,6 +1728,7 @@ mkApp = do
           mountHistoryView historyAspect historyShowRivers setHistoryInfo
         WorldScreen -> do
           setRotationDeg 0
+          setWorldActiveModal Nothing
           mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldAspect syncWorldControlsFromInfo
         MoonScreen -> do
           setRotationDeg 0
@@ -1737,6 +1745,11 @@ mkApp = do
         WeatherScreen -> do
           setRotationDeg 0
           mountWeatherView weatherAtmId weatherGlaciationPct weatherMoonCount weatherMoonMassTenths weatherMoonDistRadii weatherDayOfYear weatherAspect weatherArrowMode syncWeatherControlsFromInfo
+
+    useEffect (screen /\ worldActiveModal) do
+      let isCosmos = screen == WorldScreen && worldActiveModal == Just CosmosModal
+      setWorldCosmosModalActive isCosmos
+      pure (setWorldCosmosModalActive false)
 
     let
       handleRotateChange :: Maybe String -> Effect Unit
@@ -5249,6 +5262,7 @@ mkApp = do
                               , R.select
                                   { id: "world-aspect-select"
                                   , className: "control-select"
+                                  , style: R.css { flex: "0 0 auto", width: "auto" }
                                   , value: worldAspect
                                   , onChange: handler targetValue handleWorldAspectChange
                                   , children:
@@ -5269,6 +5283,20 @@ mkApp = do
                                           , children: [ R.text "Population" ]
                                           }
                                       ]
+                                  }
+                              , R.button
+                                  { id: "world-cosmos-btn"
+                                  , className: "action-btn secondary"
+                                  , style:
+                                      R.css
+                                        { width: "auto"
+                                        , flex: "0 0 auto"
+                                        , padding: "0.42rem 0.8rem"
+                                        , fontSize: "0.88rem"
+                                        , whiteSpace: "nowrap"
+                                        }
+                                  , onClick: capture_ (setWorldActiveModal (Just CosmosModal))
+                                  , children: [ R.text "Cosmos" ]
                                   }
                               ]
                           }
@@ -5715,6 +5743,133 @@ mkApp = do
                           }
                       ]
                   }
+              , case worldActiveModal of
+                  Just CosmosModal ->
+                    R.div
+                      { id: "world-cosmos-modal"
+                      , className: "world-modal-backdrop"
+                      , children:
+                          [ R.div
+                              { style: R.css { position: "fixed", inset: "0" }
+                              , onClick: capture_ (setWorldActiveModal Nothing)
+                              , children: []
+                              }
+                          , R.div
+                              { className: "world-modal-card"
+                              , style: R.css { position: "relative", zIndex: "1", maxWidth: "min(930px, 96vw)" }
+                              , children:
+                                  [ R.div
+                                      { className: "world-modal-header"
+                                      , children:
+                                          [ R.div
+                                              { className: "world-modal-title"
+                                              , children: [ R.text ("Cosmos — " <> worldInfo.sunSpectralType <> " Host System & Celestial Sphere") ]
+                                              }
+                                          , R.button
+                                              { id: "world-modal-close-btn"
+                                              , className: "world-modal-close-btn"
+                                              , onClick: capture_ (setWorldActiveModal Nothing)
+                                              , children: [ R.text "Close ×" ]
+                                              }
+                                          ]
+                                      }
+                                  , R.div
+                                      { className: "world-modal-body"
+                                      , children:
+                                          [ R.div
+                                              { style:
+                                                  R.css
+                                                    { display: "grid"
+                                                    , gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))"
+                                                    , gap: "0.75rem"
+                                                    }
+                                              , children:
+                                                  [ R.div
+                                                      { style:
+                                                          R.css
+                                                            { background: "#060b19"
+                                                            , border: "1px solid #334155"
+                                                            , borderRadius: "8px"
+                                                            , padding: "6px"
+                                                            }
+                                                      , children:
+                                                          [ R.canvas
+                                                              { id: "world-cosmos-galaxy-canvas"
+                                                              , style:
+                                                                  R.css
+                                                                    { width: "100%"
+                                                                    , height: "auto"
+                                                                    , aspectRatio: "430 / 258"
+                                                                    , display: "block"
+                                                                    , borderRadius: "6px"
+                                                                    , cursor: "grab"
+                                                                    }
+                                                              }
+                                                          ]
+                                                      }
+                                                  , R.div
+                                                      { style:
+                                                          R.css
+                                                            { background: "#060b19"
+                                                            , border: "1px solid #334155"
+                                                            , borderRadius: "8px"
+                                                            , padding: "6px"
+                                                            }
+                                                      , children:
+                                                          [ R.canvas
+                                                              { id: "world-cosmos-system-canvas"
+                                                              , style:
+                                                                  R.css
+                                                                    { width: "100%"
+                                                                    , height: "auto"
+                                                                    , aspectRatio: "430 / 258"
+                                                                    , display: "block"
+                                                                    , borderRadius: "6px"
+                                                                    }
+                                                              }
+                                                          ]
+                                                      }
+                                                  ]
+                                              }
+                                          , R.div
+                                              { style:
+                                                  R.css
+                                                    { background: "#050814"
+                                                    , border: "1px solid #334155"
+                                                    , borderRadius: "8px"
+                                                    , padding: "6px"
+                                                    }
+                                              , children:
+                                                  [ R.canvas
+                                                      { id: "world-cosmos-starmap-canvas"
+                                                      , style:
+                                                          R.css
+                                                            { width: "100%"
+                                                            , height: "auto"
+                                                            , aspectRatio: "760 / 430"
+                                                            , display: "block"
+                                                            , borderRadius: "6px"
+                                                            }
+                                                      }
+                                                  , R.div
+                                                      { style:
+                                                          R.css
+                                                            { fontSize: "0.76rem"
+                                                            , color: "#94a3b8"
+                                                            , marginTop: "6px"
+                                                            , lineHeight: "1.35"
+                                                            }
+                                                      , children: [ R.text worldInfo.planetsSummaryText ]
+                                                      }
+                                                  ]
+                                              }
+                                          ]
+                                      }
+                                  ]
+                              }
+                          ]
+                      }
+                  Nothing -> React.empty
               ]
           }
 

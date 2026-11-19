@@ -6,9 +6,11 @@ use crate::population::tile_population_thousands_with_water_tech;
 use crate::prehistory::PrehistorySimulation;
 use crate::racination::Heritage;
 use crate::sun_sky::{
-    format_solar_system_summary, generate_solar_system_with_rng, sample_atmosphere_with_rng,
-    sample_galactic_home_with_rng, sample_home_star_with_rng, substitute_simulated_planet,
-    synthesize_galactic_sky_constellations, AtmosphereType, Constellation, GalacticVantage,
+    build_star_map_buffers_from_sky, format_solar_system_summary,
+    generate_solar_system_with_rng, sample_atmosphere_with_rng, sample_galactic_home_with_rng,
+    sample_home_star_with_rng, substitute_simulated_planet,
+    synthesize_galactic_sky_constellations, synthesize_galactic_sky_stars_and_constellations,
+    synthesize_galaxy_cloud_normalized, AtmosphereType, Constellation, GalacticVantage,
     GalaxyType, HomeStar, PlanetaryOptics, SolarSystemPlanet,
 };
 use crate::tectonics::TectonicsSimulation;
@@ -330,6 +332,145 @@ impl WorldSimulation {
             self.galaxy_type.name(),
             self.galactic_vantage.name(),
             format_solar_system_summary(&self.solar_system)
+        )
+    }
+
+    /// Un-tilted 3D galaxy point cloud (`1,800` stars, `6` floats per star `[nx, ny, nz, r, g, b]`)
+    /// for the rotating Host Galaxy canvas inside the World `Cosmos` modal.
+    pub fn galaxy_cloud_data(&self) -> Vec<f32> {
+        synthesize_galaxy_cloud_normalized(self.galaxy_type, self.constellation_seed)
+    }
+
+    /// Flat star buffer `[ra_rad, dec_deg, app_mag, r, g, b, ...]` (`6` floats per star)
+    /// for the 2D Northern & Southern Celestial Hemisphere Star Map in the `Cosmos` modal.
+    pub fn star_map_stars_data(&self) -> Vec<f32> {
+        let (stars, _) = synthesize_galactic_sky_stars_and_constellations(
+            self.constellation_seed,
+            self.is_sol_system,
+            self.galaxy_type,
+            self.galactic_vantage,
+            self.home_star.gal_pos_kpc,
+        );
+        let (stars_buf, _, _) = build_star_map_buffers_from_sky(
+            self.is_sol_system,
+            self.galaxy_type,
+            self.galactic_vantage,
+            &self.home_star,
+            &self.solar_system,
+            &stars,
+            &self.constellations,
+        );
+        stars_buf
+    }
+
+    /// Flat constellation edge buffer `[star_idx_a, star_idx_b, constellation_idx, ...]` (`3` `u32`s per edge).
+    pub fn star_map_constellation_edges(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for c in &self.constellations {
+            for &(ia, ib) in &c.edges {
+                out.extend_from_slice(&[ia as u32, ib as u32, c.index]);
+            }
+        }
+        out
+    }
+
+    /// Star map metadata JSON matching `SunSandbox::star_map_metadata_json`.
+    pub fn star_map_metadata_json(&self) -> String {
+        let (_, _, meta_json) = build_star_map_buffers_from_sky(
+            self.is_sol_system,
+            self.galaxy_type,
+            self.galactic_vantage,
+            &self.home_star,
+            &self.solar_system,
+            &[],
+            &self.constellations,
+        );
+        meta_json
+    }
+
+    /// Structured JSON for the `Cosmos` modal's rotating 3D Host Galaxy view and live
+    /// Solar System + Harmonic Moons animation.
+    pub fn cosmos_overview_json(&self) -> String {
+        let hs = &self.home_star;
+        let [gx, gy, gz] = hs.gal_pos_kpc;
+        let max_kpc = if self.galaxy_type == GalaxyType::GlobularCluster {
+            0.020f32
+        } else {
+            15.0f32
+        };
+        let r_gal = (gx * gx + gy * gy + gz * gz).sqrt();
+
+        let mut planet_entries = Vec::with_capacity(self.solar_system.len());
+        for p in &self.solar_system {
+            planet_entries.push(format!(
+                "{{\"number\":{},\"label\":\"{}\",\"orbitAu\":{:.3},\"periodDays\":{:.2},\"radiusEarth\":{:.2},\"hasRings\":{},\"moonCount\":{},\"isHomeWorld\":{},\"initAngleRad\":{:.5},\"rgb\":[{:.3},{:.3},{:.3}]}}",
+                p.index + 1,
+                p.kind.appearance_label(),
+                p.orbit_au,
+                p.orbital_period_days.max(4.0),
+                p.radius_earth,
+                p.has_rings,
+                p.moon_count,
+                p.is_home_world,
+                p.orbit_angle_rad,
+                p.rgb[0],
+                p.rgb[1],
+                p.rgb[2]
+            ));
+        }
+
+        let a1 = self.current_moon_dist_radii().max(8.0) as f64;
+        let m_mass = self.params.moon_mass.max(0.05) as f64;
+        let p1_days = if self.params.moon_count > 0 {
+            27.3217 * (a1 / 60.0).powf(1.5) / (1.0 + 0.0123 * m_mass).sqrt()
+        } else {
+            0.0
+        };
+        let mut moon_entries = Vec::new();
+        for k in 0..self.params.moon_count.min(4) {
+            let ratio = 1u32 << k;
+            let scale_a = 2.0f64.powf((2 * k) as f64 / 3.0);
+            let ak = a1 * scale_a;
+            let pk_days = (p1_days * (ratio as f64)).max(1.2);
+            let phase_off = (k as f64) * 0.95;
+            moon_entries.push(format!(
+                "{{\"number\":{},\"resonanceRatio\":{},\"distRp\":{:.2},\"periodDays\":{:.2},\"massLunar\":{:.2},\"phaseOffsetRad\":{:.3}}}",
+                k + 1,
+                ratio,
+                ak,
+                pk_days,
+                self.params.moon_mass,
+                phase_off
+            ));
+        }
+
+        format!(
+            "{{\"galaxy\":{{\"typeName\":\"{}\",\"vantageName\":\"{}\",\"maxKpc\":{:.4},\"homePosKpc\":[{:.4},{:.4},{:.4}],\"homeRadiusKpc\":{:.3}}},\
+              \"homeStar\":{{\"spectralType\":\"{}\",\"classDesc\":\"{}\",\"tempK\":{:.0},\"massSolar\":{:.3},\"radiusSolar\":{:.3},\"luminositySolar\":{:.3},\"habitableAu\":{:.3},\"yearDays\":{:.2},\"rgb\":[{:.3},{:.3},{:.3}]}},\
+              \"homePlanetIndex\":{},\"dayHours\":{},\"tiltDeg\":{},\"planets\":[{}],\"homeMoons\":[{}]}}",
+            self.galaxy_type.name(),
+            self.galactic_vantage.name(),
+            max_kpc,
+            gx,
+            gy,
+            gz,
+            r_gal,
+            hs.spectral_type,
+            hs.class_description,
+            hs.temp_k,
+            hs.mass_solar,
+            hs.radius_solar,
+            hs.luminosity_solar,
+            hs.habitable_au,
+            hs.orbital_period_days.max(5.0),
+            hs.rgb[0],
+            hs.rgb[1],
+            hs.rgb[2],
+            self.home_planet_index,
+            self.params.day_hours,
+            self.params.tilt_deg,
+            planet_entries.join(","),
+            moon_entries.join(",")
         )
     }
 
@@ -2131,5 +2272,34 @@ mod tests {
             c_color, c_borders,
             "Color mode in History must show physical terrain rather than political Borders"
         );
+    }
+
+    #[test]
+    fn test_world_cosmos_modal_data_and_star_map() {
+        let mut p = WorldCreateParams::default();
+        p.grid_size = 2;
+        p.moon_count = 2;
+        let mut world = WorldSimulation::new(p.clone(), 42);
+
+        let gal = world.galaxy_cloud_data();
+        assert_eq!(gal.len(), 1800 * 6);
+        let stars = world.star_map_stars_data();
+        assert!(stars.len() >= 5000 * 6, "Sol star map should include Hipparcos stars");
+        let edges = world.star_map_constellation_edges();
+        assert_eq!(edges.len() % 3, 0);
+        assert!(!edges.is_empty());
+        let meta = world.star_map_metadata_json();
+        assert!(meta.contains("\"constellations\":["));
+        let overview = world.cosmos_overview_json();
+        assert!(overview.contains("\"isHomeWorld\":true"));
+        assert!(overview.contains("\"resonanceRatio\":2"));
+
+        // Also test randomized custom cosmos:
+        world.create(p, true);
+        let custom_stars = world.star_map_stars_data();
+        assert!(!custom_stars.is_empty());
+        assert_eq!(custom_stars.len() % 6, 0);
+        let custom_overview = world.cosmos_overview_json();
+        assert!(custom_overview.contains("\"planets\":["));
     }
 }

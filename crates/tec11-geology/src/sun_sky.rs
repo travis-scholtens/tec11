@@ -1877,11 +1877,30 @@ pub fn synthesize_galactic_sky_constellations(
     vantage: GalacticVantage,
     gal_pos_kpc: [f32; 3],
 ) -> Vec<Constellation> {
+    synthesize_galactic_sky_stars_and_constellations(
+        seed,
+        is_sol,
+        galaxy_type,
+        vantage,
+        gal_pos_kpc,
+    )
+    .1
+}
+
+/// Synthesize both the full naked-eye `CelestialStar` catalog and the `Constellation` catalog
+/// for `(seed, is_sol, galaxy_type, vantage, gal_pos_kpc)`.
+pub fn synthesize_galactic_sky_stars_and_constellations(
+    seed: u64,
+    is_sol: bool,
+    galaxy_type: GalaxyType,
+    vantage: GalacticVantage,
+    gal_pos_kpc: [f32; 3],
+) -> (Vec<CelestialStar>, Vec<Constellation>) {
     if is_sol {
         static SOL_SKY: std::sync::OnceLock<Vec<Constellation>> = std::sync::OnceLock::new();
-        return SOL_SKY
+        let hip_stars = parsed_hipparcos_equatorial_stars();
+        let consts = SOL_SKY
             .get_or_init(|| {
-                let hip_stars = parsed_hipparcos_equatorial_stars();
                 let (_, mut consts) = build_constellations_from_stars(hip_stars);
                 let used: std::collections::BTreeSet<usize> = consts
                     .iter()
@@ -1920,6 +1939,7 @@ pub fn synthesize_galactic_sky_constellations(
                 consts
             })
             .clone();
+        return (hip_stars.clone(), consts);
     }
 
     let mut rng = Pcg64Mcg::from_seed_u64(seed ^ 0x6A1A_C71C_541E_5EED);
@@ -2165,7 +2185,231 @@ pub fn synthesize_galactic_sky_constellations(
     for c in &mut consts {
         c.backdrop = Some(std::sync::Arc::clone(&backdrop));
     }
-    consts
+    (stars, consts)
+}
+
+/// Build an un-tilted 3D galaxy point cloud (`1,800` stars) as `6` floats per star
+/// `[nx, ny, nz, r, g, b]` in normalized galactocentric coordinates (`nx = x_kpc / max_kpc`),
+/// suitable for interactive 3D rotation around the galactic Z-axis.
+pub fn synthesize_galaxy_cloud_normalized(galaxy_type: GalaxyType, seed: u64) -> Vec<f32> {
+    let mut rng = Pcg64Mcg::from_seed_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
+    let count = 1800;
+    let mut out = Vec::with_capacity(count * 6);
+    let max_kpc = if galaxy_type == GalaxyType::GlobularCluster {
+        0.020
+    } else {
+        15.0
+    };
+    let inv_max = (1.0 / max_kpc) as f32;
+
+    for i in 0..count {
+        let (pos_kpc, bv) = match galaxy_type {
+            GalaxyType::Spiral | GalaxyType::BarredSpiral => {
+                if i < 420 {
+                    let r = rng.uniform(0.1, 2.4);
+                    let phi = rng.uniform(0.0, 2.0 * PI);
+                    let z = rng.gauss(0.0, 0.55);
+                    let (x, y) = if galaxy_type == GalaxyType::BarredSpiral && i < 280 {
+                        (
+                            rng.gauss(0.0, 1.85).clamp(-3.6, 3.6),
+                            rng.gauss(0.0, 0.55),
+                        )
+                    } else {
+                        (r * phi.cos(), r * phi.sin())
+                    };
+                    ([x, y, z], rng.uniform(0.75, 1.45) as f32)
+                } else if i < 1450 {
+                    let r = rng.uniform(2.0, 13.5);
+                    let arm = (i % 2) as f64;
+                    let pitch = 0.26;
+                    let angle = arm * PI + (r / 2.2).ln() / pitch + rng.gauss(0.0, 0.22);
+                    let z = rng.gauss(0.0, 0.16);
+                    let bv = if i % 3 == 0 {
+                        rng.uniform(-0.22, 0.25) as f32
+                    } else {
+                        rng.uniform(0.30, 1.10) as f32
+                    };
+                    ([r * angle.cos(), r * angle.sin(), z], bv)
+                } else {
+                    let r = rng.uniform(1.5, 14.0);
+                    let phi = rng.uniform(0.0, 2.0 * PI);
+                    let z = rng.gauss(0.0, 0.65);
+                    ([r * phi.cos(), r * phi.sin(), z], rng.uniform(0.55, 1.35) as f32)
+                }
+            }
+            GalaxyType::Lenticular => {
+                let r = if i < 600 {
+                    rng.uniform(0.1, 2.8)
+                } else {
+                    rng.uniform(1.5, 13.5)
+                };
+                let phi = rng.uniform(0.0, 2.0 * PI);
+                let z = rng.gauss(0.0, if i < 600 { 0.75 } else { 0.28 });
+                ([r * phi.cos(), r * phi.sin(), z], rng.uniform(0.62, 1.45) as f32)
+            }
+            GalaxyType::Elliptical => {
+                let r = rng.uniform(0.2, 12.5) * rng.uniform(0.25, 1.0);
+                let u = rng.uniform(-1.0, 1.0);
+                let phi = rng.uniform(0.0, 2.0 * PI);
+                let s = (1.0 - u * u).sqrt();
+                (
+                    [r * s * phi.cos(), r * 0.76 * s * phi.sin(), r * 0.58 * u],
+                    rng.uniform(0.75, 1.55) as f32,
+                )
+            }
+            GalaxyType::Irregular => {
+                let knot_idx = i % 6;
+                let ka = (knot_idx as f64) * (2.0 * PI / 6.0) + 0.4;
+                let kr = 2.5 + (knot_idx as f64) * 1.1;
+                let x = kr * ka.cos() + rng.gauss(0.0, 1.6);
+                let y = kr * ka.sin() + rng.gauss(0.0, 1.6);
+                let z = rng.gauss(0.0, 1.1);
+                let bv = if i % 2 == 0 {
+                    rng.uniform(-0.25, 0.20) as f32
+                } else {
+                    rng.uniform(0.35, 1.25) as f32
+                };
+                ([x, y, z], bv)
+            }
+            GalaxyType::GlobularCluster => {
+                let r = rng.uniform(0.0005, 0.016) * rng.uniform(0.2, 1.0);
+                let u = rng.uniform(-1.0, 1.0);
+                let phi = rng.uniform(0.0, 2.0 * PI);
+                let s = (1.0 - u * u).sqrt();
+                let bv = if i % 7 == 0 {
+                    rng.uniform(-0.10, 0.22) as f32
+                } else {
+                    rng.uniform(0.70, 1.55) as f32
+                };
+                ([r * s * phi.cos(), r * s * phi.sin(), r * u], bv)
+            }
+        };
+        let rgb = bv_to_rgb(bv);
+        out.extend_from_slice(&[
+            (pos_kpc[0] as f32 * inv_max).clamp(-1.05, 1.05),
+            (pos_kpc[1] as f32 * inv_max).clamp(-1.05, 1.05),
+            (pos_kpc[2] as f32 * inv_max).clamp(-1.05, 1.05),
+            rgb[0],
+            rgb[1],
+            rgb[2],
+        ]);
+    }
+    out
+}
+
+/// Build `(stars_6f, constellation_edges_3u32, metadata_json)` for rendering the 2D Northern & Southern
+/// Celestial Hemisphere Star Maps (`drawDualHemisphereStarMap` in JS).
+pub fn build_star_map_buffers_from_sky(
+    is_real_hipparcos: bool,
+    galaxy_type: GalaxyType,
+    vantage: GalacticVantage,
+    home_star: &HomeStar,
+    planets: &[SolarSystemPlanet],
+    stars: &[CelestialStar],
+    constellations: &[Constellation],
+) -> (Vec<f32>, Vec<u32>, String) {
+    let mut stars_out = Vec::with_capacity(stars.len() * 6);
+    for s in stars {
+        let (ra_deg, dec_deg) = star_dir_to_ra_dec_deg(s.dir);
+        stars_out.extend_from_slice(&[
+            ra_deg.to_radians(),
+            dec_deg,
+            s.app_mag,
+            s.base_rgb[0],
+            s.base_rgb[1],
+            s.base_rgb[2],
+        ]);
+    }
+
+    let mut edges_out = Vec::new();
+    for c in constellations {
+        for &(ia, ib) in &c.edges {
+            edges_out.extend_from_slice(&[ia as u32, ib as u32, c.index]);
+        }
+    }
+
+    let galaxy_band_mode: u8 = match (galaxy_type, vantage) {
+        (_, GalacticVantage::GalacticHalo) => 1,
+        (GalaxyType::Elliptical | GalaxyType::GlobularCluster, _)
+        | (_, GalacticVantage::GalacticBulge) => 2,
+        (GalaxyType::Irregular, _) => 3,
+        _ => 0,
+    };
+    let warm_glow = matches!(
+        galaxy_type,
+        GalaxyType::Elliptical | GalaxyType::Lenticular | GalaxyType::GlobularCluster
+    );
+
+    let backdrop = constellations.first().and_then(|c| c.backdrop.as_deref());
+    let gp = backdrop
+        .map(|b| b.galactic_pole)
+        .unwrap_or([-0.86767, -0.19808, 0.45598]);
+    let gc = backdrop
+        .map(|b| b.galactic_center_dir)
+        .unwrap_or([-0.05488, -0.87344, -0.48384]);
+    let ep = [0.0f32, -0.398, 0.917];
+    let sun_dir = [1.0, 0.0, 0.0];
+    let (sun_ra_deg, sun_dec_deg) = star_dir_to_ra_dec_deg(sun_dir);
+    let sr = home_star.rgb;
+
+    let mut planet_entries = Vec::new();
+    for p in planets {
+        if p.is_home_world || !p.is_naked_eye_visible() {
+            continue;
+        }
+        let (p_ra, p_dec) = star_dir_to_ra_dec_deg(p.sky_dir);
+        planet_entries.push(format!(
+            "{{\"number\":{},\"raRad\":{:.5},\"decDeg\":{:.3},\"appMag\":{:.2},\"rgb\":[{:.3},{:.3},{:.3}]}}",
+            p.index + 1,
+            p_ra.to_radians(),
+            p_dec,
+            p.apparent_mag,
+            p.rgb[0],
+            p.rgb[1],
+            p.rgb[2]
+        ));
+    }
+
+    let mut const_entries = Vec::new();
+    for c in constellations {
+        const_entries.push(format!(
+            "{{\"index\":{},\"number\":{},\"raRad\":{:.5},\"decDeg\":{:.3},\"starCount\":{},\"brightestMag\":{:.2},\"band\":\"{}\"}}",
+            c.index,
+            c.index + 1,
+            c.right_ascension_deg.to_radians(),
+            c.declination_deg,
+            c.star_count,
+            c.brightest_mag,
+            c.hemisphere_band_label()
+        ));
+    }
+
+    let meta_json = format!(
+        "{{\"isRealHipparcos\":{},\"starCount\":{},\"constellationCount\":{},\"galaxyBandMode\":{},\"warmGlow\":{},\"galacticPole\":[{:.5},{:.5},{:.5}],\"galacticCenterDir\":[{:.5},{:.5},{:.5}],\"eclipticPole\":[{:.5},{:.5},{:.5}],\"sun\":{{\"raRad\":{:.5},\"decDeg\":{:.3},\"rgb\":[{:.3},{:.3},{:.3}]}},\"planets\":[{}],\"constellations\":[{}]}}",
+        is_real_hipparcos,
+        stars.len(),
+        constellations.len(),
+        galaxy_band_mode,
+        warm_glow,
+        gp[0],
+        gp[1],
+        gp[2],
+        gc[0],
+        gc[1],
+        gc[2],
+        ep[0],
+        ep[1],
+        ep[2],
+        sun_ra_deg.to_radians(),
+        sun_dec_deg,
+        sr[0],
+        sr[1],
+        sr[2],
+        planet_entries.join(","),
+        const_entries.join(",")
+    );
+
+    (stars_out, edges_out, meta_json)
 }
 
 /// Generate a deterministic galaxy-rooted constellation catalog from `seed`.

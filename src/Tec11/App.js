@@ -5235,6 +5235,533 @@ function buildWorldInfo(view) {
   };
 }
 
+function stopWorldCosmosLoop(view) {
+  if (!view) return;
+  view.cosmosModalOpen = false;
+  if (view.cosmosRafId !== null && view.cosmosRafId !== undefined) {
+    cancelAnimationFrame(view.cosmosRafId);
+    view.cosmosRafId = null;
+  }
+  view.cosmosLastTs = null;
+}
+
+function invalidateWorldCosmosCache(view, overviewOnly = false) {
+  if (!view) return;
+  if (overviewOnly) {
+    if (view.cosmosCache) {
+      view.cosmosCache.overview = null;
+    }
+  } else {
+    view.cosmosCache = null;
+    view.starMapCache = null;
+  }
+  if (view.cosmosModalOpen) {
+    const smCanvas = document.getElementById("world-cosmos-starmap-canvas");
+    if (smCanvas) {
+      drawDualHemisphereStarMap(view, smCanvas);
+    }
+  }
+}
+
+function ensureWorldCosmosData(view) {
+  if (!view.cosmosCache) {
+    view.cosmosCache = {
+      galaxyCloud: view.session.galaxy_cloud_data(),
+      overview: null,
+    };
+  }
+  if (!view.cosmosCache.overview) {
+    try {
+      view.cosmosCache.overview = JSON.parse(view.session.cosmos_overview_json());
+    } catch (_err) {
+      view.cosmosCache.overview = {
+        galaxy: {
+          typeName: "Spiral Galaxy",
+          vantageName: "Spiral Arm",
+          maxKpc: 15.0,
+          homePosKpc: [8.1, 0.0, 0.02],
+          homeRadiusKpc: 8.1,
+        },
+        homeStar: {
+          spectralType: "G2V",
+          classDesc: "yellow main-sequence star",
+          tempK: 5778,
+          massSolar: 1.0,
+          radiusSolar: 1.0,
+          luminositySolar: 1.0,
+          habitableAu: 1.0,
+          yearDays: 365.25,
+          rgb: [1.0, 0.96, 0.88],
+        },
+        homePlanetIndex: 2,
+        dayHours: 24,
+        tiltDeg: 23,
+        planets: [],
+        homeMoons: [],
+      };
+    }
+  }
+  return view.cosmosCache;
+}
+
+function attachWorldGalaxyDragHandlers(canvas, view) {
+  if (!canvas || canvas.__cosmosDragBound) return;
+  canvas.__cosmosDragBound = true;
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  canvas.addEventListener("pointerdown", (ev) => {
+    dragging = true;
+    view.cosmosGalaxyDragging = true;
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+    if (canvas.setPointerCapture) {
+      try {
+        canvas.setPointerCapture(ev.pointerId);
+      } catch (_e) {}
+    }
+  });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (!dragging) return;
+    const dx = ev.clientX - lastX;
+    const dy = ev.clientY - lastY;
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+    view.cosmosGalaxyYaw = (view.cosmosGalaxyYaw || 0.0) + dx * 0.009;
+    view.cosmosGalaxyPitch = Math.max(
+      0.22,
+      Math.min(1.42, (view.cosmosGalaxyPitch ?? 0.94) + dy * 0.007)
+    );
+  });
+  const endDrag = () => {
+    dragging = false;
+    view.cosmosGalaxyDragging = false;
+  };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+}
+
+function drawWorldCosmosGalaxy(view) {
+  const canvas = document.getElementById("world-cosmos-galaxy-canvas");
+  if (!canvas || !view.session) return;
+  attachWorldGalaxyDragHandlers(canvas, view);
+
+  const W = 430;
+  const H = 258;
+  const dpr = Math.min(2.5, Math.max(1.0, window.devicePixelRatio || 1.0));
+  const tw = Math.round(W * dpr);
+  const th = Math.round(H * dpr);
+  if (canvas.width !== tw || canvas.height !== th) {
+    canvas.width = tw;
+    canvas.height = th;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const { galaxyCloud, overview } = ensureWorldCosmosData(view);
+  const gal = overview.galaxy || {};
+  const hs = overview.homeStar || {};
+
+  // Deep intergalactic backdrop:
+  const bg = ctx.createRadialGradient(W * 0.5, H * 0.54, 8, W * 0.5, H * 0.54, W * 0.65);
+  bg.addColorStop(0.0, "#0c152e");
+  bg.addColorStop(0.55, "#060b19");
+  bg.addColorStop(1.0, "#03060f");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W * 0.5;
+  const cy = H * 0.55;
+  const scalePx = 116.0;
+  const yaw = view.cosmosGalaxyYaw || 0.0;
+  const pitch = view.cosmosGalaxyPitch ?? 0.94;
+  const cyaw = Math.cos(yaw);
+  const syaw = Math.sin(yaw);
+  const cpitch = Math.cos(pitch);
+  const spitch = Math.sin(pitch);
+
+  const project3d = (nx, ny, nz) => {
+    const x1 = nx * cyaw - ny * syaw;
+    const y1 = nx * syaw + ny * cyaw;
+    const y2 = y1 * cpitch - nz * spitch;
+    const z2 = y1 * spitch + nz * cpitch;
+    const persp = 2.6 / Math.max(1.2, 2.6 - z2 * 0.65);
+    return {
+      x: cx + x1 * scalePx * persp,
+      y: cy - y2 * scalePx * persp,
+      z: z2,
+      persp,
+    };
+  };
+
+  // Warm/cool galactic core glow:
+  const coreGlow = ctx.createRadialGradient(cx, cy, 2, cx, cy, 46);
+  coreGlow.addColorStop(0.0, "rgba(255, 232, 185, 0.42)");
+  coreGlow.addColorStop(0.45, "rgba(196, 181, 253, 0.14)");
+  coreGlow.addColorStop(1.0, "rgba(15, 23, 42, 0.0)");
+  ctx.fillStyle = coreGlow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 46, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 1,800 galaxy stars:
+  const count = Math.floor(galaxyCloud.length / 6);
+  for (let i = 0; i < count; i++) {
+    const b = i * 6;
+    const pr = project3d(galaxyCloud[b], galaxyCloud[b + 1], galaxyCloud[b + 2]);
+    const r = Math.round(galaxyCloud[b + 3] * 255);
+    const g = Math.round(galaxyCloud[b + 4] * 255);
+    const bl = Math.round(galaxyCloud[b + 5] * 255);
+    const alpha = Math.max(0.24, Math.min(0.92, 0.56 + 0.24 * pr.z));
+    const rad = Math.max(0.75, 1.28 * pr.persp);
+    ctx.fillStyle = `rgba(${r}, ${g}, ${bl}, ${alpha.toFixed(2)})`;
+    ctx.beginPath();
+    ctx.arc(pr.x, pr.y, rad, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Home Star galactocentric orbit circle + pulsing highlight reticle:
+  const maxKpc = Math.max(1e-4, gal.maxKpc || 15.0);
+  const hp = gal.homePosKpc || [8.1, 0.0, 0.02];
+  const hnx = Math.max(-0.96, Math.min(0.96, hp[0] / maxKpc));
+  const hny = Math.max(-0.96, Math.min(0.96, hp[1] / maxKpc));
+  const hnz = Math.max(-0.96, Math.min(0.96, hp[2] / maxKpc));
+  const rOrb = Math.hypot(hnx, hny);
+
+  if (rOrb > 0.03) {
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = "rgba(52, 211, 153, 0.52)";
+    ctx.lineWidth = 1.15;
+    ctx.beginPath();
+    const segs = 72;
+    for (let k = 0; k <= segs; k++) {
+      const a = (k / segs) * Math.PI * 2.0;
+      const op = project3d(rOrb * Math.cos(a), rOrb * Math.sin(a), hnz);
+      if (k === 0) ctx.moveTo(op.x, op.y);
+      else ctx.lineTo(op.x, op.y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const hProj = project3d(hnx, hny, hnz);
+  const pulse = 0.5 + 0.5 * Math.sin((view.cosmosElapsedSec || 0.0) * 4.2);
+  const retR = 8.0 + 2.5 * pulse;
+
+  const halo = ctx.createRadialGradient(hProj.x, hProj.y, 1.5, hProj.x, hProj.y, retR * 2.1);
+  halo.addColorStop(0.0, "rgba(52, 211, 153, 0.72)");
+  halo.addColorStop(1.0, "rgba(52, 211, 153, 0.0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(hProj.x, hProj.y, retR * 2.1, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "#34d399";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(hProj.x, hProj.y, retR, 0, Math.PI * 2);
+  ctx.moveTo(hProj.x - retR - 4, hProj.y);
+  ctx.lineTo(hProj.x - retR + 2, hProj.y);
+  ctx.moveTo(hProj.x + retR - 2, hProj.y);
+  ctx.lineTo(hProj.x + retR + 4, hProj.y);
+  ctx.moveTo(hProj.x, hProj.y - retR - 4);
+  ctx.lineTo(hProj.x, hProj.y - retR + 2);
+  ctx.moveTo(hProj.x, hProj.y + retR - 2);
+  ctx.lineTo(hProj.x, hProj.y + retR + 4);
+  ctx.stroke();
+
+  ctx.fillStyle = rgbFloatToCss(hs.rgb, 255, 244, 214);
+  ctx.beginPath();
+  ctx.arc(hProj.x, hProj.y, 3.6, 0, Math.PI * 2);
+  ctx.fill();
+
+  const rTxt =
+    maxKpc < 0.1
+      ? `${((gal.homeRadiusKpc || 0) * 1000.0).toFixed(1)} pc`
+      : `${(gal.homeRadiusKpc || 0).toFixed(1)} kpc`;
+  ctx.font = "600 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "#6ee7b7";
+  ctx.textAlign = hProj.x > W * 0.65 ? "right" : "left";
+  ctx.fillText(
+    `Home System (${rTxt})`,
+    hProj.x + (hProj.x > W * 0.65 ? -12 : 12),
+    Math.max(36, Math.min(H - 12, hProj.y - 8))
+  );
+
+  // Top title & drag hint:
+  ctx.textAlign = "left";
+  ctx.font = "700 11.5px Inter, system-ui, sans-serif";
+  ctx.fillStyle = "#f1f5f9";
+  ctx.fillText(`${gal.typeName || "Spiral Galaxy"} · ${gal.vantageName || "Spiral Arm"}`, 10, 17);
+  ctx.font = "500 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText("Auto-rotating 3D galaxy (drag to tilt/orbit)", 10, 31);
+
+  ctx.restore();
+}
+
+function drawWorldCosmosSystem(view) {
+  const canvas = document.getElementById("world-cosmos-system-canvas");
+  if (!canvas || !view.session) return;
+
+  const W = 430;
+  const H = 258;
+  const dpr = Math.min(2.5, Math.max(1.0, window.devicePixelRatio || 1.0));
+  const tw = Math.round(W * dpr);
+  const th = Math.round(H * dpr);
+  if (canvas.width !== tw || canvas.height !== th) {
+    canvas.width = tw;
+    canvas.height = th;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const { overview } = ensureWorldCosmosData(view);
+  const hs = overview.homeStar || {};
+  const planets = Array.isArray(overview.planets) ? overview.planets : [];
+  const homeMoons = Array.isArray(overview.homeMoons) ? overview.homeMoons : [];
+  const simDays = view.cosmosSimDays || 0.0;
+
+  const cx = W * 0.5;
+  const cy = H * 0.55;
+
+  // Deep-space backdrop:
+  const bg = ctx.createRadialGradient(cx, cy, 8, cx, cy, W * 0.65);
+  bg.addColorStop(0.0, "#0d1630");
+  bg.addColorStop(0.55, "#060b19");
+  bg.addColorStop(1.0, "#03060f");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const st of MOON_BG_STARS) {
+    const sx = (st.x / MOON_ORBIT_LAYOUT.W) * W;
+    const sy = (st.y / MOON_ORBIT_LAYOUT.H) * H;
+    ctx.fillStyle = st.warm
+      ? `rgba(255, 236, 205, ${st.a * 0.8})`
+      : `rgba(210, 228, 255, ${st.a * 0.8})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, st.r * 0.9, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Compute concentric planet radii with extra clearance around the Home World for its moons:
+  const nP = planets.length;
+  const moonPad = homeMoons.length > 0 ? 11 + homeMoons.length * 3.2 : 4;
+  const weights = [];
+  for (let i = 0; i < nP; i++) {
+    const prevHome = i > 0 && planets[i - 1].isHomeWorld;
+    const currHome = planets[i].isHomeWorld;
+    weights.push(currHome || prevHome ? 1.0 + moonPad / 12.0 : 1.0);
+  }
+  const totalW = weights.reduce((a, b) => a + b, 0.0) || 1.0;
+  const rInner = 24.0;
+  const rOuter = Math.min(cx, cy) - (planets[nP - 1]?.isHomeWorld ? moonPad + 10 : 12);
+  const span = Math.max(36.0, rOuter - rInner);
+  const orbitRadii = [];
+  let acc = 0.0;
+  for (let i = 0; i < nP; i++) {
+    acc += i === 0 ? 0.0 : weights[i];
+    const denom = Math.max(1e-4, totalW - (weights[0] || 0.0));
+    orbitRadii.push(nP === 1 ? (rInner + rOuter) * 0.5 : rInner + span * (acc / denom));
+  }
+
+  // Central Home Star corona & photosphere:
+  const sunCss = rgbFloatToCss(hs.rgb, 255, 244, 212);
+  const sunRad = Math.max(7.5, Math.min(13.5, 9.5 * Math.sqrt(hs.radiusSolar || 1.0)));
+  const corona = ctx.createRadialGradient(cx, cy, sunRad * 0.3, cx, cy, sunRad * 3.2);
+  const sr255 = Math.round((hs.rgb?.[0] ?? 1.0) * 255);
+  const sg255 = Math.round((hs.rgb?.[1] ?? 0.95) * 255);
+  const sb255 = Math.round((hs.rgb?.[2] ?? 0.84) * 255);
+  corona.addColorStop(0.0, `rgba(${sr255}, ${sg255}, ${sb255}, 0.85)`);
+  corona.addColorStop(0.4, `rgba(${sr255}, ${sg255}, ${sb255}, 0.25)`);
+  corona.addColorStop(1.0, `rgba(${sr255}, ${sg255}, ${sb255}, 0.0)`);
+  ctx.fillStyle = corona;
+  ctx.beginPath();
+  ctx.arc(cx, cy, sunRad * 3.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = sunCss;
+  ctx.beginPath();
+  ctx.arc(cx, cy, sunRad, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Draw planetary orbit rings first:
+  for (let i = 0; i < nP; i++) {
+    const p = planets[i];
+    const rOrb = orbitRadii[i];
+    ctx.save();
+    if (p.isHomeWorld) {
+      ctx.strokeStyle = "rgba(52, 211, 153, 0.50)";
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([5, 4]);
+    } else {
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.22)";
+      ctx.lineWidth = 0.9;
+    }
+    ctx.beginPath();
+    ctx.arc(cx, cy, rOrb, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Draw planets and the Home World's orbiting moons:
+  for (let i = 0; i < nP; i++) {
+    const p = planets[i];
+    const rOrb = orbitRadii[i];
+    const period = Math.max(4.0, p.periodDays || 365.25);
+    const theta = (p.initAngleRad || 0.0) + (simDays / period) * Math.PI * 2.0;
+    const px = cx + rOrb * Math.cos(theta);
+    const py = cy - rOrb * Math.sin(theta);
+    const sunAng = Math.atan2(cy - py, cx - px);
+    const pRad = Math.max(
+      2.6,
+      Math.min(7.2, 3.4 + 1.55 * Math.log(Math.max(0.3, p.radiusEarth || 1.0)))
+    );
+
+    if (p.isHomeWorld && homeMoons.length > 0) {
+      // Draw harmonic moon orbits & lit moons orbiting the moving Home World:
+      for (let k = 0; k < homeMoons.length; k++) {
+        const m = homeMoons[k];
+        const mR = pRad + 6.2 + k * 4.6;
+        ctx.save();
+        ctx.strokeStyle = "rgba(110, 231, 183, 0.28)";
+        ctx.lineWidth = 0.75;
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        ctx.arc(px, py, mR, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+
+        const mPer = Math.max(1.2, m.periodDays || 27.32);
+        const mAng = (m.phaseOffsetRad || 0.0) + (simDays / mPer) * Math.PI * 2.0;
+        const mx = px + mR * Math.cos(mAng);
+        const my = py - mR * Math.sin(mAng);
+        const mSunAng = Math.atan2(cy - my, cx - mx);
+        drawLitBodyDisc(
+          ctx,
+          mx,
+          my,
+          Math.max(1.5, Math.min(2.6, 1.9 * Math.cbrt(Math.max(0.2, m.massLunar || 1.0)))),
+          mSunAng,
+          "#e2e8f0",
+          "#1e293b"
+        );
+      }
+    }
+
+    if (p.hasRings) {
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(-0.38);
+      ctx.strokeStyle = rgbFloatToCss(p.rgb, 226, 210, 175);
+      ctx.globalAlpha = 0.72;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, pRad * 2.15, pRad * 0.72, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (p.isHomeWorld) {
+      ctx.strokeStyle = "#34d399";
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.arc(px, py, pRad + 3.0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    const litCss = rgbFloatToCss(p.rgb, 96, 165, 250);
+    drawLitBodyDisc(ctx, px, py, pRad, sunAng, litCss, "rgba(5, 10, 24, 0.78)");
+
+    if (p.isHomeWorld) {
+      ctx.font = "600 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.fillStyle = "#6ee7b7";
+      ctx.textAlign = "center";
+      const lblY = py - (homeMoons.length > 0 ? pRad + 9 + homeMoons.length * 4.6 : pRad + 9);
+      ctx.fillText("Home", px, Math.max(38, lblY));
+    }
+  }
+
+  // Header caption:
+  ctx.textAlign = "left";
+  ctx.font = "700 11.5px Inter, system-ui, sans-serif";
+  ctx.fillStyle = "#f1f5f9";
+  const moonCaption =
+    homeMoons.length === 1 ? "1 Moon" : `${homeMoons.length} Harmonic Moons`;
+  ctx.fillText(
+    `${hs.spectralType || "G2V"} (${Math.round(hs.tempK || 5778)} K) · ${nP} Planets · ${moonCaption}`,
+    10,
+    17
+  );
+  ctx.font = "500 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText(
+    `Home Orbit: ${(hs.habitableAu || 1.0).toFixed(2)} AU (${Math.round(hs.yearDays || 365)}d/yr) · Year ${(simDays / Math.max(5.0, hs.yearDays || 365.25)).toFixed(1)}`,
+    10,
+    31
+  );
+
+  ctx.restore();
+}
+
+export const setWorldCosmosModalActive = (isOpen) => () => {
+  if (!activeView || !activeView.session) return;
+  if (!isOpen) {
+    stopWorldCosmosLoop(activeView);
+    return;
+  }
+  activeView.cosmosModalOpen = true;
+  if (activeView.cosmosSimDays === undefined) {
+    activeView.cosmosSimDays = 0.0;
+  }
+  if (activeView.cosmosElapsedSec === undefined) {
+    activeView.cosmosElapsedSec = 0.0;
+  }
+
+  const paintAll = () => {
+    drawWorldCosmosGalaxy(activeView);
+    drawWorldCosmosSystem(activeView);
+    const smCanvas = document.getElementById("world-cosmos-starmap-canvas");
+    if (smCanvas && !activeView.cosmosStarMapPainted) {
+      drawDualHemisphereStarMap(activeView, smCanvas);
+      activeView.cosmosStarMapPainted = true;
+    }
+  };
+  activeView.cosmosStarMapPainted = false;
+
+  const stepFrame = (ts) => {
+    if (!activeView || !activeView.cosmosModalOpen || !activeView.session) {
+      return;
+    }
+    const prev = activeView.cosmosLastTs ?? ts;
+    const dtSec = Math.min(0.08, Math.max(0.0, (ts - prev) / 1000.0));
+    activeView.cosmosLastTs = ts;
+    activeView.cosmosElapsedSec = (activeView.cosmosElapsedSec || 0.0) + dtSec;
+    if (!activeView.cosmosGalaxyDragging) {
+      activeView.cosmosGalaxyYaw = (activeView.cosmosGalaxyYaw || 0.0) + dtSec * 0.28;
+    }
+    // Advance orbital clock so both planetary years and lunar months animate smoothly together:
+    activeView.cosmosSimDays = (activeView.cosmosSimDays || 0.0) + dtSec * 36.0;
+    try {
+      paintAll();
+    } catch (err) {
+      console.error("Cosmos modal paint error:", err);
+    }
+    activeView.cosmosRafId = requestAnimationFrame(stepFrame);
+  };
+
+  if (activeView.cosmosRafId !== null && activeView.cosmosRafId !== undefined) {
+    cancelAnimationFrame(activeView.cosmosRafId);
+  }
+  activeView.cosmosLastTs = null;
+  activeView.cosmosRafId = requestAnimationFrame(stepFrame);
+};
+
 function stopWorldLoop(view) {
   view.isRunning = false;
   if (view.timerId !== null && view.timerId !== undefined) {
@@ -5249,6 +5776,7 @@ function scheduleWorldTick(view) {
     if (!view.isRunning || activeView !== view) return;
     view.session.step();
     view.dirtySnapshot = true;
+    invalidateWorldCosmosCache(view, true);
     updateWorldDataBuffers(view, false);
     if (view.setWorldInfo) {
       view.setWorldInfo(buildWorldInfo(view))();
@@ -5338,6 +5866,7 @@ export const mountWorldView =
 
     return () => {
       canvas.removeEventListener("click", handleCanvasClick);
+      stopWorldCosmosLoop(view);
       stopWorldLoop(view);
       if (view.dirtySnapshot && view.session) {
         const bytes = view.session.encode_snapshot();
@@ -5389,6 +5918,8 @@ export const createWorld =
     activeView.selectedStateId = -1;
     activeView.selectedLangId = -1;
     activeView.selectedNationId = -1;
+    activeView.cosmosStarMapPainted = false;
+    invalidateWorldCosmosCache(activeView, false);
     updateWorldDataBuffers(activeView, true);
     setWorldInfo(buildWorldInfo(activeView))();
   };
@@ -5397,6 +5928,7 @@ export const stepWorld = (setWorldInfo) => () => {
   if (!activeView || !activeView.session || activeView.isRunning) return;
   activeView.session.step();
   activeView.dirtySnapshot = true;
+  invalidateWorldCosmosCache(activeView, true);
   updateWorldDataBuffers(activeView, false);
   setWorldInfo(buildWorldInfo(activeView))();
 };
@@ -5409,6 +5941,7 @@ export const advanceWorldStage = (setWorldInfo) => () => {
   activeView.selectedStateId = -1;
   activeView.selectedLangId = -1;
   activeView.selectedNationId = -1;
+  invalidateWorldCosmosCache(activeView, true);
   updateWorldDataBuffers(activeView, false);
   setWorldInfo(buildWorldInfo(activeView))();
 };
@@ -5439,6 +5972,8 @@ export const setWorldSunAndAtmosphere =
     if (!activeView || !activeView.session) return;
     activeView.session.set_sun_and_atmosphere(starFilter, atmosphereId);
     activeView.dirtySnapshot = true;
+    activeView.cosmosStarMapPainted = false;
+    invalidateWorldCosmosCache(activeView, false);
     updateWorldDataBuffers(activeView, false);
     setWorldInfo(buildWorldInfo(activeView))();
   };
@@ -5466,6 +6001,8 @@ export const loadSavedPlanetIntoWorld = (setWorldInfo) => () => {
     activeView.selectedStateId = -1;
     activeView.selectedLangId = -1;
     activeView.selectedNationId = -1;
+    activeView.cosmosStarMapPainted = false;
+    invalidateWorldCosmosCache(activeView, false);
     updateWorldDataBuffers(activeView, true);
     setWorldInfo(buildWorldInfo(activeView))();
   }
@@ -5484,6 +6021,8 @@ export const loadFilePlanetIntoWorld = (setWorldInfo) => () => {
       activeView.selectedStateId = -1;
       activeView.selectedLangId = -1;
       activeView.selectedNationId = -1;
+      activeView.cosmosStarMapPainted = false;
+      invalidateWorldCosmosCache(activeView, false);
       updateWorldDataBuffers(activeView, true);
       setWorldInfo(buildWorldInfo(activeView))();
     }
@@ -7237,8 +7776,9 @@ function projectToHemisphere(raRad, decDeg, rotRad, isNorth, cx, cy, R) {
   };
 }
 
-function drawDualHemisphereStarMap(view) {
-  const canvas = view.starMapCanvas || document.getElementById("sun-starmap-canvas");
+function drawDualHemisphereStarMap(view, canvasOverride = null) {
+  const canvas =
+    canvasOverride || view.starMapCanvas || document.getElementById("sun-starmap-canvas");
   if (!canvas || !view.session) return;
 
   const { W, H, cxN, cyN, cxS, cyS, R } = STAR_MAP_LAYOUT;
@@ -7257,10 +7797,12 @@ function drawDualHemisphereStarMap(view) {
 
   const cache = ensureStarMapCache(view);
   const { starsRaw, edgesRaw, meta, orderArr, galCurve, eclCurve } = cache;
-  const rotRad = view.rotationAngleRad || 0.0;
+  const rotRad = canvasOverride ? 0.0 : view.rotationAngleRad || 0.0;
   const selStarIdx = typeof view.selectedStarIdx === "number" ? view.selectedStarIdx : -1;
   const selConstIdx =
-    selStarIdx >= 0 ? view.session.star_constellation_index(selStarIdx) : -1;
+    selStarIdx >= 0 && typeof view.session.star_constellation_index === "function"
+      ? view.session.star_constellation_index(selStarIdx)
+      : -1;
 
   // 1. Deep midnight celestial atlas backdrop:
   const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
@@ -7378,7 +7920,7 @@ function drawDualHemisphereStarMap(view) {
     };
 
     // Galactic Equator curve + Galactic Center diamond marker:
-    if (view.showGalacticPlane) {
+    if (view.showGalacticPlane !== false) {
       strokeGreatCircle(galCurve, "rgba(56, 189, 248, 0.42)", 1.15, [5, 4]);
       const gcInHemi = isNorth ? cache.gcDecDeg >= 0.0 : cache.gcDecDeg < 0.0;
       if (gcInHemi) {
@@ -7414,7 +7956,7 @@ function drawDualHemisphereStarMap(view) {
     strokeGreatCircle(eclCurve, "rgba(251, 191, 36, 0.34)", 1.0, [3, 4]);
 
     // Constellation asterism lines (clipping cleanly across the 0° equator rim):
-    if (view.showConstellations && edgesRaw.length >= 3) {
+    if (view.showConstellations !== false && edgesRaw.length >= 3) {
       const edgeCount = Math.floor(edgesRaw.length / 3);
       ctx.lineCap = "round";
       for (let pass = 0; pass < 2; pass++) {
@@ -7529,7 +8071,7 @@ function drawDualHemisphereStarMap(view) {
     }
 
     // Constellation labels (`C1..CN`):
-    if (view.showConstellations && Array.isArray(meta.constellations)) {
+    if (view.showConstellations !== false && Array.isArray(meta.constellations)) {
       ctx.font = "700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace";
       for (const c of meta.constellations) {
         const inHemi = isNorth ? c.decDeg >= 0.0 : c.decDeg < 0.0;
@@ -7678,12 +8220,17 @@ function drawDualHemisphereStarMap(view) {
   ctx.restore();
   ctx.fillText("Ecliptic & Planets", lx + 21, ly);
 
+  const totalStars = cache.starCount || meta.starCount || 0;
+  const galLabel =
+    typeof view.session.galaxy_type_name === "function"
+      ? view.session.galaxy_type_name()
+      : view.cosmosCache?.overview?.galaxy?.typeName || "Host Galaxy";
   ctx.textAlign = "right";
   ctx.fillStyle = "#93c5fd";
   ctx.fillText(
     meta.isRealHipparcos
-      ? `Sol · Hipparcos (${meta.starCount} stars)`
-      : `${view.session.galaxy_type_name()} (${meta.starCount} stars)`,
+      ? `Sol · Hipparcos (${totalStars} stars)`
+      : `${galLabel} (${totalStars} stars)`,
     W - 28,
     ly
   );

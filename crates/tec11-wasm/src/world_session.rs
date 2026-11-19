@@ -321,4 +321,24 @@ impl WasmWorldSession {
     pub fn ocean_current_segments_colored(&self) -> Vec<f32> {
         self.sim.ocean_current_segments_colored()
     }
+
+    pub fn galaxy_cloud_data(&self) -> Vec<f32> {
+        self.sim.galaxy_cloud_data()
+    }
+
+    pub fn star_map_stars_data(&self) -> Vec<f32> {
+        self.sim.star_map_stars_data()
+    }
+
+    pub fn star_map_constellation_edges(&self) -> Vec<u32> {
+        self.sim.star_map_constellation_edges()
+    }
+
+    pub fn star_map_metadata_json(&self) -> String {
+        self.sim.star_map_metadata_json()
+    }
+
+    pub fn cosmos_overview_json(&self) -> String {
+        self.sim.cosmos_overview_json()
+    }
 }
