@@ -54,6 +54,7 @@ derive instance eqScreen :: Eq Screen
 data WorldModal
   = CosmosModal
   | GeologyModal
+  | SkyModal
 
 derive instance eqWorldModal :: Eq WorldModal
 
@@ -626,6 +627,7 @@ foreign import loadFilePlanetIntoWorld :: (WorldInfo -> Effect Unit) -> Effect U
 foreign import setWorldCosmosModalActive :: Boolean -> Effect Unit
 foreign import clearWorldSelectedTile :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import notifyWorldGeologyModalOpen :: Effect Unit
+foreign import notifyWorldSkyModalOpen :: Effect Unit
 
 -- Moons & Tidal Erosion Sandbox mode FFI (`MoonScreen`)
 foreign import mountMoonView :: Int -> Int -> Int -> Int -> String -> Boolean -> Boolean -> Boolean -> (MoonInfo -> Effect Unit) -> Effect (Effect Unit)
@@ -1753,6 +1755,7 @@ mkApp = do
       let isCosmos = screen == WorldScreen && worldActiveModal == Just CosmosModal
       setWorldCosmosModalActive isCosmos
       when (screen == WorldScreen && worldActiveModal == Just GeologyModal) notifyWorldGeologyModalOpen
+      when (screen == WorldScreen && worldActiveModal == Just SkyModal) notifyWorldSkyModalOpen
       pure (setWorldCosmosModalActive false)
 
     let
@@ -5856,6 +5859,12 @@ mkApp = do
                                               , onClick: capture_ (setWorldActiveModal (Just GeologyModal))
                                               , children: [ R.text "Geology" ]
                                               }
+                                          , R.button
+                                              { id: "world-sky-btn"
+                                              , className: "action-btn secondary"
+                                              , onClick: capture_ (setWorldActiveModal (Just SkyModal))
+                                              , children: [ R.text "Sky" ]
+                                              }
                                           ]
                                       }
                                   ]
@@ -6034,6 +6043,58 @@ mkApp = do
                                                       "No rock layers recorded on this tile."
                                                   ]
                                               }
+                                          ]
+                                      }
+                                  ]
+                              }
+                          ]
+                      }
+                  Just SkyModal ->
+                    R.div
+                      { id: "world-sky-modal"
+                      , className: "world-modal-backdrop"
+                      , children:
+                          [ R.div
+                              { style: R.css { position: "fixed", inset: "0" }
+                              , onClick: capture_ (setWorldActiveModal Nothing)
+                              , children: []
+                              }
+                          , R.div
+                              { className: "world-modal-card"
+                              , style: R.css { position: "relative", zIndex: "1", maxWidth: "min(640px, 95vw)" }
+                              , children:
+                                  [ R.div
+                                      { className: "world-modal-header"
+                                      , children:
+                                          [ R.div
+                                              { className: "world-modal-title"
+                                              , children: [ R.text ("Local Sky & Horizon Vantage — " <> worldInfo.tileView.title) ]
+                                              }
+                                          , R.button
+                                              { id: "world-modal-close-btn"
+                                              , className: "world-modal-close-btn"
+                                              , onClick: capture_ (setWorldActiveModal Nothing)
+                                              , children: [ R.text "Close ×" ]
+                                              }
+                                          ]
+                                      }
+                                  , R.div
+                                      { className: "world-modal-body"
+                                      , children:
+                                          [ R.div
+                                              { style: R.css { fontSize: "0.80rem", color: "#cbd5e1" }
+                                              , children:
+                                                  [ R.text
+                                                      ( "Atmosphere: "
+                                                          <> worldInfo.atmosphereName
+                                                          <> " · Zenith: "
+                                                          <> worldInfo.skyColorName
+                                                          <> " · Sunset: "
+                                                          <> worldInfo.sunsetColorName
+                                                      )
+                                                  ]
+                                              }
+                                          , renderTileSkyAndVantageBox worldInfo.tileView
                                           ]
                                       }
                                   ]

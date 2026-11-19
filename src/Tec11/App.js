@@ -6176,6 +6176,11 @@ export const notifyWorldGeologyModalOpen = () => {
   }
 };
 
+export const notifyWorldSkyModalOpen = () => {
+  if (!activeView || !activeView.tileSky) return;
+  scheduleTileSkyAndVantagePaint(activeView);
+};
+
 export const setWorldSunAndAtmosphere =
   (starFilter) =>
   (atmosphereId) =>

@@ -2082,7 +2082,13 @@ export function ensureTileSkyLoop(view) {
   if (view.tileSkyRafId) return;
   let lastTs = performance.now();
   const stepSky = (now) => {
-    if (hostGetActiveView() !== view || !view.tileSky) {
+    if (
+      hostGetActiveView() !== view ||
+      !view.tileSky ||
+      (typeof document !== "undefined" &&
+        !document.getElementById("tile-sky-canvas") &&
+        !document.getElementById("tile-vantage-canvas"))
+    ) {
       view.tileSkyRafId = null;
       return;
     }
