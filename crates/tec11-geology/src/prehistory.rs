@@ -822,14 +822,19 @@ impl PrehistorySimulation {
                     _ => {}
                 }
             }
+            let soil_fert = self.tiles[t].surface_soil_fertility();
             self.tile_ag_potential[t] = if plant_count == 0 {
                 if self.subgrid_island_koeppen.get(t).copied().unwrap_or(0) != 0 {
-                    self.tiles[t].surface_soil_fertility().clamp(0.6, 1.5)
+                    soil_fert.clamp(0.6, 1.5)
                 } else {
                     0.0
                 }
             } else {
-                (0.5 + (plant_count as f32) / 30.0 + (herbivore_count as f32) / 20.0).clamp(0.5, 2.0)
+                let bio_factor = (0.5
+                    + (plant_count as f32) / 30.0
+                    + (herbivore_count as f32) / 20.0)
+                    .clamp(0.5, 1.8);
+                (bio_factor * soil_fert).clamp(0.3, 2.5)
             };
         }
     }
@@ -1805,6 +1810,38 @@ mod tests {
         assert!(
             pop.contains_key(&18),
             "Distant Continent B (18 hops away) should be reached via sub-grid island stepping stones"
+        );
+    }
+
+    #[test]
+    fn test_land_ag_potential_incorporates_surface_soil_fertility() {
+        let mut sim = PrehistorySimulation::new_earth(42);
+        let land_tiles: Vec<usize> = (0..sim.tiles.len())
+            .filter(|&t| sim.tiles[t].elevation() > 0.0 && sim.tile_ag_potential[t] > 0.0)
+            .collect();
+        assert!(land_tiles.len() >= 2);
+        let t_a = land_tiles[0];
+        let t_b = land_tiles[1];
+
+        // Give t_a fertile basaltic/volcanic topsoil and t_b nutrient-poor granite topsoil,
+        // and settle a shared biosphere with identical plant/herbivore counts on both tiles.
+        sim.tiles[t_a] = TileGeology::empty_land(crate::rock::Rock::extrusive(0.48), 1.0);
+        sim.tiles[t_b] = TileGeology::empty_land(crate::rock::Rock::intrusive(0.74), 1.0);
+        assert!(
+            sim.tiles[t_a].surface_soil_fertility() > sim.tiles[t_b].surface_soil_fertility(),
+            "Basaltic topsoil should have higher fertility than granitic topsoil"
+        );
+
+        let mut bio = sim.take_or_settle_biosphere(&sim.tile_elevations());
+        let shared_species = bio.tile_all_species[t_a].clone();
+        bio.tile_all_species[t_b] = shared_species;
+        sim.update_ag_potential_from_biosphere(&bio);
+
+        assert!(
+            sim.tile_ag_potential[t_a] > sim.tile_ag_potential[t_b],
+            "Fertile topsoil tile ({}) should have higher ag_potential than infertile tile ({})",
+            sim.tile_ag_potential[t_a],
+            sim.tile_ag_potential[t_b]
         );
     }
 }
