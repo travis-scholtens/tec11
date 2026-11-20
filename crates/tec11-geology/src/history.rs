@@ -390,10 +390,13 @@ pub struct ZoomedMapPolygon {
     pub state_id: Option<u32>,
     pub points_xy: Vec<[f32; 2]>,
     pub rgb: [f32; 3],
+    pub is_land: bool,
     pub is_in_selected_state: bool,
     pub is_selected_tile: bool,
     pub is_capital: bool,
     pub is_river: bool,
+    pub nation_pops: Vec<(u32, f32)>,
+    pub lang_pops: Vec<(u32, f32)>,
 }
 
 impl ZoomedMapPolygon {
@@ -403,9 +406,19 @@ impl ZoomedMapPolygon {
             .iter()
             .map(|&[x, y]| format!("[{x:.4},{y:.4}]"))
             .collect();
+        let nat_entries: Vec<String> = self
+            .nation_pops
+            .iter()
+            .map(|&(id, pop)| format!("\"{id}\":{pop:.3}"))
+            .collect();
+        let lang_entries: Vec<String> = self
+            .lang_pops
+            .iter()
+            .map(|&(id, pop)| format!("\"{id}\":{pop:.3}"))
+            .collect();
         let sid_val = self.state_id.map(|s| s as i32).unwrap_or(-1);
         format!(
-            "{{\"displayIdx\":{},\"fineIdx\":{},\"stateId\":{},\"points\":[{}],\"rgb\":[{:.3},{:.3},{:.3}],\"isInSelectedState\":{},\"isSelectedTile\":{},\"isCapital\":{},\"isRiver\":{}}}",
+            "{{\"displayIdx\":{},\"fineIdx\":{},\"stateId\":{},\"points\":[{}],\"rgb\":[{:.3},{:.3},{:.3}],\"isLand\":{},\"isInSelectedState\":{},\"isSelectedTile\":{},\"isCapital\":{},\"isRiver\":{},\"nationPops\":{{{}}},\"langPops\":{{{}}}}}",
             self.display_idx,
             self.fine_idx,
             sid_val,
@@ -413,10 +426,13 @@ impl ZoomedMapPolygon {
             self.rgb[0],
             self.rgb[1],
             self.rgb[2],
+            self.is_land,
             self.is_in_selected_state,
             self.is_selected_tile,
             self.is_capital,
-            self.is_river
+            self.is_river,
+            nat_entries.join(","),
+            lang_entries.join(",")
         )
     }
 }
@@ -6475,10 +6491,13 @@ impl HistorySimulation {
                 state_id: None,
                 points_xy,
                 rgb: [0.06, 0.17, 0.39],
+                is_land: false,
                 is_in_selected_state: false,
                 is_selected_tile: selected_fine_idx == Some(d_idx),
                 is_capital: false,
                 is_river: false,
+                nation_pops: Vec::new(),
+                lang_pops: Vec::new(),
             });
         }
 
@@ -6538,16 +6557,32 @@ impl HistorySimulation {
                 [0.20 * shade, 0.29 * shade, 0.19 * shade]
             };
 
+            let mut nat_map: BTreeMap<u32, f32> = BTreeMap::new();
+            let mut lang_map: BTreeMap<u32, f32> = BTreeMap::new();
+            if let Some(comms) = self.tile_communities.get(&f) {
+                for c in comms {
+                    if c.thousands > 1e-4 {
+                        *nat_map.entry(c.nationality_id).or_insert(0.0) += c.thousands;
+                        *lang_map.entry(c.language_id).or_insert(0.0) += c.thousands;
+                    }
+                }
+            }
+            let nation_pops: Vec<(u32, f32)> = nat_map.into_iter().collect();
+            let lang_pops: Vec<(u32, f32)> = lang_map.into_iter().collect();
+
             polygons.push(ZoomedMapPolygon {
                 display_idx: f,
                 fine_idx: f,
                 state_id: f_state,
                 points_xy,
                 rgb,
+                is_land: elev > 0.0,
                 is_in_selected_state,
                 is_selected_tile,
                 is_capital,
                 is_river,
+                nation_pops,
+                lang_pops,
             });
         }
         polygons

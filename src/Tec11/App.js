@@ -3279,6 +3279,54 @@ registerSkyVantageHost(
   (v) => refreshActiveInspectorView(v)
 );
 
+function heatColorCss(mode, intensity, outsideState) {
+  const u = Math.max(0, Math.min(1, intensity));
+  let r, g, b;
+  if (mode === "nation") {
+    // Deep bronze -> vivid amber -> bright gold
+    if (u < 0.5) {
+      const k = u * 2;
+      r = 95 + (234 - 95) * k;
+      g = 42 + (138 - 42) * k;
+      b = 16 + (28 - 16) * k;
+    } else {
+      const k = (u - 0.5) * 2;
+      r = 234 + (254 - 234) * k;
+      g = 138 + (240 - 138) * k;
+      b = 28 + (138 - 28) * k;
+    }
+  } else {
+    // Deep teal -> vivid sky cyan -> bright ice
+    if (u < 0.5) {
+      const k = u * 2;
+      r = 16 + (14 - 16) * k;
+      g = 68 + (165 - 68) * k;
+      b = 96 + (233 - 96) * k;
+    } else {
+      const k = (u - 0.5) * 2;
+      r = 14 + (224 - 14) * k;
+      g = 165 + (242 - 165) * k;
+      b = 233 + (254 - 233) * k;
+    }
+  }
+  const scale = outsideState ? 0.62 : 1.0;
+  return `rgb(${Math.round(r * scale)}, ${Math.round(g * scale)}, ${Math.round(b * scale)})`;
+}
+
+function resolveStateMapHeatmap(view) {
+  const hasNat = view && view.selectedNationId !== undefined && view.selectedNationId >= 0;
+  const hasLang = view && view.selectedLangId !== undefined && view.selectedLangId >= 0;
+  if (!hasNat && !hasLang) return null;
+  let mode = view.stateMapHeatMode;
+  if (mode === "nation" && !hasNat) mode = hasLang ? "language" : null;
+  else if (mode === "language" && !hasLang) mode = hasNat ? "nation" : null;
+  else if (!mode) mode = hasNat ? "nation" : "language";
+  if (!mode) return null;
+  const id = mode === "nation" ? view.selectedNationId : view.selectedLangId;
+  const name = mode === "nation" ? view.selectedNationName || "" : view.selectedLangName || "";
+  return { mode, id, key: String(id), name };
+}
+
 function paintStateZoomCanvas(view) {
   const canvas = document.getElementById("state-zoom-canvas");
   if (!canvas || !view || !view.stateMapPolygons || view.stateMapPolygons.length === 0) {
@@ -3307,6 +3355,36 @@ function paintStateZoomCanvas(view) {
   const offsetX = (cssW - size) * 0.5;
   const offsetY = (cssH - size) * 0.5;
 
+  const heat = resolveStateMapHeatmap(view);
+  let heatMaxPop = 0;
+  if (heat) {
+    for (const poly of view.stateMapPolygons) {
+      if (!poly.isLand) continue;
+      const map = heat.mode === "nation" ? poly.nationPops : poly.langPops;
+      const p = map && typeof map[heat.key] === "number" ? map[heat.key] : 0;
+      if (p > heatMaxPop) heatMaxPop = p;
+    }
+  }
+  const logDenom = Math.log1p(Math.max(heatMaxPop, 0.01));
+
+  const fillStyleForPoly = (poly, isInState) => {
+    if (!heat) {
+      return isInState
+        ? rgbFloatToCss(poly.rgb, 60, 180, 90)
+        : rgbFloatToCss(poly.rgb, 40, 60, 50);
+    }
+    if (!poly.isLand) {
+      return rgbFloatToCss(poly.rgb, 18, 51, 112);
+    }
+    const map = heat.mode === "nation" ? poly.nationPops : poly.langPops;
+    const pop = map && typeof map[heat.key] === "number" ? map[heat.key] : 0;
+    if (pop <= 1e-4) {
+      return isInState ? "#1e293b" : "#0f172a";
+    }
+    const t = Math.min(1, Math.max(0, Math.log1p(pop) / logDenom));
+    return heatColorCss(heat.mode, 0.14 + 0.86 * t, !isInState);
+  };
+
   const tracePoly = (pts) => {
     ctx.beginPath();
     for (let i = 0; i < pts.length; i++) {
@@ -3322,7 +3400,7 @@ function paintStateZoomCanvas(view) {
   for (const poly of view.stateMapPolygons) {
     if (poly.isInSelectedState || !poly.points || poly.points.length < 3) continue;
     tracePoly(poly.points);
-    ctx.fillStyle = rgbFloatToCss(poly.rgb, 40, 60, 50);
+    ctx.fillStyle = fillStyleForPoly(poly, false);
     ctx.fill();
     ctx.strokeStyle = "rgba(15, 23, 42, 0.7)";
     ctx.lineWidth = 0.75;
@@ -3333,9 +3411,10 @@ function paintStateZoomCanvas(view) {
   for (const poly of view.stateMapPolygons) {
     if (!poly.isInSelectedState || !poly.points || poly.points.length < 3) continue;
     tracePoly(poly.points);
-    ctx.fillStyle = rgbFloatToCss(poly.rgb, 60, 180, 90);
+    ctx.fillStyle = fillStyleForPoly(poly, true);
     ctx.fill();
-    ctx.strokeStyle = poly.isRiver ? "rgba(56, 189, 248, 0.9)" : "rgba(226, 232, 240, 0.85)";
+    ctx.strokeStyle =
+      !heat && poly.isRiver ? "rgba(56, 189, 248, 0.9)" : "rgba(226, 232, 240, 0.85)";
     ctx.lineWidth = 1.15;
     ctx.stroke();
   }
@@ -3366,6 +3445,51 @@ function paintStateZoomCanvas(view) {
       ctx.fill();
       ctx.stroke();
     }
+  }
+
+  // Pass 4: Heatmap legend overlay when viewing a nationality or language
+  if (heat) {
+    const labelPrefix = heat.mode === "nation" ? "Nationality" : "Language";
+    const maxText =
+      heatMaxPop > 1e-4 ? formatPopulationThousands(heatMaxPop) : "0";
+    const legendText = heat.name
+      ? `${labelPrefix}: ${heat.name} (0 → ${maxText})`
+      : `${labelPrefix} Heatmap (0 → ${maxText})`;
+    ctx.font = "600 10.5px system-ui, -apple-system, sans-serif";
+    const textW = ctx.measureText(legendText).width;
+    const barW = 42;
+    const padX = 7;
+    const boxW = Math.min(cssW - 12, barW + 8 + textW + padX * 2);
+    const boxH = 20;
+    const bx = 6;
+    const by = cssH - boxH - 6;
+
+    ctx.fillStyle = "rgba(8, 18, 36, 0.84)";
+    ctx.strokeStyle = heat.mode === "nation" ? "rgba(245, 158, 11, 0.75)" : "rgba(56, 189, 248, 0.75)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, boxW, boxH, 5);
+    ctx.fill();
+    ctx.stroke();
+
+    const gx = bx + padX;
+    const gy = by + 6;
+    const grad = ctx.createLinearGradient(gx, gy, gx + barW, gy);
+    if (heat.mode === "nation") {
+      grad.addColorStop(0, "rgb(95, 42, 16)");
+      grad.addColorStop(0.5, "rgb(234, 138, 28)");
+      grad.addColorStop(1, "rgb(254, 240, 138)");
+    } else {
+      grad.addColorStop(0, "rgb(16, 68, 96)");
+      grad.addColorStop(0.5, "rgb(14, 165, 233)");
+      grad.addColorStop(1, "rgb(224, 242, 254)");
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(gx, gy, barW, 8);
+
+    ctx.fillStyle = "#f1f5f9";
+    ctx.textBaseline = "middle";
+    ctx.fillText(legendText, gx + barW + 6, by + boxH * 0.5 + 0.5, boxW - barW - padX * 2 - 6);
   }
 
   ctx.restore();
@@ -3519,10 +3643,12 @@ function buildHistoryInspectorBundle(view) {
     view.stateMapPolygons = [];
   }
 
+  view.selectedLangName = "";
   if (canInspectPolities && view.selectedLangId !== undefined && view.selectedLangId >= 0) {
     try {
       const parsedLang = JSON.parse(s.inspect_language_json(view.selectedLangId));
       if (parsedLang && parsedLang.hasLanguage) {
+        view.selectedLangName = parsedLang.name || "";
         languageDetail = {
           hasLanguage: true,
           langId: parsedLang.langId,
@@ -3537,10 +3663,12 @@ function buildHistoryInspectorBundle(view) {
     } catch (_) {}
   }
 
+  view.selectedNationName = "";
   if (canInspectPolities && view.selectedNationId !== undefined && view.selectedNationId >= 0) {
     try {
       const parsedNat = JSON.parse(s.inspect_nation_json(view.selectedNationId));
       if (parsedNat && parsedNat.hasNation) {
+        view.selectedNationName = parsedNat.name || "";
         nationDetail = {
           hasNation: true,
           natId: parsedNat.natId,
@@ -4678,25 +4806,33 @@ export const toggleStratigraphySideZoom = () => {
 
 export const selectInspectorLanguage = (langId) => () => {
   if (!activeView || !activeView.session) return;
-  activeView.selectedLangId = activeView.selectedLangId === langId ? -1 : langId;
+  const next = activeView.selectedLangId === langId ? -1 : langId;
+  activeView.selectedLangId = next;
+  activeView.stateMapHeatMode =
+    next >= 0 ? "language" : activeView.selectedNationId >= 0 ? "nation" : null;
   refreshActiveInspectorView(activeView);
 };
 
 export const selectInspectorNation = (natId) => () => {
   if (!activeView || !activeView.session) return;
-  activeView.selectedNationId = activeView.selectedNationId === natId ? -1 : natId;
+  const next = activeView.selectedNationId === natId ? -1 : natId;
+  activeView.selectedNationId = next;
+  activeView.stateMapHeatMode =
+    next >= 0 ? "nation" : activeView.selectedLangId >= 0 ? "language" : null;
   refreshActiveInspectorView(activeView);
 };
 
 export const closeInspectorLanguage = () => {
   if (!activeView || !activeView.session) return;
   activeView.selectedLangId = -1;
+  activeView.stateMapHeatMode = activeView.selectedNationId >= 0 ? "nation" : null;
   refreshActiveInspectorView(activeView);
 };
 
 export const closeInspectorNation = () => {
   if (!activeView || !activeView.session) return;
   activeView.selectedNationId = -1;
+  activeView.stateMapHeatMode = activeView.selectedLangId >= 0 ? "language" : null;
   refreshActiveInspectorView(activeView);
 };
 
@@ -4714,6 +4850,7 @@ export const selectInspectorState = (stateId) => () => {
   activeView.pinnedStateId = stateId;
   activeView.selectedLangId = -1;
   activeView.selectedNationId = -1;
+  activeView.stateMapHeatMode = null;
   refreshActiveInspectorView(activeView);
   if (typeof document !== "undefined") {
     const body = document.querySelector("#world-state-modal .world-modal-body");
@@ -4730,6 +4867,7 @@ export const goBackInspectorState = () => {
   activeView.pinnedStateId = stack.length > 0 ? prev.stateId : -1;
   activeView.selectedLangId = -1;
   activeView.selectedNationId = -1;
+  activeView.stateMapHeatMode = null;
   refreshActiveInspectorView(activeView);
   if (typeof document !== "undefined") {
     const body = document.querySelector("#world-state-modal .world-modal-body");
