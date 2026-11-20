@@ -2663,4 +2663,57 @@ mod tests {
             assert!(rj.contains("\"isSelected\":true"));
         }
     }
+
+    #[test]
+    fn test_world_polar_ocean_currents_persist_under_glacial_history() {
+        let mut p = WorldCreateParams::default();
+        p.grid_size = 3;
+        p.atm_dt_myr = 5;
+        p.life_dt_myr = 5;
+        p.people_dt_myr = 5;
+        let mut world = WorldSimulation::new(p, 42);
+        while world.stage_index() == 0 {
+            world.step();
+        }
+        assert_eq!(world.stage_index(), 1);
+        for _ in 0..4 {
+            if world.stage_index() == 1 {
+                world.step();
+            }
+        }
+
+        // Transition at `prehistory_ticks = 32, glaciation_tick = 32` (glacial maximum: glaciation ≈ 0.0).
+        let mut snap = tec11_proto::PlanetSnapshot::decode_bytes(&world.encode_snapshot()).unwrap();
+        if let Some(tec11_proto::PlanetStageOneof::Prehistory(ref mut pre_proto)) = snap.stage {
+            pre_proto.prehistory_ticks = 32;
+            pre_proto.glaciation_tick = 32;
+            for h in &mut pre_proto.heritages {
+                h.agricultural = true;
+            }
+        }
+        assert!(world.load_snapshot_bytes(&snap.encode_bytes()));
+        world.step();
+        assert_eq!(world.stage_index(), 2);
+
+        if let WorldStageState::History(hist) = world.stage() {
+            assert!(
+                hist.prehistory().glaciation() < 0.05,
+                "History should preserve Prehistory's glacial-maximum glaciation, got {}",
+                hist.prehistory().glaciation()
+            );
+        } else {
+            panic!("Expected History stage");
+        }
+
+        // Polar ocean currents (`|y| >= sin(55 deg) ≈ 0.82`) must still flow under glacial sea ice.
+        let hist_polar = world
+            .ocean_current_segments_colored()
+            .chunks_exact(9)
+            .filter(|c| c[1].abs() >= 0.82)
+            .count();
+        assert!(
+            hist_polar > 20,
+            "Expected visible polar ocean currents in History even at glacial maximum, got {hist_polar}"
+        );
+    }
 }

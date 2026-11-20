@@ -318,8 +318,9 @@ pub fn solve_seasonal_ocean_circulation_with_geom(
             let mon_e = lge * cos_c - lgn * sin_c;
             let mon_n = lge * sin_c + lgn * cos_c;
 
-            // Sea-ice mechanical lid shields the surface ocean from wind stress.
-            let open_water_factor = 1.0 - 0.85 * ice_frac;
+            // Sea-ice pack partially shields the surface ocean from wind stress while still
+            // transmitting ice-drift drag into under-ice polar gyres and circumpolar flow.
+            let open_water_factor = 1.0 - 0.70 * ice_frac;
             let we = (base_we + monsoon_strength * mon_e) * open_water_factor;
             let wn = (base_wn + monsoon_strength * mon_n) * open_water_factor;
 
@@ -374,7 +375,7 @@ pub fn solve_seasonal_ocean_circulation_with_geom(
 
             for _iter in 0..iters {
                 for v in 0..n {
-                    if elevations[v] > 0.0 || ice_cover[v] > 0.92 {
+                    if elevations[v] > 0.0 {
                         psi[v] = 0.0;
                         continue;
                     }
@@ -386,7 +387,7 @@ pub fn solve_seasonal_ocean_circulation_with_geom(
                     let (weight_sum, neighbor_sum) =
                         ngs.iter().fold((0.0, 0.0), |(w_acc, n_acc), ng| {
                             let u = ng.idx;
-                            let psi_u = if elevations[u] > 0.0 || ice_cover[u] > 0.92 {
+                            let psi_u = if elevations[u] > 0.0 {
                                 0.0
                             } else {
                                 psi[u]
@@ -501,7 +502,7 @@ pub fn solve_seasonal_ocean_circulation_with_geom(
 
             let lat_abs = lats_deg[v].abs();
             let trop_wind_weight = 0.25 * (-((lat_abs / 18.0).powi(2))).exp();
-            let ice_damp = 1.0 - 0.80 * ice_cover[v];
+            let ice_damp = 1.0 - 0.50 * ice_cover[v];
             let init_ve = (-dpsi_dy + 0.35 * ekman_e[v] + trop_wind_weight * tau_e[v]) * ice_damp;
             let init_vn = (dpsi_dx + 0.35 * ekman_n[v] + trop_wind_weight * tau_n[v]) * ice_damp;
 

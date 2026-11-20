@@ -551,10 +551,10 @@ impl ClimateModel {
         self.refresh_seasons_and_classifications(has_life);
     }
 
-    /// Fast per-tick climate update for Pleistocene glaciation & glacio-isostasy steps in
+    /// Per-tick climate update for Pleistocene glaciation & glacio-isostasy steps in
     /// `PrehistorySimulation` where continent positions do not drift (`4,000` yr/tick),
-    /// reusing the solved 8-season ocean circulation while updating all 8 half-seasons'
-    /// temperature, precipitation, and Köppen classifications for the new `glaciation` and `elevations`.
+    /// refreshing ocean circulation when `glaciation` changes so polar currents evolve
+    /// smoothly across glacial cycles instead of jumping abruptly on transition into `History`.
     pub fn update_for_glaciation_step(&mut self, elevations: &[f32], has_life: bool) {
         if self.ocean_seasons.len() != DEFAULT_SEASONS.len() {
             self.update_for_tectonics(elevations, has_life);
@@ -563,6 +563,25 @@ impl ClimateModel {
         assert_eq!(self.elevations.len(), elevations.len());
         self.elevations.copy_from_slice(elevations);
         self.compute_seabreeze();
+        let ocean_key = OceanCacheKey {
+            cells: self.cells,
+            spin_bits: self.spin.to_bits(),
+            tilt_bits: self.tilt_deg.to_bits(),
+            glaciation_bits: self.glaciation.to_bits(),
+        };
+        if self.cached_ocean_params != Some(ocean_key) {
+            self.ocean_seasons = solve_seasonal_ocean_circulation_with_geom(
+                &self.ocean_geom,
+                &self.lats_deg,
+                &self.elevations,
+                self.cells,
+                self.spin,
+                self.tilt_deg,
+                self.glaciation,
+                &DEFAULT_SEASONS,
+            );
+            self.cached_ocean_params = Some(ocean_key);
+        }
         self.refresh_seasons_and_classifications(has_life);
     }
 
