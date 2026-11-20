@@ -557,6 +557,7 @@ impl LexiconEntryView {
 pub struct LanguageDetailView {
     pub lang_id: u32,
     pub name: String,
+    pub lineage_summary: String,
     pub total_speakers_text: String,
     pub phoneme_summary: String,
     pub speakers_by_location: Vec<StateLinkItem>,
@@ -570,9 +571,10 @@ impl LanguageDetailView {
         let nats: Vec<String> = self.speakers_by_nation.iter().map(|n| n.to_json()).collect();
         let lex: Vec<String> = self.lexicon.iter().map(|e| e.to_json()).collect();
         format!(
-            "{{\"hasLanguage\":true,\"langId\":{},\"name\":{},\"totalSpeakersText\":{},\"phonemeSummary\":{},\"speakersByLocation\":[{}],\"speakersByNation\":[{}],\"lexicon\":[{}]}}",
+            "{{\"hasLanguage\":true,\"langId\":{},\"name\":{},\"lineageSummary\":{},\"totalSpeakersText\":{},\"phonemeSummary\":{},\"speakersByLocation\":[{}],\"speakersByNation\":[{}],\"lexicon\":[{}]}}",
             self.lang_id,
             json_escape(&self.name),
+            json_escape(&self.lineage_summary),
             json_escape(&self.total_speakers_text),
             json_escape(&self.phoneme_summary),
             locs.join(","),
@@ -614,6 +616,8 @@ impl NationDetailView {
 #[derive(Clone, Debug)]
 pub struct LanguageRecord {
     pub id: u32,
+    pub parent_id: Option<u32>,
+    pub substrate_ids: Vec<u32>,
     pub phonology: Language,
     pub lexicon: BTreeMap<ConceptKey, WordOrigin>,
     pub used_words: BTreeSet<Word>,
@@ -626,6 +630,8 @@ impl LanguageRecord {
         let phonology = Language::generate(rng);
         let mut rec = Self {
             id,
+            parent_id: None,
+            substrate_ids: Vec::new(),
             phonology,
             lexicon: BTreeMap::new(),
             used_words: BTreeSet::new(),
@@ -670,6 +676,8 @@ impl LanguageRecord {
         let phonology = Language::generate(rng);
         let mut rec = Self {
             id,
+            parent_id: None,
+            substrate_ids: Vec::new(),
             phonology,
             lexicon: BTreeMap::new(),
             used_words: BTreeSet::new(),
@@ -845,6 +853,8 @@ impl LanguageRecord {
         let mut cloned = self.clone();
         let old_id = cloned.id;
         cloned.id = new_id;
+        cloned.parent_id = Some(old_id);
+        cloned.substrate_ids.clear();
         if let Some(orig) = cloned.lexicon.remove(&ConceptKey::Language(old_id)) {
             cloned.lexicon.insert(ConceptKey::Language(new_id), orig);
         }
@@ -5123,6 +5133,9 @@ impl HistorySimulation {
                     }
                     if let Some(donor) = self.languages.get(&lang).cloned() {
                         if let Some(dialect) = self.languages.get_mut(&winner_lang) {
+                            if !dialect.substrate_ids.contains(&lang) {
+                                dialect.substrate_ids.push(lang);
+                            }
                             let keys: Vec<ConceptKey> = donor.lexicon.keys().copied().collect();
                             for k in keys {
                                 dialect.borrow_concept(k, &donor);
@@ -6759,6 +6772,7 @@ impl HistorySimulation {
                 name: self.nation_name(nid, dom_lang),
                 thousands: p,
                 percent_text: format_share_percent(p, st_pop),
+                family_id: None,
             })
             .collect();
         nationalities.sort_by(|a, b| {
@@ -6781,6 +6795,7 @@ impl HistorySimulation {
                     name: lname,
                     thousands: p,
                     percent_text: format_share_percent(p, st_pop),
+                    family_id: Some(self.language_root_family(lid)),
                 }
             })
             .collect();
@@ -7697,6 +7712,7 @@ impl HistorySimulation {
                 name: self.nation_name(nid, dom_lang),
                 thousands: p,
                 percent_text: format_share_percent(p, tile_pop),
+                family_id: None,
             })
             .collect();
         nationalities.sort_by(|a, b| {
@@ -7719,6 +7735,7 @@ impl HistorySimulation {
                     name: lname,
                     thousands: p,
                     percent_text: format_share_percent(p, tile_pop),
+                    family_id: Some(self.language_root_family(lid)),
                 }
             })
             .collect();
@@ -7849,6 +7866,42 @@ impl HistorySimulation {
         })
     }
 
+    /// Trace `parent_id` links back to the founding proto-language (root family ID).
+    pub fn language_root_family(&self, lang_id: u32) -> u32 {
+        let mut cur = lang_id;
+        for _ in 0..256 {
+            match self.languages.get(&cur).and_then(|l| l.parent_id) {
+                Some(parent) if parent != cur => cur = parent,
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// Human-readable lineage summary for a language (parent dialect, root family, and any substrates).
+    pub fn language_lineage_summary(&self, lang_id: u32) -> String {
+        let Some(lang) = self.languages.get(&lang_id) else {
+            return String::new();
+        };
+        let root_id = self.language_root_family(lang_id);
+        let name_of = |id: u32| -> String {
+            self.languages
+                .get(&id)
+                .map(|l| l.name())
+                .unwrap_or_else(|| format!("Lang_{}", id + 1))
+        };
+        let mut summary = match lang.parent_id {
+            None => "Proto-language (root family)".to_string(),
+            Some(pid) if pid == root_id => format!("Dialect of {}", name_of(pid)),
+            Some(pid) => format!("Dialect of {} (family: {})", name_of(pid), name_of(root_id)),
+        };
+        if !lang.substrate_ids.is_empty() {
+            let subs: Vec<String> = lang.substrate_ids.iter().map(|&s| name_of(s)).collect();
+            summary.push_str(&format!(" · substrate: {}", subs.join(", ")));
+        }
+        summary
+    }
+
     /// Detailed inspection of a single language (`lang_id`): full lexicon, who speaks it, and where.
     pub fn inspect_language(&self, lang_id: u32) -> Option<LanguageDetailView> {
         let lang = self.languages.get(&lang_id)?;
@@ -7914,6 +7967,7 @@ impl HistorySimulation {
                 name: self.nation_name(nid, Some(lang_id)),
                 thousands: p,
                 percent_text: format_share_percent(p, total_thousands),
+                family_id: None,
             })
             .collect();
         speakers_by_nation.sort_by(|a, b| {
@@ -7943,6 +7997,7 @@ impl HistorySimulation {
         Some(LanguageDetailView {
             lang_id,
             name: lang.name(),
+            lineage_summary: self.language_lineage_summary(lang_id),
             total_speakers_text: format!(
                 "{} across {} {}",
                 format_thousands_compact(total_thousands),
@@ -8007,6 +8062,7 @@ impl HistorySimulation {
                     name: lname,
                     thousands: p,
                     percent_text: format_share_percent(p, total_thousands),
+                    family_id: Some(self.language_root_family(lid)),
                 }
             })
             .collect();
@@ -9672,5 +9728,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_language_parent_substrate_and_root_family_lineage() {
+        let mut sim = HistorySimulation::new_earth(42);
+        let root_id = *sim.languages.keys().next().expect("Expected at least one language");
+        let root = sim.languages.get(&root_id).unwrap().clone();
+        assert_eq!(root.parent_id, None);
+        assert!(root.substrate_ids.is_empty());
+        assert_eq!(sim.language_root_family(root_id), root_id);
+        assert!(sim.language_lineage_summary(root_id).contains("Proto-language"));
+
+        // Branch a child dialect and a grandchild creole dialect with a substrate.
+        let child_id = sim.next_language_id;
+        sim.next_language_id += 1;
+        let child = root.clone_dialect(child_id);
+        assert_eq!(child.parent_id, Some(root_id));
+        sim.languages.insert(child_id, child.clone());
+
+        let other_root_id = sim
+            .languages
+            .keys()
+            .copied()
+            .find(|&id| id != root_id && id != child_id)
+            .unwrap_or(root_id);
+        let grandchild_id = sim.next_language_id;
+        sim.next_language_id += 1;
+        let mut grandchild = child.clone_dialect(grandchild_id);
+        grandchild.substrate_ids.push(other_root_id);
+        sim.languages.insert(grandchild_id, grandchild);
+
+        assert_eq!(sim.language_root_family(child_id), root_id);
+        assert_eq!(sim.language_root_family(grandchild_id), root_id);
+        let summary = sim.language_lineage_summary(grandchild_id);
+        assert!(summary.contains("Dialect of"));
+        assert!(summary.contains("substrate:"));
     }
 }

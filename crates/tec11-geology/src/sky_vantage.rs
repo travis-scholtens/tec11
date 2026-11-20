@@ -61,16 +61,23 @@ pub struct DemographicShareItem {
     pub name: String,
     pub thousands: f32,
     pub percent_text: String,
+    pub family_id: Option<u32>,
 }
 
 impl DemographicShareItem {
     pub fn to_json(&self) -> String {
+        let fid: i64 = match self.family_id {
+            Some(f) => f as i64,
+            None => -1,
+        };
         format!(
-            "{{\"id\":{},\"name\":{},\"popText\":{},\"percentText\":{}}}",
+            "{{\"id\":{},\"name\":{},\"popText\":{},\"percentText\":{},\"thousands\":{:.4},\"familyId\":{}}}",
             self.id,
             json_escape(&self.name),
             json_escape(&format_thousands_compact(self.thousands)),
-            json_escape(&self.percent_text)
+            json_escape(&self.percent_text),
+            self.thousands,
+            fid
         )
     }
 }
