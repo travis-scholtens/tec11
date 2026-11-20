@@ -3270,6 +3270,7 @@ function emptyLanguageDetail() {
     phonemeSummary: "",
     speakersByLocation: [],
     speakersByNation: [],
+    familyTree: [],
     lexicon: [],
   };
 }
@@ -3768,6 +3769,7 @@ function buildHistoryInspectorBundle(view) {
           phonemeSummary: parsedLang.phonemeSummary || "",
           speakersByLocation: normalizeStateLinkList(parsedLang.speakersByLocation),
           speakersByNation: parsedLang.speakersByNation || [],
+          familyTree: parsedLang.familyTree || [],
           lexicon: parsedLang.lexicon || [],
         };
       }

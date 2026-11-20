@@ -552,6 +552,33 @@ impl LexiconEntryView {
     }
 }
 
+/// A single node in a language's pre-order DFS family tree.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LanguageTreeNode {
+    pub lang_id: u32,
+    pub name: String,
+    pub depth: usize,
+    pub is_current: bool,
+    pub is_active: bool,
+    pub speakers_text: String,
+    pub substrate_summary: String,
+}
+
+impl LanguageTreeNode {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"langId\":{},\"name\":{},\"depth\":{},\"isCurrent\":{},\"isActive\":{},\"speakersText\":{},\"substrateSummary\":{}}}",
+            self.lang_id,
+            json_escape(&self.name),
+            self.depth,
+            self.is_current,
+            self.is_active,
+            json_escape(&self.speakers_text),
+            json_escape(&self.substrate_summary)
+        )
+    }
+}
+
 /// Detailed Language inspection view (full lexicon, who speaks it, and where).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LanguageDetailView {
@@ -562,6 +589,7 @@ pub struct LanguageDetailView {
     pub phoneme_summary: String,
     pub speakers_by_location: Vec<StateLinkItem>,
     pub speakers_by_nation: Vec<DemographicShareItem>,
+    pub family_tree: Vec<LanguageTreeNode>,
     pub lexicon: Vec<LexiconEntryView>,
 }
 
@@ -569,9 +597,10 @@ impl LanguageDetailView {
     pub fn to_json(&self) -> String {
         let locs: Vec<String> = self.speakers_by_location.iter().map(|l| l.to_json()).collect();
         let nats: Vec<String> = self.speakers_by_nation.iter().map(|n| n.to_json()).collect();
+        let tree: Vec<String> = self.family_tree.iter().map(|n| n.to_json()).collect();
         let lex: Vec<String> = self.lexicon.iter().map(|e| e.to_json()).collect();
         format!(
-            "{{\"hasLanguage\":true,\"langId\":{},\"name\":{},\"lineageSummary\":{},\"totalSpeakersText\":{},\"phonemeSummary\":{},\"speakersByLocation\":[{}],\"speakersByNation\":[{}],\"lexicon\":[{}]}}",
+            "{{\"hasLanguage\":true,\"langId\":{},\"name\":{},\"lineageSummary\":{},\"totalSpeakersText\":{},\"phonemeSummary\":{},\"speakersByLocation\":[{}],\"speakersByNation\":[{}],\"familyTree\":[{}],\"lexicon\":[{}]}}",
             self.lang_id,
             json_escape(&self.name),
             json_escape(&self.lineage_summary),
@@ -579,6 +608,7 @@ impl LanguageDetailView {
             json_escape(&self.phoneme_summary),
             locs.join(","),
             nats.join(","),
+            tree.join(","),
             lex.join(",")
         )
     }
@@ -7968,6 +7998,93 @@ impl HistorySimulation {
         summary
     }
 
+    /// Build a pre-order DFS family tree rooted at `language_root_family(current_lang_id)`.
+    pub fn build_language_family_tree(&self, current_lang_id: u32) -> Vec<LanguageTreeNode> {
+        let root_id = self.language_root_family(current_lang_id);
+        let mut family_members: BTreeSet<u32> = BTreeSet::new();
+        let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for (&lid, lang) in &self.languages {
+            if self.language_root_family(lid) == root_id {
+                family_members.insert(lid);
+                if let Some(pid) = lang.parent_id {
+                    if pid != lid {
+                        children.entry(pid).or_default().push(lid);
+                    }
+                }
+            }
+        }
+        if !family_members.contains(&root_id) {
+            return Vec::new();
+        }
+
+        let mut lang_pops: BTreeMap<u32, f32> = BTreeMap::new();
+        for comms in self.tile_communities.values() {
+            for c in comms {
+                if c.thousands > 1e-4 && family_members.contains(&c.language_id) {
+                    *lang_pops.entry(c.language_id).or_insert(0.0) += c.thousands;
+                }
+            }
+        }
+
+        for kids in children.values_mut() {
+            kids.sort_by(|a, b| {
+                let pa = lang_pops.get(a).copied().unwrap_or(0.0);
+                let pb = lang_pops.get(b).copied().unwrap_or(0.0);
+                pb.partial_cmp(&pa)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.cmp(b))
+            });
+        }
+
+        let name_of = |id: u32| -> String {
+            self.languages
+                .get(&id)
+                .map(|l| l.name())
+                .unwrap_or_else(|| format!("Lang_{}", id + 1))
+        };
+
+        let mut out = Vec::with_capacity(family_members.len());
+        let mut stack: Vec<(u32, usize)> = vec![(root_id, 0)];
+        let mut visited: BTreeSet<u32> = BTreeSet::new();
+        while let Some((lid, depth)) = stack.pop() {
+            if !visited.insert(lid) {
+                continue;
+            }
+            let pop = lang_pops.get(&lid).copied().unwrap_or(0.0);
+            let is_active = pop > 1e-4;
+            let speakers_text = if is_active {
+                format_thousands_compact(pop)
+            } else {
+                "extinct".to_string()
+            };
+            let substrate_summary = self
+                .languages
+                .get(&lid)
+                .filter(|l| !l.substrate_ids.is_empty())
+                .map(|l| {
+                    let names: Vec<String> =
+                        l.substrate_ids.iter().map(|&s| name_of(s)).collect();
+                    format!("substrate: {}", names.join(", "))
+                })
+                .unwrap_or_default();
+            out.push(LanguageTreeNode {
+                lang_id: lid,
+                name: name_of(lid),
+                depth,
+                is_current: lid == current_lang_id,
+                is_active,
+                speakers_text,
+                substrate_summary,
+            });
+            if let Some(kids) = children.get(&lid) {
+                for &k in kids.iter().rev() {
+                    stack.push((k, depth + 1));
+                }
+            }
+        }
+        out
+    }
+
     /// Detailed inspection of a single language (`lang_id`): full lexicon, who speaks it, and where.
     pub fn inspect_language(&self, lang_id: u32) -> Option<LanguageDetailView> {
         let lang = self.languages.get(&lang_id)?;
@@ -8060,6 +8177,8 @@ impl HistorySimulation {
             })
             .collect();
 
+        let family_tree = self.build_language_family_tree(lang_id);
+
         Some(LanguageDetailView {
             lang_id,
             name: lang.name(),
@@ -8073,6 +8192,7 @@ impl HistorySimulation {
             phoneme_summary,
             speakers_by_location,
             speakers_by_nation,
+            family_tree,
             lexicon,
         })
     }
@@ -9830,5 +9950,16 @@ mod tests {
         let summary = sim.language_lineage_summary(grandchild_id);
         assert!(summary.contains("Dialect of"));
         assert!(summary.contains("substrate:"));
+
+        let tree = sim.build_language_family_tree(grandchild_id);
+        assert!(tree.len() >= 3);
+        assert_eq!(tree[0].lang_id, root_id);
+        assert_eq!(tree[0].depth, 0);
+        let child_node = tree.iter().find(|n| n.lang_id == child_id).expect("child in tree");
+        assert_eq!(child_node.depth, 1);
+        let grand_node = tree.iter().find(|n| n.lang_id == grandchild_id).expect("grandchild in tree");
+        assert_eq!(grand_node.depth, 2);
+        assert!(grand_node.is_current);
+        assert!(grand_node.substrate_summary.contains("substrate:"));
     }
 }

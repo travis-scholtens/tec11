@@ -244,6 +244,16 @@ type LexiconEntryItem =
   , etymology :: String
   }
 
+type LanguageTreeNodeItem =
+  { langId :: Int
+  , name :: String
+  , depth :: Int
+  , isCurrent :: Boolean
+  , isActive :: Boolean
+  , speakersText :: String
+  , substrateSummary :: String
+  }
+
 type LanguageDetailInfo =
   { hasLanguage :: Boolean
   , langId :: Int
@@ -253,6 +263,7 @@ type LanguageDetailInfo =
   , phonemeSummary :: String
   , speakersByLocation :: Array StateLinkItem
   , speakersByNation :: Array DemographicShareItem
+  , familyTree :: Array LanguageTreeNodeItem
   , lexicon :: Array LexiconEntryItem
   }
 
@@ -304,6 +315,7 @@ defaultLanguageDetailInfo =
   , phonemeSummary: ""
   , speakersByLocation: []
   , speakersByNation: []
+  , familyTree: []
   , lexicon: []
   }
 
@@ -1058,6 +1070,82 @@ renderLanguageDetailCard lang activeNationId currentStateId =
               , children: [ R.text "Who Speaks It (click nationality for details):" ]
               }
           , renderDemographicPills lang.speakersByNation activeNationId selectInspectorNation "None"
+          , if Array.length lang.familyTree > 1 then
+              R.div
+                { style: R.css { marginTop: "6px" }
+                , children:
+                    [ R.div
+                        { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#93c5fd", marginBottom: "3px" }
+                        , children: [ R.text ("Language Family Tree (" <> show (Array.length lang.familyTree) <> " varieties):") ]
+                        }
+                    , R.div
+                        { style:
+                            R.css
+                              { maxHeight: "125px"
+                              , overflowY: "auto"
+                              , borderLeft: "1px solid #1e293b"
+                              , paddingLeft: "4px"
+                              , display: "flex"
+                              , flexDirection: "column"
+                              , gap: "2px"
+                              }
+                        , children:
+                            map
+                              ( \node ->
+                                  R.div
+                                    { style:
+                                        R.css
+                                          { paddingLeft: show (node.depth * 14) <> "px"
+                                          , fontSize: "0.74rem"
+                                          , lineHeight: "1.3"
+                                          , color: if node.isActive then "#e2e8f0" else "#64748b"
+                                          }
+                                    , children:
+                                        [ R.text (if node.depth > 0 then "└─ " else "")
+                                        , if node.isCurrent then
+                                            R.span
+                                              { style: R.css { fontWeight: "700", color: "#7dd3fc" }
+                                              , children: [ R.text ("● " <> node.name) ]
+                                              }
+                                          else
+                                            R.button
+                                              { type: "button"
+                                              , style:
+                                                  R.css
+                                                    { background: "none"
+                                                    , border: "none"
+                                                    , padding: "0"
+                                                    , margin: "0"
+                                                    , color: if node.isActive then "#38bdf8" else "#94a3b8"
+                                                    , fontStyle: if node.isActive then "normal" else "italic"
+                                                    , textDecoration: "underline"
+                                                    , cursor: "pointer"
+                                                    , fontSize: "inherit"
+                                                    , fontFamily: "inherit"
+                                                    }
+                                              , onClick: capture_ (selectInspectorLanguage node.langId)
+                                              , children: [ R.text (if node.isActive then node.name else "† " <> node.name) ]
+                                              }
+                                        , R.span
+                                            { style: R.css { color: "#94a3b8", marginLeft: "4px", fontSize: "0.71rem" }
+                                            , children: [ R.text ("(" <> node.speakersText <> ")") ]
+                                            }
+                                        , if node.substrateSummary /= "" then
+                                            R.span
+                                              { style: R.css { color: "#fcd34d", marginLeft: "5px", fontSize: "0.70rem" }
+                                              , children: [ R.text ("[" <> node.substrateSummary <> "]") ]
+                                              }
+                                          else
+                                            React.empty
+                                        ]
+                                    }
+                              )
+                              lang.familyTree
+                        }
+                    ]
+                }
+            else
+              React.empty
           , R.div
               { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#93c5fd", marginTop: "7px", marginBottom: "3px" }
               , children: [ R.text ("Full Lexicon (" <> show (Array.length lang.lexicon) <> " words):") ]
