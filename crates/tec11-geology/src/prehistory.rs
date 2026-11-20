@@ -368,14 +368,23 @@ impl PrehistorySimulation {
             spin,
             tilt_deg,
             tectonics_ticks,
-            rng,
+            mut rng,
         ) = tec.take_parts_for_prehistory();
         let n = tiles.len();
         if groups.is_empty() {
             groups = build_continent_groups_from_elevations(&tiles, &adjacency);
         }
         let cells = tec11_climate::nominal_cells_for_spin(spin);
-        climate_model.reset_for_stage(cells, spin, tilt_deg, 0.5);
+        // Start Prehistory at a random phase in the ongoing 32-tick glacial cycle
+        // (`2 * PREHISTORY_GLACIATION_STEP`), since the cycle was conceptually running
+        // even while abstracted away during Tectonics.
+        let initial_glaciation_tick =
+            (rng.next_u64() % ((2 * PREHISTORY_GLACIATION_STEP) as u64)) as u32;
+        let initial_glaciation =
+            0.5 - ((initial_glaciation_tick as f64) * PI / (PREHISTORY_GLACIATION_STEP as f64))
+                .cos()
+                / 2.0;
+        climate_model.reset_for_stage(cells, spin, tilt_deg, initial_glaciation);
         let mut sim = Self {
             grid,
             adjacency,
@@ -384,8 +393,8 @@ impl PrehistorySimulation {
             tilt_deg,
             tectonics_ticks,
             prehistory_ticks: 0,
-            glaciation_tick: 0,
-            glaciation: 0.5,
+            glaciation_tick: initial_glaciation_tick,
+            glaciation: initial_glaciation,
             tiles,
             groups,
             climate_model,

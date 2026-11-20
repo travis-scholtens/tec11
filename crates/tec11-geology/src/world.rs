@@ -616,8 +616,8 @@ impl WorldSimulation {
                 pre.step();
                 self.prehistory_ticks = pre.prehistory_ticks();
                 // Rivergoing and seafaring let prehistoric peoples disperse along rivers and across seas,
-                // while transitioning to urban History requires the invention of agriculture.
-                if self.prehistory_ticks >= 32 && pre.active_agricultural_race_count() > 0 {
+                // while transitioning to urban History happens as soon as agriculture is invented.
+                if pre.active_agricultural_race_count() > 0 {
                     StageTransition::ToHistory
                 } else {
                     StageTransition::None
@@ -2471,17 +2471,12 @@ mod tests {
             world.step();
         }
         assert_eq!(world.stage_index(), 1);
-        for _ in 0..4 {
-            if world.stage_index() == 1 {
-                world.step();
-            }
-        }
 
-        // Build a Prehistory snapshot at tick 32 (`glaciation_tick = 32` -> `glaciation = 0.0` so `gfactor = 0.0`)
+        // Build a Prehistory snapshot at tick 4 (`glaciation_tick = 32` -> `glaciation = 0.0` so `gfactor = 0.0`)
         // where all active heritages have BOTH rivergoing and seafaring, but ZERO agriculture:
         let mut snap = tec11_proto::PlanetSnapshot::decode_bytes(&world.encode_snapshot()).unwrap();
         if let Some(tec11_proto::PlanetStageOneof::Prehistory(ref mut pre_proto)) = snap.stage {
-            pre_proto.prehistory_ticks = 32;
+            pre_proto.prehistory_ticks = 4;
             pre_proto.glaciation_tick = 32;
             for h in &mut pre_proto.heritages {
                 h.agricultural = false;
@@ -2492,7 +2487,7 @@ mod tests {
         assert!(world.load_snapshot_bytes(&snap.encode_bytes()));
         assert_eq!(world.stage_index(), 1);
 
-        // Stepping at `prehistory_ticks >= 32` with active rivergoing & seafaring (and 0 agriculture)
+        // Stepping with active rivergoing & seafaring (and 0 agriculture)
         // must keep the world in Prehistory (`stage_index == 1`), not flip to History:
         world.step();
         assert_eq!(
@@ -2508,10 +2503,12 @@ mod tests {
             panic!("Expected Prehistory stage");
         }
 
-        // Once an active heritage develops agriculture, the next Prehistory step transitions to History (`stage_index == 2`):
+        // Once an active heritage develops agriculture, the next Prehistory step transitions
+        // immediately to History (`stage_index == 2`) without waiting for 32 Prehistory ticks:
         let mut ag_snap =
             tec11_proto::PlanetSnapshot::decode_bytes(&world.encode_snapshot()).unwrap();
         if let Some(tec11_proto::PlanetStageOneof::Prehistory(ref mut pre_proto)) = ag_snap.stage {
+            pre_proto.prehistory_ticks = 4;
             pre_proto.glaciation_tick = 32;
             for h in &mut pre_proto.heritages {
                 h.agricultural = true;
@@ -2522,7 +2519,7 @@ mod tests {
         assert_eq!(
             world.stage_index(),
             2,
-            "Developing agriculture after >= 32 Prehistory ticks must transition into History"
+            "Developing agriculture must immediately transition Prehistory into History"
         );
     }
 
@@ -2676,16 +2673,10 @@ mod tests {
             world.step();
         }
         assert_eq!(world.stage_index(), 1);
-        for _ in 0..4 {
-            if world.stage_index() == 1 {
-                world.step();
-            }
-        }
 
-        // Transition at `prehistory_ticks = 32, glaciation_tick = 32` (glacial maximum: glaciation ≈ 0.0).
+        // Transition at `glaciation_tick = 32` (glacial maximum: glaciation ≈ 0.0).
         let mut snap = tec11_proto::PlanetSnapshot::decode_bytes(&world.encode_snapshot()).unwrap();
         if let Some(tec11_proto::PlanetStageOneof::Prehistory(ref mut pre_proto)) = snap.stage {
-            pre_proto.prehistory_ticks = 32;
             pre_proto.glaciation_tick = 32;
             for h in &mut pre_proto.heritages {
                 h.agricultural = true;
@@ -2714,6 +2705,32 @@ mod tests {
         assert!(
             hist_polar > 20,
             "Expected visible polar ocean currents in History even at glacial maximum, got {hist_polar}"
+        );
+    }
+
+    #[test]
+    fn test_prehistory_starts_at_random_glaciation_phase() {
+        let mut p = WorldCreateParams::default();
+        p.grid_size = 2;
+        p.atm_dt_myr = 5;
+        p.life_dt_myr = 5;
+        p.people_dt_myr = 5;
+        let mut phases = std::collections::BTreeSet::new();
+        for seed in [11u64, 29, 42, 77, 101] {
+            let mut world = WorldSimulation::new(p.clone(), seed);
+            while world.stage_index() == 0 {
+                world.step();
+            }
+            if let WorldStageState::Prehistory(pre) = world.stage() {
+                phases.insert(pre.glaciation_tick());
+            } else {
+                panic!("Expected Prehistory stage");
+            }
+        }
+        assert!(
+            phases.len() >= 3,
+            "Expected distinct initial glaciation phases across seeds, got {:?}",
+            phases
         );
     }
 }
