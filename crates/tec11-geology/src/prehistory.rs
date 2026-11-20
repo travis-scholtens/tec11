@@ -39,6 +39,17 @@ pub fn agriculture_spark_prob(koeppen: u8) -> f64 {
     }
 }
 
+/// Glaciation multiplier (`[0.0, 1.0]`) for agriculture discovery.
+/// Suppressed during deep glacial maxima (`0.0` at `glaciation = 0.0`), ramps smoothly
+/// through cool/Holocene climates (`~0.78` at Earth's `0.35`), and saturates at `1.0`
+/// once the planet reaches mild interglacial conditions (`glaciation >= 0.50`) so
+/// hothouse peaks (`glaciation = 1.0`) do not disproportionately trigger History.
+#[inline]
+pub fn agriculture_glaciation_factor(glaciation: f64) -> f64 {
+    let t = (glaciation / 0.50).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// Seasonal flooding multiplier (`[0.5, 2.0]`) for a river based on its basin's wet-vs-dry
 /// seasonal precipitation swing across the climate model's seasonal snapshots.
 fn river_seasonal_flood_factor(river: &[usize], climate_model: &ClimateModel) -> f64 {
@@ -642,7 +653,7 @@ impl PrehistorySimulation {
         //    weighted by each river basin's seasonal flooding swing, and seafaring along coastal tiles.
         //    Rivergoing and seafaring develop independently of agriculture and of each other, though
         //    having one boosts the probability of developing the other (`3.0x`).
-        let gfactor = glaciation * glaciation;
+        let gfactor = agriculture_glaciation_factor(glaciation);
         let mut river_tile_flood: BTreeMap<usize, f64> = BTreeMap::new();
         for r in &self.rivers {
             let flood_mult = river_seasonal_flood_factor(r, &self.climate_model);
@@ -1935,5 +1946,14 @@ mod tests {
         );
         assert!(agriculture_spark_prob(7) > agriculture_spark_prob(6)); // Cs > Cf
         assert!(agriculture_spark_prob(8) > agriculture_spark_prob(6)); // Cw > Cf
+    }
+
+    #[test]
+    fn test_agriculture_glaciation_factor_saturates_at_interglacial() {
+        assert!((agriculture_glaciation_factor(0.0) - 0.0).abs() < 1e-12);
+        assert!(agriculture_glaciation_factor(0.25) > 0.4 && agriculture_glaciation_factor(0.25) < 0.6);
+        assert!(agriculture_glaciation_factor(EARTH_GLACIATION) > 0.7);
+        assert!((agriculture_glaciation_factor(0.50) - 1.0).abs() < 1e-12);
+        assert!((agriculture_glaciation_factor(1.0) - 1.0).abs() < 1e-12);
     }
 }
