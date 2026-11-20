@@ -204,6 +204,14 @@ type StateLinkItem =
   , suffix :: String
   }
 
+type LanguageFamilyGroup =
+  { familyId :: Int
+  , name :: String
+  , dialectCount :: Int
+  , percentText :: String
+  , dialects :: Array DemographicShareItem
+  }
+
 type StateViewInfo =
   { hasState :: Boolean
   , stateId :: Int
@@ -217,6 +225,8 @@ type StateViewInfo =
   , asabiyaText :: String
   , nationalities :: Array DemographicShareItem
   , languages :: Array DemographicShareItem
+  , languageGroups :: Array LanguageFamilyGroup
+  , expandedLangFamilies :: Array Int
   , exports :: Array String
   , imports :: Array String
   , tradePartners :: Array StateLinkItem
@@ -238,6 +248,7 @@ type LanguageDetailInfo =
   { hasLanguage :: Boolean
   , langId :: Int
   , name :: String
+  , lineageSummary :: String
   , totalSpeakersText :: String
   , phonemeSummary :: String
   , speakersByLocation :: Array StateLinkItem
@@ -254,6 +265,8 @@ type NationDetailInfo =
   , heritageSummary :: String
   , currentLocations :: Array StateLinkItem
   , spokenLanguages :: Array DemographicShareItem
+  , spokenLanguageGroups :: Array LanguageFamilyGroup
+  , expandedLangFamilies :: Array Int
   }
 
 defaultStateViewInfo :: StateViewInfo
@@ -270,6 +283,8 @@ defaultStateViewInfo =
   , asabiyaText: ""
   , nationalities: []
   , languages: []
+  , languageGroups: []
+  , expandedLangFamilies: []
   , exports: []
   , imports: []
   , tradePartners: []
@@ -284,6 +299,7 @@ defaultLanguageDetailInfo =
   { hasLanguage: false
   , langId: -1
   , name: ""
+  , lineageSummary: ""
   , totalSpeakersText: ""
   , phonemeSummary: ""
   , speakersByLocation: []
@@ -301,6 +317,8 @@ defaultNationDetailInfo =
   , heritageSummary: ""
   , currentLocations: []
   , spokenLanguages: []
+  , spokenLanguageGroups: []
+  , expandedLangFamilies: []
   }
 
 type HistoryInfo =
@@ -707,6 +725,7 @@ foreign import closeInspectorNation :: Effect Unit
 foreign import selectInspectorState :: Int -> Effect Unit
 foreign import goBackInspectorState :: Effect Unit
 foreign import resetInspectorStateNav :: Effect Unit
+foreign import toggleExpandedLangFamily :: Int -> Effect Unit
 foreign import toggleStratigraphySideZoom :: Effect Unit
 
 renderStratigraphySideViewBox :: JSX
@@ -794,7 +813,8 @@ renderDemographicPills items activeId onSelect emptyText =
                     { className: if isSelected then "action-btn" else "action-btn secondary"
                     , style:
                         R.css
-                          { padding: "2px 7px"
+                          { width: "auto"
+                          , padding: "2px 8px"
                           , fontSize: "0.75rem"
                           , lineHeight: "1.25"
                           , borderRadius: "999px"
@@ -806,6 +826,116 @@ renderDemographicPills items activeId onSelect emptyText =
                     }
             )
             items
+      }
+
+renderLanguageFamilyPills
+  :: Array LanguageFamilyGroup
+  -> Array Int
+  -> Int
+  -> (Int -> Effect Unit)
+  -> String
+  -> JSX
+renderLanguageFamilyPills groups expandedFamilies activeLangId onSelectLang emptyText =
+  if Array.null groups then
+    R.span
+      { style: R.css { color: "#94a3b8", fontSize: "0.78rem" }
+      , children: [ R.text emptyText ]
+      }
+  else
+    R.div
+      { style: R.css { display: "flex", flexDirection: "column", gap: "5px", marginTop: "3px" }
+      , children:
+          [ R.div
+              { style: R.css { display: "flex", flexWrap: "wrap", gap: "4px" }
+              , children:
+                  map
+                    ( \grp ->
+                        if grp.dialectCount <= 1 then
+                          case Array.head grp.dialects of
+                            Nothing -> React.empty
+                            Just item ->
+                              let
+                                isSelected = item.id == activeLangId
+                              in
+                                R.button
+                                  { className: if isSelected then "action-btn" else "action-btn secondary"
+                                  , style:
+                                      R.css
+                                        { width: "auto"
+                                        , padding: "2px 8px"
+                                        , fontSize: "0.75rem"
+                                        , lineHeight: "1.25"
+                                        , borderRadius: "999px"
+                                        , border: if isSelected then "1px solid #38bdf8" else "1px solid #334155"
+                                        }
+                                  , onClick: capture_ (onSelectLang item.id)
+                                  , children: [ R.text (item.name <> " (" <> item.percentText <> ")") ]
+                                  }
+                        else
+                          let
+                            isExpanded = Array.elem grp.familyId expandedFamilies
+                            hasSelectedChild = Array.any (\d -> d.id == activeLangId) grp.dialects
+                          in
+                            R.button
+                              { className: if hasSelectedChild then "action-btn" else "action-btn secondary"
+                              , style:
+                                  R.css
+                                    { width: "auto"
+                                    , padding: "2px 9px"
+                                    , fontSize: "0.75rem"
+                                    , lineHeight: "1.25"
+                                    , borderRadius: "999px"
+                                    , border:
+                                        if hasSelectedChild || isExpanded then
+                                          "1px solid #38bdf8"
+                                        else
+                                          "1px solid #475569"
+                                    }
+                              , onClick: capture_ (toggleExpandedLangFamily grp.familyId)
+                              , children:
+                                  [ R.text
+                                      ( grp.name
+                                          <> " ("
+                                          <> show grp.dialectCount
+                                          <> " dialects · "
+                                          <> grp.percentText
+                                          <> ") "
+                                          <> (if isExpanded then "▾" else "▸")
+                                      )
+                                  ]
+                              }
+                    )
+                    groups
+              }
+          , R.div
+              { style: R.css { display: "flex", flexDirection: "column", gap: "4px" }
+              , children:
+                  map
+                    ( \grp ->
+                        if grp.dialectCount > 1 && Array.elem grp.familyId expandedFamilies then
+                          R.div
+                            { style:
+                                R.css
+                                  { paddingLeft: "8px"
+                                  , borderLeft: "2px solid #334155"
+                                  , display: "flex"
+                                  , flexDirection: "column"
+                                  , gap: "3px"
+                                  }
+                            , children:
+                                [ R.div
+                                    { style: R.css { fontSize: "0.71rem", color: "#94a3b8" }
+                                    , children: [ R.text (grp.name <> " dialects (" <> show grp.dialectCount <> "):") ]
+                                    }
+                                , renderDemographicPills grp.dialects activeLangId onSelectLang "None"
+                                ]
+                            }
+                        else
+                          React.empty
+                    )
+                    groups
+              }
+          ]
       }
 
 renderStringBulletList :: Array String -> String -> JSX
@@ -907,6 +1037,13 @@ renderLanguageDetailCard lang activeNationId currentStateId =
                       }
                   ]
               }
+          , if lang.lineageSummary /= "" then
+              R.div
+                { style: R.css { fontSize: "0.74rem", color: "#93c5fd", marginBottom: "3px" }
+                , children: [ R.text lang.lineageSummary ]
+                }
+            else
+              React.empty
           , R.div
               { style: R.css { fontSize: "0.76rem", color: "#cbd5e1", marginBottom: "5px" }
               , children: [ R.text ("Speakers: " <> lang.totalSpeakersText <> " | Phonology: " <> lang.phonemeSummary) ]
@@ -1024,7 +1161,7 @@ renderNationDetailCard nat activeLangId currentStateId =
               { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#fde68a", marginTop: "6px" }
               , children: [ R.text "Languages Spoken (click language for lexicon):" ]
               }
-          , renderDemographicPills nat.spokenLanguages activeLangId selectInspectorLanguage "None"
+          , renderLanguageFamilyPills nat.spokenLanguageGroups nat.expandedLangFamilies activeLangId selectInspectorLanguage "None"
           ]
       }
 
@@ -1144,7 +1281,7 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                       { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#cbd5e1", marginTop: "6px" }
                       , children: [ R.text "Languages in State (click for lexicon & speakers):" ]
                       }
-                  , renderDemographicPills st.languages (if lang.hasLanguage then lang.langId else -1) selectInspectorLanguage "None"
+                  , renderLanguageFamilyPills st.languageGroups st.expandedLangFamilies (if lang.hasLanguage then lang.langId else -1) selectInspectorLanguage "None"
                   , R.div
                       { style: R.css { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginTop: "6px" }
                       , children:
@@ -6461,7 +6598,7 @@ mkApp = do
                                                                   { style: R.css { fontSize: "0.76rem", fontWeight: "600", color: "#cbd5e1", marginTop: "6px" }
                                                                   , children: [ R.text "Languages in State (click for lexicon & speakers):" ]
                                                                   }
-                                                              , renderDemographicPills st.languages (if lang.hasLanguage then lang.langId else -1) selectInspectorLanguage "None"
+                                                              , renderLanguageFamilyPills st.languageGroups st.expandedLangFamilies (if lang.hasLanguage then lang.langId else -1) selectInspectorLanguage "None"
                                                               ]
                                                           }
                                                       ]

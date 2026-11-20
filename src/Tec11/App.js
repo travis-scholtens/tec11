@@ -3162,6 +3162,53 @@ function normalizeStateLinkList(items) {
   });
 }
 
+function formatSharePercentJs(part, total) {
+  if (!(total > 1e-6) || !(part > 0)) return "0%";
+  const pct = (part / total) * 100.0;
+  if (pct < 0.1) return "<0.1%";
+  if (pct < 10.0) return `${pct.toFixed(1)}%`;
+  return `${Math.round(pct)}%`;
+}
+
+function groupLanguageDialects(items) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  let totalThousands = 0;
+  for (const it of items) {
+    if (it && typeof it.thousands === "number" && it.thousands > 0) {
+      totalThousands += it.thousands;
+    }
+  }
+  const byFamily = new Map();
+  const order = [];
+  for (const it of items) {
+    if (!it || typeof it !== "object") continue;
+    const fid = typeof it.familyId === "number" && it.familyId >= 0 ? it.familyId : it.id;
+    let entry = byFamily.get(fid);
+    if (!entry) {
+      entry = {
+        familyId: fid,
+        name: it.name || "",
+        thousands: 0,
+        dialects: [],
+      };
+      byFamily.set(fid, entry);
+      order.push(entry);
+    }
+    entry.thousands += typeof it.thousands === "number" ? it.thousands : 0;
+    entry.dialects.push(it);
+  }
+  return order.map((g) => ({
+    familyId: g.familyId,
+    name: g.name,
+    dialectCount: g.dialects.length,
+    percentText:
+      g.dialects.length === 1 && g.dialects[0].percentText
+        ? g.dialects[0].percentText
+        : formatSharePercentJs(g.thousands, totalThousands),
+    dialects: g.dialects,
+  }));
+}
+
 function emptyStateView() {
   return {
     hasState: false,
@@ -3176,6 +3223,8 @@ function emptyStateView() {
     asabiyaText: "",
     nationalities: [],
     languages: [],
+    languageGroups: [],
+    expandedLangFamilies: [],
     exports: [],
     imports: [],
     tradePartners: [],
@@ -3216,6 +3265,7 @@ function emptyLanguageDetail() {
     hasLanguage: false,
     langId: -1,
     name: "",
+    lineageSummary: "",
     totalSpeakersText: "",
     phonemeSummary: "",
     speakersByLocation: [],
@@ -3234,6 +3284,8 @@ function emptyNationDetail() {
     heritageSummary: "",
     currentLocations: [],
     spokenLanguages: [],
+    spokenLanguageGroups: [],
+    expandedLangFamilies: [],
   };
 }
 
@@ -3612,6 +3664,10 @@ function buildHistoryInspectorBundle(view) {
         view.stateMapPolygons = parsedState.mapPolygons || [];
         const navStack = Array.isArray(view.stateNavStack) ? view.stateNavStack : [];
         const topBack = navStack.length > 0 ? navStack[navStack.length - 1] : null;
+        const expandedLangFamilies = view.expandedLangFamilies
+          ? Array.from(view.expandedLangFamilies)
+          : [];
+        const stateLanguages = parsedState.languages || [];
         stateView = {
           hasState: true,
           stateId: parsedState.stateId,
@@ -3624,7 +3680,9 @@ function buildHistoryInspectorBundle(view) {
           tileCount: parsedState.tileCount || 0,
           asabiyaText: parsedState.asabiyaText || "",
           nationalities: parsedState.nationalities || [],
-          languages: parsedState.languages || [],
+          languages: stateLanguages,
+          languageGroups: groupLanguageDialects(stateLanguages),
+          expandedLangFamilies,
           exports: parsedState.exports || [],
           imports: parsedState.imports || [],
           tradePartners: normalizeStateLinkList(parsedState.tradePartners),
@@ -3653,6 +3711,7 @@ function buildHistoryInspectorBundle(view) {
           hasLanguage: true,
           langId: parsedLang.langId,
           name: parsedLang.name || "",
+          lineageSummary: parsedLang.lineageSummary || "",
           totalSpeakersText: parsedLang.totalSpeakersText || "",
           phonemeSummary: parsedLang.phonemeSummary || "",
           speakersByLocation: normalizeStateLinkList(parsedLang.speakersByLocation),
@@ -3669,6 +3728,10 @@ function buildHistoryInspectorBundle(view) {
       const parsedNat = JSON.parse(s.inspect_nation_json(view.selectedNationId));
       if (parsedNat && parsedNat.hasNation) {
         view.selectedNationName = parsedNat.name || "";
+        const natSpoken = parsedNat.spokenLanguages || [];
+        const expandedLangFamilies = view.expandedLangFamilies
+          ? Array.from(view.expandedLangFamilies)
+          : [];
         nationDetail = {
           hasNation: true,
           natId: parsedNat.natId,
@@ -3677,7 +3740,9 @@ function buildHistoryInspectorBundle(view) {
           originSummary: parsedNat.originSummary || "",
           heritageSummary: parsedNat.heritageSummary || "",
           currentLocations: normalizeStateLinkList(parsedNat.currentLocations),
-          spokenLanguages: parsedNat.spokenLanguages || [],
+          spokenLanguages: natSpoken,
+          spokenLanguageGroups: groupLanguageDialects(natSpoken),
+          expandedLangFamilies,
         };
       }
     } catch (_) {}
@@ -4833,6 +4898,19 @@ export const closeInspectorNation = () => {
   if (!activeView || !activeView.session) return;
   activeView.selectedNationId = -1;
   activeView.stateMapHeatMode = activeView.selectedLangId >= 0 ? "language" : null;
+  refreshActiveInspectorView(activeView);
+};
+
+export const toggleExpandedLangFamily = (familyId) => () => {
+  if (!activeView || !activeView.session) return;
+  if (!activeView.expandedLangFamilies) {
+    activeView.expandedLangFamilies = new Set();
+  }
+  if (activeView.expandedLangFamilies.has(familyId)) {
+    activeView.expandedLangFamilies.delete(familyId);
+  } else {
+    activeView.expandedLangFamilies.add(familyId);
+  }
   refreshActiveInspectorView(activeView);
 };
 
