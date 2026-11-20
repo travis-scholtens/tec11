@@ -5401,6 +5401,72 @@ impl HistorySimulation {
             .is_some_and(|st| st.capital_tile == fine_idx)
     }
 
+    /// Colored 3D line-segment buffer (`[x0, y0, z0, x1, y1, z1, r, g, b, ...]`, 9 floats per segment)
+    /// along every shared hex/pent edge between different sovereign states (or between a state and
+    /// adjacent unclaimed/ocean tiles) so neighboring states never visually merge on the 3D globe.
+    pub fn state_border_segments_colored(&self) -> Vec<f32> {
+        let faces = &self.terrain.terrain_grid.faces;
+        let adj = &self.terrain.terrain_adj;
+        let rotate_axes = |v: [f64; 3], r_lift: f64| -> [f32; 3] {
+            [
+                (-v[1] * r_lift) as f32,
+                (v[2] * r_lift) as f32,
+                (v[0] * r_lift) as f32,
+            ]
+        };
+        let r_lift = 1.003;
+        let border_rgb = [0.05f32, 0.08, 0.14];
+        let mut out = Vec::new();
+        for (&f1, &s1) in &self.tile_states {
+            let Some((_, verts1)) = faces.get(f1) else {
+                continue;
+            };
+            let Some(nbs) = adj.get(f1) else {
+                continue;
+            };
+            for &f2 in nbs {
+                let s2 = self.tile_states.get(&f2).copied();
+                if s2 == Some(s1) {
+                    continue;
+                }
+                // Deduplicate shared edges between two states by only emitting when f1 < f2;
+                // for state-vs-non-state borders, only the state side visits the edge.
+                if s2.is_some() && f1 > f2 {
+                    continue;
+                }
+                let Some((_, verts2)) = faces.get(f2) else {
+                    continue;
+                };
+                // Find the two vertices shared by f1 and f2
+                let mut shared: [[f64; 3]; 2] = [[0.0; 3]; 2];
+                let mut found = 0usize;
+                for &v1 in verts1 {
+                    if verts2.iter().any(|&v2| {
+                        let dx = v1[0] - v2[0];
+                        let dy = v1[1] - v2[1];
+                        let dz = v1[2] - v2[2];
+                        dx * dx + dy * dy + dz * dz < 1e-8
+                    }) {
+                        shared[found] = v1;
+                        found += 1;
+                        if found == 2 {
+                            break;
+                        }
+                    }
+                }
+                if found == 2 {
+                    let a = rotate_axes(shared[0], r_lift);
+                    let b = rotate_axes(shared[1], r_lift);
+                    out.extend_from_slice(&[
+                        a[0], a[1], a[2], b[0], b[1], b[2], border_rgb[0], border_rgb[1],
+                        border_rgb[2],
+                    ]);
+                }
+            }
+        }
+        out
+    }
+
     /// 3D unit-sphere polylines and `[r, g, b]` colors for all active travel routes (in grid coordinates).
     pub fn active_route_polylines_grid(&self) -> Vec<(Vec<Vec3>, [f32; 3])> {
         let grid = self.prehistory.grid();

@@ -318,6 +318,13 @@ impl WasmWorldSession {
         }
     }
 
+    pub fn state_border_segments_colored(&self) -> Vec<f32> {
+        match self.sim.stage() {
+            WorldStageState::History(hist) => hist.state_border_segments_colored(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn ocean_current_segments_colored(&self) -> Vec<f32> {
         self.sim.ocean_current_segments_colored()
     }

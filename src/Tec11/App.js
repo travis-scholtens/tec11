@@ -5633,6 +5633,40 @@ function paintWorldRegionalCanvas(view) {
     ctx.stroke();
   }
 
+  // Pass 1.5: Crisp dark border outlines between neighboring states in `Borders` mode
+  if (isBorders) {
+    const q = (v) => Math.round(v * 2000);
+    const edgeOwners = new Map();
+    for (const poly of polys) {
+      const pts = poly.pts;
+      if (!pts || pts.length < 3) continue;
+      const sid = typeof poly.stateId === "number" ? poly.stateId : -1;
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.length];
+        const ka = `${q(a[0])},${q(a[1])}`;
+        const kb = `${q(b[0])},${q(b[1])}`;
+        const key = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+        const prev = edgeOwners.get(key);
+        if (!prev) {
+          edgeOwners.set(key, { sid, a, b, isBorder: false });
+        } else if (prev.sid !== sid && (prev.sid >= 0 || sid >= 0)) {
+          prev.isBorder = true;
+        }
+      }
+    }
+    ctx.strokeStyle = "#0f172a";
+    ctx.lineWidth = 1.9;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    for (const edge of edgeOwners.values()) {
+      if (!edge.isBorder) continue;
+      ctx.moveTo(ox + edge.a[0] * scale, oy + edge.a[1] * scale);
+      ctx.lineTo(ox + edge.b[0] * scale, oy + edge.b[1] * scale);
+    }
+    ctx.stroke();
+  }
+
   // Pass 2: Mode-specific vector overlays (`Climate` ocean currents or `Borders` travel routes):
   if (data.aspect === "climate" && Array.isArray(data.currents)) {
     ctx.lineCap = "round";
@@ -5782,8 +5816,12 @@ function updateWorldDataBuffers(view, rebuildGeometry = false) {
     const oceanSegs = session.ocean_current_segments_colored();
     setColoredArrowSegments(view, [oceanSegs]);
   } else if (view.aspect === "borders" && session.stage_index() === 2) {
+    const borderSegs =
+      typeof session.state_border_segments_colored === "function"
+        ? session.state_border_segments_colored()
+        : new Float32Array(0);
     const routeSegs = session.travel_route_segments_colored();
-    setColoredArrowSegments(view, [routeSegs]);
+    setColoredArrowSegments(view, [borderSegs, routeSegs]);
   } else {
     view.arrowLines.visible = false;
   }
