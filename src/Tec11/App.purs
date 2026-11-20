@@ -197,6 +197,13 @@ type TerrainInfo =
   , selectedReport :: String
   }
 
+type StateLinkItem =
+  { stateId :: Int
+  , prefix :: String
+  , label :: String
+  , suffix :: String
+  }
+
 type StateViewInfo =
   { hasState :: Boolean
   , stateId :: Int
@@ -212,9 +219,11 @@ type StateViewInfo =
   , languages :: Array DemographicShareItem
   , exports :: Array String
   , imports :: Array String
-  , tradePartners :: Array String
-  , conflicts :: Array String
-  , waterRoutes :: Array String
+  , tradePartners :: Array StateLinkItem
+  , conflicts :: Array StateLinkItem
+  , waterRoutes :: Array StateLinkItem
+  , canGoBack :: Boolean
+  , backStateName :: String
   }
 
 type LexiconEntryItem =
@@ -231,7 +240,7 @@ type LanguageDetailInfo =
   , name :: String
   , totalSpeakersText :: String
   , phonemeSummary :: String
-  , speakersByLocation :: Array String
+  , speakersByLocation :: Array StateLinkItem
   , speakersByNation :: Array DemographicShareItem
   , lexicon :: Array LexiconEntryItem
   }
@@ -243,7 +252,7 @@ type NationDetailInfo =
   , totalPopText :: String
   , originSummary :: String
   , heritageSummary :: String
-  , currentLocations :: Array String
+  , currentLocations :: Array StateLinkItem
   , spokenLanguages :: Array DemographicShareItem
   }
 
@@ -266,6 +275,8 @@ defaultStateViewInfo =
   , tradePartners: []
   , conflicts: []
   , waterRoutes: []
+  , canGoBack: false
+  , backStateName: ""
   }
 
 defaultLanguageDetailInfo :: LanguageDetailInfo
@@ -693,6 +704,9 @@ foreign import selectInspectorLanguage :: Int -> Effect Unit
 foreign import selectInspectorNation :: Int -> Effect Unit
 foreign import closeInspectorLanguage :: Effect Unit
 foreign import closeInspectorNation :: Effect Unit
+foreign import selectInspectorState :: Int -> Effect Unit
+foreign import goBackInspectorState :: Effect Unit
+foreign import resetInspectorStateNav :: Effect Unit
 foreign import toggleStratigraphySideZoom :: Effect Unit
 
 renderStratigraphySideViewBox :: JSX
@@ -810,8 +824,58 @@ renderStringBulletList items emptyText =
             items
       }
 
-renderLanguageDetailCard :: LanguageDetailInfo -> Int -> JSX
-renderLanguageDetailCard lang activeNationId =
+renderStateLinkList :: Array StateLinkItem -> Int -> (Int -> Effect Unit) -> String -> JSX
+renderStateLinkList items currentStateId onSelectState emptyText =
+  if Array.null items then
+    R.div
+      { style: R.css { color: "#94a3b8", fontSize: "0.77rem" }
+      , children: [ R.text emptyText ]
+      }
+  else
+    R.div
+      { style: R.css { display: "flex", flexDirection: "column", gap: "2px", fontSize: "0.77rem", color: "#e2e8f0" }
+      , children:
+          map
+            ( \item ->
+                R.div
+                  { children:
+                      [ R.text ("• " <> item.prefix)
+                      , if item.stateId >= 0 && item.stateId /= currentStateId then
+                          R.button
+                            { type: "button"
+                            , className: "state-inline-link"
+                            , style:
+                                R.css
+                                  { background: "none"
+                                  , border: "none"
+                                  , padding: "0"
+                                  , margin: "0"
+                                  , color: "#38bdf8"
+                                  , textDecoration: "underline"
+                                  , cursor: "pointer"
+                                  , fontSize: "inherit"
+                                  , fontFamily: "inherit"
+                                  , fontWeight: "600"
+                                  }
+                            , onClick: capture_ (onSelectState item.stateId)
+                            , children: [ R.text item.label ]
+                            }
+                        else if item.stateId >= 0 && item.stateId == currentStateId then
+                          R.span
+                            { style: R.css { fontWeight: "600", color: "#f8fafc" }
+                            , children: [ R.text item.label ]
+                            }
+                        else
+                          R.text item.label
+                      , R.text item.suffix
+                      ]
+                  }
+            )
+            items
+      }
+
+renderLanguageDetailCard :: LanguageDetailInfo -> Int -> Int -> JSX
+renderLanguageDetailCard lang activeNationId currentStateId =
   if not lang.hasLanguage then
     React.empty
   else
@@ -851,7 +915,7 @@ renderLanguageDetailCard lang activeNationId =
               { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#93c5fd", marginTop: "4px" }
               , children: [ R.text "Where It Is Spoken (States & Continents):" ]
               }
-          , renderStringBulletList lang.speakersByLocation "No active speakers"
+          , renderStateLinkList lang.speakersByLocation currentStateId selectInspectorState "No active speakers"
           , R.div
               { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#93c5fd", marginTop: "6px" }
               , children: [ R.text "Who Speaks It (click nationality for details):" ]
@@ -902,8 +966,8 @@ renderLanguageDetailCard lang activeNationId =
           ]
       }
 
-renderNationDetailCard :: NationDetailInfo -> Int -> JSX
-renderNationDetailCard nat activeLangId =
+renderNationDetailCard :: NationDetailInfo -> Int -> Int -> JSX
+renderNationDetailCard nat activeLangId currentStateId =
   if not nat.hasNation then
     React.empty
   else
@@ -955,7 +1019,7 @@ renderNationDetailCard nat activeLangId =
               { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#fde68a", marginTop: "6px" }
               , children: [ R.text "Where They Currently Live (States & Continents):" ]
               }
-          , renderStringBulletList nat.currentLocations "Extinct / no active settlements"
+          , renderStateLinkList nat.currentLocations currentStateId selectInspectorState "Extinct / no active settlements"
           , R.div
               { style: R.css { fontSize: "0.75rem", fontWeight: "600", color: "#fde68a", marginTop: "6px" }
               , children: [ R.text "Languages Spoken (click language for lexicon):" ]
@@ -1013,6 +1077,23 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                                             }
                                       , children: []
                                       }
+                                  , if st.canGoBack then
+                                      R.button
+                                        { type: "button"
+                                        , className: "action-btn secondary"
+                                        , style: R.css { padding: "1px 6px", fontSize: "0.72rem", width: "auto" }
+                                        , onClick: capture_ goBackInspectorState
+                                        , children:
+                                            [ R.text
+                                                ( if st.backStateName /= "" then
+                                                    "← " <> st.backStateName
+                                                  else
+                                                    "← Back"
+                                                )
+                                            ]
+                                        }
+                                    else
+                                      React.empty
                                   , R.span
                                       { style: R.css { fontWeight: "700", fontSize: "0.88rem", color: "#f8fafc" }
                                       , children: [ R.text ("State: " <> st.stateName) ]
@@ -1073,7 +1154,7 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                                       { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#fde047" }
                                       , children: [ R.text ("Trading Partners (" <> show (Array.length st.tradePartners) <> "):") ]
                                       }
-                                  , renderStringBulletList st.tradePartners "None"
+                                  , renderStateLinkList st.tradePartners st.stateId selectInspectorState "None"
                                   ]
                               }
                           , R.div
@@ -1082,7 +1163,7 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                                       { style: R.css { fontSize: "0.74rem", fontWeight: "600", color: "#f87171" }
                                       , children: [ R.text ("Current Conflicts (" <> show (Array.length st.conflicts) <> "):") ]
                                       }
-                                  , renderStringBulletList st.conflicts "At Peace"
+                                  , renderStateLinkList st.conflicts st.stateId selectInspectorState "At Peace"
                                   ]
                               }
                           ]
@@ -1218,8 +1299,8 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
               }
           else
             React.empty
-        , renderLanguageDetailCard lang (if nat.hasNation then nat.natId else -1)
-        , renderNationDetailCard nat (if lang.hasLanguage then lang.langId else -1)
+        , renderLanguageDetailCard lang (if nat.hasNation then nat.natId else -1) (if st.hasState then st.stateId else -1)
+        , renderNationDetailCard nat (if lang.hasLanguage then lang.langId else -1) (if st.hasState then st.stateId else -1)
         ]
     }
 
@@ -6235,6 +6316,9 @@ mkApp = do
                       st = worldInfo.stateView
                       lang = worldInfo.languageDetail
                       nat = worldInfo.nationDetail
+                      closeStateModal = do
+                        resetInspectorStateNav
+                        setWorldActiveModal Nothing
                     in
                       R.div
                         { id: "world-state-modal"
@@ -6242,7 +6326,7 @@ mkApp = do
                         , children:
                             [ R.div
                                 { style: R.css { position: "fixed", inset: "0" }
-                                , onClick: capture_ (setWorldActiveModal Nothing)
+                                , onClick: capture_ closeStateModal
                                 , children: []
                                 }
                             , R.div
@@ -6253,9 +6337,31 @@ mkApp = do
                                         { className: "world-modal-header"
                                         , children:
                                             [ R.div
-                                                { style: R.css { display: "flex", alignItems: "center", gap: "0.55rem" }
+                                                { style: R.css { display: "flex", alignItems: "center", gap: "0.55rem", flexWrap: "wrap" }
                                                 , children:
-                                                    [ R.span
+                                                    [ if st.canGoBack then
+                                                        R.button
+                                                          { id: "world-state-back-btn"
+                                                          , type: "button"
+                                                          , className: "world-modal-close-btn"
+                                                          , title:
+                                                              if st.backStateName /= "" then
+                                                                "Back to " <> st.backStateName
+                                                              else
+                                                                "Back to previous state"
+                                                          , onClick: capture_ goBackInspectorState
+                                                          , children:
+                                                              [ R.text
+                                                                  ( if st.backStateName /= "" then
+                                                                      "← " <> st.backStateName
+                                                                    else
+                                                                      "← Back"
+                                                                  )
+                                                              ]
+                                                          }
+                                                      else
+                                                        React.empty
+                                                    , R.span
                                                         { style:
                                                             R.css
                                                               { width: "13px"
@@ -6275,7 +6381,7 @@ mkApp = do
                                             , R.button
                                                 { id: "world-modal-close-btn"
                                                 , className: "world-modal-close-btn"
-                                                , onClick: capture_ (setWorldActiveModal Nothing)
+                                                , onClick: capture_ closeStateModal
                                                 , children: [ R.text "Close ×" ]
                                                 }
                                             ]
@@ -6376,7 +6482,7 @@ mkApp = do
                                                                   { style: R.css { fontWeight: "700", color: "#fde047", marginBottom: "4px" }
                                                                   , children: [ R.text ("Trading Partners (" <> show (Array.length st.tradePartners) <> ")") ]
                                                                   }
-                                                              , renderStringBulletList st.tradePartners "None"
+                                                              , renderStateLinkList st.tradePartners st.stateId selectInspectorState "None"
                                                               ]
                                                           }
                                                       , R.div
@@ -6387,7 +6493,7 @@ mkApp = do
                                                                   { style: R.css { fontWeight: "700", color: "#f87171", marginBottom: "4px" }
                                                                   , children: [ R.text ("Active Conflicts (" <> show (Array.length st.conflicts) <> ")") ]
                                                                   }
-                                                              , renderStringBulletList st.conflicts "At Peace"
+                                                              , renderStateLinkList st.conflicts st.stateId selectInspectorState "At Peace"
                                                               ]
                                                           }
                                                       , R.div
@@ -6425,11 +6531,11 @@ mkApp = do
                                                             { style: R.css { fontWeight: "700", color: "#7dd3fc", marginBottom: "4px" }
                                                             , children: [ R.text ("Maritime & River Routes (" <> show (Array.length st.waterRoutes) <> ")") ]
                                                             }
-                                                        , renderStringBulletList st.waterRoutes "None"
+                                                        , renderStateLinkList st.waterRoutes st.stateId selectInspectorState "None"
                                                         ]
                                                     }
-                                              , renderNationDetailCard nat (if lang.hasLanguage then lang.langId else -1)
-                                              , renderLanguageDetailCard lang (if nat.hasNation then nat.natId else -1)
+                                              , renderNationDetailCard nat (if lang.hasLanguage then lang.langId else -1) st.stateId
+                                              , renderLanguageDetailCard lang (if nat.hasNation then nat.natId else -1) st.stateId
                                               ]
                                         }
                                     ]

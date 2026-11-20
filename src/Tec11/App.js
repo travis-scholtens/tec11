@@ -1049,7 +1049,9 @@ function stopTectonicsLoop(view) {
 }
 
 export const initWasm = (onReady) => () => {
-  initWasmModule({ module_or_path: "./tec11_wasm_bg.wasm" })
+  initWasmModule({
+    module_or_path: fetch("./tec11_wasm_bg.wasm", { cache: "no-store" }),
+  })
     .then(() => {
       onReady();
     })
@@ -3140,6 +3142,26 @@ function updateHistoryDataBuffers(view, rebuildGeometry = false) {
   view.paint();
 }
 
+function normalizeStateLinkList(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => {
+    if (item && typeof item === "object") {
+      return {
+        stateId: typeof item.stateId === "number" ? item.stateId : -1,
+        prefix: typeof item.prefix === "string" ? item.prefix : "",
+        label: typeof item.label === "string" ? item.label : "",
+        suffix: typeof item.suffix === "string" ? item.suffix : "",
+      };
+    }
+    return {
+      stateId: -1,
+      prefix: "",
+      label: item == null ? "" : String(item),
+      suffix: "",
+    };
+  });
+}
+
 function emptyStateView() {
   return {
     hasState: false,
@@ -3159,6 +3181,8 @@ function emptyStateView() {
     tradePartners: [],
     conflicts: [],
     waterRoutes: [],
+    canGoBack: false,
+    backStateName: "",
   };
 }
 
@@ -3397,6 +3421,14 @@ function paintStateZoomCanvas(view) {
     if (hit) {
       view.selectedTileIdx = hit.displayIdx;
       if (hit.stateId >= 0) {
+        if (view.selectedStateId >= 0 && hit.stateId !== view.selectedStateId) {
+          view.stateNavStack = view.stateNavStack || [];
+          view.stateNavStack.push({
+            stateId: view.selectedStateId,
+            stateName: view.currentStateName || "",
+          });
+          view.pinnedStateId = hit.stateId;
+        }
         view.selectedStateId = hit.stateId;
       }
       refreshActiveInspectorView(view);
@@ -3436,17 +3468,26 @@ function buildHistoryInspectorBundle(view) {
     clearTileSkyAndVantageOnView(view);
   }
 
+  if (view.pinnedStateId !== undefined && view.pinnedStateId >= 0) {
+    view.selectedStateId = view.pinnedStateId;
+  }
+
   if (canInspectPolities && view.selectedStateId !== undefined && view.selectedStateId >= 0) {
     try {
       let parsedState = JSON.parse(
         s.inspect_state_json(view.selectedStateId, view.selectedTileIdx)
       );
       if ((!parsedState || !parsedState.hasState) && view.selectedTileIdx >= 0) {
+        view.pinnedStateId = -1;
+        view.stateNavStack = [];
         parsedState = JSON.parse(s.inspect_state_for_tile_json(view.selectedTileIdx));
       }
       if (parsedState && parsedState.hasState) {
         view.selectedStateId = parsedState.stateId;
+        view.currentStateName = parsedState.stateName || "";
         view.stateMapPolygons = parsedState.mapPolygons || [];
+        const navStack = Array.isArray(view.stateNavStack) ? view.stateNavStack : [];
+        const topBack = navStack.length > 0 ? navStack[navStack.length - 1] : null;
         stateView = {
           hasState: true,
           stateId: parsedState.stateId,
@@ -3462,9 +3503,11 @@ function buildHistoryInspectorBundle(view) {
           languages: parsedState.languages || [],
           exports: parsedState.exports || [],
           imports: parsedState.imports || [],
-          tradePartners: parsedState.tradePartners || [],
-          conflicts: parsedState.conflicts || [],
-          waterRoutes: parsedState.waterRoutes || [],
+          tradePartners: normalizeStateLinkList(parsedState.tradePartners),
+          conflicts: normalizeStateLinkList(parsedState.conflicts),
+          waterRoutes: normalizeStateLinkList(parsedState.waterRoutes),
+          canGoBack: navStack.length > 0,
+          backStateName: topBack ? topBack.stateName || "" : "",
         };
       } else {
         view.stateMapPolygons = [];
@@ -3486,7 +3529,7 @@ function buildHistoryInspectorBundle(view) {
           name: parsedLang.name || "",
           totalSpeakersText: parsedLang.totalSpeakersText || "",
           phonemeSummary: parsedLang.phonemeSummary || "",
-          speakersByLocation: parsedLang.speakersByLocation || [],
+          speakersByLocation: normalizeStateLinkList(parsedLang.speakersByLocation),
           speakersByNation: parsedLang.speakersByNation || [],
           lexicon: parsedLang.lexicon || [],
         };
@@ -3505,7 +3548,7 @@ function buildHistoryInspectorBundle(view) {
           totalPopText: parsedNat.totalPopText || "",
           originSummary: parsedNat.originSummary || "",
           heritageSummary: parsedNat.heritageSummary || "",
-          currentLocations: parsedNat.currentLocations || [],
+          currentLocations: normalizeStateLinkList(parsedNat.currentLocations),
           spokenLanguages: parsedNat.spokenLanguages || [],
         };
       }
@@ -4657,6 +4700,56 @@ export const closeInspectorNation = () => {
   refreshActiveInspectorView(activeView);
 };
 
+export const selectInspectorState = (stateId) => () => {
+  if (!activeView || !activeView.session) return;
+  if (stateId < 0 || stateId === activeView.selectedStateId) return;
+  activeView.stateNavStack = activeView.stateNavStack || [];
+  if (activeView.selectedStateId !== undefined && activeView.selectedStateId >= 0) {
+    activeView.stateNavStack.push({
+      stateId: activeView.selectedStateId,
+      stateName: activeView.currentStateName || "",
+    });
+  }
+  activeView.selectedStateId = stateId;
+  activeView.pinnedStateId = stateId;
+  activeView.selectedLangId = -1;
+  activeView.selectedNationId = -1;
+  refreshActiveInspectorView(activeView);
+  if (typeof document !== "undefined") {
+    const body = document.querySelector("#world-state-modal .world-modal-body");
+    if (body) body.scrollTop = 0;
+  }
+};
+
+export const goBackInspectorState = () => {
+  if (!activeView || !activeView.session) return;
+  const stack = activeView.stateNavStack;
+  if (!Array.isArray(stack) || stack.length === 0) return;
+  const prev = stack.pop();
+  activeView.selectedStateId = prev.stateId;
+  activeView.pinnedStateId = stack.length > 0 ? prev.stateId : -1;
+  activeView.selectedLangId = -1;
+  activeView.selectedNationId = -1;
+  refreshActiveInspectorView(activeView);
+  if (typeof document !== "undefined") {
+    const body = document.querySelector("#world-state-modal .world-modal-body");
+    if (body) body.scrollTop = 0;
+  }
+};
+
+export const resetInspectorStateNav = () => {
+  if (!activeView || !activeView.session) return;
+  const hadNav =
+    (activeView.pinnedStateId !== undefined && activeView.pinnedStateId >= 0) ||
+    (Array.isArray(activeView.stateNavStack) && activeView.stateNavStack.length > 0);
+  activeView.pinnedStateId = -1;
+  activeView.stateNavStack = [];
+  if (hadNav) {
+    activeView.selectedStateId = -1;
+    refreshActiveInspectorView(activeView);
+  }
+};
+
 function buildHistoryInfo(view) {
   const s = view.session;
   const planetName = s.is_custom_planet()
@@ -4749,6 +4842,8 @@ export const mountHistoryView =
       if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
         view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
         view.selectedStateId = -1;
+        view.pinnedStateId = -1;
+        view.stateNavStack = [];
         updateHistoryDataBuffers(view, false);
         view.setHistoryInfo(buildHistoryInfo(view))();
       }
@@ -5000,6 +5095,8 @@ export const mountTravelView =
       if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
         view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
         view.selectedStateId = -1;
+        view.pinnedStateId = -1;
+        view.stateNavStack = [];
         updateTravelDataBuffers(view, false);
         view.setTravelInfo(buildTravelInfo(view))();
       }
@@ -5300,6 +5397,8 @@ function paintWorldRegionalCanvas(view) {
     if (hit && hit.tileIdx >= 0) {
       view.selectedTileIdx = hit.tileIdx;
       view.selectedStateId = -1;
+      view.pinnedStateId = -1;
+      view.stateNavStack = [];
       updateWorldDataBuffers(view, false);
       if (view.setWorldInfo) {
         view.setWorldInfo(buildWorldInfo(view))();
@@ -5388,9 +5487,11 @@ function buildWorldInfo(view) {
     moonCount === 0
       ? `Day: ${curDay.toFixed(1)}h | Tilt: ${curTilt.toFixed(1)}° | Moons: 0 (Solar Tides ${curTides.toFixed(2)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`
       : `Day: ${curDay.toFixed(1)}h (→${s.param_day_hours()}h) | Tilt: ${curTilt.toFixed(1)}° | Moons: ${moonCount} (${moonMass.toFixed(1)}x @ ${curMoonDist.toFixed(1)}→${moonDistTarget} Rp, Tides ${curTides.toFixed(1)}x) | Meteors: ${meteorFreq.toFixed(1)}x (${impacts} hits)`;
-  // Reset `selectedStateId` before inspecting `selectedTileIdx` so `stateView.hasState` always reflects
-  // whether the currently selected tile belongs to an active state on this tick:
-  view.selectedStateId = -1;
+  // Reset `selectedStateId` before inspecting `selectedTileIdx` unless the user has navigated
+  // to a linked state inside the State modal (`pinnedStateId >= 0`):
+  if (!(view.pinnedStateId >= 0)) {
+    view.selectedStateId = -1;
+  }
   const bundle = buildHistoryInspectorBundle(view);
   return {
     stageIndex: s.stage_index(),
@@ -6050,6 +6151,8 @@ export const mountWorldView =
       if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
         view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
         view.selectedStateId = -1;
+        view.pinnedStateId = -1;
+        view.stateNavStack = [];
         updateWorldDataBuffers(view, false);
         view.setWorldInfo(buildWorldInfo(view))();
       }

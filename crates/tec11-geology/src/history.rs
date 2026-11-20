@@ -422,6 +422,41 @@ impl ZoomedMapPolygon {
 }
 
 /// Level-1 State inspection view (zoomed-in centered state map + state demographics, economy & diplomacy).
+/// A list entry referencing an optional sovereign state so the UI can link directly
+/// to that state's details (or render plain text when `state_id` is `None`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StateLinkItem {
+    pub state_id: Option<u32>,
+    pub prefix: String,
+    pub label: String,
+    pub suffix: String,
+}
+
+impl StateLinkItem {
+    pub fn state(state_id: u32, label: String) -> Self {
+        Self {
+            state_id: Some(state_id),
+            prefix: String::new(),
+            label,
+            suffix: String::new(),
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        let sid_json: i64 = match self.state_id {
+            Some(id) => id as i64,
+            None => -1,
+        };
+        format!(
+            "{{\"stateId\":{},\"prefix\":{},\"label\":{},\"suffix\":{}}}",
+            sid_json,
+            json_escape(&self.prefix),
+            json_escape(&self.label),
+            json_escape(&self.suffix)
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StateInspectionView {
     pub state_id: u32,
@@ -437,9 +472,9 @@ pub struct StateInspectionView {
     pub languages: Vec<DemographicShareItem>,
     pub exports: Vec<String>,
     pub imports: Vec<String>,
-    pub trade_partners: Vec<String>,
-    pub conflicts: Vec<String>,
-    pub water_routes: Vec<String>,
+    pub trade_partners: Vec<StateLinkItem>,
+    pub conflicts: Vec<StateLinkItem>,
+    pub water_routes: Vec<StateLinkItem>,
     pub map_polygons: Vec<ZoomedMapPolygon>,
 }
 
@@ -447,13 +482,16 @@ impl StateInspectionView {
     pub fn to_json(&self) -> String {
         let nats: Vec<String> = self.nationalities.iter().map(|n| n.to_json()).collect();
         let langs: Vec<String> = self.languages.iter().map(|l| l.to_json()).collect();
+        let partners: Vec<String> = self.trade_partners.iter().map(|p| p.to_json()).collect();
+        let conflicts: Vec<String> = self.conflicts.iter().map(|c| c.to_json()).collect();
+        let routes: Vec<String> = self.water_routes.iter().map(|r| r.to_json()).collect();
         let polys: Vec<String> = self.map_polygons.iter().map(|p| p.to_json()).collect();
         let r255 = (self.color_rgb[0] * 255.0).round().clamp(0.0, 255.0) as u8;
         let g255 = (self.color_rgb[1] * 255.0).round().clamp(0.0, 255.0) as u8;
         let b255 = (self.color_rgb[2] * 255.0).round().clamp(0.0, 255.0) as u8;
         let color_css = format!("rgb({r255}, {g255}, {b255})");
         format!(
-            "{{\"hasState\":true,\"stateId\":{},\"stateName\":{},\"colorCss\":{},\"continents\":{},\"technology\":{},\"populationText\":{},\"capacityText\":{},\"tileCount\":{},\"asabiyaText\":{},\"nationalities\":[{}],\"languages\":[{}],\"exports\":{},\"imports\":{},\"tradePartners\":{},\"conflicts\":{},\"waterRoutes\":{},\"mapPolygons\":[{}]}}",
+            "{{\"hasState\":true,\"stateId\":{},\"stateName\":{},\"colorCss\":{},\"continents\":{},\"technology\":{},\"populationText\":{},\"capacityText\":{},\"tileCount\":{},\"asabiyaText\":{},\"nationalities\":[{}],\"languages\":[{}],\"exports\":{},\"imports\":{},\"tradePartners\":[{}],\"conflicts\":[{}],\"waterRoutes\":[{}],\"mapPolygons\":[{}]}}",
             self.state_id,
             json_escape(&self.state_name),
             json_escape(&color_css),
@@ -467,9 +505,9 @@ impl StateInspectionView {
             langs.join(","),
             json_str_array(&self.exports),
             json_str_array(&self.imports),
-            json_str_array(&self.trade_partners),
-            json_str_array(&self.conflicts),
-            json_str_array(&self.water_routes),
+            partners.join(","),
+            conflicts.join(","),
+            routes.join(","),
             polys.join(",")
         )
     }
@@ -505,22 +543,23 @@ pub struct LanguageDetailView {
     pub name: String,
     pub total_speakers_text: String,
     pub phoneme_summary: String,
-    pub speakers_by_location: Vec<String>,
+    pub speakers_by_location: Vec<StateLinkItem>,
     pub speakers_by_nation: Vec<DemographicShareItem>,
     pub lexicon: Vec<LexiconEntryView>,
 }
 
 impl LanguageDetailView {
     pub fn to_json(&self) -> String {
+        let locs: Vec<String> = self.speakers_by_location.iter().map(|l| l.to_json()).collect();
         let nats: Vec<String> = self.speakers_by_nation.iter().map(|n| n.to_json()).collect();
         let lex: Vec<String> = self.lexicon.iter().map(|e| e.to_json()).collect();
         format!(
-            "{{\"hasLanguage\":true,\"langId\":{},\"name\":{},\"totalSpeakersText\":{},\"phonemeSummary\":{},\"speakersByLocation\":{},\"speakersByNation\":[{}],\"lexicon\":[{}]}}",
+            "{{\"hasLanguage\":true,\"langId\":{},\"name\":{},\"totalSpeakersText\":{},\"phonemeSummary\":{},\"speakersByLocation\":[{}],\"speakersByNation\":[{}],\"lexicon\":[{}]}}",
             self.lang_id,
             json_escape(&self.name),
             json_escape(&self.total_speakers_text),
             json_escape(&self.phoneme_summary),
-            json_str_array(&self.speakers_by_location),
+            locs.join(","),
             nats.join(","),
             lex.join(",")
         )
@@ -535,21 +574,22 @@ pub struct NationDetailView {
     pub total_pop_text: String,
     pub origin_summary: String,
     pub heritage_summary: String,
-    pub current_locations: Vec<String>,
+    pub current_locations: Vec<StateLinkItem>,
     pub spoken_languages: Vec<DemographicShareItem>,
 }
 
 impl NationDetailView {
     pub fn to_json(&self) -> String {
+        let locs: Vec<String> = self.current_locations.iter().map(|l| l.to_json()).collect();
         let langs: Vec<String> = self.spoken_languages.iter().map(|l| l.to_json()).collect();
         format!(
-            "{{\"hasNation\":true,\"natId\":{},\"name\":{},\"totalPopText\":{},\"originSummary\":{},\"heritageSummary\":{},\"currentLocations\":{},\"spokenLanguages\":[{}]}}",
+            "{{\"hasNation\":true,\"natId\":{},\"name\":{},\"totalPopText\":{},\"originSummary\":{},\"heritageSummary\":{},\"currentLocations\":[{}],\"spokenLanguages\":[{}]}}",
             self.nat_id,
             json_escape(&self.name),
             json_escape(&self.total_pop_text),
             json_escape(&self.origin_summary),
             json_escape(&self.heritage_summary),
-            json_str_array(&self.current_locations),
+            locs.join(","),
             langs.join(",")
         )
     }
@@ -6831,17 +6871,17 @@ impl HistorySimulation {
             }
         }
 
-        let trade_partners: Vec<String> = direct_partners
+        let trade_partners: Vec<StateLinkItem> = direct_partners
             .iter()
-            .map(|&p| self.state_name(p))
+            .map(|&p| StateLinkItem::state(p, self.state_name(p)))
             .collect();
-        let conflicts: Vec<String> = self
+        let conflicts: Vec<StateLinkItem> = self
             .lookup_opponents(state_id)
             .into_iter()
-            .map(|r| self.state_name(r))
+            .map(|r| StateLinkItem::state(r, self.state_name(r)))
             .collect();
 
-        let mut water_routes: Vec<String> = self
+        let mut water_routes: Vec<StateLinkItem> = self
             .travel_routes
             .iter()
             .filter_map(|r| {
@@ -6851,12 +6891,22 @@ impl HistorySimulation {
                     let dst_label = s_to
                         .map(|s| self.state_name(s))
                         .unwrap_or_else(|| format!("Coast #{}", r.to_coarse_tile));
-                    Some(format!("→ {dst_label} ({})", r.kind_name()))
+                    Some(StateLinkItem {
+                        state_id: s_to,
+                        prefix: "→ ".to_string(),
+                        label: dst_label,
+                        suffix: format!(" ({})", r.kind_name()),
+                    })
                 } else if s_to == Some(state_id) {
                     let src_label = s_from
                         .map(|s| self.state_name(s))
                         .unwrap_or_else(|| format!("Coast #{}", r.from_coarse_tile));
-                    Some(format!("← {src_label} ({})", r.kind_name()))
+                    Some(StateLinkItem {
+                        state_id: s_from,
+                        prefix: "← ".to_string(),
+                        label: src_label,
+                        suffix: format!(" ({})", r.kind_name()),
+                    })
                 } else {
                     None
                 }
@@ -7801,18 +7851,23 @@ impl HistorySimulation {
                 .partial_cmp(&a.1 .0)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let speakers_by_location: Vec<String> = loc_vec
+        let speakers_by_location: Vec<StateLinkItem> = loc_vec
             .into_iter()
             .map(|((sid_opt, cont), (pop, tcount))| {
                 let polity = sid_opt
                     .map(|s| self.state_name(s))
                     .unwrap_or_else(|| "Unclaimed Land".to_string());
-                format!(
-                    "{polity} ({cont}, {tcount} {}): {} ({})",
-                    if tcount == 1 { "tile" } else { "tiles" },
-                    format_thousands_compact(pop),
-                    format_share_percent(pop, total_thousands)
-                )
+                StateLinkItem {
+                    state_id: sid_opt,
+                    prefix: String::new(),
+                    label: polity,
+                    suffix: format!(
+                        " ({cont}, {tcount} {}): {} ({})",
+                        if tcount == 1 { "tile" } else { "tiles" },
+                        format_thousands_compact(pop),
+                        format_share_percent(pop, total_thousands)
+                    ),
+                }
             })
             .collect();
 
@@ -7985,18 +8040,23 @@ impl HistorySimulation {
                 .partial_cmp(&a.1 .0)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let current_locations: Vec<String> = loc_vec
+        let current_locations: Vec<StateLinkItem> = loc_vec
             .into_iter()
             .map(|((sid_opt, cont), (pop, tcount))| {
                 let polity = sid_opt
                     .map(|s| self.state_name(s))
                     .unwrap_or_else(|| "Unclaimed Land".to_string());
-                format!(
-                    "{polity} ({cont}, {tcount} {}): {} ({})",
-                    if tcount == 1 { "tile" } else { "tiles" },
-                    format_thousands_compact(pop),
-                    format_share_percent(pop, total_thousands)
-                )
+                StateLinkItem {
+                    state_id: sid_opt,
+                    prefix: String::new(),
+                    label: polity,
+                    suffix: format!(
+                        " ({cont}, {tcount} {}): {} ({})",
+                        if tcount == 1 { "tile" } else { "tiles" },
+                        format_thousands_compact(pop),
+                        format_share_percent(pop, total_thousands)
+                    ),
+                }
             })
             .collect();
 
