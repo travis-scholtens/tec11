@@ -25,14 +25,16 @@ pub const HISTORY_MIN_RIVER_ELEV: f32 = 2.0;
 pub const HISTORY_MIN_RIVER_PRECIP: f32 = 0.25;
 pub const MAJOR_LANGUAGE_THRESHOLD: f32 = 0.25;
 
-/// 6 distinct political map colors (`terrainmethod.py:colornations`).
-pub const NATION_PALETTE: [[f32; 3]; 6] = [
+/// 8 distinct political map colors (high-contrast against ocean blue, snow white, and stateless terracotta).
+pub const NATION_PALETTE: [[f32; 3]; 8] = [
     [0.88, 0.28, 0.28], // Crimson
     [0.92, 0.56, 0.18], // Amber
     [0.86, 0.82, 0.22], // Gold
-    [0.26, 0.72, 0.58], // Teal
+    [0.34, 0.78, 0.36], // Emerald
+    [0.22, 0.72, 0.66], // Teal
     [0.32, 0.56, 0.88], // Cobalt
     [0.72, 0.38, 0.86], // Amethyst
+    [0.88, 0.36, 0.64], // Rose
 ];
 
 pub const BASIC_WORD_GLOSSES: [&str; 16] = [
@@ -2543,7 +2545,8 @@ impl HistorySimulation {
             .collect();
     }
 
-    /// Greedy 6-coloring of adjacent states (`terrainmethod.py:colornations`).
+    /// DSATUR graph coloring of adjacent states using `NATION_PALETTE` with color stability
+    /// (preserving a state's existing color when conflict-free) and minimum-conflict fallback.
     fn recolor_states(&mut self, adjacency: &[Vec<usize>]) {
         let mut state_adj: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         for (&t, &s1) in &self.tile_states {
@@ -2558,20 +2561,71 @@ impl HistorySimulation {
             }
         }
 
-        let state_ids: Vec<u32> = self.states.keys().copied().collect();
-        for sid in state_ids {
-            let used_colors: BTreeSet<usize> = state_adj
-                .get(&sid)
-                .into_iter()
-                .flatten()
-                .filter(|&&nb_sid| nb_sid < sid)
-                .filter_map(|nb_sid| self.states.get(nb_sid).map(|st| st.color_idx))
-                .collect();
-            let chosen = (0..NATION_PALETTE.len())
-                .find(|c| !used_colors.contains(c))
-                .unwrap_or((sid as usize) % NATION_PALETTE.len());
-            if let Some(st) = self.states.get_mut(&sid) {
+        let palette_len = NATION_PALETTE.len();
+        let mut uncolored: BTreeSet<u32> = state_adj.keys().copied().collect();
+        let mut colored: BTreeMap<u32, usize> = BTreeMap::new();
+        let mut neighbor_colors: BTreeMap<u32, BTreeSet<usize>> = uncolored
+            .iter()
+            .map(|&sid| (sid, BTreeSet::new()))
+            .collect();
+
+        while !uncolored.is_empty() {
+            // Pick the uncolored state with the highest saturation degree (distinct neighbor colors),
+            // breaking ties by highest adjacency degree, then smallest state ID for determinism.
+            let next_sid = *uncolored
+                .iter()
+                .max_by_key(|&&sid| {
+                    let sat = neighbor_colors.get(&sid).map(|s| s.len()).unwrap_or(0);
+                    let deg = state_adj.get(&sid).map(|s| s.len()).unwrap_or(0);
+                    (sat, deg, std::cmp::Reverse(sid))
+                })
+                .unwrap();
+            uncolored.remove(&next_sid);
+
+            let used = neighbor_colors.get(&next_sid);
+            let existing = self
+                .states
+                .get(&next_sid)
+                .map(|st| st.color_idx)
+                .filter(|&c| c < palette_len);
+
+            let chosen = if let Some(cur) = existing.filter(|c| !used.is_some_and(|u| u.contains(c)))
+            {
+                cur
+            } else if let Some(free) = (0..palette_len).find(|c| !used.is_some_and(|u| u.contains(c)))
+            {
+                free
+            } else {
+                // Pathological non-planar clique (> palette_len mutually adjacent states):
+                // pick the color with the fewest already-colored conflicting neighbors.
+                let mut counts = vec![0usize; palette_len];
+                if let Some(nbs) = state_adj.get(&next_sid) {
+                    for &nb in nbs {
+                        if let Some(&c) = colored.get(&nb) {
+                            if c < palette_len {
+                                counts[c] += 1;
+                            }
+                        }
+                    }
+                }
+                counts
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|&(c, &cnt)| (cnt, c))
+                    .map(|(c, _)| c)
+                    .unwrap_or(0)
+            };
+
+            colored.insert(next_sid, chosen);
+            if let Some(st) = self.states.get_mut(&next_sid) {
                 st.color_idx = chosen;
+            }
+            if let Some(nbs) = state_adj.get(&next_sid) {
+                for &nb in nbs {
+                    if uncolored.contains(&nb) {
+                        neighbor_colors.entry(nb).or_default().insert(chosen);
+                    }
+                }
             }
         }
     }
@@ -8452,6 +8506,8 @@ impl HistorySimulation {
                 for st in sim.states.values_mut() {
                     st.active = active_sids.contains(&st.id);
                 }
+                let fine_adj = std::sync::Arc::clone(&sim.fine_adj);
+                sim.recolor_states(&fine_adj);
                 for (lid_usize, proto_lang) in hist.languages.iter().enumerate() {
                     let lid = lid_usize as u32;
                     sim.next_language_id = sim.next_language_id.max(lid + 1);
@@ -9477,5 +9533,49 @@ mod tests {
             ocean_view.vantage.samples.is_empty(),
             "Coarse ocean tiles should omit distant neighbor terrain/water samples"
         );
+    }
+
+    #[test]
+    fn test_dsatur_recolor_states_prevents_adjacent_same_color_states() {
+        let mut sim = HistorySimulation::new_earth(42);
+        for _ in 0..8 {
+            sim.step();
+        }
+        let fine_adj = std::sync::Arc::clone(&sim.fine_adj);
+        let mut conflicts = 0usize;
+        for (&t, &s1) in &sim.tile_states {
+            let c1 = sim.states.get(&s1).map(|s| s.color_idx);
+            for &nb in &fine_adj[t] {
+                if let Some(&s2) = sim.tile_states.get(&nb) {
+                    if s1 < s2 {
+                        let c2 = sim.states.get(&s2).map(|s| s.color_idx);
+                        if c1 == c2 {
+                            conflicts += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            conflicts, 0,
+            "Adjacent states must never share the same palette color after DSATUR recoloring"
+        );
+
+        // Also verify snapshot reload runs recolor_states cleanly without adjacent collisions.
+        let bytes = sim.encode_snapshot();
+        let mut reloaded = HistorySimulation::new_earth(7);
+        assert!(reloaded.load_snapshot_bytes(&bytes));
+        let reload_adj = std::sync::Arc::clone(&reloaded.fine_adj);
+        for (&t, &s1) in &reloaded.tile_states {
+            let c1 = reloaded.states.get(&s1).map(|s| s.color_idx);
+            for &nb in &reload_adj[t] {
+                if let Some(&s2) = reloaded.tile_states.get(&nb) {
+                    if s1 < s2 {
+                        let c2 = reloaded.states.get(&s2).map(|s| s.color_idx);
+                        assert_ne!(c1, c2, "Reloaded snapshot had adjacent states {s1} and {s2} with same color");
+                    }
+                }
+            }
+        }
     }
 }
