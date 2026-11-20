@@ -24,6 +24,8 @@ impl WasmWorldSession {
         moon_mass: f32,
         moon_dist_radii: u32,
         meteor_freq: f32,
+        seed_lo: u32,
+        seed_hi: u32,
     ) -> Self {
         let params = WorldCreateParams {
             grid_size,
@@ -38,8 +40,10 @@ impl WasmWorldSession {
             moon_dist_radii,
             meteor_freq,
         };
+        let raw_seed = ((seed_hi as u64) << 32) | (seed_lo as u64);
+        let seed = if raw_seed == 0 { 42 } else { raw_seed };
         Self {
-            sim: WorldSimulation::new(params, 42),
+            sim: WorldSimulation::new(params, seed),
         }
     }
 

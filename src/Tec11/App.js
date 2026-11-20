@@ -6479,6 +6479,14 @@ export const mountWorldView =
     }
 
     const view = createBaseSphereView(canvas, false);
+    let seedLo = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+    let seedHi = Math.floor(Math.random() * 0xffffffff) >>> 0;
+    if (typeof window !== "undefined" && window.crypto && window.crypto.getRandomValues) {
+      const buf = new Uint32Array(2);
+      window.crypto.getRandomValues(buf);
+      seedLo = buf[0];
+      seedHi = buf[1];
+    }
     view.session = new WasmWorldSession(
       gridSize,
       dayHours,
@@ -6490,7 +6498,9 @@ export const mountWorldView =
       moonCount,
       moonMassTenths / 10.0,
       moonDistRadii,
-      meteorFreqTenths / 10.0
+      meteorFreqTenths / 10.0,
+      seedLo,
+      seedHi
     );
     if (activeClimateSnapshotBytes) {
       view.session.load_snapshot_bytes(activeClimateSnapshotBytes);
