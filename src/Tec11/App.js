@@ -3368,15 +3368,61 @@ function heatColorCss(mode, intensity, outsideState) {
 function resolveStateMapHeatmap(view) {
   const hasNat = view && view.selectedNationId !== undefined && view.selectedNationId >= 0;
   const hasLang = view && view.selectedLangId !== undefined && view.selectedLangId >= 0;
-  if (!hasNat && !hasLang) return null;
+  const famInfo =
+    view &&
+    view.selectedLangFamilyId !== undefined &&
+    view.selectedLangFamilyId >= 0 &&
+    view.langFamilyLookup
+      ? view.langFamilyLookup.get(view.selectedLangFamilyId) || null
+      : null;
+  const hasLangFam = famInfo !== null && Array.isArray(famInfo.keys) && famInfo.keys.length > 0;
+  if (!hasNat && !hasLang && !hasLangFam) return null;
+
   let mode = view.stateMapHeatMode;
-  if (mode === "nation" && !hasNat) mode = hasLang ? "language" : null;
-  else if (mode === "language" && !hasLang) mode = hasNat ? "nation" : null;
-  else if (!mode) mode = hasNat ? "nation" : "language";
+  if (mode === "nation" && !hasNat) {
+    mode = hasLang ? "language" : hasLangFam ? "langFamily" : null;
+  } else if (mode === "language" && !hasLang) {
+    mode = hasLangFam ? "langFamily" : hasNat ? "nation" : null;
+  } else if (mode === "langFamily" && !hasLangFam) {
+    mode = hasLang ? "language" : hasNat ? "nation" : null;
+  } else if (!mode) {
+    mode = hasLang ? "language" : hasLangFam ? "langFamily" : hasNat ? "nation" : null;
+  }
   if (!mode) return null;
-  const id = mode === "nation" ? view.selectedNationId : view.selectedLangId;
-  const name = mode === "nation" ? view.selectedNationName || "" : view.selectedLangName || "";
-  return { mode, id, key: String(id), name };
+
+  if (mode === "nation") {
+    return {
+      mode,
+      keys: [String(view.selectedNationId)],
+      name: view.selectedNationName || "",
+      dialectCount: 0,
+    };
+  }
+  if (mode === "langFamily") {
+    return {
+      mode,
+      keys: famInfo.keys,
+      name: famInfo.name || "",
+      dialectCount: famInfo.keys.length,
+    };
+  }
+  return {
+    mode,
+    keys: [String(view.selectedLangId)],
+    name: view.selectedLangName || "",
+    dialectCount: 1,
+  };
+}
+
+function polyHeatPopulation(poly, heat) {
+  const map = heat.mode === "nation" ? poly.nationPops : poly.langPops;
+  if (!map) return 0;
+  let sum = 0;
+  for (const k of heat.keys) {
+    const p = map[k];
+    if (typeof p === "number" && p > 0) sum += p;
+  }
+  return sum;
 }
 
 function paintStateZoomCanvas(view) {
@@ -3412,8 +3458,7 @@ function paintStateZoomCanvas(view) {
   if (heat) {
     for (const poly of view.stateMapPolygons) {
       if (!poly.isLand) continue;
-      const map = heat.mode === "nation" ? poly.nationPops : poly.langPops;
-      const p = map && typeof map[heat.key] === "number" ? map[heat.key] : 0;
+      const p = polyHeatPopulation(poly, heat);
       if (p > heatMaxPop) heatMaxPop = p;
     }
   }
@@ -3428,8 +3473,7 @@ function paintStateZoomCanvas(view) {
     if (!poly.isLand) {
       return rgbFloatToCss(poly.rgb, 18, 51, 112);
     }
-    const map = heat.mode === "nation" ? poly.nationPops : poly.langPops;
-    const pop = map && typeof map[heat.key] === "number" ? map[heat.key] : 0;
+    const pop = polyHeatPopulation(poly, heat);
     if (pop <= 1e-4) {
       return isInState ? "#1e293b" : "#0f172a";
     }
@@ -3499,14 +3543,22 @@ function paintStateZoomCanvas(view) {
     }
   }
 
-  // Pass 4: Heatmap legend overlay when viewing a nationality or language
+  // Pass 4: Heatmap legend overlay when viewing a nationality, language, or dialect family
   if (heat) {
-    const labelPrefix = heat.mode === "nation" ? "Nationality" : "Language";
+    const labelPrefix =
+      heat.mode === "nation"
+        ? "Nationality"
+        : heat.mode === "langFamily"
+          ? "Dialects"
+          : "Language";
     const maxText =
       heatMaxPop > 1e-4 ? formatPopulationThousands(heatMaxPop) : "0";
-    const legendText = heat.name
-      ? `${labelPrefix}: ${heat.name} (0 → ${maxText})`
-      : `${labelPrefix} Heatmap (0 → ${maxText})`;
+    const legendText =
+      heat.mode === "langFamily" && heat.name
+        ? `${heat.name} (${heat.dialectCount} dialects · 0 → ${maxText})`
+        : heat.name
+          ? `${labelPrefix}: ${heat.name} (0 → ${maxText})`
+          : `${labelPrefix} Heatmap (0 → ${maxText})`;
     ctx.font = "600 10.5px system-ui, -apple-system, sans-serif";
     const textW = ctx.measureText(legendText).width;
     const barW = 42;
@@ -3746,6 +3798,31 @@ function buildHistoryInspectorBundle(view) {
         };
       }
     } catch (_) {}
+  }
+
+  const familyLookup = new Map();
+  const registerFamilyGroups = (groups) => {
+    if (!Array.isArray(groups)) return;
+    for (const g of groups) {
+      if (!g || !Array.isArray(g.dialects)) continue;
+      let entry = familyLookup.get(g.familyId);
+      if (!entry) {
+        entry = { name: g.name || "", keySet: new Set() };
+        familyLookup.set(g.familyId, entry);
+      }
+      for (const d of g.dialects) {
+        if (d && typeof d.id === "number") entry.keySet.add(String(d.id));
+      }
+    }
+  };
+  registerFamilyGroups(stateView.languageGroups);
+  registerFamilyGroups(nationDetail.spokenLanguageGroups);
+  view.langFamilyLookup = new Map();
+  for (const [fid, entry] of familyLookup.entries()) {
+    view.langFamilyLookup.set(fid, {
+      name: entry.name,
+      keys: Array.from(entry.keySet),
+    });
   }
 
   if (stateView.hasState && typeof window !== "undefined") {
@@ -4874,7 +4951,13 @@ export const selectInspectorLanguage = (langId) => () => {
   const next = activeView.selectedLangId === langId ? -1 : langId;
   activeView.selectedLangId = next;
   activeView.stateMapHeatMode =
-    next >= 0 ? "language" : activeView.selectedNationId >= 0 ? "nation" : null;
+    next >= 0
+      ? "language"
+      : activeView.selectedLangFamilyId >= 0
+        ? "langFamily"
+        : activeView.selectedNationId >= 0
+          ? "nation"
+          : null;
   refreshActiveInspectorView(activeView);
 };
 
@@ -4883,21 +4966,37 @@ export const selectInspectorNation = (natId) => () => {
   const next = activeView.selectedNationId === natId ? -1 : natId;
   activeView.selectedNationId = next;
   activeView.stateMapHeatMode =
-    next >= 0 ? "nation" : activeView.selectedLangId >= 0 ? "language" : null;
+    next >= 0
+      ? "nation"
+      : activeView.selectedLangId >= 0
+        ? "language"
+        : activeView.selectedLangFamilyId >= 0
+          ? "langFamily"
+          : null;
   refreshActiveInspectorView(activeView);
 };
 
 export const closeInspectorLanguage = () => {
   if (!activeView || !activeView.session) return;
   activeView.selectedLangId = -1;
-  activeView.stateMapHeatMode = activeView.selectedNationId >= 0 ? "nation" : null;
+  activeView.stateMapHeatMode =
+    activeView.selectedLangFamilyId >= 0
+      ? "langFamily"
+      : activeView.selectedNationId >= 0
+        ? "nation"
+        : null;
   refreshActiveInspectorView(activeView);
 };
 
 export const closeInspectorNation = () => {
   if (!activeView || !activeView.session) return;
   activeView.selectedNationId = -1;
-  activeView.stateMapHeatMode = activeView.selectedLangId >= 0 ? "language" : null;
+  activeView.stateMapHeatMode =
+    activeView.selectedLangId >= 0
+      ? "language"
+      : activeView.selectedLangFamilyId >= 0
+        ? "langFamily"
+        : null;
   refreshActiveInspectorView(activeView);
 };
 
@@ -4908,8 +5007,20 @@ export const toggleExpandedLangFamily = (familyId) => () => {
   }
   if (activeView.expandedLangFamilies.has(familyId)) {
     activeView.expandedLangFamilies.delete(familyId);
+    if (activeView.selectedLangFamilyId === familyId) {
+      activeView.selectedLangFamilyId = -1;
+      activeView.stateMapHeatMode =
+        activeView.selectedLangId >= 0
+          ? "language"
+          : activeView.selectedNationId >= 0
+            ? "nation"
+            : null;
+    }
   } else {
     activeView.expandedLangFamilies.add(familyId);
+    activeView.selectedLangFamilyId = familyId;
+    activeView.selectedLangId = -1;
+    activeView.stateMapHeatMode = "langFamily";
   }
   refreshActiveInspectorView(activeView);
 };
@@ -4927,7 +5038,9 @@ export const selectInspectorState = (stateId) => () => {
   activeView.selectedStateId = stateId;
   activeView.pinnedStateId = stateId;
   activeView.selectedLangId = -1;
+  activeView.selectedLangFamilyId = -1;
   activeView.selectedNationId = -1;
+  activeView.expandedLangFamilies = new Set();
   activeView.stateMapHeatMode = null;
   refreshActiveInspectorView(activeView);
   if (typeof document !== "undefined") {
@@ -4944,7 +5057,9 @@ export const goBackInspectorState = () => {
   activeView.selectedStateId = prev.stateId;
   activeView.pinnedStateId = stack.length > 0 ? prev.stateId : -1;
   activeView.selectedLangId = -1;
+  activeView.selectedLangFamilyId = -1;
   activeView.selectedNationId = -1;
+  activeView.expandedLangFamilies = new Set();
   activeView.stateMapHeatMode = null;
   refreshActiveInspectorView(activeView);
   if (typeof document !== "undefined") {
@@ -4960,6 +5075,8 @@ export const resetInspectorStateNav = () => {
     (Array.isArray(activeView.stateNavStack) && activeView.stateNavStack.length > 0);
   activeView.pinnedStateId = -1;
   activeView.stateNavStack = [];
+  activeView.selectedLangFamilyId = -1;
+  activeView.expandedLangFamilies = new Set();
   if (hadNav) {
     activeView.selectedStateId = -1;
     refreshActiveInspectorView(activeView);
