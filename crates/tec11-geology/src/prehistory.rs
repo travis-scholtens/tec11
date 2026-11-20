@@ -24,16 +24,47 @@ pub const PREHISTORY_MIN_RIVER_PRECIP: f32 = 0.5;
 pub const PREHISTORY_GLACIATION_STEP: u32 = 16;
 pub const PREHISTORY_ANTHROGLACIAL_STEPS: usize = 6;
 
-/// Agriculture discovery probability per river tile by Köppen climate code (`prehistorysimulation.py:34-43`).
+/// Agriculture discovery probability per river tile by Köppen climate code.
+/// Favors arid/steppe exotic rivers (`BS`/`BW`) and seasonal wet-dry temperate valleys (`Cs`/`Cw`)
+/// over year-round humid (`Cf`) or cold continental (`D*`) rivers.
 #[inline]
 pub fn agriculture_spark_prob(koeppen: u8) -> f64 {
     match koeppen {
-        4 | 5 => 0.05,         // BS, BW
-        6 | 7 | 8 => 0.005,    // Cf, Cs, Cw
-        9 | 10 | 11 => 0.001,  // Df, Ds, Dw
-        3 => 0.0001,           // Aw
+        4 | 5 => 0.015,        // BS, BW (Nile, Mesopotamia, Indus)
+        7 | 8 => 0.005,        // Cs, Cw (Mediterranean, Yellow River / monsoon temperate)
+        6 => 0.003,            // Cf (year-round humid temperate)
+        9 | 10 | 11 => 0.0008, // Df, Ds, Dw (continental)
+        3 => 0.0006,           // Aw (tropical wet-dry savanna)
         _ => 0.0,
     }
+}
+
+/// Seasonal flooding multiplier (`[0.5, 2.0]`) for a river based on its basin's wet-vs-dry
+/// seasonal precipitation swing across the climate model's seasonal snapshots.
+fn river_seasonal_flood_factor(river: &[usize], climate_model: &ClimateModel) -> f64 {
+    let num_seasons = climate_model.season_count();
+    if river.is_empty() || num_seasons < 2 {
+        return 1.0;
+    }
+    let mut p_min = f64::INFINITY;
+    let mut p_max = f64::NEG_INFINITY;
+    let inv_len = 1.0 / (river.len() as f64);
+    for s in 0..num_seasons {
+        if let Some(snap) = climate_model.season_snapshot(s) {
+            let mean_p: f64 = river
+                .iter()
+                .map(|&t| snap.precipitation.get(t).copied().unwrap_or(0.0) as f64)
+                .sum::<f64>()
+                * inv_len;
+            p_min = p_min.min(mean_p);
+            p_max = p_max.max(mean_p);
+        }
+    }
+    if !p_min.is_finite() || !p_max.is_finite() {
+        return 1.0;
+    }
+    let swing = (p_max - p_min).max(0.0);
+    (0.5 + 2.5 * swing).clamp(0.5, 2.0)
 }
 
 /// Rivergoing (canoe/barge/freshwater navigation & fishing) discovery probability per river tile by Köppen climate code.
@@ -607,29 +638,44 @@ impl PrehistorySimulation {
         // 7. Trace coarse rivers (`prehistorysimulation.py:130`).
         self.refresh_rivers(&elevations);
 
-        // 8. Spark agriculture and rivergoing along river tiles (`prehistorysimulation.py:133-137`),
-        //    and seafaring along coastal tiles. Rivergoing and seafaring develop independently of
-        //    agriculture and of each other, though having one boosts the probability of developing the other (`3.0x`).
+        // 8. Spark agriculture and rivergoing along unique river tiles (`prehistorysimulation.py:133-137`),
+        //    weighted by each river basin's seasonal flooding swing, and seafaring along coastal tiles.
+        //    Rivergoing and seafaring develop independently of agriculture and of each other, though
+        //    having one boosts the probability of developing the other (`3.0x`).
         let gfactor = glaciation * glaciation;
+        let mut river_tile_flood: BTreeMap<usize, f64> = BTreeMap::new();
         for r in &self.rivers {
+            let flood_mult = river_seasonal_flood_factor(r, &self.climate_model);
             for &t in r {
-                if let Some(&hid) = self.populated.get(&t) {
-                    let ag_mult = self.tile_ag_potential.get(t).copied().unwrap_or(1.0) as f64;
-                    let prob = gfactor * agriculture_spark_prob(self.tile_koeppen[t]) * ag_mult;
-                    if prob > 0.0 && self.rng.uniform(0.0, 1.0) < prob {
-                        self.agricultural_heritages.insert(hid);
-                    }
-                    if !self.rivergoing_heritages.contains(&hid) {
-                        let sea_synergy = if self.seafaring_heritages.contains(&hid) {
-                            3.0
-                        } else {
-                            1.0
-                        };
-                        let r_prob =
-                            (0.25 + 0.75 * gfactor) * rivergoing_spark_prob(self.tile_koeppen[t]) * sea_synergy;
-                        if r_prob > 0.0 && self.rng.uniform(0.0, 1.0) < r_prob {
-                            self.rivergoing_heritages.insert(hid);
+                river_tile_flood
+                    .entry(t)
+                    .and_modify(|cur| {
+                        if flood_mult > *cur {
+                            *cur = flood_mult;
                         }
+                    })
+                    .or_insert(flood_mult);
+            }
+        }
+        for (t, flood_mult) in river_tile_flood {
+            if let Some(&hid) = self.populated.get(&t) {
+                let ag_mult = self.tile_ag_potential.get(t).copied().unwrap_or(1.0) as f64;
+                let prob =
+                    gfactor * agriculture_spark_prob(self.tile_koeppen[t]) * ag_mult * flood_mult;
+                if prob > 0.0 && self.rng.uniform(0.0, 1.0) < prob {
+                    self.agricultural_heritages.insert(hid);
+                }
+                if !self.rivergoing_heritages.contains(&hid) {
+                    let sea_synergy = if self.seafaring_heritages.contains(&hid) {
+                        3.0
+                    } else {
+                        1.0
+                    };
+                    let r_prob = (0.25 + 0.75 * gfactor)
+                        * rivergoing_spark_prob(self.tile_koeppen[t])
+                        * sea_synergy;
+                    if r_prob > 0.0 && self.rng.uniform(0.0, 1.0) < r_prob {
+                        self.rivergoing_heritages.insert(hid);
                     }
                 }
             }
@@ -1843,5 +1889,51 @@ mod tests {
             sim.tile_ag_potential[t_a],
             sim.tile_ag_potential[t_b]
         );
+    }
+
+    #[test]
+    fn test_river_seasonal_flood_factor_rewards_seasonal_precipitation_swing() {
+        let sim = PrehistorySimulation::new_earth(42);
+        let cm = sim.climate_model();
+        let num_seasons = cm.season_count();
+        assert!(num_seasons >= 2);
+
+        // Find one land tile with a large seasonal precipitation swing and one with a small swing.
+        let mut best_seasonal = (0usize, -1.0f64);
+        let mut best_steady = (0usize, f64::INFINITY);
+        for t in 0..sim.tiles.len() {
+            if sim.tiles[t].elevation() <= 0.0 {
+                continue;
+            }
+            let mut p_min = f64::INFINITY;
+            let mut p_max = f64::NEG_INFINITY;
+            for s in 0..num_seasons {
+                if let Some(snap) = cm.season_snapshot(s) {
+                    let p = snap.precipitation[t] as f64;
+                    p_min = p_min.min(p);
+                    p_max = p_max.max(p);
+                }
+            }
+            let swing = p_max - p_min;
+            if swing > best_seasonal.1 {
+                best_seasonal = (t, swing);
+            }
+            if swing < best_steady.1 {
+                best_steady = (t, swing);
+            }
+        }
+
+        let f_seasonal = river_seasonal_flood_factor(&[best_seasonal.0], cm);
+        let f_steady = river_seasonal_flood_factor(&[best_steady.0], cm);
+        assert!(
+            f_seasonal > f_steady + 0.15,
+            "Seasonal river basin (swing={:.3}, mult={:.3}) should outscore steady basin (swing={:.3}, mult={:.3})",
+            best_seasonal.1,
+            f_seasonal,
+            best_steady.1,
+            f_steady
+        );
+        assert!(agriculture_spark_prob(7) > agriculture_spark_prob(6)); // Cs > Cf
+        assert!(agriculture_spark_prob(8) > agriculture_spark_prob(6)); // Cw > Cf
     }
 }
