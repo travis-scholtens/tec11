@@ -138,10 +138,25 @@ pub fn racinate_with_technologies<F>(
         races.entry(r).or_default().insert(t);
     }
 
-    // 1. If any geographically isolated race has >1 heritages, combine them into a new one (`racinatemethod.py:18-25`)
+    // 1. Localized contact-zone admixture when >1 heritages share a connected component:
+    //    - Small components (<= 12 tiles, e.g. islands/enclaves) fully admix into one heritage.
+    //    - Larger landmasses admix only along contact borders between heritages that do not
+    //      already share a direct parent-child ancestry link, preserving distinct interiors
+    //      and stabilizing into an A — AB — B gradient without spawning endless border IDs.
+    let mut existing_pair_heritage: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    for (&hid, h) in heritages.iter() {
+        if h.ancestry.len() == 2 {
+            let pair = (h.ancestry[0].min(h.ancestry[1]), h.ancestry[0].max(h.ancestry[1]));
+            existing_pair_heritage.entry(pair).or_insert(hid);
+        }
+    }
+
     for ts in races.values() {
         let hs: BTreeSet<u32> = ts.iter().map(|t| populated[t]).collect();
-        if hs.len() > 1 {
+        if hs.len() <= 1 {
+            continue;
+        }
+        if ts.len() <= 12 {
             let parents: Vec<u32> = hs.iter().copied().collect();
             let h = new_heritage(parents);
             let new_id = h.id;
@@ -157,6 +172,59 @@ pub fn racinate_with_technologies<F>(
             heritages.insert(new_id, h);
             for &t in ts {
                 populated.insert(t, new_id);
+            }
+            continue;
+        }
+
+        // Find pairs of directly adjacent heritages on this landmass that are not already
+        // parent-child admixed, and collect their contact-border tiles.
+        let mut pair_border_tiles: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+        for &t in ts {
+            let ha = populated[&t];
+            let mut foreign_nb: Option<u32> = None;
+            for &nb in &adjacency[t] {
+                if let Some(&hb) = populated.get(&nb) {
+                    if hb != ha && ts.contains(&nb) {
+                        let already_related = heritages
+                            .get(&ha)
+                            .is_some_and(|h| h.ancestry.contains(&hb))
+                            || heritages
+                                .get(&hb)
+                                .is_some_and(|h| h.ancestry.contains(&ha));
+                        if !already_related {
+                            foreign_nb = Some(hb);
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(hb) = foreign_nb {
+                let pair = (ha.min(hb), ha.max(hb));
+                pair_border_tiles.entry(pair).or_default().push(t);
+            }
+        }
+
+        for ((ha, hb), border_tiles) in pair_border_tiles {
+            let admixed_id = if let Some(&existing_id) = existing_pair_heritage.get(&(ha, hb)) {
+                existing_id
+            } else {
+                let h = new_heritage(vec![ha, hb]);
+                let new_id = h.id;
+                heritages.insert(new_id, h);
+                existing_pair_heritage.insert((ha, hb), new_id);
+                new_id
+            };
+            if agricultural_heritages.contains(&ha) || agricultural_heritages.contains(&hb) {
+                agricultural_heritages.insert(admixed_id);
+            }
+            if rivergoing_heritages.contains(&ha) || rivergoing_heritages.contains(&hb) {
+                rivergoing_heritages.insert(admixed_id);
+            }
+            if seafaring_heritages.contains(&ha) || seafaring_heritages.contains(&hb) {
+                seafaring_heritages.insert(admixed_id);
+            }
+            for t in border_tiles {
+                populated.insert(t, admixed_id);
             }
         }
     }
@@ -532,6 +600,106 @@ mod tests {
         assert_ne!(
             populated[&0], populated[&3],
             "Seafaring populations separated by 2+ ocean tiles should branch into distinct heritages"
+        );
+    }
+
+    #[test]
+    fn test_contact_zone_admixture_preserves_interiors_and_stabilizes() {
+        // 20-tile contiguous land strip: tiles 0..10 are heritage 0, tiles 10..20 are heritage 1.
+        let n = 20usize;
+        let elevations = vec![1.0f32; n];
+        let koeppen_ids = vec![6u8; n];
+        let adjacency: Vec<Vec<usize>> = (0..n)
+            .map(|i| {
+                let mut nbs = Vec::new();
+                if i > 0 {
+                    nbs.push(i - 1);
+                }
+                if i + 1 < n {
+                    nbs.push(i + 1);
+                }
+                nbs
+            })
+            .collect();
+        let mut populated: BTreeMap<usize, u32> = (0..n)
+            .map(|i| (i, if i < 10 { 0 } else { 1 }))
+            .collect();
+        let mut ag = BTreeSet::new();
+        let mut riv = BTreeSet::new();
+        let mut sea = BTreeSet::new();
+        let mut heritages = BTreeMap::from([
+            (
+                0u32,
+                Heritage {
+                    id: 0,
+                    name: "people_1".to_string(),
+                    ancestry: Vec::new(),
+                },
+            ),
+            (
+                1u32,
+                Heritage {
+                    id: 1,
+                    name: "people_2".to_string(),
+                    ancestry: Vec::new(),
+                },
+            ),
+        ]);
+        let mut next_id = 2u32;
+
+        // Tick 1: contact border (tiles 9 and 10) admixes into heritage 2; interiors remain 0 and 1
+        racinate_with_technologies(
+            &elevations,
+            &koeppen_ids,
+            &adjacency,
+            &mut populated,
+            &mut ag,
+            &mut riv,
+            &mut sea,
+            &mut heritages,
+            |ancestry| {
+                let id = next_id;
+                next_id += 1;
+                Heritage {
+                    id,
+                    name: format!("people_{}", id + 1),
+                    ancestry,
+                }
+            },
+            2,
+        );
+
+        assert_eq!(populated[&0], 0, "West interior should retain heritage 0");
+        assert_eq!(populated[&19], 1, "East interior should retain heritage 1");
+        assert_eq!(populated[&9], 2, "Contact border tile 9 should admix into heritage 2");
+        assert_eq!(populated[&10], 2, "Contact border tile 10 should admix into heritage 2");
+        assert_eq!(heritages[&2].ancestry, vec![0, 1]);
+
+        // Tick 2: running racination again should stabilize (no endless new border heritages)
+        let id_after_tick1 = next_id;
+        racinate_with_technologies(
+            &elevations,
+            &koeppen_ids,
+            &adjacency,
+            &mut populated,
+            &mut ag,
+            &mut riv,
+            &mut sea,
+            &mut heritages,
+            |ancestry| {
+                let id = next_id;
+                next_id += 1;
+                Heritage {
+                    id,
+                    name: format!("people_{}", id + 1),
+                    ancestry,
+                }
+            },
+            2,
+        );
+        assert_eq!(
+            next_id, id_after_tick1,
+            "Contact-zone admixture should stabilize without spawning endless border heritages"
         );
     }
 }
