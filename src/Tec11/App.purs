@@ -400,6 +400,7 @@ type WorldInfo =
   , plantColorCss :: String
   , plantColorName :: String
   , planetsSummaryText :: String
+  , calendarSummaryText :: String
   , isRunning :: Boolean
   , hasSavedPlanet :: Boolean
   , selectedReport :: String
@@ -1787,6 +1788,7 @@ mkApp = do
       , plantColorCss: "rgb(36, 138, 41)"
       , plantColorName: "Emerald Chlorophyll Green"
       , planetsSummaryText: "#1: Scorched Rocky (0.38 R⊕ @ 0.39 AU) | #2: Cloudy Rocky (0.95 R⊕ @ 0.72 AU) | #3 [HOME]: Temperate Rocky (1.00 R⊕ @ 1.00 AU)"
+      , calendarSummaryText: "Year: 365.3 days · Month: 29.5 days · Day: 24.0 hours"
       , isRunning: false
       , hasSavedPlanet: false
       , selectedReport: "Click any tile on the globe to inspect its rock strata, climate classification, and population / heritage ancestry tree."
@@ -6236,6 +6238,20 @@ mkApp = do
                                       { className: "world-modal-body"
                                       , children:
                                           [ R.div
+                                              { style:
+                                                  R.css
+                                                    { background: "#0b1328"
+                                                    , border: "1px solid #334155"
+                                                    , borderRadius: "8px"
+                                                    , padding: "0.45rem 0.75rem"
+                                                    , fontSize: "0.82rem"
+                                                    , color: "#e2e8f0"
+                                                    , fontWeight: "500"
+                                                    , letterSpacing: "0.01em"
+                                                    }
+                                              , children: [ R.text worldInfo.calendarSummaryText ]
+                                              }
+                                          , R.div
                                               { style:
                                                   R.css
                                                     { display: "grid"

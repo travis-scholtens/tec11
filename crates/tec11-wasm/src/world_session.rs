@@ -243,6 +243,10 @@ impl WasmWorldSession {
         self.sim.planets_summary_text()
     }
 
+    pub fn calendar_summary_text(&self) -> String {
+        self.sim.calendar_summary_text()
+    }
+
     pub fn inspect_tile(&self, tile_idx: usize) -> String {
         self.sim.inspect_tile(tile_idx)
     }

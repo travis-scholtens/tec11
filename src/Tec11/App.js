@@ -5896,6 +5896,8 @@ function buildWorldInfo(view) {
     plantColorCss: rgbFloatToCss(s.plant_foliage_rgb(), 36, 138, 41),
     plantColorName: s.plant_color_name(),
     planetsSummaryText: s.planets_summary_text(),
+    calendarSummaryText:
+      typeof s.calendar_summary_text === "function" ? s.calendar_summary_text() : "",
     isRunning: Boolean(view.isRunning),
     hasSavedPlanet: getSavedSnapshotBytes() !== null,
     selectedReport,
@@ -9138,6 +9140,8 @@ function buildSunInfo(view) {
     plantColorName: s.plant_color_name(),
     plantPigmentDesc: s.plant_pigment_desc(),
     planetsSummaryText: s.planets_summary_text(),
+    calendarSummaryText:
+      typeof s.calendar_summary_text === "function" ? s.calendar_summary_text() : "",
     summaryLine: s.summary_line(),
     selectedReport,
   };

@@ -335,6 +335,45 @@ impl WorldSimulation {
         )
     }
 
+    /// Human-readable local calendar summary for the `Cosmos` modal:
+    /// year length in local days, synodic month length(s) in local days, and day length in hours.
+    pub fn calendar_summary_text(&self) -> String {
+        let day_hours = (self.current_day_hours() as f64).max(1.0);
+        let year_earth_days = (self.home_star.orbital_period_days as f64).max(5.0);
+        let year_local_days = year_earth_days * (24.0 / day_hours);
+
+        let month_text = if self.params.moon_count == 0 {
+            "Month: None (no moons)".to_string()
+        } else {
+            let a1 = self.current_moon_dist_radii().max(8.0) as f64;
+            let m_mass = self.params.moon_mass.max(0.05) as f64;
+            let p1_sid_earth = 27.3217
+                * (a1 / 60.0).powf(1.5)
+                * ((1.0 + 0.0123) / (1.0 + 0.0123 * m_mass)).sqrt();
+            let count = self.params.moon_count.min(4);
+            let mut synodic_months = Vec::with_capacity(count as usize);
+            for k in 0..count {
+                let ratio = (1u32 << k) as f64;
+                let p_sid_earth = (p1_sid_earth * ratio).max(1.2);
+                let denom = (year_earth_days - p_sid_earth).abs();
+                let p_syn_earth = if denom > 0.25 {
+                    (p_sid_earth * year_earth_days) / denom
+                } else {
+                    p_sid_earth
+                };
+                let p_syn_local = p_syn_earth * (24.0 / day_hours);
+                synodic_months.push(format!("{p_syn_local:.1}"));
+            }
+            if count == 1 {
+                format!("Month: {} days", synodic_months[0])
+            } else {
+                format!("Months: {} days", synodic_months.join(" / "))
+            }
+        };
+
+        format!("Year: {year_local_days:.1} days · {month_text} · Day: {day_hours:.1} hours")
+    }
+
     /// Un-tilted 3D galaxy point cloud (`1,800` stars, `6` floats per star `[nx, ny, nz, r, g, b]`)
     /// for the rotating Host Galaxy canvas inside the World `Cosmos` modal.
     pub fn galaxy_cloud_data(&self) -> Vec<f32> {
@@ -2732,5 +2771,34 @@ mod tests {
             "Expected distinct initial glaciation phases across seeds, got {:?}",
             phases
         );
+    }
+
+    #[test]
+    fn test_calendar_summary_text() {
+        let mut p = WorldCreateParams::default();
+        p.grid_size = 2;
+        p.day_hours = 24;
+        p.moon_count = 1;
+        p.moon_mass = 1.0;
+        p.moon_dist_radii = 60;
+        let world = WorldSimulation::new(p.clone(), 42);
+        let text = world.calendar_summary_text();
+        assert!(text.contains("Year:") && text.contains("days"), "got: {text}");
+        assert!(text.contains("Month:") && text.contains("days"), "got: {text}");
+        assert!(text.contains("Day:") && text.contains("hours"), "got: {text}");
+
+        // Moonless world reports no moons
+        let mut p0 = p.clone();
+        p0.moon_count = 0;
+        let world0 = WorldSimulation::new(p0, 42);
+        let text0 = world0.calendar_summary_text();
+        assert!(text0.contains("Month: None (no moons)"), "got: {text0}");
+
+        // Multi-moon world lists multiple synodic months
+        let mut p2 = p;
+        p2.moon_count = 2;
+        let world2 = WorldSimulation::new(p2, 42);
+        let text2 = world2.calendar_summary_text();
+        assert!(text2.contains("Months:") && text2.contains(" / "), "got: {text2}");
     }
 }
