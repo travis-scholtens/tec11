@@ -899,7 +899,25 @@ impl LanguageRecord {
         let mut tick_changes = Vec::with_capacity(num_changes);
 
         for _ in 0..num_changes {
-            let change_id = (rng.next_u64() as u32) % 9;
+            let is_tonal = !self.phonology.tones.is_empty();
+            let roll = rng.uniform(0.0, 1.0);
+            let change_id = if !is_tonal && roll < 0.015 {
+                // Rare emergence of tone in non-tonal languages (~35-45% tonal after 10-15 ticks)
+                if (rng.next_u64() & 1) == 0 {
+                    SoundChangeKind::TonogenesisOnset as u32
+                } else {
+                    SoundChangeKind::TonogenesisCoda as u32
+                }
+            } else if is_tonal && roll < 0.08 {
+                // Already-tonal languages undergo chain tone shifts or secondary register splits
+                match (rng.next_u64() as u32) % 4 {
+                    0 | 1 => SoundChangeKind::ToneShift as u32,
+                    2 => SoundChangeKind::TonogenesisOnset as u32,
+                    _ => SoundChangeKind::TonogenesisCoda as u32,
+                }
+            } else {
+                (rng.next_u64() as u32) % 9
+            };
             let change = SoundChangeKind::from_u32(change_id);
             tick_changes.push(change_id);
             let my_name = self.name();
@@ -8159,11 +8177,22 @@ impl HistorySimulation {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let phoneme_summary = format!(
-            "{} consonants, {} vowels",
-            lang.phonology.consonants.len(),
-            lang.phonology.vowels.len()
-        );
+        let phoneme_summary = if lang.phonology.tones.is_empty() {
+            format!(
+                "{} consonants, {} vowels",
+                lang.phonology.consonants.len(),
+                lang.phonology.vowels.len()
+            )
+        } else {
+            let tone_names: Vec<&'static str> =
+                lang.phonology.tones.iter().map(|t| t.label()).collect();
+            format!(
+                "{} consonants, {} vowels · Tonal ({})",
+                lang.phonology.consonants.len(),
+                lang.phonology.vowels.len(),
+                tone_names.join(", ")
+            )
+        };
 
         let lexicon: Vec<LexiconEntryView> = lang
             .lexicon

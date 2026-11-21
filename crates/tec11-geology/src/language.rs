@@ -448,11 +448,90 @@ impl PhonotacticConstraint {
     }
 }
 
+/// Lexical tone on a syllable. Proto-languages always start with `Tone::None`;
+/// tones arise historically through tonogenesis (`TonogenesisOnset`, `TonogenesisCoda`)
+/// and subsequently evolve via `ToneShift`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(u8)]
+pub enum Tone {
+    #[default]
+    None = 0,
+    High = 1,
+    Mid = 2,
+    Low = 3,
+    Rising = 4,
+    Falling = 5,
+}
+
+impl Tone {
+    pub fn ipa_symbol(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::High => "˥",
+            Self::Mid => "˧",
+            Self::Low => "˩",
+            Self::Rising => "˩˥",
+            Self::Falling => "˥˩",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::High => "High",
+            Self::Mid => "Mid",
+            Self::Low => "Low",
+            Self::Rising => "Rising",
+            Self::Falling => "Falling",
+        }
+    }
+}
+
+/// Apply a tone diacritic to a vowel's base Romanized orthography string.
+fn apply_tone_orth(base: &str, tone: Tone) -> String {
+    match tone {
+        Tone::None | Tone::Mid => base.to_string(),
+        Tone::High => match base {
+            "a" => "á".to_string(),
+            "e" => "é".to_string(),
+            "i" => "í".to_string(),
+            "o" => "ó".to_string(),
+            "u" => "ú".to_string(),
+            _ => format!("{base}\u{0301}"),
+        },
+        Tone::Low => match base {
+            "a" => "à".to_string(),
+            "e" => "è".to_string(),
+            "i" => "ì".to_string(),
+            "o" => "ò".to_string(),
+            "u" => "ù".to_string(),
+            _ => format!("{base}\u{0300}"),
+        },
+        Tone::Rising => match base {
+            "a" => "ǎ".to_string(),
+            "e" => "ě".to_string(),
+            "i" => "ǐ".to_string(),
+            "o" => "ǒ".to_string(),
+            "u" => "ǔ".to_string(),
+            _ => format!("{base}\u{030C}"),
+        },
+        Tone::Falling => match base {
+            "a" => "â".to_string(),
+            "e" => "ê".to_string(),
+            "i" => "î".to_string(),
+            "o" => "ô".to_string(),
+            "u" => "û".to_string(),
+            _ => format!("{base}\u{0302}"),
+        },
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Syllable {
     pub onset: Vec<usize>,
     pub nucleus: Vec<usize>,
     pub coda: Vec<usize>,
+    pub tone: Tone,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -489,14 +568,19 @@ impl Word {
         }
     }
 
+    pub fn is_tonal(&self) -> bool {
+        self.syllables.iter().any(|s| s.tone != Tone::None)
+    }
+
     /// Format in IPA (`language/ipa.py` and `language/output.py:pronounce`).
     pub fn pronounce(&self) -> String {
+        let tonal = self.is_tonal();
         let stressed_idx = self.stressed_index();
         let multi = self.syllables.len() > 1;
-        let mut out = String::with_capacity(self.syllables.len() * 4);
+        let mut out = String::with_capacity(self.syllables.len() * 5);
 
         for (idx, syl) in self.syllables.iter().enumerate() {
-            if multi && idx == stressed_idx {
+            if !tonal && multi && idx == stressed_idx {
                 out.push('ˈ');
             } else if idx > 0 {
                 out.push('.');
@@ -515,15 +599,19 @@ impl Word {
             for &c in &syl.coda {
                 out.push_str(CONSONANTS[c].symbol);
             }
+            if syl.tone != Tone::None {
+                out.push_str(syl.tone.ipa_symbol());
+            }
         }
         out
     }
 
     /// Format in Romanized orthography (`language/orthography.py` and `language/output.py:write`).
     pub fn write(&self, capitalize: bool) -> String {
+        let tonal = self.is_tonal();
         let stressed_idx = self.stressed_index();
-        let mark_stress = self.stress != 1 && self.syllables.len() > 1;
-        let mut out = String::with_capacity(self.syllables.len() * 4);
+        let mark_stress = !tonal && self.stress != 1 && self.syllables.len() > 1;
+        let mut out = String::with_capacity(self.syllables.len() * 5);
         let mut need_cap = capitalize;
 
         let mut push_segment = |seg: &str| {
@@ -548,7 +636,10 @@ impl Word {
                 push_segment(CONSONANTS[c].orth);
             }
             for (v_pos, &v) in syl.nucleus.iter().enumerate() {
-                if mark_stress && idx == stressed_idx && v_pos == 0 {
+                if tonal && v_pos == 0 && syl.tone != Tone::None {
+                    let toned = apply_tone_orth(VOWELS[v].orth, syl.tone);
+                    push_segment(&toned);
+                } else if mark_stress && idx == stressed_idx && v_pos == 0 {
                     push_segment(VOWELS[v].orth_acute);
                 } else {
                     push_segment(VOWELS[v].orth);
@@ -566,6 +657,9 @@ impl Word {
 pub struct Language {
     pub vowels: Vec<usize>,
     pub consonants: Vec<usize>,
+    /// Active lexical tones in this language. Always empty for newly generated proto-languages;
+    /// populated dynamically via `refresh_from_word_iter` once tonogenesis occurs.
+    pub tones: Vec<Tone>,
     pub onsetp: Vec<f64>,
     pub codap: Vec<f64>,
     pub constraints: Vec<PhonotacticConstraint>,
@@ -604,6 +698,7 @@ impl Language {
         Self {
             vowels,
             consonants,
+            tones: Vec::new(),
             onsetp,
             codap,
             constraints,
@@ -622,6 +717,7 @@ impl Language {
     pub fn refresh_from_word_iter<'a>(&mut self, words: impl Iterator<Item = &'a Word>) {
         let mut vs = [false; VOWELS.len()];
         let mut cs = [false; CONSONANTS.len()];
+        let mut active_tones = BTreeSet::new();
         let mut onsets = BTreeSet::new();
         let mut codae = BTreeSet::new();
         let mut num_syllables = 0usize;
@@ -632,6 +728,9 @@ impl Language {
         for w in words {
             any_word = true;
             for s in &w.syllables {
+                if s.tone != Tone::None {
+                    active_tones.insert(s.tone);
+                }
                 for &c in &s.onset {
                     cs[c] = true;
                 }
@@ -692,6 +791,7 @@ impl Language {
                 self.codap = vec![cp];
             }
         }
+        self.tones = active_tones.into_iter().collect();
         self.attested_onsets = onsets;
         self.attested_codae = codae;
     }
@@ -749,10 +849,17 @@ impl Language {
                 .collect();
         }
 
+        let tone = if self.tones.is_empty() {
+            Tone::None
+        } else {
+            self.tones[(rng.next_u64() as usize) % self.tones.len()]
+        };
+
         Syllable {
             onset,
             nucleus,
             coda,
+            tone,
         }
     }
 
@@ -810,6 +917,7 @@ impl Language {
 
     /// Adapt foreign phonemes in `word` to the nearest phonemes in `self` (`lexicon.py:18-24`).
     pub fn adapt_sounds(&self, word: &Word) -> Word {
+        let default_tone = self.tones.first().copied().unwrap_or(Tone::None);
         let syllables = word
             .syllables
             .iter()
@@ -829,6 +937,13 @@ impl Language {
                     .iter()
                     .map(|&c| nearest_consonant_to_pos(consonant_pos(c), &self.consonants))
                     .collect(),
+                tone: if self.tones.is_empty() {
+                    Tone::None
+                } else if self.tones.contains(&s.tone) {
+                    s.tone
+                } else {
+                    default_tone
+                },
             })
             .collect();
         Word {
@@ -842,6 +957,11 @@ impl Language {
         if syllable.onset.is_empty() {
             return Some(vec![syllable.clone()]);
         }
+        let ep_tone = if self.tones.is_empty() {
+            Tone::None
+        } else {
+            Tone::Mid
+        };
         let len = syllable.onset.len();
         for n in (1..=len).rev() {
             let clusters: Vec<Vec<usize>> =
@@ -853,12 +973,14 @@ impl Language {
                         onset: c.clone(),
                         nucleus: vec![filler],
                         coda: Vec::new(),
+                        tone: ep_tone,
                     })
                     .collect();
                 out.push(Syllable {
                     onset: clusters.last().cloned().unwrap_or_default(),
                     nucleus: syllable.nucleus.clone(),
                     coda: syllable.coda.clone(),
+                    tone: syllable.tone,
                 });
                 return Some(out);
             }
@@ -869,6 +991,7 @@ impl Language {
                     onset: Vec::new(),
                     nucleus: vec![filler],
                     coda: clusters[0].clone(),
+                    tone: ep_tone,
                 }];
                 if clusters.len() > 2 {
                     for c in &clusters[1..clusters.len() - 1] {
@@ -876,6 +999,7 @@ impl Language {
                             onset: c.clone(),
                             nucleus: vec![filler],
                             coda: Vec::new(),
+                            tone: ep_tone,
                         });
                     }
                 }
@@ -887,6 +1011,7 @@ impl Language {
                     },
                     nucleus: syllable.nucleus.clone(),
                     coda: syllable.coda.clone(),
+                    tone: syllable.tone,
                 });
                 return Some(out);
             }
@@ -899,6 +1024,11 @@ impl Language {
         if syllable.coda.is_empty() {
             return Some(vec![syllable.clone()]);
         }
+        let ep_tone = if self.tones.is_empty() {
+            Tone::None
+        } else {
+            Tone::Mid
+        };
         let len = syllable.coda.len();
         for n in (1..=len).rev() {
             let clusters: Vec<Vec<usize>> =
@@ -908,12 +1038,14 @@ impl Language {
                     onset: syllable.onset.clone(),
                     nucleus: syllable.nucleus.clone(),
                     coda: clusters[0].clone(),
+                    tone: syllable.tone,
                 }];
                 for c in &clusters[1..] {
                     out.push(Syllable {
                         onset: Vec::new(),
                         nucleus: vec![filler],
                         coda: c.clone(),
+                        tone: ep_tone,
                     });
                 }
                 return Some(out);
@@ -932,6 +1064,7 @@ impl Language {
                     } else {
                         Vec::new()
                     },
+                    tone: syllable.tone,
                 }];
                 if clusters.len() > 2 {
                     for c in &clusters[1..last_idx] {
@@ -939,6 +1072,7 @@ impl Language {
                             onset: Vec::new(),
                             nucleus: vec![filler],
                             coda: c.clone(),
+                            tone: ep_tone,
                         });
                     }
                 }
@@ -946,6 +1080,7 @@ impl Language {
                     onset: clusters[last_idx].clone(),
                     nucleus: vec![filler],
                     coda: Vec::new(),
+                    tone: ep_tone,
                 });
                 return Some(out);
             }
@@ -986,6 +1121,11 @@ impl Language {
 
         let max_o = self.onsetp.len().max(1);
         let max_c = self.codap.len().max(1);
+        let ep_tone = if self.tones.is_empty() {
+            Tone::None
+        } else {
+            Tone::Mid
+        };
 
         for s in &word.syllables {
             let mut onset = s.onset.clone();
@@ -995,6 +1135,7 @@ impl Language {
                     onset: extra,
                     nucleus: vec![ep],
                     coda: Vec::new(),
+                    tone: ep_tone,
                 });
             }
 
@@ -1017,6 +1158,7 @@ impl Language {
                     onset: part.clone(),
                     nucleus: vec![ep],
                     coda: Vec::new(),
+                    tone: ep_tone,
                 });
             }
             let final_onset = onset_parts.pop().unwrap_or_default();
@@ -1031,6 +1173,7 @@ impl Language {
                         onset: Vec::new(),
                         nucleus: vec![ep],
                         coda: extra,
+                        tone: ep_tone,
                     },
                 );
             }
@@ -1059,6 +1202,7 @@ impl Language {
                     s.nucleus.clone()
                 },
                 coda: first_coda,
+                tone: s.tone,
             });
 
             for part in coda_parts {
@@ -1066,6 +1210,7 @@ impl Language {
                     onset: Vec::new(),
                     nucleus: vec![ep],
                     coda: part,
+                    tone: ep_tone,
                 });
             }
             new_syllables.extend(trailing_syllables);
@@ -1076,6 +1221,7 @@ impl Language {
                 onset: Vec::new(),
                 nucleus: vec![ep],
                 coda: Vec::new(),
+                tone: ep_tone,
             });
         }
 
@@ -1148,7 +1294,8 @@ impl Language {
     }
 }
 
-/// All 9 historical sound changes (`metaphony.py`, `breaking.py`, `lenition.py`, `elision.py`).
+/// All 12 historical sound changes (`metaphony.py`, `breaking.py`, `lenition.py`, `elision.py`,
+/// plus onset/coda tonogenesis and diachronic tone shifting).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SoundChangeKind {
@@ -1161,10 +1308,13 @@ pub enum SoundChangeKind {
     Apheresize = 6,
     Syncopate = 7,
     Apocopate = 8,
+    TonogenesisOnset = 9,
+    TonogenesisCoda = 10,
+    ToneShift = 11,
 }
 
 impl SoundChangeKind {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 12] = [
         Self::AMutate,
         Self::IMutate,
         Self::BreakVowels,
@@ -1174,10 +1324,13 @@ impl SoundChangeKind {
         Self::Apheresize,
         Self::Syncopate,
         Self::Apocopate,
+        Self::TonogenesisOnset,
+        Self::TonogenesisCoda,
+        Self::ToneShift,
     ];
 
     pub fn from_u32(v: u32) -> Self {
-        match v % 9 {
+        match v % 12 {
             0 => Self::AMutate,
             1 => Self::IMutate,
             2 => Self::BreakVowels,
@@ -1186,7 +1339,10 @@ impl SoundChangeKind {
             5 => Self::VocalizeConsonants,
             6 => Self::Apheresize,
             7 => Self::Syncopate,
-            _ => Self::Apocopate,
+            8 => Self::Apocopate,
+            9 => Self::TonogenesisOnset,
+            10 => Self::TonogenesisCoda,
+            _ => Self::ToneShift,
         }
     }
 
@@ -1207,8 +1363,128 @@ impl SoundChangeKind {
             Self::Apheresize => apheresize_opt(word),
             Self::Syncopate => syncopate_opt(word),
             Self::Apocopate => apocopate_opt(word),
+            Self::TonogenesisOnset => tonogenesis_onset_opt(word),
+            Self::TonogenesisCoda => tonogenesis_coda_opt(word),
+            Self::ToneShift => tone_shift_opt(word),
         }
     }
+}
+
+/// Onset-voicing tonogenesis: voiced obstruent onsets devoice and depress pitch to `Tone::Low`,
+/// while voiceless obstruent onsets raise pitch to `Tone::High` (register split).
+pub fn tonogenesis_onset(word: &Word) -> Word {
+    tonogenesis_onset_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn tonogenesis_onset_opt(word: &Word) -> Option<Word> {
+    let mut out_opt: Option<Word> = None;
+    let mut became_tonal = false;
+    for (i, syl) in word.syllables.iter().enumerate() {
+        let Some(&c0) = syl.onset.first() else {
+            continue;
+        };
+        let cd = &CONSONANTS[c0];
+        if !matches!(cd.manner, 0 | 1 | 2 | 6) || cd.place > 5 {
+            continue;
+        }
+        if cd.voice == 1 {
+            let devoiced = nearest_consonant_to_pos((cd.manner, cd.place, 0), &ALL_CONSONANT_INDICES);
+            let new_tone = match syl.tone {
+                Tone::Falling => Tone::Falling,
+                _ => Tone::Low,
+            };
+            if devoiced != c0 || new_tone != syl.tone {
+                let out = out_opt.get_or_insert_with(|| word.clone());
+                out.syllables[i].onset[0] = devoiced;
+                out.syllables[i].tone = new_tone;
+                became_tonal = true;
+            }
+        } else if matches!(syl.tone, Tone::None | Tone::Mid) {
+            let out = out_opt.get_or_insert_with(|| word.clone());
+            out.syllables[i].tone = Tone::High;
+            became_tonal = true;
+        }
+    }
+    if became_tonal {
+        if let Some(ref mut out) = out_opt {
+            for syl in &mut out.syllables {
+                if syl.tone == Tone::None {
+                    syl.tone = Tone::Mid;
+                }
+            }
+        }
+    }
+    out_opt
+}
+
+/// Coda-loss contour tonogenesis: dropping a glottal/voiceless-stop coda yields `Tone::Rising`,
+/// while dropping a `-h`/fricative coda yields `Tone::Falling`.
+pub fn tonogenesis_coda(word: &Word) -> Word {
+    tonogenesis_coda_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn tonogenesis_coda_opt(word: &Word) -> Option<Word> {
+    let mut out_opt: Option<Word> = None;
+    let mut became_tonal = false;
+    for (i, syl) in word.syllables.iter().enumerate() {
+        let Some(&c_last) = syl.coda.last() else {
+            continue;
+        };
+        let cd = &CONSONANTS[c_last];
+        let new_tone = if c_last == 27 || (matches!(cd.manner, 0 | 7 | 8) && cd.voice == 0) {
+            // Glottal stop `ʔ` or voiceless/aspirated/ejective stop coda -> Rising tone
+            Some(Tone::Rising)
+        } else if c_last == 26 || matches!(cd.manner, 1 | 2) {
+            // Glottal `h` or fricative coda -> Falling tone
+            Some(Tone::Falling)
+        } else {
+            None
+        };
+        if let Some(tone) = new_tone {
+            let out = out_opt.get_or_insert_with(|| word.clone());
+            out.syllables[i].coda.pop();
+            out.syllables[i].tone = tone;
+            became_tonal = true;
+        }
+    }
+    if became_tonal {
+        if let Some(ref mut out) = out_opt {
+            for syl in &mut out.syllables {
+                if syl.tone == Tone::None {
+                    syl.tone = Tone::Mid;
+                }
+            }
+        }
+    }
+    out_opt
+}
+
+/// Diachronic chain tone shift (`High -> Falling -> Low -> Rising -> High`; `Mid` stays `Mid`).
+/// Has no effect on non-tonal words.
+pub fn tone_shift(word: &Word) -> Word {
+    tone_shift_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn tone_shift_opt(word: &Word) -> Option<Word> {
+    if !word.is_tonal() {
+        return None;
+    }
+    let mut out_opt: Option<Word> = None;
+    for (i, syl) in word.syllables.iter().enumerate() {
+        let next = match syl.tone {
+            Tone::High => Tone::Falling,
+            Tone::Falling => Tone::Low,
+            Tone::Low => Tone::Rising,
+            Tone::Rising => Tone::High,
+            Tone::Mid => Tone::Mid,
+            Tone::None => Tone::None,
+        };
+        if next != syl.tone {
+            let out = out_opt.get_or_insert_with(|| word.clone());
+            out.syllables[i].tone = next;
+        }
+    }
+    out_opt
 }
 
 /// Height metaphony (`metaphony.py:21-22`).
@@ -1854,10 +2130,58 @@ mod tests {
                 onset: vec![60, 6], // ǃ + k
                 nucleus: vec![26],  // a
                 coda: vec![],
+                tone: Tone::None,
             }],
             stress: 0,
         };
         assert_eq!(click_word.write(true), "ǃKa");
         assert_eq!(click_word.pronounce(), "ǃka");
+    }
+
+    #[test]
+    fn test_tonogenesis_and_tone_shift_emerge_from_nontonal_proto_languages() {
+        let mut rng = Pcg64Mcg::new(99);
+        for _ in 0..30 {
+            let lang = Language::generate(&mut rng);
+            assert!(lang.tones.is_empty(), "Proto-languages must start non-tonal");
+        }
+
+        // Onset tonogenesis: voiced `b` (1) + `a` (26) -> devoiced `p` (0) + Low tone (`pà`, `pa˩`);
+        // voiceless `t` (2) + `a` (26) -> `t` + High tone (`tá`, `ta˥`).
+        let w_onset = Word {
+            syllables: vec![
+                Syllable { onset: vec![1], nucleus: vec![26], coda: vec![], tone: Tone::None },
+                Syllable { onset: vec![2], nucleus: vec![26], coda: vec![], tone: Tone::None },
+            ],
+            stress: 1,
+        };
+        let t_onset = tonogenesis_onset(&w_onset);
+        assert_eq!(t_onset.syllables[0].onset[0], 0); // b -> p
+        assert_eq!(t_onset.syllables[0].tone, Tone::Low);
+        assert_eq!(t_onset.syllables[1].tone, Tone::High);
+        assert_eq!(t_onset.write(true), "Pàtá");
+        assert_eq!(t_onset.pronounce(), "pa˩.ta˥");
+
+        // Coda tonogenesis: `kaʔ` -> `kǎ` (`ka˩˥`), `tah` -> `tâ` (`ta˥˩`).
+        let w_coda = Word {
+            syllables: vec![
+                Syllable { onset: vec![6], nucleus: vec![26], coda: vec![27], tone: Tone::None },
+                Syllable { onset: vec![2], nucleus: vec![26], coda: vec![26], tone: Tone::None },
+            ],
+            stress: 1,
+        };
+        let t_coda = tonogenesis_coda(&w_coda);
+        assert!(t_coda.syllables[0].coda.is_empty());
+        assert!(t_coda.syllables[1].coda.is_empty());
+        assert_eq!(t_coda.syllables[0].tone, Tone::Rising);
+        assert_eq!(t_coda.syllables[1].tone, Tone::Falling);
+        assert_eq!(t_coda.write(true), "Kǎtâ");
+        assert_eq!(t_coda.pronounce(), "ka˩˥.ta˥˩");
+
+        // Tone shift leaves non-tonal words untouched, and cycles tonal words.
+        assert!(tone_shift_opt(&w_onset).is_none());
+        let shifted = tone_shift(&t_coda);
+        assert_eq!(shifted.syllables[0].tone, Tone::High);
+        assert_eq!(shifted.syllables[1].tone, Tone::Low);
     }
 }
