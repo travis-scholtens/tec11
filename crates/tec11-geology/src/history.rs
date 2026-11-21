@@ -196,12 +196,36 @@ pub const MINERAL_CONCEPT_GLOSSES: [&str; 22] = [
     "opal",
 ];
 
+pub const TIME_UNIT_YEAR: u32 = 0;
+pub const TIME_UNIT_MONTH: u32 = 1;
+pub const TIME_UNIT_DAY: u32 = 2;
+pub const TIME_UNIT_HOUR: u32 = 3;
+
+pub const TIME_UNIT_GLOSSES: [&str; 4] = ["year", "month", "day (solar day)", "hour"];
+
+pub const MONTH_MODE_LUNAR: u32 = 0;
+pub const MONTH_MODE_HALF_MOON: u32 = 1;
+pub const MONTH_MODE_GROUPED: u32 = 2;
+pub const MONTH_MODE_SOLAR: u32 = 3;
+
+#[inline]
+pub fn encode_month_concept(mode: u32, group_size: u32, index: u32) -> u32 {
+    ((mode & 0xFF) << 16) | ((group_size & 0xFF) << 8) | (index & 0xFF)
+}
+
+#[inline]
+pub fn decode_month_concept(id: u32) -> (u32, u32, u32) {
+    ((id >> 16) & 0xFF, (id >> 8) & 0xFF, id & 0xFF)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConceptKey {
     BasicWord(u32),
     Culture(u32),
     Season(u32),
     Weather(u32),
+    TimeUnit(u32),
+    Month(u32),
     Sun(u32),
     Moon(u32),
     Planet(u32),
@@ -236,6 +260,14 @@ impl ConceptKey {
             },
             Self::Weather(id) => tec11_proto::Concept {
                 kind: tec11_proto::ConceptKind::Weather as i32,
+                id,
+            },
+            Self::TimeUnit(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::TimeUnit as i32,
+                id,
+            },
+            Self::Month(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::Month as i32,
                 id,
             },
             Self::Sun(id) => tec11_proto::Concept {
@@ -309,6 +341,8 @@ impl ConceptKey {
             tec11_proto::ConceptKind::Culture => Self::Culture(c.id),
             tec11_proto::ConceptKind::Season => Self::Season(c.id),
             tec11_proto::ConceptKind::Weather => Self::Weather(c.id),
+            tec11_proto::ConceptKind::TimeUnit => Self::TimeUnit(c.id),
+            tec11_proto::ConceptKind::Month => Self::Month(c.id),
             tec11_proto::ConceptKind::Sun => Self::Sun(c.id),
             tec11_proto::ConceptKind::Moon => Self::Moon(c.id),
             tec11_proto::ConceptKind::Planet => Self::Planet(c.id),
@@ -710,6 +744,27 @@ impl LanguageRecord {
         solar_system: &[SolarSystemPlanet],
         rng: &mut Pcg64Mcg,
     ) -> Self {
+        let default_mpy = if moon_count > 0 { 12.37 } else { 0.0 };
+        Self::new_for_state_with_calendar(
+            id,
+            state_id,
+            species_indices,
+            moon_count,
+            solar_system,
+            default_mpy,
+            rng,
+        )
+    }
+
+    pub fn new_for_state_with_calendar(
+        id: u32,
+        state_id: u32,
+        species_indices: &[usize],
+        moon_count: u32,
+        solar_system: &[SolarSystemPlanet],
+        synodic_months_per_year: f64,
+        rng: &mut Pcg64Mcg,
+    ) -> Self {
         let phonology = Language::generate(rng);
         let mut rec = Self {
             id,
@@ -782,6 +837,21 @@ impl LanguageRecord {
         for bw_id in 0..(BASIC_WORD_GLOSSES.len() as u32) {
             rec.coin_concept(ConceptKey::BasicWord(bw_id), rng);
         }
+        // Timekeeping concepts: year, month (derived from main moon when present), day, hour,
+        // plus individual named calendar months adapted to the planet's main-moon cycle.
+        rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_YEAR), rng);
+        if moon_count > 0 && rec.describes(ConceptKey::Moon(0)) {
+            rec.derive_concept(
+                ConceptKey::Moon(0),
+                ConceptKey::TimeUnit(TIME_UNIT_MONTH),
+                rng,
+            );
+        } else {
+            rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_MONTH), rng);
+        }
+        rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_DAY), rng);
+        rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_HOUR), rng);
+        rec.coin_calendar_months(moon_count, synodic_months_per_year, rng);
         // Baseline cultural concepts present at city founding
         rec.coin_concept(ConceptKey::Culture(CULTURE_FORAGING), rng);
         rec.coin_concept(ConceptKey::Culture(CULTURE_CITY), rng);
@@ -790,6 +860,70 @@ impl LanguageRecord {
         }
         rec.refresh_phonology();
         rec
+    }
+
+    /// Coin individual named calendar months adapted to the planet's main moon (biggest in the sky):
+    /// - Moonless worlds (`moon_count == 0` or `mpy <= 0`): solar divisions (4, 6, 8, or 12).
+    /// - Very long months (`mpy < 5`): usually named half-months (waxing/waning), with randomness.
+    /// - Very short months (`mpy > 18`): usually grouped multi-moon months (2+ cycles), with randomness.
+    /// - Moderate months (`5..=18`): usually 1 main-moon cycle per month, with occasional grouped or half-month systems.
+    pub fn coin_calendar_months(
+        &mut self,
+        moon_count: u32,
+        synodic_months_per_year: f64,
+        rng: &mut Pcg64Mcg,
+    ) {
+        let roll = rng.uniform(0.0, 1.0);
+        let (mode, group_size, count) = if moon_count == 0 || synodic_months_per_year <= 0.0 {
+            let choices = [4u32, 6, 8, 12];
+            let c = choices[(rng.next_u64() as usize) % choices.len()];
+            (MONTH_MODE_SOLAR, c, c)
+        } else if synodic_months_per_year < 5.0 {
+            if roll < 0.75 {
+                let c = (synodic_months_per_year * 2.0).round().clamp(2.0, 12.0) as u32;
+                (MONTH_MODE_HALF_MOON, 1, c)
+            } else {
+                let c = synodic_months_per_year.round().clamp(1.0, 5.0) as u32;
+                (MONTH_MODE_LUNAR, 1, c)
+            }
+        } else if synodic_months_per_year > 18.0 {
+            let ideal_group = (synodic_months_per_year / 12.0).round().clamp(2.0, 12.0) as u32;
+            if roll < 0.65 {
+                let c = (synodic_months_per_year / (ideal_group as f64))
+                    .round()
+                    .clamp(4.0, 18.0) as u32;
+                (MONTH_MODE_GROUPED, ideal_group, c)
+            } else if roll < 0.85 {
+                let alt_group = if (rng.next_u64() & 1) == 0 && ideal_group > 2 {
+                    ideal_group - 1
+                } else {
+                    (ideal_group + 1).min(12)
+                };
+                let c = (synodic_months_per_year / (alt_group as f64))
+                    .round()
+                    .clamp(4.0, 18.0) as u32;
+                (MONTH_MODE_GROUPED, alt_group, c)
+            } else {
+                let c = synodic_months_per_year.round().clamp(18.0, 24.0) as u32;
+                (MONTH_MODE_LUNAR, 1, c)
+            }
+        } else if roll < 0.80 {
+            let c = synodic_months_per_year.round().clamp(5.0, 18.0) as u32;
+            (MONTH_MODE_LUNAR, 1, c)
+        } else if roll < 0.92 {
+            let c = (synodic_months_per_year / 2.0).round().clamp(3.0, 10.0) as u32;
+            (MONTH_MODE_GROUPED, 2, c)
+        } else {
+            let c = (synodic_months_per_year * 2.0).round().clamp(10.0, 24.0) as u32;
+            (MONTH_MODE_HALF_MOON, 1, c)
+        };
+
+        for idx in 0..count {
+            self.coin_concept(
+                ConceptKey::Month(encode_month_concept(mode, group_size, idx)),
+                rng,
+            );
+        }
     }
 
     pub fn name(&self) -> String {
@@ -1330,6 +1464,7 @@ pub struct HistorySimulation {
     tree: PointTree,
     history_ticks: u32,
     moon_count: u32,
+    synodic_months_per_year: f64,
     home_star: HomeStar,
     optics: PlanetaryOptics,
     solar_system: Vec<SolarSystemPlanet>,
@@ -1409,8 +1544,27 @@ impl HistorySimulation {
     }
 
     pub fn from_prehistory_with_sky(
+        prehistory: PrehistorySimulation,
+        moon_count: u32,
+        solar_system: Vec<SolarSystemPlanet>,
+        constellations: Vec<Constellation>,
+        seed: u128,
+    ) -> Self {
+        let default_mpy = if moon_count > 0 { 12.37 } else { 0.0 };
+        Self::from_prehistory_with_calendar(
+            prehistory,
+            moon_count,
+            default_mpy,
+            solar_system,
+            constellations,
+            seed,
+        )
+    }
+
+    pub fn from_prehistory_with_calendar(
         mut prehistory: PrehistorySimulation,
         moon_count: u32,
+        synodic_months_per_year: f64,
         solar_system: Vec<SolarSystemPlanet>,
         constellations: Vec<Constellation>,
         seed: u128,
@@ -1459,6 +1613,7 @@ impl HistorySimulation {
             tree,
             history_ticks: 0,
             moon_count,
+            synodic_months_per_year,
             home_star,
             optics,
             solar_system,
@@ -1937,12 +2092,13 @@ impl HistorySimulation {
                 city_hid.is_some_and(|h| pre_sea.contains(&h)) || self.is_coastal_fine[city_f];
             state_init_tech.insert(sid, (has_ag, has_riv, has_sea));
 
-            let lang = LanguageRecord::new_for_state_with_system(
+            let lang = LanguageRecord::new_for_state_with_calendar(
                 lid,
                 sid,
                 &self.tile_species[city_f],
                 self.moon_count,
                 &self.solar_system,
+                self.synodic_months_per_year,
                 &mut self.rng,
             );
             self.languages.insert(lid, lang);
@@ -2116,12 +2272,13 @@ impl HistorySimulation {
                     cap_hid.is_some_and(|h| pre_riv.contains(&h)) || self.river_tiles[cap_f];
                 state_init_tech.insert(sid, (has_ag, has_riv, true));
 
-                let mut lang = LanguageRecord::new_for_state_with_system(
+                let mut lang = LanguageRecord::new_for_state_with_calendar(
                     lid,
                     sid,
                     &self.tile_species[cap_f],
                     self.moon_count,
                     &self.solar_system,
+                    self.synodic_months_per_year,
                     &mut self.rng,
                 );
                 for &f_idx in &fine_list {
@@ -4295,6 +4452,29 @@ impl HistorySimulation {
                                 .or_insert(p_lang);
                         }
                     }
+                    // Cross-system calendar borrowing: if a trading partner uses a different
+                    // calendar system (e.g. half-months vs full months, or different multi-moon
+                    // groupings), borrow up to 3 of their distinct month names.
+                    if let Some(p_lid) = p_lang {
+                        if let Some(p_rec) = self.languages.get(&p_lid) {
+                            let mut borrowed_cal = 0usize;
+                            for &ck in p_rec.lexicon.keys() {
+                                if let ConceptKey::Month(_) = ck {
+                                    let already_has = self
+                                        .languages
+                                        .get(&lang_id)
+                                        .is_some_and(|l| l.describes(ck));
+                                    if !already_has {
+                                        concepts.entry(ck).or_insert(p_lang);
+                                        borrowed_cal += 1;
+                                        if borrowed_cal >= 3 {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Native species, local geographic features (continents, oceans, seas, rivers, mountain ranges),
@@ -4863,6 +5043,7 @@ impl HistorySimulation {
                     | ConceptKey::Rock(_)
                     | ConceptKey::Constellation(_)
                     | ConceptKey::Planet(_) => 4,
+                    ConceptKey::TimeUnit(_) | ConceptKey::Month(_) => 3,
                     ConceptKey::Species(_) | ConceptKey::Weather(_) | ConceptKey::Season(_) => 2,
                     ConceptKey::BasicWord(_) => 1,
                     _ => 1,
@@ -6913,6 +7094,33 @@ impl HistorySimulation {
                 .copied()
                 .unwrap_or("weather")
                 .to_string(),
+            ConceptKey::TimeUnit(id) => TIME_UNIT_GLOSSES
+                .get(id as usize)
+                .copied()
+                .unwrap_or("time unit")
+                .to_string(),
+            ConceptKey::Month(id) => {
+                let (mode, group_size, idx) = decode_month_concept(id);
+                match mode {
+                    MONTH_MODE_LUNAR => format!("month #{}", idx + 1),
+                    MONTH_MODE_HALF_MOON => {
+                        let moon_num = idx / 2 + 1;
+                        let half = if idx % 2 == 0 {
+                            "waxing half"
+                        } else {
+                            "waning half"
+                        };
+                        format!("half-month #{} (moon {moon_num}, {half})", idx + 1)
+                    }
+                    MONTH_MODE_GROUPED => {
+                        format!("month #{} ({}-moon cycle)", idx + 1, group_size.max(2))
+                    }
+                    MONTH_MODE_SOLAR => {
+                        format!("solar month #{} (of {})", idx + 1, group_size.max(1))
+                    }
+                    _ => format!("month #{}", idx + 1),
+                }
+            }
             ConceptKey::Sun(0) => "sun (host star)".to_string(),
             ConceptKey::Sun(id) => format!("sun #{}", id + 1),
             ConceptKey::Moon(m) => {
@@ -7010,6 +7218,8 @@ impl HistorySimulation {
             ConceptKey::Culture(_) => "Culture",
             ConceptKey::Season(_) => "Season",
             ConceptKey::Weather(_) => "Weather",
+            ConceptKey::TimeUnit(_) => "Time",
+            ConceptKey::Month(_) => "Calendar",
             ConceptKey::Sun(_)
             | ConceptKey::Moon(_)
             | ConceptKey::Planet(_)
@@ -10680,6 +10890,74 @@ mod tests {
             recipient.lexicon.get(&key).unwrap().word,
             native_before,
             "Primary lexicon word should now be the promoted prestige loanword"
+        );
+    }
+
+    #[test]
+    fn test_calendar_time_units_and_month_systems() {
+        let mut rng = Pcg64Mcg::new(13579246);
+
+        // 1. Earth-like world (~12.37 months/year): year, month (derived from main moon), day, hour + months
+        let lang = LanguageRecord::new_for_state_with_calendar(0, 0, &[0, 1], 2, &[], 12.37, &mut rng);
+        assert!(lang.describes(ConceptKey::TimeUnit(TIME_UNIT_YEAR)));
+        assert!(lang.describes(ConceptKey::TimeUnit(TIME_UNIT_MONTH)));
+        assert!(lang.describes(ConceptKey::TimeUnit(TIME_UNIT_DAY)));
+        assert!(lang.describes(ConceptKey::TimeUnit(TIME_UNIT_HOUR)));
+        // "month" should derive from Moon(0) (main moon, biggest in the sky)
+        let month_orig = lang.lexicon.get(&ConceptKey::TimeUnit(TIME_UNIT_MONTH)).unwrap();
+        assert!(
+            month_orig.parent.is_some(),
+            "Expected 'month' to be derived from main moon Moon(0)"
+        );
+        let month_keys: Vec<u32> = lang
+            .lexicon
+            .keys()
+            .filter_map(|ck| match ck {
+                ConceptKey::Month(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert!(!month_keys.is_empty(), "Expected named calendar months");
+
+        // 2. Long months (< 5/yr, e.g. 3.6): across several languages, both half-month and full-month systems appear
+        let mut saw_half = false;
+        let mut saw_full = false;
+        for i in 0..24u32 {
+            let l = LanguageRecord::new_for_state_with_calendar(i, i, &[0], 1, &[], 3.6, &mut rng);
+            for ck in l.lexicon.keys() {
+                if let ConceptKey::Month(id) = *ck {
+                    let (mode, _, _) = decode_month_concept(id);
+                    if mode == MONTH_MODE_HALF_MOON {
+                        saw_half = true;
+                    } else if mode == MONTH_MODE_LUNAR {
+                        saw_full = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_half, "Expected half-month calendar system when < 5 months/year");
+        assert!(saw_full, "Expected randomness to still allow full-month calendars when < 5 months/year");
+
+        // 3. Short months (> 18/yr, e.g. 26.0): grouped multi-moon systems appear with randomness
+        let mut saw_grouped = false;
+        let mut group_sizes = BTreeSet::new();
+        for i in 0..24u32 {
+            let l = LanguageRecord::new_for_state_with_calendar(i, i, &[0], 1, &[], 26.0, &mut rng);
+            for ck in l.lexicon.keys() {
+                if let ConceptKey::Month(id) = *ck {
+                    let (mode, grp, _) = decode_month_concept(id);
+                    if mode == MONTH_MODE_GROUPED {
+                        saw_grouped = true;
+                        group_sizes.insert(grp);
+                    }
+                }
+            }
+        }
+        assert!(saw_grouped, "Expected grouped multi-moon months when > 18 months/year");
+        assert!(
+            group_sizes.iter().all(|&g| g >= 2),
+            "Grouped months must span at least 2 moon cycles, got {:?}",
+            group_sizes
         );
     }
 }

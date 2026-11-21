@@ -184,6 +184,8 @@ message Concept {
     KIND_WEATHER = 16;
     KIND_ROCK = 17;
     KIND_MINERAL = 18;
+    KIND_TIME_UNIT = 19;
+    KIND_MONTH = 20;
   }
   Kind kind = 1;
   uint32 id = 2;

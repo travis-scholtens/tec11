@@ -335,6 +335,27 @@ impl WorldSimulation {
         )
     }
 
+    /// Number of synodic months of the main moon (Moon 1, biggest in the sky) per orbital year,
+    /// or `0.0` on moonless worlds.
+    pub fn main_moon_synodic_months_per_year(&self) -> f64 {
+        if self.params.moon_count == 0 {
+            return 0.0;
+        }
+        let year_earth_days = (self.home_star.orbital_period_days as f64).max(5.0);
+        let a1 = self.current_moon_dist_radii().max(8.0) as f64;
+        let m_mass = self.params.moon_mass.max(0.05) as f64;
+        let p1_sid_earth = 27.3217
+            * (a1 / 60.0).powf(1.5)
+            * ((1.0 + 0.0123) / (1.0 + 0.0123 * m_mass)).sqrt();
+        let denom = (year_earth_days - p1_sid_earth).abs();
+        let p1_syn_earth = if denom > 0.25 {
+            (p1_sid_earth * year_earth_days) / denom
+        } else {
+            p1_sid_earth
+        };
+        year_earth_days / p1_syn_earth.max(0.5)
+    }
+
     /// Human-readable local calendar summary for the `Cosmos` modal:
     /// year length in local days, synodic month length(s) in local days, and day length in hours.
     pub fn calendar_summary_text(&self) -> String {
@@ -706,9 +727,11 @@ impl WorldSimulation {
                     crate::profile::span(crate::profile::ProfilePhase::HistInitPrehistoryCopy);
                 pre.take_for_history()
             };
-            let mut hist = HistorySimulation::from_prehistory_with_sky(
+            let mpy = self.main_moon_synodic_months_per_year();
+            let mut hist = HistorySimulation::from_prehistory_with_calendar(
                 pre_copy,
                 self.params.moon_count,
+                mpy,
                 self.solar_system.clone(),
                 self.constellations.clone(),
                 sub_seed as u128,
