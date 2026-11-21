@@ -3,14 +3,35 @@ use std::sync::Arc;
 
 use tec11_math_grid::Pcg64Mcg;
 
-pub const ALL_VOWEL_INDICES: [usize; 27] = [
+pub const ALL_VOWEL_INDICES: [usize; 32] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+];
+
+pub const ALL_ORAL_VOWEL_INDICES: [usize; 27] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
     26,
 ];
 
-pub const ALL_CONSONANT_INDICES: [usize; 26] = [
+pub const ALL_CONSONANT_INDICES: [usize; 63] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+    50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
 ];
+
+/// Core pulmonic consonant indices sampled independently by PHOIBLE frequency weight.
+/// Marked phonological series (retroflex, aspirated, ejective, implosive, click) are sampled
+/// as coherent series in `generate_phonemes` rather than isolated stray phonemes.
+const CORE_CONSONANT_INDICES: [usize; 43] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+];
+const RETROFLEX_SERIES: [usize; 5] = [43, 44, 45, 46, 47];
+const ASPIRATED_SERIES: [usize; 3] = [48, 49, 50];
+const EJECTIVE_SERIES: [usize; 5] = [51, 52, 53, 54, 55];
+const IMPLOSIVE_SERIES: [usize; 3] = [56, 57, 58];
+const CLICK_SERIES: [usize; 4] = [59, 60, 61, 62];
+const NASAL_VOWEL_SERIES: [usize; 5] = [27, 28, 29, 30, 31];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VowelDef {
@@ -33,7 +54,7 @@ pub struct ConsonantDef {
     pub weight: f64,
 }
 
-pub const VOWELS: [VowelDef; 27] = [
+pub const VOWELS: [VowelDef; 32] = [
     VowelDef { symbol: "i", orth: "i", orth_acute: "í", height: 0, backness: 0, roundedness: 0, weight: 0.871 },
     VowelDef { symbol: "y", orth: "ü", orth_acute: "ǘ", height: 0, backness: 0, roundedness: 1, weight: 0.053 },
     VowelDef { symbol: "ɨ", orth: "ï", orth_acute: "Ḯ", height: 0, backness: 2, roundedness: 0, weight: 0.160 },
@@ -61,9 +82,15 @@ pub const VOWELS: [VowelDef; 27] = [
     VowelDef { symbol: "ɔ", orth: "o", orth_acute: "ó", height: 3, backness: 4, roundedness: 1, weight: 0.359 },
     VowelDef { symbol: "æ", orth: "ä", orth_acute: "á", height: 4, backness: 0, roundedness: 0, weight: 0.086 },
     VowelDef { symbol: "a", orth: "a", orth_acute: "á", height: 4, backness: 2, roundedness: 0, weight: 0.869 },
+    // Nasalized vowel series (indices 27..32)
+    VowelDef { symbol: "ĩ", orth: "ĩ", orth_acute: "ĩ́", height: 0, backness: 0, roundedness: 0, weight: 0.195 },
+    VowelDef { symbol: "ẽ", orth: "ẽ", orth_acute: "ẽ́", height: 2, backness: 0, roundedness: 0, weight: 0.165 },
+    VowelDef { symbol: "ã", orth: "ã", orth_acute: "ã́", height: 4, backness: 2, roundedness: 0, weight: 0.220 },
+    VowelDef { symbol: "õ", orth: "õ", orth_acute: "ṍ", height: 2, backness: 4, roundedness: 1, weight: 0.175 },
+    VowelDef { symbol: "ũ", orth: "ũ", orth_acute: "ṹ", height: 0, backness: 4, roundedness: 1, weight: 0.185 },
 ];
 
-pub const CONSONANTS: [ConsonantDef; 26] = [
+pub const CONSONANTS: [ConsonantDef; 63] = [
     ConsonantDef { symbol: "p", orth: "p", manner: 0, place: 0, voice: 0, weight: 0.856 },
     ConsonantDef { symbol: "b", orth: "b", manner: 0, place: 0, voice: 1, weight: 0.636 },
     ConsonantDef { symbol: "t", orth: "t", manner: 0, place: 1, voice: 0, weight: 0.973 },
@@ -90,6 +117,51 @@ pub const CONSONANTS: [ConsonantDef; 26] = [
     ConsonantDef { symbol: "r", orth: "r", manner: 4, place: 1, voice: 1, weight: 0.727 },
     ConsonantDef { symbol: "j", orth: "y", manner: 5, place: 2, voice: 1, weight: 0.838 },
     ConsonantDef { symbol: "w", orth: "w", manner: 5, place: 0, voice: 1, weight: 0.738 },
+    // Glottals (26..28)
+    ConsonantDef { symbol: "h", orth: "h", manner: 2, place: 6, voice: 0, weight: 0.620 },
+    ConsonantDef { symbol: "ʔ", orth: "'", manner: 0, place: 6, voice: 0, weight: 0.480 },
+    // Affricates (28..32, manner 6)
+    ConsonantDef { symbol: "tʃ", orth: "ch", manner: 6, place: 2, voice: 0, weight: 0.450 },
+    ConsonantDef { symbol: "dʒ", orth: "dj", manner: 6, place: 2, voice: 1, weight: 0.250 },
+    ConsonantDef { symbol: "ts", orth: "ts", manner: 6, place: 1, voice: 0, weight: 0.250 },
+    ConsonantDef { symbol: "dz", orth: "dz", manner: 6, place: 1, voice: 1, weight: 0.110 },
+    // Common pulmonic consonants: tap, lateral fricative, bilabial/palatal fricatives, uvulars, pharyngeals, labialized velars (32..43)
+    ConsonantDef { symbol: "ɾ", orth: "r", manner: 4, place: 1, voice: 1, weight: 0.280 },
+    ConsonantDef { symbol: "ɬ", orth: "hl", manner: 2, place: 1, voice: 0, weight: 0.095 },
+    ConsonantDef { symbol: "β", orth: "bh", manner: 2, place: 0, voice: 1, weight: 0.120 },
+    ConsonantDef { symbol: "ç", orth: "hy", manner: 2, place: 2, voice: 0, weight: 0.075 },
+    ConsonantDef { symbol: "q", orth: "q", manner: 0, place: 4, voice: 0, weight: 0.160 },
+    ConsonantDef { symbol: "χ", orth: "qh", manner: 2, place: 4, voice: 0, weight: 0.095 },
+    ConsonantDef { symbol: "ʁ", orth: "rh", manner: 2, place: 4, voice: 1, weight: 0.080 },
+    ConsonantDef { symbol: "ħ", orth: "hh", manner: 2, place: 5, voice: 0, weight: 0.045 },
+    ConsonantDef { symbol: "ʕ", orth: "ʻ", manner: 2, place: 5, voice: 1, weight: 0.040 },
+    ConsonantDef { symbol: "kʷ", orth: "kw", manner: 0, place: 3, voice: 0, weight: 0.180 },
+    ConsonantDef { symbol: "gʷ", orth: "gw", manner: 0, place: 3, voice: 1, weight: 0.100 },
+    // Retroflex series (43..48)
+    ConsonantDef { symbol: "ʈ", orth: "tr", manner: 0, place: 1, voice: 0, weight: 0.110 },
+    ConsonantDef { symbol: "ɖ", orth: "dr", manner: 0, place: 1, voice: 1, weight: 0.095 },
+    ConsonantDef { symbol: "ʂ", orth: "sr", manner: 1, place: 2, voice: 0, weight: 0.085 },
+    ConsonantDef { symbol: "ɳ", orth: "nr", manner: 3, place: 1, voice: 1, weight: 0.090 },
+    ConsonantDef { symbol: "ɭ", orth: "lr", manner: 4, place: 1, voice: 1, weight: 0.085 },
+    // Aspirated stop series (48..51, manner 7)
+    ConsonantDef { symbol: "pʰ", orth: "ph", manner: 7, place: 0, voice: 0, weight: 0.230 },
+    ConsonantDef { symbol: "tʰ", orth: "th", manner: 7, place: 1, voice: 0, weight: 0.240 },
+    ConsonantDef { symbol: "kʰ", orth: "kh", manner: 7, place: 3, voice: 0, weight: 0.250 },
+    // Ejective series (51..56, manner 8)
+    ConsonantDef { symbol: "pʼ", orth: "p'", manner: 8, place: 0, voice: 0, weight: 0.110 },
+    ConsonantDef { symbol: "tʼ", orth: "t'", manner: 8, place: 1, voice: 0, weight: 0.145 },
+    ConsonantDef { symbol: "kʼ", orth: "k'", manner: 8, place: 3, voice: 0, weight: 0.155 },
+    ConsonantDef { symbol: "tsʼ", orth: "ts'", manner: 8, place: 1, voice: 0, weight: 0.085 },
+    ConsonantDef { symbol: "tʃʼ", orth: "ch'", manner: 8, place: 2, voice: 0, weight: 0.105 },
+    // Implosive series (56..59, manner 9)
+    ConsonantDef { symbol: "ɓ", orth: "bb", manner: 9, place: 0, voice: 1, weight: 0.115 },
+    ConsonantDef { symbol: "ɗ", orth: "dd", manner: 9, place: 1, voice: 1, weight: 0.105 },
+    ConsonantDef { symbol: "ɠ", orth: "gg", manner: 9, place: 3, voice: 1, weight: 0.040 },
+    // Click series (59..63, manner 10 — onset-only)
+    ConsonantDef { symbol: "ǀ", orth: "ǀ", manner: 10, place: 1, voice: 0, weight: 0.025 },
+    ConsonantDef { symbol: "ǃ", orth: "ǃ", manner: 10, place: 1, voice: 0, weight: 0.025 },
+    ConsonantDef { symbol: "ǁ", orth: "ǁ", manner: 10, place: 1, voice: 0, weight: 0.022 },
+    ConsonantDef { symbol: "ǂ", orth: "ǂ", manner: 10, place: 2, voice: 0, weight: 0.018 },
 ];
 
 #[inline]
@@ -156,24 +228,70 @@ pub fn nearest_consonant_to_pos(pos: (i32, i32, i32), candidates: &[usize]) -> u
         .unwrap_or(0)
 }
 
-/// Generate a language's vowel and consonant inventory (`language/phonemes.py:39-47`).
+/// Generate a language's vowel and consonant inventory (`language/phonemes.py:39-47`),
+/// sampling core pulmonic phonemes by PHOIBLE frequency and adding marked phonological
+/// series (nasal vowels, retroflexes, aspirates, ejectives, implosives, clicks) as coherent series.
 pub fn generate_phonemes(rng: &mut Pcg64Mcg) -> (Vec<usize>, Vec<usize>) {
-    let nv = (rng.gauss(8.7, 3.0).round() as usize).clamp(3, 18);
-    let nc = (rng.gauss(22.5, 9.0).round() as usize).clamp(6, 24);
+    let nv_oral = (rng.gauss(7.5, 2.6).round() as usize).clamp(3, 15);
+    let nc_core = (rng.gauss(20.0, 6.5).round() as usize).clamp(8, 30);
 
     let mut vs = BTreeSet::new();
-    while vs.len() < nv {
-        let idx = (rng.next_u64() as usize) % VOWELS.len();
+    while vs.len() < nv_oral {
+        let idx = ALL_ORAL_VOWEL_INDICES[(rng.next_u64() as usize) % ALL_ORAL_VOWEL_INDICES.len()];
         if rng.uniform(0.0, 1.0) < VOWELS[idx].weight {
             vs.insert(idx);
         }
     }
+    // ~22% of languages have a nasalized vowel series (e.g. French, Portuguese, Hindi, Yoruba, Navajo)
+    if rng.uniform(0.0, 1.0) < 0.22 {
+        for &nv_idx in &NASAL_VOWEL_SERIES {
+            if rng.uniform(0.0, 1.0) < 0.78 {
+                vs.insert(nv_idx);
+            }
+        }
+    }
 
     let mut cs = BTreeSet::new();
-    while cs.len() < nc {
-        let idx = (rng.next_u64() as usize) % CONSONANTS.len();
+    while cs.len() < nc_core {
+        let idx = CORE_CONSONANT_INDICES[(rng.next_u64() as usize) % CORE_CONSONANT_INDICES.len()];
         if rng.uniform(0.0, 1.0) < CONSONANTS[idx].weight {
             cs.insert(idx);
+        }
+    }
+    // Coherent marked consonant series (matching cross-linguistic feature economy):
+    if rng.uniform(0.0, 1.0) < 0.25 {
+        for &idx in &ASPIRATED_SERIES {
+            if rng.uniform(0.0, 1.0) < 0.85 {
+                cs.insert(idx);
+            }
+        }
+    }
+    if rng.uniform(0.0, 1.0) < 0.16 {
+        for &idx in &EJECTIVE_SERIES {
+            if rng.uniform(0.0, 1.0) < 0.75 {
+                cs.insert(idx);
+            }
+        }
+    }
+    if rng.uniform(0.0, 1.0) < 0.14 {
+        for &idx in &RETROFLEX_SERIES {
+            if rng.uniform(0.0, 1.0) < 0.72 {
+                cs.insert(idx);
+            }
+        }
+    }
+    if rng.uniform(0.0, 1.0) < 0.11 {
+        for &idx in &IMPLOSIVE_SERIES {
+            if rng.uniform(0.0, 1.0) < 0.80 {
+                cs.insert(idx);
+            }
+        }
+    }
+    if rng.uniform(0.0, 1.0) < 0.04 {
+        for &idx in &CLICK_SERIES {
+            if rng.uniform(0.0, 1.0) < 0.82 {
+                cs.insert(idx);
+            }
         }
     }
 
@@ -410,15 +528,17 @@ impl Word {
 
         let mut push_segment = |seg: &str| {
             if need_cap && !seg.is_empty() {
-                let mut chars = seg.chars();
-                if let Some(first) = chars.next() {
-                    for ch in first.to_uppercase() {
+                for ch in seg.chars() {
+                    if need_cap && ch.is_lowercase() {
+                        for up in ch.to_uppercase() {
+                            out.push(up);
+                        }
+                        need_cap = false;
+                    } else {
                         out.push(ch);
                     }
-                    out.push_str(chars.as_str());
-                    need_cap = false;
-                    return;
                 }
+                return;
             }
             out.push_str(seg);
         };
@@ -615,7 +735,10 @@ impl Language {
         for &p in &self.codap {
             if rng.uniform(0.0, 1.0) < p && !self.consonants.is_empty() {
                 let c = self.consonants[(rng.next_u64() as usize) % self.consonants.len()];
-                coda.push(c);
+                // Clicks (manner 10) are onset-only in natural languages.
+                if CONSONANTS[c].manner != 10 {
+                    coda.push(c);
+                }
             }
         }
         for c_rule in &self.constraints {
@@ -1114,7 +1237,12 @@ fn a_mutate_opt(word: &Word) -> Option<Word> {
     if dh == 0 {
         return None;
     }
-    let nv = nearest_vowel_to_pos((h0 + dh, b0, r0), &ALL_VOWEL_INDICES);
+    let pool: &[usize] = if v0 >= 27 {
+        &NASAL_VOWEL_SERIES
+    } else {
+        &ALL_ORAL_VOWEL_INDICES
+    };
+    let nv = nearest_vowel_to_pos((h0 + dh, b0, r0), pool);
     if nv == v0 {
         return None;
     }
@@ -1146,7 +1274,12 @@ fn i_mutate_opt(word: &Word) -> Option<Word> {
     let (h0, b0, _) = vowel_pos(v0);
     let (_, b1, r1) = vowel_pos(v1);
     let db = (b1 - b0).signum();
-    let nv = nearest_vowel_to_pos((h0, b0 + db, r1), &ALL_VOWEL_INDICES);
+    let pool: &[usize] = if v0 >= 27 {
+        &NASAL_VOWEL_SERIES
+    } else {
+        &ALL_ORAL_VOWEL_INDICES
+    };
+    let nv = nearest_vowel_to_pos((h0, b0 + db, r1), pool);
     if nv == v0 {
         return None;
     }
@@ -1172,11 +1305,11 @@ fn break_vowels_opt(word: &Word) -> Option<Word> {
     let v = s.nucleus[0];
     let (h, b, r) = vowel_pos(v);
     let pair = if h == 0 {
-        let onglide = nearest_vowel_to_pos((2, 2, r), &ALL_VOWEL_INDICES);
+        let onglide = nearest_vowel_to_pos((2, 2, r), &ALL_ORAL_VOWEL_INDICES);
         vec![onglide, v]
     } else {
         let target_b = if b < 2 { 0 } else if b > 2 { 4 } else { 2 };
-        let onglide = nearest_vowel_to_pos((0, target_b, r), &ALL_VOWEL_INDICES);
+        let onglide = nearest_vowel_to_pos((0, target_b, r), &ALL_ORAL_VOWEL_INDICES);
         vec![onglide, v]
     };
     let mut out = word.clone();
@@ -1194,6 +1327,9 @@ fn open_consonants_opt(word: &Word) -> Option<Word> {
         let cd = &CONSONANTS[c];
         if cd.manner == 0 {
             nearest_consonant_to_pos((2, cd.place, cd.voice), &ALL_CONSONANT_INDICES)
+        } else if cd.manner == 6 {
+            // Deaffrication: intervocalic affricate (`tʃ`/`ts`) -> sibilant (`ʃ`/`s`)
+            nearest_consonant_to_pos((1, cd.place, cd.voice), &ALL_CONSONANT_INDICES)
         } else {
             c
         }
@@ -1208,7 +1344,7 @@ pub fn sonorize_consonants(word: &Word) -> Word {
 fn sonorize_consonants_opt(word: &Word) -> Option<Word> {
     lenite_intervocalic_opt(word, |c| {
         let cd = &CONSONANTS[c];
-        if cd.voice == 0 {
+        if cd.voice == 0 && matches!(cd.manner, 0 | 1 | 2 | 6) && cd.place <= 5 {
             nearest_consonant_to_pos((cd.manner, cd.place, 1), &ALL_CONSONANT_INDICES)
         } else {
             c
@@ -1648,5 +1784,80 @@ mod tests {
         sandbox.borrow();
         assert_eq!(sandbox.word_count(), 20);
         assert!(sandbox.dest_etymology(0).starts_with("< "));
+    }
+
+    #[test]
+    fn test_expanded_phoneme_inventory_series_and_orthography() {
+        let mut rng = Pcg64Mcg::new(12345);
+        let mut saw_glottal = 0usize;
+        let mut saw_affricate = 0usize;
+        let mut saw_uvular = 0usize;
+        let mut saw_retroflex = 0usize;
+        let mut saw_aspirate = 0usize;
+        let mut saw_ejective = 0usize;
+        let mut saw_implosive = 0usize;
+        let mut saw_click = 0usize;
+        let mut saw_nasal_vowel = 0usize;
+
+        for _ in 0..200 {
+            let lang = Language::generate(&mut rng);
+            if lang.consonants.iter().any(|&c| c == 26 || c == 27) {
+                saw_glottal += 1;
+            }
+            if lang.consonants.iter().any(|&c| (28..32).contains(&c)) {
+                saw_affricate += 1;
+            }
+            if lang.consonants.iter().any(|&c| (36..39).contains(&c)) {
+                saw_uvular += 1;
+            }
+            if lang.consonants.iter().any(|&c| RETROFLEX_SERIES.contains(&c)) {
+                saw_retroflex += 1;
+            }
+            if lang.consonants.iter().any(|&c| ASPIRATED_SERIES.contains(&c)) {
+                saw_aspirate += 1;
+            }
+            if lang.consonants.iter().any(|&c| EJECTIVE_SERIES.contains(&c)) {
+                saw_ejective += 1;
+            }
+            if lang.consonants.iter().any(|&c| IMPLOSIVE_SERIES.contains(&c)) {
+                saw_implosive += 1;
+            }
+            if lang.consonants.iter().any(|&c| CLICK_SERIES.contains(&c)) {
+                saw_click += 1;
+                // Clicks must never appear in syllable codas
+                for _ in 0..20 {
+                    let syl = lang.generate_syllable(&mut rng);
+                    assert!(
+                        syl.coda.iter().all(|&c| CONSONANTS[c].manner != 10),
+                        "Click phoneme must not appear in syllable coda"
+                    );
+                }
+            }
+            if lang.vowels.iter().any(|&v| NASAL_VOWEL_SERIES.contains(&v)) {
+                saw_nasal_vowel += 1;
+            }
+        }
+
+        assert!(saw_glottal > 50, "Expected glottals (h/ʔ) in many languages, got {saw_glottal}");
+        assert!(saw_affricate > 40, "Expected affricates in many languages, got {saw_affricate}");
+        assert!(saw_uvular > 10, "Expected uvulars in some languages, got {saw_uvular}");
+        assert!(saw_retroflex > 5, "Expected retroflex series, got {saw_retroflex}");
+        assert!(saw_aspirate > 15, "Expected aspirated series, got {saw_aspirate}");
+        assert!(saw_ejective > 10, "Expected ejective series, got {saw_ejective}");
+        assert!(saw_implosive > 5, "Expected implosive series, got {saw_implosive}");
+        assert!(saw_click > 0, "Expected click series in a small fraction of languages");
+        assert!(saw_nasal_vowel > 15, "Expected nasalized vowel series, got {saw_nasal_vowel}");
+
+        // Verify capitalization skips leading click/glottal marks cleanly (`ǃka` -> `ǃKa`, `'a` -> `'A`)
+        let click_word = Word {
+            syllables: vec![Syllable {
+                onset: vec![60, 6], // ǃ + k
+                nucleus: vec![26],  // a
+                coda: vec![],
+            }],
+            stress: 0,
+        };
+        assert_eq!(click_word.write(true), "ǃKa");
+        assert_eq!(click_word.pronounce(), "ǃka");
     }
 }
