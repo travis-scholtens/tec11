@@ -1294,8 +1294,8 @@ impl Language {
     }
 }
 
-/// All 12 historical sound changes (`metaphony.py`, `breaking.py`, `lenition.py`, `elision.py`,
-/// plus onset/coda tonogenesis and diachronic tone shifting).
+/// All 14 historical sound changes (`metaphony.py`, `breaking.py`, `lenition.py`, `elision.py`,
+/// onset/coda tonogenesis, diachronic tone shifting, palatalization, and vowel nasalization).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SoundChangeKind {
@@ -1311,10 +1311,12 @@ pub enum SoundChangeKind {
     TonogenesisOnset = 9,
     TonogenesisCoda = 10,
     ToneShift = 11,
+    Palatalize = 12,
+    Nasalize = 13,
 }
 
 impl SoundChangeKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::AMutate,
         Self::IMutate,
         Self::BreakVowels,
@@ -1327,10 +1329,27 @@ impl SoundChangeKind {
         Self::TonogenesisOnset,
         Self::TonogenesisCoda,
         Self::ToneShift,
+        Self::Palatalize,
+        Self::Nasalize,
+    ];
+
+    /// Regular segmental sound changes (excluding tonogenesis/tone-shift which use their own cadence).
+    pub const SEGMENTAL: [Self; 11] = [
+        Self::AMutate,
+        Self::IMutate,
+        Self::BreakVowels,
+        Self::OpenConsonants,
+        Self::SonorizeConsonants,
+        Self::VocalizeConsonants,
+        Self::Apheresize,
+        Self::Syncopate,
+        Self::Apocopate,
+        Self::Palatalize,
+        Self::Nasalize,
     ];
 
     pub fn from_u32(v: u32) -> Self {
-        match v % 12 {
+        match v % 14 {
             0 => Self::AMutate,
             1 => Self::IMutate,
             2 => Self::BreakVowels,
@@ -1342,7 +1361,9 @@ impl SoundChangeKind {
             8 => Self::Apocopate,
             9 => Self::TonogenesisOnset,
             10 => Self::TonogenesisCoda,
-            _ => Self::ToneShift,
+            11 => Self::ToneShift,
+            12 => Self::Palatalize,
+            _ => Self::Nasalize,
         }
     }
 
@@ -1366,6 +1387,8 @@ impl SoundChangeKind {
             Self::TonogenesisOnset => tonogenesis_onset_opt(word),
             Self::TonogenesisCoda => tonogenesis_coda_opt(word),
             Self::ToneShift => tone_shift_opt(word),
+            Self::Palatalize => palatalize_opt(word),
+            Self::Nasalize => nasalize_opt(word),
         }
     }
 }
@@ -1483,6 +1506,88 @@ fn tone_shift_opt(word: &Word) -> Option<Word> {
             let out = out_opt.get_or_insert_with(|| word.clone());
             out.syllables[i].tone = next;
         }
+    }
+    out_opt
+}
+
+/// Palatalization of velar/alveolar onsets before front high/mid vowels (`i, e, ...`) or yod (`j`),
+/// including yod-coalescence (`kj/tj -> tʃ`, `gj/dj -> dʒ`, `sj -> ʃ`, `zj -> ʒ`, `nj -> ɲ`).
+pub fn palatalize(word: &Word) -> Word {
+    palatalize_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn palatalize_consonant(c: usize) -> Option<usize> {
+    match c {
+        2 | 6 | 36 | 49 | 50 => Some(28), // t, k, q, tʰ, kʰ -> tʃ
+        3 | 7 => Some(29),                // d, g -> dʒ
+        8 => Some(10),                    // s -> ʃ
+        9 => Some(11),                    // z -> ʒ
+        16 | 37 => Some(35),              // x, χ -> ç
+        19 | 21 => Some(20),              // n, ŋ -> ɲ
+        _ => None,
+    }
+}
+
+fn palatalize_opt(word: &Word) -> Option<Word> {
+    let mut out_opt: Option<Word> = None;
+    for (i, syl) in word.syllables.iter().enumerate() {
+        if syl.onset.is_empty() {
+            continue;
+        }
+        // Case 1: Yod-coalescence in onset cluster (`Cj` -> palatalized `C`, dropping `j` = idx 24)
+        let len = syl.onset.len();
+        if len >= 2 && syl.onset[len - 1] == 24 {
+            if let Some(pal) = palatalize_consonant(syl.onset[len - 2]) {
+                let out = out_opt.get_or_insert_with(|| word.clone());
+                let olen = out.syllables[i].onset.len();
+                out.syllables[i].onset[olen - 2] = pal;
+                out.syllables[i].onset.pop();
+                continue;
+            }
+        }
+        // Case 2: Onset consonant immediately preceding a front high/mid vowel
+        let Some(&v0) = syl.nucleus.first() else {
+            continue;
+        };
+        let vd = &VOWELS[v0];
+        if vd.backness <= 1 && vd.height <= 2 {
+            if let Some(pal) = palatalize_consonant(syl.onset[len - 1]) {
+                let out = out_opt.get_or_insert_with(|| word.clone());
+                let olen = out.syllables[i].onset.len();
+                out.syllables[i].onset[olen - 1] = pal;
+            }
+        }
+    }
+    out_opt
+}
+
+/// Regressive vowel nasalization with nasal coda loss (`VN -> Ṽ`), mapping oral vowels
+/// to the nearest vowel in `NASAL_VOWEL_SERIES` (`ĩ ẽ ã õ ũ`).
+pub fn nasalize(word: &Word) -> Word {
+    nasalize_opt(word).unwrap_or_else(|| word.clone())
+}
+
+fn nasalize_opt(word: &Word) -> Option<Word> {
+    let mut out_opt: Option<Word> = None;
+    for (i, syl) in word.syllables.iter().enumerate() {
+        let Some(&c0) = syl.coda.first() else {
+            continue;
+        };
+        if CONSONANTS[c0].manner != 3 {
+            continue;
+        }
+        let Some(&v_last) = syl.nucleus.last() else {
+            continue;
+        };
+        let nv = if v_last >= 27 {
+            v_last
+        } else {
+            nearest_vowel_to_pos(vowel_pos(v_last), &NASAL_VOWEL_SERIES)
+        };
+        let out = out_opt.get_or_insert_with(|| word.clone());
+        let nlen = out.syllables[i].nucleus.len();
+        out.syllables[i].nucleus[nlen - 1] = nv;
+        out.syllables[i].coda.remove(0);
     }
     out_opt
 }
@@ -2183,5 +2288,52 @@ mod tests {
         let shifted = tone_shift(&t_coda);
         assert_eq!(shifted.syllables[0].tone, Tone::High);
         assert_eq!(shifted.syllables[1].tone, Tone::Low);
+    }
+
+    #[test]
+    fn test_palatalization_and_nasalization_sound_changes() {
+        // Palatalization: `ki` -> `tʃi` (`chi`), `ni` -> `ɲi` (`nhi`), `ka` unchanged
+        let w_pal = Word {
+            syllables: vec![
+                Syllable { onset: vec![6], nucleus: vec![0], coda: vec![], tone: Tone::None },  // ki
+                Syllable { onset: vec![19], nucleus: vec![0], coda: vec![], tone: Tone::None }, // ni
+                Syllable { onset: vec![6], nucleus: vec![26], coda: vec![], tone: Tone::None }, // ka
+            ],
+            stress: 1,
+        };
+        let pal = palatalize(&w_pal);
+        assert_eq!(pal.syllables[0].onset, vec![28]); // k -> tʃ
+        assert_eq!(pal.syllables[1].onset, vec![20]); // n -> ɲ
+        assert_eq!(pal.syllables[2].onset, vec![6]);  // k before a unchanged
+
+        // Yod-coalescence: `kja` -> `tʃa`
+        let w_yod = Word {
+            syllables: vec![Syllable {
+                onset: vec![6, 24],
+                nucleus: vec![26],
+                coda: vec![],
+                tone: Tone::None,
+            }],
+            stress: 1,
+        };
+        let yod = palatalize(&w_yod);
+        assert_eq!(yod.syllables[0].onset, vec![28]);
+
+        // Nasalization: `kan` -> `kã`, `tin` -> `tĩ`, `kat` unchanged
+        let w_nas = Word {
+            syllables: vec![
+                Syllable { onset: vec![6], nucleus: vec![26], coda: vec![19], tone: Tone::None }, // kan
+                Syllable { onset: vec![2], nucleus: vec![0], coda: vec![19], tone: Tone::None },  // tin
+                Syllable { onset: vec![6], nucleus: vec![26], coda: vec![2], tone: Tone::None },  // kat
+            ],
+            stress: 1,
+        };
+        let nas = nasalize(&w_nas);
+        assert_eq!(nas.syllables[0].nucleus, vec![29]); // ã
+        assert!(nas.syllables[0].coda.is_empty());
+        assert_eq!(nas.syllables[1].nucleus, vec![27]); // ĩ
+        assert!(nas.syllables[1].coda.is_empty());
+        assert_eq!(nas.syllables[2].nucleus, vec![26]); // a unchanged
+        assert_eq!(nas.syllables[2].coda, vec![2]);     // t unchanged
     }
 }

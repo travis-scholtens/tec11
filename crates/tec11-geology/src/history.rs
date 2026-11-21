@@ -916,7 +916,8 @@ impl LanguageRecord {
                     _ => SoundChangeKind::TonogenesisCoda as u32,
                 }
             } else {
-                (rng.next_u64() as u32) % 9
+                let seg = SoundChangeKind::SEGMENTAL;
+                seg[(rng.next_u64() as usize) % seg.len()] as u32
             };
             let change = SoundChangeKind::from_u32(change_id);
             tick_changes.push(change_id);
