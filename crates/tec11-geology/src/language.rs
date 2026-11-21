@@ -26,12 +26,12 @@ const CORE_CONSONANT_INDICES: [usize; 43] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
     26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 ];
-const RETROFLEX_SERIES: [usize; 5] = [43, 44, 45, 46, 47];
-const ASPIRATED_SERIES: [usize; 3] = [48, 49, 50];
-const EJECTIVE_SERIES: [usize; 5] = [51, 52, 53, 54, 55];
-const IMPLOSIVE_SERIES: [usize; 3] = [56, 57, 58];
-const CLICK_SERIES: [usize; 4] = [59, 60, 61, 62];
-const NASAL_VOWEL_SERIES: [usize; 5] = [27, 28, 29, 30, 31];
+pub const RETROFLEX_SERIES: [usize; 5] = [43, 44, 45, 46, 47];
+pub const ASPIRATED_SERIES: [usize; 3] = [48, 49, 50];
+pub const EJECTIVE_SERIES: [usize; 5] = [51, 52, 53, 54, 55];
+pub const IMPLOSIVE_SERIES: [usize; 3] = [56, 57, 58];
+pub const CLICK_SERIES: [usize; 4] = [59, 60, 61, 62];
+pub const NASAL_VOWEL_SERIES: [usize; 5] = [27, 28, 29, 30, 31];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VowelDef {
@@ -1925,6 +1925,173 @@ impl WordOrigin {
         } else {
             format!("< {}", steps.join(" < "))
         }
+    }
+}
+
+/// Distinctive marked phonological series that can diffuse across language-family boundaries
+/// in a sprachbund (e.g. clicks from Khoisan to Bantu, retroflexes from Dravidian to Indo-Aryan,
+/// ejectives in the Caucasus, aspirates in South Asia, nasal vowels in West Africa).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArealFeature {
+    Retroflex,
+    Aspirated,
+    Ejective,
+    Implosive,
+    Clicks,
+    NasalVowels,
+}
+
+impl ArealFeature {
+    pub const ALL: [Self; 6] = [
+        Self::Retroflex,
+        Self::Aspirated,
+        Self::Ejective,
+        Self::Implosive,
+        Self::Clicks,
+        Self::NasalVowels,
+    ];
+
+    /// Whether `lang` attests at least one phoneme from this marked series.
+    pub fn present_in(self, lang: &Language) -> bool {
+        match self {
+            Self::Retroflex => lang.consonants.iter().any(|c| RETROFLEX_SERIES.contains(c)),
+            Self::Aspirated => lang.consonants.iter().any(|c| ASPIRATED_SERIES.contains(c)),
+            Self::Ejective => lang.consonants.iter().any(|c| EJECTIVE_SERIES.contains(c)),
+            Self::Implosive => lang.consonants.iter().any(|c| IMPLOSIVE_SERIES.contains(c)),
+            Self::Clicks => lang.consonants.iter().any(|c| CLICK_SERIES.contains(c)),
+            Self::NasalVowels => lang.vowels.iter().any(|v| NASAL_VOWEL_SERIES.contains(v)),
+        }
+    }
+
+    /// Marked features attested in `donor` that `recipient` currently lacks.
+    pub fn candidates_from(donor: &Language, recipient: &Language) -> Vec<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(|f| f.present_in(donor) && !f.present_in(recipient))
+            .collect()
+    }
+
+    /// Apply a localized contact-induced substitution of this areal feature to at most one
+    /// syllable in `word`, using phonemes attested in `donor`.
+    pub fn apply_to_word(self, word: &Word, donor: &Language, rng: &mut Pcg64Mcg) -> Option<Word> {
+        let mut out = word.clone();
+        let mut changed = false;
+        match self {
+            Self::Retroflex => {
+                for syl in &mut out.syllables {
+                    for c in syl.onset.iter_mut().chain(syl.coda.iter_mut()) {
+                        let mapped = match *c {
+                            2 if donor.consonants.contains(&43) => Some(43), // t → ʈ
+                            3 if donor.consonants.contains(&44) => Some(44), // d → ɖ
+                            8 if donor.consonants.contains(&45) => Some(45), // s → ʂ
+                            19 if donor.consonants.contains(&46) => Some(46), // n → ɳ
+                            22 if donor.consonants.contains(&47) => Some(47), // l → ɭ
+                            _ => None,
+                        };
+                        if let Some(nc) = mapped {
+                            *c = nc;
+                            changed = true;
+                            break;
+                        }
+                    }
+                    if changed {
+                        break;
+                    }
+                }
+            }
+            Self::Aspirated => {
+                for syl in &mut out.syllables {
+                    if let Some(first) = syl.onset.first_mut() {
+                        let mapped = match *first {
+                            0 if donor.consonants.contains(&48) => Some(48), // p → pʰ
+                            2 if donor.consonants.contains(&49) => Some(49), // t → tʰ
+                            6 if donor.consonants.contains(&50) => Some(50), // k → kʰ
+                            _ => None,
+                        };
+                        if let Some(nc) = mapped {
+                            *first = nc;
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            Self::Ejective => {
+                for syl in &mut out.syllables {
+                    if let Some(first) = syl.onset.first_mut() {
+                        let mapped = match *first {
+                            0 if donor.consonants.contains(&51) => Some(51),  // p → pʼ
+                            2 if donor.consonants.contains(&52) => Some(52),  // t → tʼ
+                            6 if donor.consonants.contains(&53) => Some(53),  // k → kʼ
+                            30 if donor.consonants.contains(&54) => Some(54), // ts → tsʼ
+                            28 if donor.consonants.contains(&55) => Some(55), // tʃ → tʃʼ
+                            _ => None,
+                        };
+                        if let Some(nc) = mapped {
+                            *first = nc;
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            Self::Implosive => {
+                for syl in &mut out.syllables {
+                    if let Some(first) = syl.onset.first_mut() {
+                        let mapped = match *first {
+                            1 if donor.consonants.contains(&56) => Some(56), // b → ɓ
+                            3 if donor.consonants.contains(&57) => Some(57), // d → ɗ
+                            7 if donor.consonants.contains(&58) => Some(58), // g → ɠ
+                            _ => None,
+                        };
+                        if let Some(nc) = mapped {
+                            *first = nc;
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            Self::Clicks => {
+                let donor_clicks: Vec<usize> = CLICK_SERIES
+                    .iter()
+                    .copied()
+                    .filter(|c| donor.consonants.contains(c))
+                    .collect();
+                if donor_clicks.is_empty() {
+                    return None;
+                }
+                for syl in &mut out.syllables {
+                    if syl.onset.len() == 1 && matches!(syl.onset[0], 2 | 4 | 6) {
+                        syl.onset[0] =
+                            donor_clicks[(rng.next_u64() as usize) % donor_clicks.len()];
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            Self::NasalVowels => {
+                let donor_nasals: Vec<usize> = NASAL_VOWEL_SERIES
+                    .iter()
+                    .copied()
+                    .filter(|v| donor.vowels.contains(v))
+                    .collect();
+                if donor_nasals.is_empty() {
+                    return None;
+                }
+                for syl in &mut out.syllables {
+                    if let Some(last_v) = syl.nucleus.last_mut() {
+                        if *last_v < 27 {
+                            *last_v = nearest_vowel_to_pos(vowel_pos(*last_v), &donor_nasals);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        changed.then_some(out)
     }
 }
 

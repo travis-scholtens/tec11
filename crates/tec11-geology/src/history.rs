@@ -7,7 +7,7 @@ use tec11_math_grid::{
 };
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::language::{Language, SoundChangeKind, Word, WordOrigin};
+use crate::language::{ArealFeature, Language, SoundChangeKind, Word, WordOrigin};
 use crate::lifeforms::{select_salient_flora_and_fauna_ids, SettledSpecies, SpeciesKind};
 use crate::population::{
     is_farmable, is_habitable, is_passable, main_ocean, tile_population_thousands,
@@ -648,6 +648,7 @@ pub struct LanguageRecord {
     pub id: u32,
     pub parent_id: Option<u32>,
     pub substrate_ids: Vec<u32>,
+    pub sprachbund_ids: Vec<u32>,
     pub phonology: Language,
     pub lexicon: BTreeMap<ConceptKey, WordOrigin>,
     pub used_words: BTreeSet<Word>,
@@ -662,6 +663,7 @@ impl LanguageRecord {
             id,
             parent_id: None,
             substrate_ids: Vec::new(),
+            sprachbund_ids: Vec::new(),
             phonology,
             lexicon: BTreeMap::new(),
             used_words: BTreeSet::new(),
@@ -708,6 +710,7 @@ impl LanguageRecord {
             id,
             parent_id: None,
             substrate_ids: Vec::new(),
+            sprachbund_ids: Vec::new(),
             phonology,
             lexicon: BTreeMap::new(),
             used_words: BTreeSet::new(),
@@ -885,61 +888,143 @@ impl LanguageRecord {
         cloned.id = new_id;
         cloned.parent_id = Some(old_id);
         cloned.substrate_ids.clear();
+        cloned.sprachbund_ids.clear();
         if let Some(orig) = cloned.lexicon.remove(&ConceptKey::Language(old_id)) {
             cloned.lexicon.insert(ConceptKey::Language(new_id), orig);
         }
         cloned
     }
 
+    /// Apply a single language-wide sound change to all words in the lexicon, preventing
+    /// homophonous mergers (`language/lazy.py:47`, `languagesimulation.py:25`).
+    pub fn apply_sound_change(&mut self, change: SoundChangeKind) {
+        let my_name = self.name();
+        for origin in self.lexicon.values_mut() {
+            if let Some(candidate) = change.apply_opt(&origin.word) {
+                if !self.used_words.contains(&candidate) {
+                    self.used_words.remove(&origin.word);
+                    self.used_wordkeys.insert(candidate.wordkey());
+                    self.used_words.insert(candidate.clone());
+                    let prev_origin = std::mem::replace(
+                        origin,
+                        WordOrigin::with_arc_parent(candidate, my_name.clone(), None),
+                    );
+                    origin.parent = Some(std::sync::Arc::new(prev_origin));
+                }
+            }
+        }
+    }
+
     /// Apply 2 to 4 cascaded language-wide sound changes for a 200-year tick, preventing homophonous
     /// mergers (`language/lazy.py:47`, `languagesimulation.py:25`) and refreshing the language's
     /// emergent phoneme inventory and cluster constraints (`language/stats.py`).
     pub fn mutate_tick(&mut self, rng: &mut Pcg64Mcg) {
+        self.mutate_tick_with_areal(0.0, None, rng);
+    }
+
+    /// Variant of [`mutate_tick`] supporting sprachbund areal diffusion:
+    /// - `tonal_contact_share` (`0.0..=1.0`): share of areal contact weight from tonal neighbors,
+    ///   raising tonogenesis probability via areal tonal contagion (e.g. Mainland Southeast Asia).
+    /// - `areal_change`: optional sound change diffused from a geographical neighbor in this tick.
+    pub fn mutate_tick_with_areal(
+        &mut self,
+        tonal_contact_share: f64,
+        areal_change: Option<SoundChangeKind>,
+        rng: &mut Pcg64Mcg,
+    ) {
         let num_changes = 2 + ((rng.next_u64() as usize) % 3); // 2, 3, or 4 sound changes per 200 years
         let mut tick_changes = Vec::with_capacity(num_changes);
 
-        for _ in 0..num_changes {
-            let is_tonal = !self.phonology.tones.is_empty();
-            let roll = rng.uniform(0.0, 1.0);
-            let change_id = if !is_tonal && roll < 0.015 {
-                // Rare emergence of tone in non-tonal languages (~35-45% tonal after 10-15 ticks)
-                if (rng.next_u64() & 1) == 0 {
-                    SoundChangeKind::TonogenesisOnset as u32
+        for idx in 0..num_changes {
+            let change_id = if idx == 0 {
+                if let Some(diffused) = areal_change {
+                    diffused as u32
                 } else {
-                    SoundChangeKind::TonogenesisCoda as u32
-                }
-            } else if is_tonal && roll < 0.08 {
-                // Already-tonal languages undergo chain tone shifts or secondary register splits
-                match (rng.next_u64() as u32) % 4 {
-                    0 | 1 => SoundChangeKind::ToneShift as u32,
-                    2 => SoundChangeKind::TonogenesisOnset as u32,
-                    _ => SoundChangeKind::TonogenesisCoda as u32,
+                    self.sample_sound_change_id(tonal_contact_share, rng)
                 }
             } else {
-                let seg = SoundChangeKind::SEGMENTAL;
-                seg[(rng.next_u64() as usize) % seg.len()] as u32
+                self.sample_sound_change_id(tonal_contact_share, rng)
             };
             let change = SoundChangeKind::from_u32(change_id);
             tick_changes.push(change_id);
-            let my_name = self.name();
-
-            for origin in self.lexicon.values_mut() {
-                if let Some(candidate) = change.apply_opt(&origin.word) {
-                    if !self.used_words.contains(&candidate) {
-                        self.used_words.remove(&origin.word);
-                        self.used_wordkeys.insert(candidate.wordkey());
-                        self.used_words.insert(candidate.clone());
-                        let prev_origin = std::mem::replace(
-                            origin,
-                            WordOrigin::with_arc_parent(candidate, my_name.clone(), None),
-                        );
-                        origin.parent = Some(std::sync::Arc::new(prev_origin));
-                    }
-                }
-            }
+            self.apply_sound_change(change);
         }
         self.changes_per_tick.push(tick_changes);
         self.refresh_phonology();
+    }
+
+    fn sample_sound_change_id(&self, tonal_contact_share: f64, rng: &mut Pcg64Mcg) -> u32 {
+        let is_tonal = !self.phonology.tones.is_empty();
+        let roll = rng.uniform(0.0, 1.0);
+        // Baseline 1.5% tonogenesis per sound change, rising up to ~13.5% under strong tonal sprachbund contact
+        let tonogenesis_prob = (0.015 + 0.12 * tonal_contact_share.clamp(0.0, 1.0)).min(0.14);
+        if !is_tonal && roll < tonogenesis_prob {
+            if (rng.next_u64() & 1) == 0 {
+                SoundChangeKind::TonogenesisOnset as u32
+            } else {
+                SoundChangeKind::TonogenesisCoda as u32
+            }
+        } else if is_tonal && roll < 0.08 {
+            // Already-tonal languages undergo chain tone shifts or secondary register splits
+            match (rng.next_u64() as u32) % 4 {
+                0 | 1 => SoundChangeKind::ToneShift as u32,
+                2 => SoundChangeKind::TonogenesisOnset as u32,
+                _ => SoundChangeKind::TonogenesisCoda as u32,
+            }
+        } else {
+            let seg = SoundChangeKind::SEGMENTAL;
+            seg[(rng.next_u64() as usize) % seg.len()] as u32
+        }
+    }
+
+    /// Contact-induced adoption of a marked areal phonological series (clicks, retroflexes,
+    /// ejectives, aspirates, implosives, or nasal vowels) from a neighboring `donor` language.
+    /// Applies the feature to a subset (~25%) of eligible words so it enters the living phonology.
+    pub fn adopt_areal_feature(
+        &mut self,
+        donor: &Language,
+        rng: &mut Pcg64Mcg,
+    ) -> Option<ArealFeature> {
+        let candidates = ArealFeature::candidates_from(donor, &self.phonology);
+        if candidates.is_empty() {
+            return None;
+        }
+        let feature = candidates[(rng.next_u64() as usize) % candidates.len()];
+        let my_name = self.name();
+        let mut applied_count = 0usize;
+
+        for origin in self.lexicon.values_mut() {
+            // Only affect a subset of eligible words so adoption is gradual and natural
+            if rng.uniform(0.0, 1.0) >= 0.25 {
+                continue;
+            }
+            if let Some(candidate) = feature.apply_to_word(&origin.word, donor, rng) {
+                if !self.used_words.contains(&candidate) {
+                    self.used_words.remove(&origin.word);
+                    self.used_wordkeys.insert(candidate.wordkey());
+                    self.used_words.insert(candidate.clone());
+                    let prev_origin = std::mem::replace(
+                        origin,
+                        WordOrigin::with_arc_parent(candidate, my_name.clone(), None),
+                    );
+                    origin.parent = Some(std::sync::Arc::new(prev_origin));
+                    applied_count += 1;
+                }
+            }
+        }
+
+        if applied_count > 0 {
+            self.refresh_phonology();
+            Some(feature)
+        } else {
+            None
+        }
+    }
+
+    pub fn record_sprachbund_partner(&mut self, partner_id: u32) {
+        if partner_id != self.id && !self.sprachbund_ids.contains(&partner_id) {
+            self.sprachbund_ids.push(partner_id);
+        }
     }
 }
 
@@ -4503,6 +4588,94 @@ impl HistorySimulation {
         }
     }
 
+    /// Build pairwise areal contact weights between active languages from:
+    /// 1. Bilingual co-location on the same fine tile (`+2.0` per shared tile),
+    /// 2. Geographic adjacency across neighboring fine tiles (`+0.5` per border edge), and
+    /// 3. Active inter-state trade partnerships (`+1.0` between dominant languages).
+    fn build_language_contact_weights(
+        &self,
+        fine_adj: &[Vec<usize>],
+    ) -> BTreeMap<u32, BTreeMap<u32, f32>> {
+        let mut weights: BTreeMap<u32, BTreeMap<u32, f32>> = BTreeMap::new();
+        let mut tile_primary_lang: BTreeMap<usize, u32> = BTreeMap::new();
+        let mut state_lang_pops: BTreeMap<u32, BTreeMap<u32, f32>> = BTreeMap::new();
+
+        for (&t, comms) in &self.tile_communities {
+            let mut tile_langs: BTreeMap<u32, f32> = BTreeMap::new();
+            for c in comms {
+                if c.thousands > 1e-4 {
+                    *tile_langs.entry(c.language_id).or_insert(0.0) += c.thousands;
+                }
+            }
+            if tile_langs.is_empty() {
+                continue;
+            }
+            if let Some((&dom_lid, _)) = tile_langs.iter().max_by(|a, b| {
+                a.1.partial_cmp(b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.0.cmp(a.0))
+            }) {
+                tile_primary_lang.insert(t, dom_lid);
+            }
+            if let Some(&sid) = self.tile_states.get(&t) {
+                let s_entry = state_lang_pops.entry(sid).or_default();
+                for (&lid, &pop) in &tile_langs {
+                    *s_entry.entry(lid).or_insert(0.0) += pop;
+                }
+            }
+            if tile_langs.len() >= 2 {
+                let lids: Vec<u32> = tile_langs.keys().copied().collect();
+                for i in 0..lids.len() {
+                    for j in (i + 1)..lids.len() {
+                        *weights.entry(lids[i]).or_default().entry(lids[j]).or_insert(0.0) += 2.0;
+                        *weights.entry(lids[j]).or_default().entry(lids[i]).or_insert(0.0) += 2.0;
+                    }
+                }
+            }
+        }
+
+        for (&t, &la) in &tile_primary_lang {
+            if let Some(nbs) = fine_adj.get(t) {
+                for &nb in nbs {
+                    if let Some(&lb) = tile_primary_lang.get(&nb) {
+                        if la != lb {
+                            *weights.entry(la).or_default().entry(lb).or_insert(0.0) += 0.5;
+                        }
+                    }
+                }
+            }
+        }
+
+        let state_dom_lang: BTreeMap<u32, u32> = state_lang_pops
+            .into_iter()
+            .filter_map(|(sid, lmap)| {
+                let dom = lmap
+                    .into_iter()
+                    .max_by(|a, b| {
+                        a.1.partial_cmp(&b.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| b.0.cmp(&a.0))
+                    })?
+                    .0;
+                Some((sid, dom))
+            })
+            .collect();
+
+        for pair in &self.trade_partners {
+            if let (Some(&la), Some(&lb)) = (
+                state_dom_lang.get(&pair.a),
+                state_dom_lang.get(&pair.b),
+            ) {
+                if la != lb {
+                    *weights.entry(la).or_default().entry(lb).or_insert(0.0) += 1.0;
+                    *weights.entry(lb).or_default().entry(la).or_insert(0.0) += 1.0;
+                }
+            }
+        }
+
+        weights
+    }
+
     /// Advance the History simulation by 1 tick (`200` years, matching `HistorySimulation.update`
     /// in `historysimulation.py:504-706`).
     pub fn step(&mut self) {
@@ -4511,7 +4684,9 @@ impl HistorySimulation {
             std::sync::Arc::clone(&self.fine_adj)
         };
 
-        // 1. Language sound changes (`historysimulation.py:511-515`: 2-4 cascaded per-language sound changes per 200-year tick)
+        // 1. Language sound changes + sprachbund areal diffusion (`historysimulation.py:511-515`:
+        // 2-4 cascaded per-language sound changes per 200-year tick, plus areal wave diffusion,
+        // tonal contagion, and marked feature convergence across geographical neighbors)
         {
             let _span_lang = crate::profile::span(crate::profile::ProfilePhase::HistStepLanguageSoundChanges);
             let active_langs: BTreeSet<u32> = self
@@ -4521,10 +4696,138 @@ impl HistorySimulation {
                 .filter(|c| c.thousands > 0.0)
                 .map(|c| c.language_id)
                 .collect();
+
+            let contact_weights = self.build_language_contact_weights(&fine_adj);
+            let lang_root_families: BTreeMap<u32, u32> = active_langs
+                .iter()
+                .map(|&lid| (lid, self.language_root_family(lid)))
+                .collect();
+
+            // Snapshot pre-tick tonal status, recent sound changes, and phonologies so areal
+            // diffusion is order-independent across languages within a tick.
+            let pre_tonal: BTreeMap<u32, bool> = active_langs
+                .iter()
+                .filter_map(|&lid| {
+                    let l = self.languages.get(&lid)?;
+                    Some((lid, !l.phonology.tones.is_empty()))
+                })
+                .collect();
+            let pre_last_changes: BTreeMap<u32, Vec<u32>> = active_langs
+                .iter()
+                .filter_map(|&lid| {
+                    let l = self.languages.get(&lid)?;
+                    let last = l.changes_per_tick.last()?;
+                    (!last.is_empty()).then(|| (lid, last.clone()))
+                })
+                .collect();
+            let pre_phonologies: BTreeMap<u32, Language> = active_langs
+                .iter()
+                .filter_map(|&lid| {
+                    let l = self.languages.get(&lid)?;
+                    Some((lid, l.phonology.clone()))
+                })
+                .collect();
+
             for lid in active_langs {
                 let mut temp_rng = self.rng.clone();
+                let mut tonal_contact_share = 0.0f64;
+                let mut chosen_donor: Option<(u32, f32)> = None;
+
+                if let Some(nbs) = contact_weights.get(&lid) {
+                    let total_w: f32 = nbs.values().copied().sum();
+                    if total_w > 0.0 {
+                        let tonal_w: f32 = nbs
+                            .iter()
+                            .filter(|(&nb_id, _)| pre_tonal.get(&nb_id).copied().unwrap_or(false))
+                            .map(|(_, &w)| w)
+                            .sum();
+                        tonal_contact_share = (tonal_w / total_w) as f64;
+
+                        // Pick a weighted areal neighbor for potential sound-change / feature diffusion
+                        let mut target = (temp_rng.uniform(0.0, 1.0) as f32) * total_w;
+                        for (&nb_id, &w) in nbs {
+                            target -= w;
+                            if target <= 0.0 {
+                                chosen_donor = Some((nb_id, total_w));
+                                break;
+                            }
+                        }
+                        if chosen_donor.is_none() {
+                            if let Some((&nb_id, _)) = nbs.iter().next() {
+                                chosen_donor = Some((nb_id, total_w));
+                            }
+                        }
+                    }
+                }
+
+                let mut diffused_change: Option<SoundChangeKind> = None;
+                let mut diffused_from: Option<u32> = None;
+                if let Some((donor_id, total_w)) = chosen_donor {
+                    let contact_strength = (total_w / (total_w + 4.0)) as f64;
+                    if temp_rng.uniform(0.0, 1.0) < 0.30 * contact_strength {
+                        if let Some(donor_changes) = pre_last_changes.get(&donor_id) {
+                            let cid = donor_changes
+                                [(temp_rng.next_u64() as usize) % donor_changes.len()];
+                            diffused_change = Some(SoundChangeKind::from_u32(cid));
+                            diffused_from = Some(donor_id);
+                        }
+                    }
+                }
+
+                let was_tonal = pre_tonal.get(&lid).copied().unwrap_or(false);
+                let my_root = lang_root_families.get(&lid).copied().unwrap_or(lid);
+
                 if let Some(lang) = self.languages.get_mut(&lid) {
-                    lang.mutate_tick(&mut temp_rng);
+                    lang.mutate_tick_with_areal(tonal_contact_share, diffused_change, &mut temp_rng);
+
+                    // Record sprachbund link if a sound change diffused across family boundaries
+                    if let Some(donor_id) = diffused_from {
+                        let donor_root =
+                            lang_root_families.get(&donor_id).copied().unwrap_or(donor_id);
+                        if donor_root != my_root {
+                            lang.record_sprachbund_partner(donor_id);
+                        }
+                    }
+
+                    // Record sprachbund link if tonal contagion triggered tonogenesis from an unrelated tonal neighbor
+                    if !was_tonal && !lang.phonology.tones.is_empty() && tonal_contact_share > 0.0 {
+                        if let Some(nbs) = contact_weights.get(&lid) {
+                            if let Some((&tonal_nb, _)) = nbs
+                                .iter()
+                                .filter(|(&nb_id, _)| {
+                                    pre_tonal.get(&nb_id).copied().unwrap_or(false)
+                                        && lang_root_families
+                                            .get(&nb_id)
+                                            .copied()
+                                            .unwrap_or(nb_id)
+                                            != my_root
+                                })
+                                .max_by(|a, b| {
+                                    a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                            {
+                                lang.record_sprachbund_partner(tonal_nb);
+                            }
+                        }
+                    }
+
+                    // Occasional contact-induced adoption of a marked areal phoneme series
+                    if let Some((donor_id, total_w)) = chosen_donor {
+                        let contact_strength = (total_w / (total_w + 4.0)) as f64;
+                        if temp_rng.uniform(0.0, 1.0) < 0.08 * contact_strength {
+                            if let Some(donor_phon) = pre_phonologies.get(&donor_id) {
+                                if lang.adopt_areal_feature(donor_phon, &mut temp_rng).is_some() {
+                                    let donor_root = lang_root_families
+                                        .get(&donor_id)
+                                        .copied()
+                                        .unwrap_or(donor_id);
+                                    if donor_root != my_root {
+                                        lang.record_sprachbund_partner(donor_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 self.rng = temp_rng;
             }
@@ -8014,6 +8317,23 @@ impl HistorySimulation {
             let subs: Vec<String> = lang.substrate_ids.iter().map(|&s| name_of(s)).collect();
             summary.push_str(&format!(" · substrate: {}", subs.join(", ")));
         }
+        if !lang.sprachbund_ids.is_empty() {
+            let shown: Vec<String> = lang
+                .sprachbund_ids
+                .iter()
+                .take(3)
+                .map(|&s| name_of(s))
+                .collect();
+            if lang.sprachbund_ids.len() > 3 {
+                summary.push_str(&format!(
+                    " · sprachbund: {} (+{} more)",
+                    shown.join(", "),
+                    lang.sprachbund_ids.len() - 3
+                ));
+            } else {
+                summary.push_str(&format!(" · sprachbund: {}", shown.join(", ")));
+            }
+        }
         summary
     }
 
@@ -9991,5 +10311,62 @@ mod tests {
         assert_eq!(grand_node.depth, 2);
         assert!(grand_node.is_current);
         assert!(grand_node.substrate_summary.contains("substrate:"));
+    }
+
+    #[test]
+    fn test_sprachbund_areal_feature_diffusion_and_tonal_contagion() {
+        let mut rng = Pcg64Mcg::new(99112233);
+        let mut recipient = LanguageRecord::new_for_state(0, 0, &[0, 1, 2, 3, 4], &mut rng);
+        // Strip retroflexes from recipient so we have a clean test target
+        recipient.phonology.consonants.retain(|c| !crate::language::RETROFLEX_SERIES.contains(c));
+        // Ensure recipient has basic alveolars in lexicon words so retroflex substitution can fire
+        for bw in 0..(BASIC_WORD_GLOSSES.len() as u32) {
+            recipient.coin_concept(ConceptKey::BasicWord(bw), &mut rng);
+        }
+
+        let mut donor = LanguageRecord::new_for_state(1, 1, &[0, 1, 2], &mut rng);
+        // Ensure donor attests the retroflex series
+        for &c in &crate::language::RETROFLEX_SERIES {
+            if !donor.phonology.consonants.contains(&c) {
+                donor.phonology.consonants.push(c);
+            }
+        }
+        donor.phonology.consonants.sort_unstable();
+
+        // Areal feature adoption should eventually introduce retroflexes into recipient's living phonology
+        let mut adopted = false;
+        for _ in 0..8 {
+            if let Some(feat) = recipient.adopt_areal_feature(&donor.phonology, &mut rng) {
+                if feat == ArealFeature::Retroflex {
+                    adopted = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            adopted || ArealFeature::Retroflex.present_in(&recipient.phonology),
+            "Expected recipient to adopt retroflex areal feature from donor"
+        );
+        assert!(
+            ArealFeature::Retroflex.present_in(&recipient.phonology),
+            "Adopted retroflexes should be reflected in recipient's refreshed living phonology"
+        );
+
+        // Tonal contagion: under strong tonal contact (share = 1.0), a non-tonal language should
+        // acquire tone within several ticks via TonogenesisOnset / TonogenesisCoda.
+        let mut tonal_emerged = false;
+        let mut non_tonal = LanguageRecord::new_for_state(2, 2, &[0, 1, 2, 3], &mut rng);
+        assert!(non_tonal.phonology.tones.is_empty());
+        for _ in 0..25 {
+            non_tonal.mutate_tick_with_areal(1.0, None, &mut rng);
+            if !non_tonal.phonology.tones.is_empty() {
+                tonal_emerged = true;
+                break;
+            }
+        }
+        assert!(
+            tonal_emerged,
+            "Expected tonal contagion under strong tonal sprachbund contact to trigger tonogenesis"
+        );
     }
 }
