@@ -651,6 +651,10 @@ pub struct LanguageRecord {
     pub sprachbund_ids: Vec<u32>,
     pub phonology: Language,
     pub lexicon: BTreeMap<ConceptKey, WordOrigin>,
+    /// Prestige loanword doublets / synonyms that coexist alongside the native word in `lexicon`
+    /// (e.g. English *cow/beef*, *ask/question*), evolving through sound changes and occasionally
+    /// displacing the native word over time.
+    pub synonyms: BTreeMap<ConceptKey, Vec<WordOrigin>>,
     pub used_words: BTreeSet<Word>,
     pub used_wordkeys: BTreeSet<Vec<(bool, i32)>>,
     pub changes_per_tick: Vec<Vec<u32>>,
@@ -666,6 +670,7 @@ impl LanguageRecord {
             sprachbund_ids: Vec::new(),
             phonology,
             lexicon: BTreeMap::new(),
+            synonyms: BTreeMap::new(),
             used_words: BTreeSet::new(),
             used_wordkeys: BTreeSet::new(),
             changes_per_tick: Vec::new(),
@@ -713,6 +718,7 @@ impl LanguageRecord {
             sprachbund_ids: Vec::new(),
             phonology,
             lexicon: BTreeMap::new(),
+            synonyms: BTreeMap::new(),
             used_words: BTreeSet::new(),
             used_wordkeys: BTreeSet::new(),
             changes_per_tick: Vec::new(),
@@ -803,8 +809,12 @@ impl LanguageRecord {
         if self.lexicon.is_empty() {
             return;
         }
-        self.phonology
-            .refresh_from_word_iter(self.lexicon.values().map(|o| &o.word));
+        let all_words = self
+            .lexicon
+            .values()
+            .map(|o| &o.word)
+            .chain(self.synonyms.values().flat_map(|v| v.iter().map(|o| &o.word)));
+        self.phonology.refresh_from_word_iter(all_words);
     }
 
     pub fn coin_concept(&mut self, key: ConceptKey, rng: &mut Pcg64Mcg) -> WordOrigin {
@@ -880,6 +890,82 @@ impl LanguageRecord {
         self.lexicon.insert(key, origin);
     }
 
+    /// Borrow a prestige loanword as a **synonym / doublet** for a concept that `self` already
+    /// expresses natively (e.g. *cow/beef*, *ask/question*). Caps synonyms at 2 per concept and
+    /// avoids duplicate borrowings from the same donor language.
+    pub fn borrow_prestige_synonym(
+        &mut self,
+        key: ConceptKey,
+        donor_id: u32,
+        donor_origin: &WordOrigin,
+    ) -> bool {
+        if !self.lexicon.contains_key(&key) {
+            return false;
+        }
+        let existing_syns = self.synonyms.get(&key);
+        if let Some(syns) = existing_syns {
+            if syns.len() >= 2 {
+                return false;
+            }
+            if syns.iter().any(|s| {
+                s.parent
+                    .as_deref()
+                    .is_some_and(|p| p.lang_name == donor_origin.lang_name)
+            }) {
+                return false;
+            }
+        }
+        let syn_count = existing_syns.map(|v| v.len()).unwrap_or(0);
+        let mut local_rng = Pcg64Mcg::new(
+            ((self.id as u128) << 64)
+                ^ ((donor_id as u128) << 32)
+                ^ ((self.lexicon.len() as u128) << 8)
+                ^ (syn_count as u128)
+                ^ 0x5052_4553_5449_4745,
+        );
+        let borrowed_word = self.phonology.borrow_word_unique(
+            &donor_origin.word,
+            &self.used_words,
+            &mut local_rng,
+        );
+        self.used_wordkeys.insert(borrowed_word.wordkey());
+        self.used_words.insert(borrowed_word.clone());
+        let my_name = self.name();
+        let origin = WordOrigin::new(borrowed_word, my_name, Some(donor_origin.clone()));
+        self.synonyms.entry(key).or_default().push(origin);
+        true
+    }
+
+    /// Over centuries, a prestige synonym occasionally displaces the older native word
+    /// (e.g. Old English *niman* → Old Norse *take*, *ēam* → French *uncle*).
+    pub fn resolve_synonym_displacements(&mut self, rng: &mut Pcg64Mcg) -> usize {
+        let mut displaced = 0usize;
+        let keys: Vec<ConceptKey> = self.synonyms.keys().copied().collect();
+        for key in keys {
+            // ~8% chance per 200-year tick for a prestige doublet to replace the primary word
+            if rng.uniform(0.0, 1.0) >= 0.08 {
+                continue;
+            }
+            let Some(syns) = self.synonyms.get_mut(&key) else {
+                continue;
+            };
+            if syns.is_empty() {
+                continue;
+            }
+            let pick = (rng.next_u64() as usize) % syns.len();
+            let promoted = syns.remove(pick);
+            let now_empty = syns.is_empty();
+            if let Some(old_native) = self.lexicon.insert(key, promoted) {
+                self.used_words.remove(&old_native.word);
+            }
+            if now_empty {
+                self.synonyms.remove(&key);
+            }
+            displaced += 1;
+        }
+        displaced
+    }
+
     /// Clone a dialect and redefine `Language(self.id)` to `Language(new_id)`
     /// (`language/lazy.py:137-146, 190-194`).
     pub fn clone_dialect(&self, new_id: u32) -> Self {
@@ -895,11 +981,15 @@ impl LanguageRecord {
         cloned
     }
 
-    /// Apply a single language-wide sound change to all words in the lexicon, preventing
-    /// homophonous mergers (`language/lazy.py:47`, `languagesimulation.py:25`).
+    /// Apply a single language-wide sound change to all words in the lexicon and any prestige
+    /// synonyms, preventing homophonous mergers (`language/lazy.py:47`, `languagesimulation.py:25`).
     pub fn apply_sound_change(&mut self, change: SoundChangeKind) {
         let my_name = self.name();
-        for origin in self.lexicon.values_mut() {
+        for origin in self
+            .lexicon
+            .values_mut()
+            .chain(self.synonyms.values_mut().flat_map(|v| v.iter_mut()))
+        {
             if let Some(candidate) = change.apply_opt(&origin.word) {
                 if !self.used_words.contains(&candidate) {
                     self.used_words.remove(&origin.word);
@@ -950,6 +1040,7 @@ impl LanguageRecord {
             self.apply_sound_change(change);
         }
         self.changes_per_tick.push(tick_changes);
+        self.resolve_synonym_displacements(rng);
         self.refresh_phonology();
     }
 
@@ -4676,6 +4767,158 @@ impl HistorySimulation {
         weights
     }
 
+    /// Compute socio-political and demographic prestige scores for all active languages from
+    /// speaker population, population-weighted technology level, and territorial extent.
+    fn compute_language_prestige_scores(&self) -> BTreeMap<u32, f64> {
+        let mut lang_pop: BTreeMap<u32, f64> = BTreeMap::new();
+        let mut lang_tech_weighted: BTreeMap<u32, f64> = BTreeMap::new();
+        let mut lang_tiles: BTreeMap<u32, usize> = BTreeMap::new();
+
+        for comms in self.tile_communities.values() {
+            let mut seen_on_tile: BTreeSet<u32> = BTreeSet::new();
+            for c in comms {
+                if c.thousands <= 1e-4 {
+                    continue;
+                }
+                let pop = c.thousands as f64;
+                let tech = (c.agriculture as u8 as f64)
+                    + (c.rivergoing as u8 as f64)
+                    + (c.seafaring as u8 as f64)
+                    + 1.5 * (c.bronzeworking as u8 as f64)
+                    + 2.0 * (c.ironworking as u8 as f64);
+                *lang_pop.entry(c.language_id).or_insert(0.0) += pop;
+                *lang_tech_weighted.entry(c.language_id).or_insert(0.0) += pop * tech;
+                if seen_on_tile.insert(c.language_id) {
+                    *lang_tiles.entry(c.language_id).or_insert(0) += 1;
+                }
+            }
+        }
+
+        lang_pop
+            .into_iter()
+            .map(|(lid, pop)| {
+                let avg_tech = lang_tech_weighted.get(&lid).copied().unwrap_or(0.0) / pop.max(1e-6);
+                let tiles = lang_tiles.get(&lid).copied().unwrap_or(0) as f64;
+                let score = (1.0 + pop).ln() + 0.7 * avg_tech + 0.35 * tiles.sqrt();
+                (lid, score)
+            })
+            .collect()
+    }
+
+    /// Borrow prestige synonyms/doublets from higher-prestige contact neighbors for concepts
+    /// already expressed natively in the recipient language.
+    fn apply_prestige_borrowing(&mut self, contact_weights: &BTreeMap<u32, BTreeMap<u32, f32>>) {
+        let prestige = self.compute_language_prestige_scores();
+        let mut planned_borrows: Vec<(u32, u32, ConceptKey, WordOrigin)> = Vec::new();
+
+        for (&lid, nbs) in contact_weights {
+            let Some(&my_prestige) = prestige.get(&lid) else {
+                continue;
+            };
+            let Some(recipient) = self.languages.get(&lid) else {
+                continue;
+            };
+
+            // Select the strongest higher-prestige contact neighbor (donor prestige >= 1.18x)
+            let best_donor = nbs
+                .iter()
+                .filter_map(|(&nb_id, &w)| {
+                    let dp = prestige.get(&nb_id).copied()?;
+                    if dp > my_prestige * 1.18 && w > 0.0 {
+                        let pull = (w as f64) * (dp - my_prestige);
+                        Some((nb_id, w as f64, dp, pull))
+                    } else {
+                        None
+                    }
+                })
+                .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+
+            let Some((donor_id, contact_w, donor_prestige, _)) = best_donor else {
+                continue;
+            };
+            let Some(donor) = self.languages.get(&donor_id) else {
+                continue;
+            };
+
+            let ratio = donor_prestige / my_prestige.max(0.25);
+            let prob = (0.35 * (ratio - 1.15).clamp(0.0, 1.5) * (contact_w / (contact_w + 3.0)))
+                .clamp(0.0, 0.45);
+            if self.rng.uniform(0.0, 1.0) >= prob {
+                continue;
+            }
+
+            // Gather shared concepts eligible for prestige doublets (exclude proper endonyms)
+            let mut weighted_concepts: Vec<(ConceptKey, u32)> = Vec::new();
+            for &ck in recipient.lexicon.keys() {
+                if !donor.lexicon.contains_key(&ck) {
+                    continue;
+                }
+                if recipient.synonyms.get(&ck).is_some_and(|v| v.len() >= 2) {
+                    continue;
+                }
+                let weight = match ck {
+                    ConceptKey::Language(_) | ConceptKey::Nation(_) | ConceptKey::State(_) => 0,
+                    ConceptKey::Culture(_)
+                    | ConceptKey::Mineral(_)
+                    | ConceptKey::Rock(_)
+                    | ConceptKey::Constellation(_)
+                    | ConceptKey::Planet(_) => 4,
+                    ConceptKey::Species(_) | ConceptKey::Weather(_) | ConceptKey::Season(_) => 2,
+                    ConceptKey::BasicWord(_) => 1,
+                    _ => 1,
+                };
+                if weight > 0 {
+                    weighted_concepts.push((ck, weight));
+                }
+            }
+            if weighted_concepts.is_empty() {
+                continue;
+            }
+
+            let borrow_count = if ratio > 1.6 && self.rng.uniform(0.0, 1.0) < 0.35 {
+                2
+            } else {
+                1
+            };
+            let mut picked_keys: BTreeSet<ConceptKey> = BTreeSet::new();
+            let total_weight: u32 = weighted_concepts.iter().map(|(_, w)| *w).sum();
+
+            for _ in 0..borrow_count {
+                if total_weight == 0 {
+                    break;
+                }
+                let mut roll = (self.rng.next_u64() as u32) % total_weight;
+                let mut chosen_ck = weighted_concepts[0].0;
+                for &(ck, w) in &weighted_concepts {
+                    if roll < w {
+                        chosen_ck = ck;
+                        break;
+                    }
+                    roll -= w;
+                }
+                if picked_keys.insert(chosen_ck) {
+                    if let Some(donor_origin) = donor.lexicon.get(&chosen_ck) {
+                        planned_borrows.push((lid, donor_id, chosen_ck, donor_origin.clone()));
+                    }
+                }
+            }
+        }
+
+        let mut touched_langs: BTreeSet<u32> = BTreeSet::new();
+        for (lid, donor_id, ck, donor_origin) in planned_borrows {
+            if let Some(lang) = self.languages.get_mut(&lid) {
+                if lang.borrow_prestige_synonym(ck, donor_id, &donor_origin) {
+                    touched_langs.insert(lid);
+                }
+            }
+        }
+        for lid in touched_langs {
+            if let Some(lang) = self.languages.get_mut(&lid) {
+                lang.refresh_phonology();
+            }
+        }
+    }
+
     /// Advance the History simulation by 1 tick (`200` years, matching `HistorySimulation.update`
     /// in `historysimulation.py:504-706`).
     pub fn step(&mut self) {
@@ -4831,6 +5074,11 @@ impl HistorySimulation {
                 }
                 self.rng = temp_rng;
             }
+
+            // Prestige borrowing: languages in contact with a more prestigious donor (larger
+            // speaker base, higher technology, or broader territorial reach) borrow synonyms /
+            // doublets for existing concepts (e.g. cow/beef, ask/question).
+            self.apply_prestige_borrowing(&contact_weights);
         }
 
         let _span_growth = crate::profile::span(crate::profile::ProfilePhase::HistStepGrowthSpilloverAndTech);
@@ -8518,12 +8766,30 @@ impl HistorySimulation {
         let lexicon: Vec<LexiconEntryView> = lang
             .lexicon
             .iter()
-            .map(|(&ck, orig)| LexiconEntryView {
-                category: Self::concept_category_label(ck).to_string(),
-                gloss: self.format_concept_gloss(ck),
-                orthography: orig.word.write(false),
-                ipa: orig.word.pronounce(),
-                etymology: orig.format_etymology(),
+            .map(|(&ck, orig)| {
+                let mut orthography = orig.word.write(false);
+                let mut ipa = orig.word.pronounce();
+                let mut etymology = orig.format_etymology();
+                if let Some(syns) = lang.synonyms.get(&ck) {
+                    if !syns.is_empty() {
+                        let syn_orths: Vec<String> =
+                            syns.iter().map(|s| s.word.write(false)).collect();
+                        let syn_ipas: Vec<String> =
+                            syns.iter().map(|s| s.word.pronounce()).collect();
+                        let syn_etyms: Vec<String> =
+                            syns.iter().map(|s| s.format_etymology()).collect();
+                        orthography = format!("{} / {}", orthography, syn_orths.join(" / "));
+                        ipa = format!("{} / {}", ipa, syn_ipas.join(" / "));
+                        etymology = format!("{} · doublet: {}", etymology, syn_etyms.join("; "));
+                    }
+                }
+                LexiconEntryView {
+                    category: Self::concept_category_label(ck).to_string(),
+                    gloss: self.format_concept_gloss(ck),
+                    orthography,
+                    ipa,
+                    etymology,
+                }
             })
             .collect();
 
@@ -10367,6 +10633,53 @@ mod tests {
         assert!(
             tonal_emerged,
             "Expected tonal contagion under strong tonal sprachbund contact to trigger tonogenesis"
+        );
+    }
+
+    #[test]
+    fn test_prestige_borrowing_synonyms_and_displacement() {
+        let mut rng = Pcg64Mcg::new(42424242);
+        let mut recipient = LanguageRecord::new_for_state(0, 0, &[0, 1, 2], &mut rng);
+        let donor = LanguageRecord::new_for_state(1, 1, &[0, 1, 2], &mut rng);
+        let donor2 = LanguageRecord::new_for_state(2, 2, &[0, 1, 2], &mut rng);
+
+        let key = ConceptKey::BasicWord(0);
+        let native_before = recipient.lexicon.get(&key).expect("native word").word.clone();
+        let donor_origin = donor.lexicon.get(&key).expect("donor word").clone();
+        let donor2_origin = donor2.lexicon.get(&key).expect("donor2 word").clone();
+
+        // First prestige borrowing creates a synonym doublet without replacing the native word
+        assert!(recipient.borrow_prestige_synonym(key, donor.id, &donor_origin));
+        assert_eq!(recipient.lexicon.get(&key).unwrap().word, native_before);
+        assert_eq!(recipient.synonyms.get(&key).map(|v| v.len()), Some(1));
+        assert!(recipient.synonyms[&key][0]
+            .format_etymology()
+            .contains(&donor.name()));
+
+        // Re-borrowing the same concept from the same donor is rejected
+        assert!(!recipient.borrow_prestige_synonym(key, donor.id, &donor_origin));
+        assert_eq!(recipient.synonyms.get(&key).map(|v| v.len()), Some(1));
+
+        // A second distinct prestige donor can add a second doublet (capped at 2)
+        assert!(recipient.borrow_prestige_synonym(key, donor2.id, &donor2_origin));
+        assert_eq!(recipient.synonyms.get(&key).map(|v| v.len()), Some(2));
+
+        // Over enough ticks, displacement should promote a prestige synonym to primary word
+        let mut displaced_total = 0usize;
+        for _ in 0..80 {
+            displaced_total += recipient.resolve_synonym_displacements(&mut rng);
+            if displaced_total > 0 {
+                break;
+            }
+        }
+        assert!(
+            displaced_total > 0,
+            "Expected prestige synonym to eventually displace the native word"
+        );
+        assert_ne!(
+            recipient.lexicon.get(&key).unwrap().word,
+            native_before,
+            "Primary lexicon word should now be the promoted prestige loanword"
         );
     }
 }
