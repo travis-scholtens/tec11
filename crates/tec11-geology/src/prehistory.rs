@@ -19,6 +19,9 @@ use crate::tile::TileGeology;
 
 pub const PREHISTORY_COAST_PROX: usize = 2;
 pub const PREHISTORY_TRAVEL_RANGE: usize = 6;
+/// Panmictic gene-flow range for Prehistory racination (tighter than 16 kyr migration range
+/// `PREHISTORY_TRAVEL_RANGE` so deserts, mountains, and seas genuinely isolate populations).
+pub const PREHISTORY_RACINATION_RANGE: usize = 2;
 pub const PREHISTORY_MIN_RIVER_ELEV: f32 = 5.0;
 pub const PREHISTORY_MIN_RIVER_PRECIP: f32 = 0.5;
 pub const PREHISTORY_GLACIATION_STEP: u32 = 16;
@@ -784,7 +787,7 @@ impl PrehistorySimulation {
                     ancestry,
                 }
             },
-            PREHISTORY_TRAVEL_RANGE,
+            PREHISTORY_RACINATION_RANGE,
         );
         self.next_heritage_id = next_id;
     }

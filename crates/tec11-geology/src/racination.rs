@@ -84,7 +84,7 @@ pub fn racinate_with_technologies<F>(
     for &(t, h) in &pop_entries {
         let is_ag = agricultural_heritages.contains(&h);
         let is_sea = seafaring_heritages.contains(&h);
-        let eff_range = if is_sea { travel_range + 1 } else { travel_range };
+        let eff_range = travel_range;
         let passable_t = if is_sea && elevations[t] <= 0.0 {
             true
         } else {
@@ -103,13 +103,15 @@ pub fn racinate_with_technologies<F>(
         curr_frontier.clear();
         curr_frontier.push(t);
 
-        for _step in 0..eff_range {
+        for step in 0..eff_range {
             next_frontier.clear();
             for &u in &curr_frontier {
                 for &nb in &adjacency[u] {
                     if visited_stamp[nb] != stamp {
-                        let ok = if is_sea && elevations[nb] <= 0.0 {
-                            true
+                        let ok = if elevations[nb] <= 0.0 {
+                            // Seafaring only maintains panmictic gene flow across a narrow
+                            // 1-tile coastal strait (land -> 1 water tile -> land), not wide seas.
+                            is_sea && step == 0 && elevations[u] > 0.0
                         } else {
                             is_passable(elevations[nb], koeppen_ids[nb], is_ag)
                         };
@@ -484,5 +486,52 @@ mod tests {
         assert_eq!(sim.peoples(), 1);
         sim.isolate();
         assert!(sim.peoples() >= 2, "Expected at least 2 distinct races after isolation");
+    }
+
+    #[test]
+    fn test_seafaring_does_not_collapse_wide_sea_separation() {
+        // Linear chain: [0: land] - [1: sea] - [2: sea] - [3: land]
+        let elevations = vec![1.0f32, -1.0, -1.0, 1.0];
+        let koeppen_ids = vec![6u8, 0, 0, 6]; // Cf on land
+        let adjacency = vec![vec![1], vec![0, 2], vec![1, 3], vec![2]];
+        let mut populated = BTreeMap::from([(0usize, 0u32), (3usize, 0u32)]);
+        let mut ag = BTreeSet::new();
+        let mut riv = BTreeSet::new();
+        let mut sea = BTreeSet::from([0u32]);
+        let mut heritages = BTreeMap::from([(
+            0u32,
+            Heritage {
+                id: 0,
+                name: "people_1".to_string(),
+                ancestry: Vec::new(),
+            },
+        )]);
+        let mut next_id = 1u32;
+
+        racinate_with_technologies(
+            &elevations,
+            &koeppen_ids,
+            &adjacency,
+            &mut populated,
+            &mut ag,
+            &mut riv,
+            &mut sea,
+            &mut heritages,
+            |ancestry| {
+                let id = next_id;
+                next_id += 1;
+                Heritage {
+                    id,
+                    name: format!("people_{}", id + 1),
+                    ancestry,
+                }
+            },
+            2,
+        );
+
+        assert_ne!(
+            populated[&0], populated[&3],
+            "Seafaring populations separated by 2+ ocean tiles should branch into distinct heritages"
+        );
     }
 }
