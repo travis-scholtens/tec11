@@ -11,7 +11,9 @@ use crate::population::{
     eden_tile, expand_population_with_technologies_and_islands, is_farmable, is_habitable,
     is_subgrid_island_habitable, tile_population_thousands_with_water_tech, DisjointSet,
 };
-use crate::racination::{racinate_with_technologies, racination_shades, Heritage};
+use crate::racination::{
+    branch_wide_heritages_by_distance, racinate_with_technologies, racination_shades, Heritage,
+};
 use crate::rivers::trace_coarse_rivers;
 use crate::rock::{Rock, RockKind, RockLayer};
 use crate::tectonics::{LithosphericGroup, TectonicsSimulation};
@@ -22,6 +24,9 @@ pub const PREHISTORY_TRAVEL_RANGE: usize = 6;
 /// Panmictic gene-flow range for Prehistory racination (tighter than 16 kyr migration range
 /// `PREHISTORY_TRAVEL_RANGE` so deserts, mountains, and seas genuinely isolate populations).
 pub const PREHISTORY_RACINATION_RANGE: usize = 2;
+/// Maximum spherical angular diameter (radians, ~41° / ~4,600 km on Earth) before a single
+/// wide-ranging heritage branches into regional peoples via isolation by distance.
+pub const PREHISTORY_ISOLATION_BY_DISTANCE_RAD: f64 = 0.72;
 pub const PREHISTORY_MIN_RIVER_ELEV: f32 = 5.0;
 pub const PREHISTORY_MIN_RIVER_PRECIP: f32 = 0.5;
 pub const PREHISTORY_GLACIATION_STEP: u32 = 16;
@@ -788,6 +793,26 @@ impl PrehistorySimulation {
                 }
             },
             PREHISTORY_RACINATION_RANGE,
+        );
+        let tile_centers: Vec<[f64; 3]> = self.grid.faces.iter().map(|(c, _)| *c).collect();
+        branch_wide_heritages_by_distance(
+            &tile_centers,
+            &self.adjacency,
+            &mut self.populated,
+            &mut self.agricultural_heritages,
+            &mut self.rivergoing_heritages,
+            &mut self.seafaring_heritages,
+            &mut self.heritages,
+            |ancestry| {
+                let id = next_id;
+                next_id += 1;
+                Heritage {
+                    id,
+                    name: format!("people_{}", id + 1),
+                    ancestry,
+                }
+            },
+            PREHISTORY_ISOLATION_BY_DISTANCE_RAD,
         );
         self.next_heritage_id = next_id;
     }

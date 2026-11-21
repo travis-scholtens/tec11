@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::f64::consts::PI;
 
-use tec11_math_grid::{normal, rotate, Pcg64Mcg, SphericalGrid, SphericalPolygon, Vec3};
+use tec11_math_grid::{dot, normal, rotate, Pcg64Mcg, SphericalGrid, SphericalPolygon, Vec3};
 
 use crate::population::{is_passable, DisjointSet};
 
@@ -262,6 +262,160 @@ pub fn racinate_with_technologies<F>(
                     }
                 }
             }
+        }
+    }
+}
+
+#[inline]
+fn spherical_angle(a: Vec3, b: Vec3) -> f64 {
+    dot(a, b).clamp(-1.0, 1.0).acos()
+}
+
+/// Isolation-by-distance regional branching: if any single heritage occupies a contiguous
+/// geographic span wider than `max_arc_rad` (e.g. `0.72` rad ≈ 41° / ~4,600 km on Earth),
+/// partition it into 2..=5 regional child heritages via farthest-point seeding and multi-source
+/// BFS Voronoi over its populated tiles so large continents diverge naturally without requiring
+/// an ocean barrier.
+pub fn branch_wide_heritages_by_distance<F>(
+    tile_centers: &[Vec3],
+    adjacency: &[Vec<usize>],
+    populated: &mut BTreeMap<usize, u32>,
+    agricultural_heritages: &mut BTreeSet<u32>,
+    rivergoing_heritages: &mut BTreeSet<u32>,
+    seafaring_heritages: &mut BTreeSet<u32>,
+    heritages: &mut BTreeMap<u32, Heritage>,
+    mut new_heritage: F,
+    max_arc_rad: f64,
+) where
+    F: FnMut(Vec<u32>) -> Heritage,
+{
+    if populated.is_empty() || tile_centers.is_empty() || max_arc_rad <= 0.0 {
+        return;
+    }
+
+    let mut by_heritage: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (&t, &h) in populated.iter() {
+        if t < tile_centers.len() {
+            by_heritage.entry(h).or_default().push(t);
+        }
+    }
+
+    let min_seed_sep = 0.55 * max_arc_rad;
+
+    for (h, tiles) in by_heritage {
+        if tiles.len() < 16 {
+            continue;
+        }
+        // Two-pass farthest-point sweep for O(|T|) spherical diameter estimate
+        let p0 = tile_centers[tiles[0]];
+        let seed_a = *tiles
+            .iter()
+            .max_by(|&&x, &&y| {
+                spherical_angle(p0, tile_centers[x])
+                    .partial_cmp(&spherical_angle(p0, tile_centers[y]))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
+        let pa = tile_centers[seed_a];
+        let mut seed_b = seed_a;
+        let mut diam = 0.0f64;
+        for &t in &tiles {
+            let d = spherical_angle(pa, tile_centers[t]);
+            if d > diam {
+                diam = d;
+                seed_b = t;
+            }
+        }
+        if diam <= max_arc_rad || seed_b == seed_a {
+            continue;
+        }
+
+        // Greedily pick up to 5 well-separated regional seeds
+        let mut seeds = vec![seed_a, seed_b];
+        while seeds.len() < 5 {
+            let mut best_t = None;
+            let mut best_min_d = 0.0f64;
+            for &t in &tiles {
+                let pt = tile_centers[t];
+                let min_d = seeds
+                    .iter()
+                    .map(|&s| spherical_angle(pt, tile_centers[s]))
+                    .fold(f64::INFINITY, f64::min);
+                if min_d > best_min_d {
+                    best_min_d = min_d;
+                    best_t = Some(t);
+                }
+            }
+            if best_min_d > min_seed_sep {
+                if let Some(t) = best_t {
+                    seeds.push(t);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Multi-source BFS Voronoi over `tiles` so regional boundaries respect coastlines & terrain
+        let tile_set: BTreeSet<usize> = tiles.iter().copied().collect();
+        let mut owner: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+        for (idx, &s) in seeds.iter().enumerate() {
+            owner.insert(s, idx);
+            queue.push_back((s, idx));
+        }
+        while let Some((u, region_idx)) = queue.pop_front() {
+            if let Some(nbs) = adjacency.get(u) {
+                for &nb in nbs {
+                    if tile_set.contains(&nb) && !owner.contains_key(&nb) {
+                        owner.insert(nb, region_idx);
+                        queue.push_back((nb, region_idx));
+                    }
+                }
+            }
+        }
+        // Fallback to nearest spherical seed for any tile not reached via land adjacency
+        for &t in &tiles {
+            if !owner.contains_key(&t) {
+                let pt = tile_centers[t];
+                let nearest_idx = seeds
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, &a), (_, &b)| {
+                        spherical_angle(pt, tile_centers[a])
+                            .partial_cmp(&spherical_angle(pt, tile_centers[b]))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                owner.insert(t, nearest_idx);
+            }
+        }
+
+        let was_ag = agricultural_heritages.contains(&h);
+        let was_riv = rivergoing_heritages.contains(&h);
+        let was_sea = seafaring_heritages.contains(&h);
+
+        let mut region_ids: Vec<u32> = Vec::with_capacity(seeds.len());
+        for _ in 0..seeds.len() {
+            let nh = new_heritage(vec![h]);
+            let new_id = nh.id;
+            if was_ag {
+                agricultural_heritages.insert(new_id);
+            }
+            if was_riv {
+                rivergoing_heritages.insert(new_id);
+            }
+            if was_sea {
+                seafaring_heritages.insert(new_id);
+            }
+            heritages.insert(new_id, nh);
+            region_ids.push(new_id);
+        }
+
+        for (t, region_idx) in owner {
+            populated.insert(t, region_ids[region_idx]);
         }
     }
 }
@@ -701,5 +855,78 @@ mod tests {
             next_id, id_after_tick1,
             "Contact-zone admixture should stabilize without spawning endless border heritages"
         );
+    }
+
+    #[test]
+    fn test_isolation_by_distance_branches_continental_heritage() {
+        // 30-tile contiguous equatorial arc spanning 120 degrees (~2.09 rad > 0.72 rad)
+        let n = 30usize;
+        let tile_centers: Vec<Vec3> = (0..n)
+            .map(|i| {
+                let theta = (i as f64) * (2.0 * PI / 3.0) / ((n - 1) as f64);
+                [theta.cos(), theta.sin(), 0.0]
+            })
+            .collect();
+        let adjacency: Vec<Vec<usize>> = (0..n)
+            .map(|i| {
+                let mut nbs = Vec::new();
+                if i > 0 {
+                    nbs.push(i - 1);
+                }
+                if i + 1 < n {
+                    nbs.push(i + 1);
+                }
+                nbs
+            })
+            .collect();
+        let mut populated: BTreeMap<usize, u32> = (0..n).map(|i| (i, 0u32)).collect();
+        let mut ag = BTreeSet::from([0u32]);
+        let mut riv = BTreeSet::new();
+        let mut sea = BTreeSet::new();
+        let mut heritages = BTreeMap::from([(
+            0u32,
+            Heritage {
+                id: 0,
+                name: "people_1".to_string(),
+                ancestry: Vec::new(),
+            },
+        )]);
+        let mut next_id = 1u32;
+
+        branch_wide_heritages_by_distance(
+            &tile_centers,
+            &adjacency,
+            &mut populated,
+            &mut ag,
+            &mut riv,
+            &mut sea,
+            &mut heritages,
+            |ancestry| {
+                let id = next_id;
+                next_id += 1;
+                Heritage {
+                    id,
+                    name: format!("people_{}", id + 1),
+                    ancestry,
+                }
+            },
+            0.72,
+        );
+
+        let distinct: BTreeSet<u32> = populated.values().copied().collect();
+        assert!(
+            distinct.len() >= 3,
+            "Expected wide continental heritage (~120° arc) to branch into >= 3 regional peoples, got {}",
+            distinct.len()
+        );
+        assert_ne!(
+            populated[&0],
+            populated[&(n - 1)],
+            "Opposite ends of a 120° continent should belong to distinct regional peoples"
+        );
+        for hid in &distinct {
+            assert_eq!(heritages[hid].ancestry, vec![0]);
+            assert!(ag.contains(hid), "Branched regional peoples should inherit agriculture");
+        }
     }
 }
