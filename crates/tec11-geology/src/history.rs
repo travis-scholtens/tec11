@@ -837,21 +837,24 @@ impl LanguageRecord {
         for bw_id in 0..(BASIC_WORD_GLOSSES.len() as u32) {
             rec.coin_concept(ConceptKey::BasicWord(bw_id), rng);
         }
-        // Timekeeping concepts: year, month (derived from main moon when present), day, hour,
-        // plus individual named calendar months adapted to the planet's main-moon cycle.
+        // Timekeeping concepts: year, day, hour, plus month (derived from main moon) and
+        // individual named calendar months only on worlds with moons. Moonless worlds subdivide
+        // the year using seasons and constellations rather than months.
         rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_YEAR), rng);
-        if moon_count > 0 && rec.describes(ConceptKey::Moon(0)) {
-            rec.derive_concept(
-                ConceptKey::Moon(0),
-                ConceptKey::TimeUnit(TIME_UNIT_MONTH),
-                rng,
-            );
-        } else {
-            rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_MONTH), rng);
-        }
         rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_DAY), rng);
         rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_HOUR), rng);
-        rec.coin_calendar_months(moon_count, synodic_months_per_year, rng);
+        if moon_count > 0 && synodic_months_per_year > 0.0 {
+            if rec.describes(ConceptKey::Moon(0)) {
+                rec.derive_concept(
+                    ConceptKey::Moon(0),
+                    ConceptKey::TimeUnit(TIME_UNIT_MONTH),
+                    rng,
+                );
+            } else {
+                rec.coin_concept(ConceptKey::TimeUnit(TIME_UNIT_MONTH), rng);
+            }
+            rec.coin_calendar_months(moon_count, synodic_months_per_year, rng);
+        }
         // Baseline cultural concepts present at city founding
         rec.coin_concept(ConceptKey::Culture(CULTURE_FORAGING), rng);
         rec.coin_concept(ConceptKey::Culture(CULTURE_CITY), rng);
@@ -863,7 +866,7 @@ impl LanguageRecord {
     }
 
     /// Coin individual named calendar months adapted to the planet's main moon (biggest in the sky):
-    /// - Moonless worlds (`moon_count == 0` or `mpy <= 0`): solar divisions (4, 6, 8, or 12).
+    /// - Moonless worlds (`moon_count == 0` or `mpy <= 0`): no months (people use seasons & constellations).
     /// - Very long months (`mpy < 5`): usually named half-months (waxing/waning), with randomness.
     /// - Very short months (`mpy > 18`): usually grouped multi-moon months (2+ cycles), with randomness.
     /// - Moderate months (`5..=18`): usually 1 main-moon cycle per month, with occasional grouped or half-month systems.
@@ -873,12 +876,11 @@ impl LanguageRecord {
         synodic_months_per_year: f64,
         rng: &mut Pcg64Mcg,
     ) {
+        if moon_count == 0 || synodic_months_per_year <= 0.0 {
+            return;
+        }
         let roll = rng.uniform(0.0, 1.0);
-        let (mode, group_size, count) = if moon_count == 0 || synodic_months_per_year <= 0.0 {
-            let choices = [4u32, 6, 8, 12];
-            let c = choices[(rng.next_u64() as usize) % choices.len()];
-            (MONTH_MODE_SOLAR, c, c)
-        } else if synodic_months_per_year < 5.0 {
+        let (mode, group_size, count) = if synodic_months_per_year < 5.0 {
             if roll < 0.75 {
                 let c = (synodic_months_per_year * 2.0).round().clamp(2.0, 12.0) as u32;
                 (MONTH_MODE_HALF_MOON, 1, c)
@@ -10958,6 +10960,17 @@ mod tests {
             group_sizes.iter().all(|&g| g >= 2),
             "Grouped months must span at least 2 moon cycles, got {:?}",
             group_sizes
+        );
+
+        // 4. Moonless world: has year/day/hour, but NO month concept and NO named months
+        let moonless = LanguageRecord::new_for_state_with_calendar(99, 99, &[0], 0, &[], 0.0, &mut rng);
+        assert!(moonless.describes(ConceptKey::TimeUnit(TIME_UNIT_YEAR)));
+        assert!(moonless.describes(ConceptKey::TimeUnit(TIME_UNIT_DAY)));
+        assert!(moonless.describes(ConceptKey::TimeUnit(TIME_UNIT_HOUR)));
+        assert!(!moonless.describes(ConceptKey::TimeUnit(TIME_UNIT_MONTH)));
+        assert!(
+            !moonless.lexicon.keys().any(|ck| matches!(ck, ConceptKey::Month(_))),
+            "Moonless worlds should not coin any named months"
         );
     }
 }
