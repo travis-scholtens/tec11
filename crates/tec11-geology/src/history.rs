@@ -507,6 +507,35 @@ impl StateLinkItem {
     }
 }
 
+/// Compact event kind for state- and city-level historical chronicles (`1` byte).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HistoricalEventKind {
+    StateFounded = 0,
+    StateSplitFrom = 1,
+    StateSplitLost = 2,
+    StateConquered = 3,
+    StateAnnexed = 4,
+    BorderVictory = 5,
+    BorderDefeat = 6,
+    CapitalCaptured = 7,
+    TechAdopted = 8,
+    TradeOpened = 9,
+    TradeEnded = 10,
+    DialectFormed = 11,
+}
+
+/// Compact 20-byte `Copy` historical event record stored in `HistorySimulation::chronicle`
+/// with zero heap allocations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoricalEvent {
+    pub tick: u32,
+    pub primary_id: u32,
+    pub secondary_id: u32,
+    pub tile_idx: u32,
+    pub kind: HistoricalEventKind,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StateInspectionView {
     pub state_id: u32,
@@ -525,6 +554,7 @@ pub struct StateInspectionView {
     pub trade_partners: Vec<StateLinkItem>,
     pub conflicts: Vec<StateLinkItem>,
     pub water_routes: Vec<StateLinkItem>,
+    pub chronicle: Vec<StateLinkItem>,
     pub map_polygons: Vec<ZoomedMapPolygon>,
 }
 
@@ -535,13 +565,14 @@ impl StateInspectionView {
         let partners: Vec<String> = self.trade_partners.iter().map(|p| p.to_json()).collect();
         let conflicts: Vec<String> = self.conflicts.iter().map(|c| c.to_json()).collect();
         let routes: Vec<String> = self.water_routes.iter().map(|r| r.to_json()).collect();
+        let chronicle: Vec<String> = self.chronicle.iter().map(|e| e.to_json()).collect();
         let polys: Vec<String> = self.map_polygons.iter().map(|p| p.to_json()).collect();
         let r255 = (self.color_rgb[0] * 255.0).round().clamp(0.0, 255.0) as u8;
         let g255 = (self.color_rgb[1] * 255.0).round().clamp(0.0, 255.0) as u8;
         let b255 = (self.color_rgb[2] * 255.0).round().clamp(0.0, 255.0) as u8;
         let color_css = format!("rgb({r255}, {g255}, {b255})");
         format!(
-            "{{\"hasState\":true,\"stateId\":{},\"stateName\":{},\"colorCss\":{},\"continents\":{},\"technology\":{},\"populationText\":{},\"capacityText\":{},\"tileCount\":{},\"asabiyaText\":{},\"nationalities\":[{}],\"languages\":[{}],\"exports\":{},\"imports\":{},\"tradePartners\":[{}],\"conflicts\":[{}],\"waterRoutes\":[{}],\"mapPolygons\":[{}]}}",
+            "{{\"hasState\":true,\"stateId\":{},\"stateName\":{},\"colorCss\":{},\"continents\":{},\"technology\":{},\"populationText\":{},\"capacityText\":{},\"tileCount\":{},\"asabiyaText\":{},\"nationalities\":[{}],\"languages\":[{}],\"exports\":{},\"imports\":{},\"tradePartners\":[{}],\"conflicts\":[{}],\"waterRoutes\":[{}],\"chronicle\":[{}],\"mapPolygons\":[{}]}}",
             self.state_id,
             json_escape(&self.state_name),
             json_escape(&color_css),
@@ -558,6 +589,7 @@ impl StateInspectionView {
             partners.join(","),
             conflicts.join(","),
             routes.join(","),
+            chronicle.join(","),
             polys.join(",")
         )
     }
@@ -1505,6 +1537,14 @@ pub struct HistorySimulation {
     nationalities: BTreeSet<u32>,
     trade_partners: Vec<StatePair>,
     conflicts: Vec<StatePair>,
+    /// Compact append-only historical chronicle of state and city/capital events.
+    chronicle: Vec<HistoricalEvent>,
+    /// Per-state index into `chronicle` for O(k) state history lookup.
+    state_chronicle_idx: BTreeMap<u32, Vec<u32>>,
+    /// Per-fine-tile index into `chronicle` for O(k) city/capital history lookup.
+    tile_chronicle_idx: BTreeMap<usize, Vec<u32>>,
+    /// Bitmask of recorded state tech milestones (bit 0 = bronzeworking, bit 1 = ironworking).
+    state_recorded_tech: BTreeMap<u32, u8>,
     next_state_id: u32,
     next_language_id: u32,
     rng: Pcg64Mcg,
@@ -1651,6 +1691,10 @@ impl HistorySimulation {
             nationalities: BTreeSet::new(),
             trade_partners: Vec::new(),
             conflicts: Vec::new(),
+            chronicle: Vec::new(),
+            state_chronicle_idx: BTreeMap::new(),
+            tile_chronicle_idx: BTreeMap::new(),
+            state_recorded_tech: BTreeMap::new(),
             next_state_id: 0,
             next_language_id: 0,
             rng: Pcg64Mcg::new(seed),
@@ -2305,6 +2349,15 @@ impl HistorySimulation {
                     },
                 );
             }
+        }
+
+        let initial_states: Vec<(u32, usize)> = self
+            .states
+            .values()
+            .map(|s| (s.id, s.capital_tile))
+            .collect();
+        for (sid, cap_f) in initial_states {
+            self.record_event(HistoricalEventKind::StateFounded, sid, 0, cap_f, true);
         }
 
         // Coin all constellations visible at some point in the year, local geographic features (continents, oceans,
@@ -3695,6 +3748,64 @@ impl HistorySimulation {
                 // If tension overcame Polachek commercial peace, abrogate the trade pact
                 partner_set.remove(&pair);
                 conflict_set.insert(pair);
+            }
+        }
+        let prev_partners: BTreeSet<StatePair> = self.trade_partners.iter().copied().collect();
+        if self.history_ticks > 0 {
+            for &pair in partner_set.difference(&prev_partners) {
+                let cap_a = self.states.get(&pair.a).map(|s| s.capital_tile).unwrap_or(0);
+                let cap_b = self.states.get(&pair.b).map(|s| s.capital_tile).unwrap_or(0);
+                self.record_event(HistoricalEventKind::TradeOpened, pair.a, pair.b, cap_a, false);
+                self.record_event(HistoricalEventKind::TradeOpened, pair.b, pair.a, cap_b, false);
+            }
+            for &pair in prev_partners.difference(&partner_set) {
+                // Only log TradeEnded if both states still exist (conquests are already logged)
+                if extents.contains_key(&pair.a) && extents.contains_key(&pair.b) {
+                    let cap_a = self.states.get(&pair.a).map(|s| s.capital_tile).unwrap_or(0);
+                    let cap_b = self.states.get(&pair.b).map(|s| s.capital_tile).unwrap_or(0);
+                    self.record_event(HistoricalEventKind::TradeEnded, pair.a, pair.b, cap_a, false);
+                    self.record_event(HistoricalEventKind::TradeEnded, pair.b, pair.a, cap_b, false);
+                }
+            }
+        }
+        // Record bronze/ironworking milestones once per state
+        for (&sid, tiles) in &extents {
+            let mut has_bronze = false;
+            let mut has_iron = false;
+            for &t in tiles {
+                if let Some(comms) = self.tile_communities.get(&t) {
+                    for c in comms {
+                        if c.thousands > 0.0 {
+                            if c.bronzeworking {
+                                has_bronze = true;
+                            }
+                            if c.ironworking {
+                                has_iron = true;
+                            }
+                        }
+                    }
+                }
+                if has_bronze && has_iron {
+                    break;
+                }
+            }
+            let mask = self.state_recorded_tech.get(&sid).copied().unwrap_or(0);
+            let cap = self.states.get(&sid).map(|s| s.capital_tile).unwrap_or(0);
+            let mut new_mask = mask;
+            if has_bronze && (mask & 1) == 0 {
+                new_mask |= 1;
+                if self.history_ticks > 0 {
+                    self.record_event(HistoricalEventKind::TechAdopted, sid, 0, cap, false);
+                }
+            }
+            if has_iron && (mask & 2) == 0 {
+                new_mask |= 2;
+                if self.history_ticks > 0 {
+                    self.record_event(HistoricalEventKind::TechAdopted, sid, 1, cap, false);
+                }
+            }
+            if new_mask != mask {
+                self.state_recorded_tech.insert(sid, new_mask);
             }
         }
         self.trade_partners = partner_set.into_iter().collect();
@@ -5788,11 +5899,18 @@ impl HistorySimulation {
         for &WarOutcome { winner, loser } in &results {
             if !losers.contains(&winner) {
                 conquests.entry(winner).or_default().insert(loser);
+                let loser_cap = self.states.get(&loser).map(|s| s.capital_tile).unwrap_or(0);
                 if let Some(loser_tiles) = extents.get(&loser) {
                     for &t in loser_tiles {
                         self.tile_states.insert(t, winner);
                     }
                 }
+                if let Some(st) = self.states.get_mut(&loser) {
+                    st.active = false;
+                }
+                self.record_event(HistoricalEventKind::StateAnnexed, winner, loser, loser_cap, false);
+                self.record_event(HistoricalEventKind::StateConquered, loser, winner, loser_cap, false);
+                self.record_event(HistoricalEventKind::CapitalCaptured, loser, winner, loser_cap, true);
             }
         }
         for &WarOutcome { winner, loser } in &border_transfers {
@@ -5833,8 +5951,29 @@ impl HistorySimulation {
                         }
                     }
                     border_faces.truncate(6.min(loser_tiles.len().saturating_sub(1)));
+                    let first_captured = border_faces.first().copied();
+                    let loser_cap = self.states.get(&loser).map(|s| s.capital_tile);
+                    let mut cap_captured = false;
                     for t in border_faces {
                         self.tile_states.insert(t, winner);
+                        if loser_cap == Some(t) {
+                            cap_captured = true;
+                        }
+                    }
+                    if let Some(site) = first_captured {
+                        self.record_event(HistoricalEventKind::BorderVictory, winner, loser, site, false);
+                        self.record_event(HistoricalEventKind::BorderDefeat, loser, winner, site, false);
+                        if cap_captured {
+                            if let Some(cap_t) = loser_cap {
+                                self.record_event(
+                                    HistoricalEventKind::CapitalCaptured,
+                                    loser,
+                                    winner,
+                                    cap_t,
+                                    true,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -5913,6 +6052,14 @@ impl HistorySimulation {
                             old_lang = Some(winner_lang);
                             winner_lang = new_lid;
                             created_dialect = true;
+                            let w_cap = self.states.get(&winner).map(|s| s.capital_tile).unwrap_or(0);
+                            self.record_event(
+                                HistoricalEventKind::DialectFormed,
+                                winner,
+                                new_lid,
+                                w_cap,
+                                false,
+                            );
                         }
                     }
                     if let Some(donor) = self.languages.get(&lang).cloned() {
@@ -6044,6 +6191,20 @@ impl HistorySimulation {
                         active: true,
                         asabiya: breakaway_asabiya,
                     },
+                );
+                self.record_event(
+                    HistoricalEventKind::StateSplitFrom,
+                    new_state,
+                    n,
+                    cities[i],
+                    true,
+                );
+                self.record_event(
+                    HistoricalEventKind::StateSplitLost,
+                    n,
+                    new_state,
+                    cities[i],
+                    false,
                 );
 
                 // Coin the new state's name in its majority language and borrow into minority languages
@@ -6948,6 +7109,11 @@ impl HistorySimulation {
             }
         ));
 
+        let city_history = self.format_tile_chronicle(fine_idx);
+        if !city_history.is_empty() {
+            lines.push(format!("City History: {}", city_history.join(" | ")));
+        }
+
         // Sample lexicon from primary language (including celestial Sun, Moons, Planets & Constellations)
         if let Some(lid) = dom_lang {
             if let Some(lang) = self.languages.get(&lid) {
@@ -7480,6 +7646,178 @@ impl HistorySimulation {
         polygons
     }
 
+    /// Append a compact 20-byte historical event to `chronicle` and index it by `primary_id`
+    /// (and optionally by `tile_idx` for city/capital-level history).
+    fn record_event(
+        &mut self,
+        kind: HistoricalEventKind,
+        primary_id: u32,
+        secondary_id: u32,
+        tile_idx: usize,
+        record_on_tile: bool,
+    ) {
+        let ev_idx = self.chronicle.len() as u32;
+        self.chronicle.push(HistoricalEvent {
+            tick: self.history_ticks,
+            primary_id,
+            secondary_id,
+            tile_idx: tile_idx as u32,
+            kind,
+        });
+        self.state_chronicle_idx
+            .entry(primary_id)
+            .or_default()
+            .push(ev_idx);
+        if record_on_tile {
+            self.tile_chronicle_idx
+                .entry(tile_idx)
+                .or_default()
+                .push(ev_idx);
+        }
+    }
+
+    /// Format the chronological history of `state_id` as clickable [`StateLinkItem`] entries.
+    pub fn format_state_chronicle(&self, state_id: u32) -> Vec<StateLinkItem> {
+        let Some(indices) = self.state_chronicle_idx.get(&state_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            let Some(&ev) = self.chronicle.get(idx as usize) else {
+                continue;
+            };
+            let year = ev.tick * HISTORY_YEARS_PER_TICK;
+            let yr_prefix = format!("Yr {year}: ");
+            let item = match ev.kind {
+                HistoricalEventKind::StateFounded => StateLinkItem {
+                    state_id: None,
+                    prefix: yr_prefix,
+                    label: format!("Founded at capital (Tile #{})", ev.tile_idx),
+                    suffix: String::new(),
+                },
+                HistoricalEventKind::StateSplitFrom => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Split from "),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: format!(" (capital Tile #{})", ev.tile_idx),
+                },
+                HistoricalEventKind::StateSplitLost => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Breakaway state "),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: " seceded".to_string(),
+                },
+                HistoricalEventKind::StateConquered => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Conquered and annexed by "),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: String::new(),
+                },
+                HistoricalEventKind::StateAnnexed => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Conquered and annexed "),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: String::new(),
+                },
+                HistoricalEventKind::BorderVictory => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Captured territory from "),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: String::new(),
+                },
+                HistoricalEventKind::BorderDefeat => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Lost territory to "),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: String::new(),
+                },
+                HistoricalEventKind::CapitalCaptured => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Capital (Tile #{}) captured by ", ev.tile_idx),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: String::new(),
+                },
+                HistoricalEventKind::TechAdopted => {
+                    let tech_name = if ev.secondary_id == 0 {
+                        "bronzeworking"
+                    } else {
+                        "ironworking"
+                    };
+                    StateLinkItem {
+                        state_id: None,
+                        prefix: yr_prefix,
+                        label: format!("Adopted {tech_name}"),
+                        suffix: String::new(),
+                    }
+                }
+                HistoricalEventKind::TradeOpened => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Opened trade with "),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: String::new(),
+                },
+                HistoricalEventKind::TradeEnded => StateLinkItem {
+                    state_id: Some(ev.secondary_id),
+                    prefix: format!("{yr_prefix}Trade ended with "),
+                    label: self.state_name(ev.secondary_id),
+                    suffix: String::new(),
+                },
+                HistoricalEventKind::DialectFormed => {
+                    let lname = self
+                        .languages
+                        .get(&ev.secondary_id)
+                        .map(|l| l.name())
+                        .unwrap_or_else(|| format!("Lang_{}", ev.secondary_id + 1));
+                    StateLinkItem {
+                        state_id: None,
+                        prefix: yr_prefix,
+                        label: format!("New dialect emerged ({lname})"),
+                        suffix: String::new(),
+                    }
+                }
+            };
+            out.push(item);
+        }
+        out
+    }
+
+    /// Format city/capital-level historical events recorded at fine tile `fine_idx`.
+    pub fn format_tile_chronicle(&self, fine_idx: usize) -> Vec<String> {
+        let Some(indices) = self.tile_chronicle_idx.get(&fine_idx) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            let Some(&ev) = self.chronicle.get(idx as usize) else {
+                continue;
+            };
+            let year = ev.tick * HISTORY_YEARS_PER_TICK;
+            let line = match ev.kind {
+                HistoricalEventKind::StateFounded => {
+                    format!("Yr {year}: Capital founded by {}", self.state_name(ev.primary_id))
+                }
+                HistoricalEventKind::StateSplitFrom => format!(
+                    "Yr {year}: Seceded from {} as capital of {}",
+                    self.state_name(ev.secondary_id),
+                    self.state_name(ev.primary_id)
+                ),
+                HistoricalEventKind::CapitalCaptured => format!(
+                    "Yr {year}: Captured from {} by {}",
+                    self.state_name(ev.primary_id),
+                    self.state_name(ev.secondary_id)
+                ),
+                _ => continue,
+            };
+            out.push(line);
+        }
+        out
+    }
+
+    /// Total number of recorded historical events in the simulation chronicle.
+    pub fn chronicle_len(&self) -> usize {
+        self.chronicle.len()
+    }
+
     /// Inspect the state ruling `display_idx` (if `display_idx` is a fine face belonging to a state).
     pub fn inspect_state_for_tile(&self, display_idx: usize) -> Option<StateInspectionView> {
         let face = self.terrain.display_faces.get(display_idx)?;
@@ -7504,10 +7842,32 @@ impl HistorySimulation {
             export_minerals,
             ..
         } = self.state_topology(fine_adj);
-        let tiles = extents.get(&state_id)?;
-        if tiles.is_empty() {
-            return None;
-        }
+        let Some(tiles) = extents.get(&state_id).filter(|t| !t.is_empty()) else {
+            // Allow inspecting former/conquered states via clickable chronicle links
+            let st_rec = self.states.get(&state_id)?;
+            let st_name = format!("{} (Former State)", self.state_name(state_id));
+            let color_rgb = NATION_PALETTE[st_rec.color_idx % NATION_PALETTE.len()];
+            return Some(StateInspectionView {
+                state_id,
+                state_name: st_name,
+                color_rgb,
+                continents: "Extinct / Conquered".to_string(),
+                technology: "—".to_string(),
+                population_text: "0".to_string(),
+                capacity_text: "0".to_string(),
+                tile_count: 0,
+                asabiya_text: "—".to_string(),
+                nationalities: Vec::new(),
+                languages: Vec::new(),
+                exports: Vec::new(),
+                imports: Vec::new(),
+                trade_partners: Vec::new(),
+                conflicts: Vec::new(),
+                water_routes: Vec::new(),
+                chronicle: self.format_state_chronicle(state_id),
+                map_polygons: Vec::new(),
+            });
+        };
 
         let st_name = self.state_name(state_id);
         let cidx = self
@@ -7862,6 +8222,7 @@ impl HistorySimulation {
             trade_partners,
             conflicts,
             water_routes,
+            chronicle: self.format_state_chronicle(state_id),
             map_polygons,
         })
     }
@@ -10973,5 +11334,46 @@ mod tests {
             !moonless.lexicon.keys().any(|ck| matches!(ck, ConceptKey::Month(_))),
             "Moonless worlds should not coin any named months"
         );
+    }
+
+    #[test]
+    fn test_state_and_city_historical_chronicle() {
+        assert!(
+            std::mem::size_of::<HistoricalEvent>() <= 24,
+            "HistoricalEvent should remain compact (<= 24 bytes), got {}",
+            std::mem::size_of::<HistoricalEvent>()
+        );
+        let mut sim = HistorySimulation::new_earth(42);
+        assert!(
+            sim.chronicle_len() > 0,
+            "Expected initial state/capital founding events in chronicle"
+        );
+        let first_state_id = *sim.states.keys().next().expect("at least one initial state");
+        let cap_tile = sim.states[&first_state_id].capital_tile;
+        let init_events = sim.format_state_chronicle(first_state_id);
+        assert!(
+            init_events.iter().any(|e| e.label.contains("Founded")),
+            "Expected initial StateFounded event in state chronicle"
+        );
+        let tile_events = sim.format_tile_chronicle(cap_tile);
+        assert!(
+            tile_events.iter().any(|l| l.contains("Capital founded")),
+            "Expected Capital founded event in tile chronicle"
+        );
+
+        // Advance several ticks and verify chronicle grows and StateInspectionView includes it
+        let before_len = sim.chronicle_len();
+        for _ in 0..4 {
+            sim.step();
+        }
+        assert!(
+            sim.chronicle_len() >= before_len,
+            "Chronicle should append events over History ticks"
+        );
+        let view = sim
+            .inspect_state(first_state_id, Some(cap_tile))
+            .expect("inspect_state should work for both active and conquered former states");
+        assert!(!view.chronicle.is_empty());
+        assert!(view.to_json().contains("\"chronicle\":["));
     }
 }

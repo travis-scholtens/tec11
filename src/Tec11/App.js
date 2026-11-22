@@ -3258,6 +3258,7 @@ function emptyStateView() {
     tradePartners: [],
     conflicts: [],
     waterRoutes: [],
+    chronicle: [],
     canGoBack: false,
     backStateName: "",
   };
@@ -3769,6 +3770,7 @@ function buildHistoryInspectorBundle(view) {
           tradePartners: normalizeStateLinkList(parsedState.tradePartners),
           conflicts: normalizeStateLinkList(parsedState.conflicts),
           waterRoutes: normalizeStateLinkList(parsedState.waterRoutes),
+          chronicle: normalizeStateLinkList(parsedState.chronicle),
           canGoBack: navStack.length > 0,
           backStateName: topBack ? topBack.stateName || "" : "",
         };

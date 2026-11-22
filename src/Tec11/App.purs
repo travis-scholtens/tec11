@@ -232,6 +232,7 @@ type StateViewInfo =
   , tradePartners :: Array StateLinkItem
   , conflicts :: Array StateLinkItem
   , waterRoutes :: Array StateLinkItem
+  , chronicle :: Array StateLinkItem
   , canGoBack :: Boolean
   , backStateName :: String
   }
@@ -301,6 +302,7 @@ defaultStateViewInfo =
   , tradePartners: []
   , conflicts: []
   , waterRoutes: []
+  , chronicle: []
   , canGoBack: false
   , backStateName: ""
   }
@@ -6832,6 +6834,17 @@ mkApp = do
                                                         , renderStateLinkList st.waterRoutes st.stateId selectInspectorState "None"
                                                         ]
                                                     }
+                                              , R.div
+                                                  { className: "tile-details-box"
+                                                  , style: R.css { maxHeight: "190px", overflowY: "auto" }
+                                                  , children:
+                                                      [ R.div
+                                                          { style: R.css { fontWeight: "700", color: "#fcd34d", marginBottom: "4px" }
+                                                          , children: [ R.text ("Historical Chronicle (" <> show (Array.length st.chronicle) <> ")") ]
+                                                          }
+                                                      , renderStateLinkList st.chronicle st.stateId selectInspectorState "No recorded events"
+                                                      ]
+                                                  }
                                               , renderNationDetailCard nat (if lang.hasLanguage then lang.langId else -1) st.stateId
                                               , renderLanguageDetailCard lang (if nat.hasNation then nat.natId else -1) st.stateId
                                               ]
