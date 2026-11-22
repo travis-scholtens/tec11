@@ -1584,7 +1584,7 @@ impl HistorySimulation {
         }
 
         let _span_subdiv = crate::profile::span(crate::profile::ProfilePhase::HistInitSubdivideAndKdTree);
-        let coarse_elevs: Vec<f32> = prehistory.tiles().iter().map(|t| t.elevation()).collect();
+        let coarse_elevs: Vec<f32> = prehistory.tile_elevations();
         let coarse_mounts: Vec<f32> = prehistory.tiles().iter().map(|t| t.mountainosity).collect();
         let coarse_thicks: Option<Vec<f32>> = prehistory
             .is_custom_planet()

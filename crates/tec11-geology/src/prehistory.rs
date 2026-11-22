@@ -167,6 +167,9 @@ pub struct PrehistorySimulation {
     prehistory_ticks: u32,
     glaciation_tick: u32,
     glaciation: f64,
+    /// Eustatic sea-level offset in model elevation units (`<= 0.0` during glacial periods,
+    /// up to `-0.12 km` on custom planets or `-120/550` on canned Earth at glacial maximum).
+    eustatic_sea_level_km: f32,
     tiles: Vec<TileGeology>,
     groups: Vec<LithosphericGroup>,
     climate_model: ClimateModel,
@@ -374,6 +377,7 @@ impl PrehistorySimulation {
             prehistory_ticks: 0,
             glaciation_tick: 0,
             glaciation: EARTH_GLACIATION,
+            eustatic_sea_level_km: Self::compute_eustatic_sea_level(EARTH_GLACIATION, false),
             tiles,
             groups,
             climate_model,
@@ -445,6 +449,7 @@ impl PrehistorySimulation {
             prehistory_ticks: 0,
             glaciation_tick: initial_glaciation_tick,
             glaciation: initial_glaciation,
+            eustatic_sea_level_km: Self::compute_eustatic_sea_level(initial_glaciation, true),
             tiles,
             groups,
             climate_model,
@@ -528,6 +533,7 @@ impl PrehistorySimulation {
             prehistory_ticks: self.prehistory_ticks,
             glaciation_tick: self.glaciation_tick,
             glaciation,
+            eustatic_sea_level_km: Self::compute_eustatic_sea_level(glaciation, self.is_custom),
             tiles,
             groups,
             climate_model,
@@ -566,6 +572,8 @@ impl PrehistorySimulation {
         self.prehistory_ticks = 0;
         self.glaciation_tick = 0;
         self.glaciation = initial_glaciation;
+        self.eustatic_sea_level_km =
+            Self::compute_eustatic_sea_level(initial_glaciation, self.is_custom);
         self.populated.clear();
         self.heritages.clear();
         self.agricultural_heritages.clear();
@@ -593,10 +601,12 @@ impl PrehistorySimulation {
             })
             .collect();
 
-        // 2. Sinusoidal Pleistocene-style glaciation cycle (`prehistorysimulation.py:109`).
+        // 2. Sinusoidal Pleistocene-style glaciation cycle (`prehistorysimulation.py:109`)
+        //    plus eustatic sea-level drop (~120 m at glacial maximum) exposing shallow continental shelves.
         let glaciation =
             0.5 - ((self.glaciation_tick as f64) * PI / (PREHISTORY_GLACIATION_STEP as f64)).cos() / 2.0;
         self.glaciation = glaciation;
+        self.eustatic_sea_level_km = Self::compute_eustatic_sea_level(glaciation, self.is_custom);
         self.climate_model.set_glaciation_only(glaciation);
 
         // 3. Recompute climate and remove populated tiles that became uninhabitable (`prehistorysimulation.py:110-114`).
@@ -605,8 +615,9 @@ impl PrehistorySimulation {
         let subgrid_koeppen = &self.subgrid_island_koeppen;
         let tile_koeppen = &self.tile_koeppen;
         let tiles_ref = &self.tiles;
+        let sea_level = self.eustatic_sea_level_km;
         self.populated.retain(|&t, &mut hid| {
-            let e = tiles_ref[t].elevation();
+            let e = tiles_ref[t].elevation() - sea_level;
             let is_ag = ag_heritages.contains(&hid);
             if e > 0.0 {
                 is_habitable(e, tile_koeppen[t]) || (is_ag && is_farmable(e, tile_koeppen[t]))
@@ -641,7 +652,7 @@ impl PrehistorySimulation {
         drop(_span_glac);
         let _span_riv = crate::profile::span(crate::profile::ProfilePhase::PreRiversAndTechSparks);
         // 6. Seed Eden if currently unpopulated (`prehistorysimulation.py:126-127`).
-        let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
+        let elevations: Vec<f32> = self.tile_elevations();
         if self.populated.is_empty() {
             if let Some(eden) = eden_tile(
                 &elevations,
@@ -843,9 +854,10 @@ impl PrehistorySimulation {
         }
         if self.is_custom {
             for v in 0..n {
-                if self.tiles[v].elevation() <= 0.0 {
+                let eff_e = self.tiles[v].elevation() - self.eustatic_sea_level_km;
+                if eff_e <= 0.0 {
                     if let Some(pk) = tec11_math_grid::compute_subgrid_volcanic_peak_km(
-                        self.tiles[v].elevation(),
+                        eff_e,
                         self.tiles[v].thickness(),
                         self.tiles[v].mountainosity,
                     ) {
@@ -859,10 +871,11 @@ impl PrehistorySimulation {
     }
 
     fn refresh_climate(&mut self) {
+        let sea_level = self.eustatic_sea_level_km;
         let land_elevs: Vec<f32> = self
             .tiles
             .iter()
-            .map(|t| t.elevation().max(0.0))
+            .map(|t| (t.elevation() - sea_level).max(0.0))
             .collect();
         self.climate_model.update_for_glaciation_step(&land_elevs, true);
         self.sync_classification_arrays();
@@ -935,14 +948,15 @@ impl PrehistorySimulation {
     }
 
     fn refresh_climate_and_rivers_without_biosphere(&mut self) -> Vec<f32> {
+        let sea_level = self.eustatic_sea_level_km;
         let land_elevs: Vec<f32> = self
             .tiles
             .iter()
-            .map(|t| t.elevation().max(0.0))
+            .map(|t| (t.elevation() - sea_level).max(0.0))
             .collect();
         self.climate_model.update_for_tectonics(&land_elevs, true);
         self.sync_classification_arrays();
-        let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
+        let elevations: Vec<f32> = self.tile_elevations();
         self.refresh_rivers(&elevations);
         *self.settled_biosphere.get_mut() = None;
         elevations
@@ -1115,6 +1129,7 @@ impl PrehistorySimulation {
                     prehistory_ticks: 0,
                     glaciation_tick: 0,
                     glaciation: 0.5,
+                    eustatic_sea_level_km: Self::compute_eustatic_sea_level(0.5, true),
                     tiles,
                     groups,
                     climate_model,
@@ -1279,6 +1294,7 @@ impl PrehistorySimulation {
             prehistory_ticks: pre.prehistory_ticks,
             glaciation_tick: pre.glaciation_tick,
             glaciation,
+            eustatic_sea_level_km: Self::compute_eustatic_sea_level(glaciation, true),
             tiles,
             groups,
             climate_model,
@@ -1486,8 +1502,26 @@ impl PrehistorySimulation {
             .sum()
     }
 
+    /// Compute eustatic sea-level offset (`<= 0.0`) from the current glaciation index (`0.0` at
+    /// glacial maximum → `-120 m`, `1.0` at full interglacial → `0 m`).
+    #[inline]
+    pub fn compute_eustatic_sea_level(glaciation: f64, is_custom: bool) -> f32 {
+        let max_drop = if is_custom { 0.12f32 } else { 120.0 / 550.0 };
+        -max_drop * (1.0 - glaciation as f32).clamp(0.0, 1.0)
+    }
+
+    /// Current eustatic sea-level offset in physical meters (`-120.0` at glacial maximum to `0.0`
+    /// at full interglacial).
+    pub fn eustatic_sea_level_m(&self) -> f32 {
+        -120.0 * (1.0 - self.glaciation as f32).clamp(0.0, 1.0)
+    }
+
     pub fn tile_elevations(&self) -> Vec<f32> {
-        self.tiles.iter().map(|t| t.elevation()).collect()
+        let sea_level = self.eustatic_sea_level_km;
+        self.tiles
+            .iter()
+            .map(|t| t.elevation() - sea_level)
+            .collect()
     }
 
     pub fn tile_felsities(&self) -> Vec<f32> {
@@ -1983,5 +2017,34 @@ mod tests {
         assert!(agriculture_glaciation_factor(EARTH_GLACIATION) > 0.7);
         assert!((agriculture_glaciation_factor(0.50) - 1.0).abs() < 1e-12);
         assert!((agriculture_glaciation_factor(1.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_eustatic_sea_level_exposes_and_submerges_glacial_land_bridges() {
+        let mut sim = PrehistorySimulation::new_earth(42);
+        // Step at glacial maximum (glaciation_tick = 0 -> glaciation = 0.0 -> -120 m sea level)
+        sim.glaciation_tick = 0;
+        sim.step();
+        assert!(
+            sim.eustatic_sea_level_m() <= -119.0,
+            "Expected ~-120 m eustatic drop at glacial maximum, got {}",
+            sim.eustatic_sea_level_m()
+        );
+        let lgm_land = sim.tile_elevations().iter().filter(|&&e| e > 0.0).count();
+
+        // Step at full interglacial (glaciation_tick = PREHISTORY_GLACIATION_STEP -> glaciation = 1.0 -> 0 m)
+        sim.glaciation_tick = PREHISTORY_GLACIATION_STEP;
+        sim.step();
+        assert!(
+            sim.eustatic_sea_level_m().abs() < 1e-3,
+            "Expected 0 m eustatic offset at full interglacial, got {}",
+            sim.eustatic_sea_level_m()
+        );
+        let interglacial_land = sim.tile_elevations().iter().filter(|&&e| e > 0.0).count();
+
+        assert!(
+            lgm_land > interglacial_land,
+            "Expected eustatic sea-level drop at LGM to expose shallow continental shelves ({lgm_land} vs {interglacial_land} land tiles)"
+        );
     }
 }
