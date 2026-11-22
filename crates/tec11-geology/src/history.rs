@@ -3604,6 +3604,8 @@ impl HistorySimulation {
             st.active = active_states.contains(&st.id);
         }
 
+        let prev_partners: BTreeSet<StatePair> = self.trade_partners.iter().copied().collect();
+
         // Prune any stale trade partnerships or conflicts involving extinct or non-neighboring states
         let is_valid_pair = |pair: &StatePair| {
             active_states.contains(&pair.a)
@@ -3750,14 +3752,13 @@ impl HistorySimulation {
                 conflict_set.insert(pair);
             }
         }
-        let prev_partners: BTreeSet<StatePair> = self.trade_partners.iter().copied().collect();
+        for &pair in partner_set.difference(&prev_partners) {
+            let cap_a = self.states.get(&pair.a).map(|s| s.capital_tile).unwrap_or(0);
+            let cap_b = self.states.get(&pair.b).map(|s| s.capital_tile).unwrap_or(0);
+            self.record_event(HistoricalEventKind::TradeOpened, pair.a, pair.b, cap_a, false);
+            self.record_event(HistoricalEventKind::TradeOpened, pair.b, pair.a, cap_b, false);
+        }
         if self.history_ticks > 0 {
-            for &pair in partner_set.difference(&prev_partners) {
-                let cap_a = self.states.get(&pair.a).map(|s| s.capital_tile).unwrap_or(0);
-                let cap_b = self.states.get(&pair.b).map(|s| s.capital_tile).unwrap_or(0);
-                self.record_event(HistoricalEventKind::TradeOpened, pair.a, pair.b, cap_a, false);
-                self.record_event(HistoricalEventKind::TradeOpened, pair.b, pair.a, cap_b, false);
-            }
             for &pair in prev_partners.difference(&partner_set) {
                 // Only log TradeEnded if both states still exist (conquests are already logged)
                 if extents.contains_key(&pair.a) && extents.contains_key(&pair.b) {
@@ -11411,6 +11412,19 @@ mod tests {
             .expect("inspect_state should work for both active and conquered former states");
         assert!(!view.chronicle.is_empty());
         assert!(view.to_json().contains("\"chronicle\":["));
+
+        // Every state with active trade partners should have TradeOpened events in its chronicle
+        if let Some(pair) = sim.trade_partners.first().copied() {
+            let events_a = sim.format_state_chronicle(pair.a);
+            assert!(
+                events_a
+                    .iter()
+                    .any(|e| e.prefix.contains("Opened trade with") && e.state_id == Some(pair.b)),
+                "Expected TradeOpened event for active trading partner {} in state {}'s chronicle",
+                pair.b,
+                pair.a
+            );
+        }
 
         // Verify local orbital year conversion and precision-matched rounding
         assert_eq!(sim.tick_to_local_years(0), 0);
