@@ -238,6 +238,7 @@ pub enum ConceptKey {
     Species(u32),
     Nation(u32),
     State(u32),
+    City(u32),
     Language(u32),
     Rock(u32),
     Mineral(u32),
@@ -318,6 +319,10 @@ impl ConceptKey {
                 kind: tec11_proto::ConceptKind::State as i32,
                 id,
             },
+            Self::City(id) => tec11_proto::Concept {
+                kind: tec11_proto::ConceptKind::City as i32,
+                id,
+            },
             Self::Language(id) => tec11_proto::Concept {
                 kind: tec11_proto::ConceptKind::Language as i32,
                 id,
@@ -355,6 +360,7 @@ impl ConceptKey {
             tec11_proto::ConceptKind::Species => Self::Species(c.id),
             tec11_proto::ConceptKind::Nation => Self::Nation(c.id),
             tec11_proto::ConceptKind::State => Self::State(c.id),
+            tec11_proto::ConceptKind::City => Self::City(c.id),
             tec11_proto::ConceptKind::Language => Self::Language(c.id),
             tec11_proto::ConceptKind::Rock => Self::Rock(c.id),
             tec11_proto::ConceptKind::Mineral => Self::Mineral(c.id),
@@ -1547,6 +1553,11 @@ pub struct HistorySimulation {
     tile_chronicle_idx: BTreeMap<usize, Vec<u32>>,
     /// Bitmask of recorded state tech milestones (bit 0 = bronzeworking, bit 1 = ironworking).
     state_recorded_tech: BTreeMap<u32, u8>,
+    /// Mapping from fine tile index to named `city_id` (`ConceptKey::City`).
+    tile_cities: BTreeMap<usize, u32>,
+    /// Original founding language ID for each named city.
+    city_founding_lang: BTreeMap<u32, u32>,
+    next_city_id: u32,
     next_state_id: u32,
     next_language_id: u32,
     rng: Pcg64Mcg,
@@ -1697,6 +1708,9 @@ impl HistorySimulation {
             state_chronicle_idx: BTreeMap::new(),
             tile_chronicle_idx: BTreeMap::new(),
             state_recorded_tech: BTreeMap::new(),
+            tile_cities: BTreeMap::new(),
+            city_founding_lang: BTreeMap::new(),
+            next_city_id: 0,
             next_state_id: 0,
             next_language_id: 0,
             rng: Pcg64Mcg::new(seed),
@@ -2355,12 +2369,15 @@ impl HistorySimulation {
             }
         }
 
-        let initial_states: Vec<(u32, usize)> = self
+        let initial_states: Vec<(u32, usize, Option<u32>)> = self
             .states
             .values()
-            .map(|s| (s.id, s.capital_tile))
+            .map(|s| (s.id, s.capital_tile, s.founding_language_id))
             .collect();
-        for (sid, cap_f) in initial_states {
+        for (sid, cap_f, founding_lid) in initial_states {
+            if let Some(lid) = founding_lid {
+                self.ensure_city_at_tile(cap_f, lid);
+            }
             self.record_event(HistoricalEventKind::StateFounded, sid, 0, cap_f, true);
         }
 
@@ -5156,7 +5173,10 @@ impl HistorySimulation {
                     continue;
                 }
                 let weight = match ck {
-                    ConceptKey::Language(_) | ConceptKey::Nation(_) | ConceptKey::State(_) => 0,
+                    ConceptKey::Language(_)
+                    | ConceptKey::Nation(_)
+                    | ConceptKey::State(_)
+                    | ConceptKey::City(_) => 0,
                     ConceptKey::Culture(_)
                     | ConceptKey::Mineral(_)
                     | ConceptKey::Rock(_)
@@ -5913,6 +5933,11 @@ impl HistorySimulation {
                 if let Some(st) = self.states.get_mut(&loser) {
                     st.active = false;
                 }
+                if let Some(&cid) = self.tile_cities.get(&loser_cap) {
+                    if let Some(w_lid) = self.primary_language_for_state(winner) {
+                        self.borrow_city_into_language(cid, w_lid);
+                    }
+                }
                 self.record_event(HistoricalEventKind::StateAnnexed, winner, loser, loser_cap, false);
                 self.record_event(HistoricalEventKind::StateConquered, loser, winner, loser_cap, false);
                 self.record_event(HistoricalEventKind::CapitalCaptured, loser, winner, loser_cap, true);
@@ -6213,7 +6238,9 @@ impl HistorySimulation {
                     false,
                 );
 
-                // Coin the new state's name in its majority language and borrow into minority languages
+                // Coin the new state's name (and capital city name if not already named)
+                // in its majority language and borrow into minority languages
+                let cap_cid = self.ensure_city_at_tile(cities[i], maj_lang);
                 let mut temp_rng = self.rng.clone();
                 if let Some(lang) = self.languages.get_mut(&maj_lang) {
                     lang.coin_concept(ConceptKey::State(new_state), &mut temp_rng);
@@ -6223,6 +6250,7 @@ impl HistorySimulation {
                     for &(min_lang, _) in langs_by_pop.iter().skip(1) {
                         if let Some(lang) = self.languages.get_mut(&min_lang) {
                             lang.borrow_concept(ConceptKey::State(new_state), &donor);
+                            lang.borrow_concept(ConceptKey::City(cap_cid), &donor);
                         }
                     }
                 }
@@ -6339,6 +6367,86 @@ impl HistorySimulation {
             }
         }
         format!("State {}", state_id + 1)
+    }
+
+    /// Ensure fine tile `fine_idx` has a named city (`ConceptKey::City`), coining it in
+    /// `founding_lang_id` if new or borrowing it into `founding_lang_id` if already named.
+    fn ensure_city_at_tile(&mut self, fine_idx: usize, founding_lang_id: u32) -> u32 {
+        if let Some(&cid) = self.tile_cities.get(&fine_idx) {
+            self.borrow_city_into_language(cid, founding_lang_id);
+            return cid;
+        }
+        let cid = self.next_city_id;
+        self.next_city_id += 1;
+        self.tile_cities.insert(fine_idx, cid);
+        self.city_founding_lang.insert(cid, founding_lang_id);
+        let mut temp_rng = self.rng.clone();
+        if let Some(lang) = self.languages.get_mut(&founding_lang_id) {
+            lang.coin_concept(ConceptKey::City(cid), &mut temp_rng);
+        }
+        self.rng = temp_rng;
+        cid
+    }
+
+    fn borrow_city_into_language(&mut self, city_id: u32, recipient_lang_id: u32) {
+        let key = ConceptKey::City(city_id);
+        if self
+            .languages
+            .get(&recipient_lang_id)
+            .is_some_and(|l| l.describes(key))
+        {
+            return;
+        }
+        let donor_opt = self
+            .city_founding_lang
+            .get(&city_id)
+            .copied()
+            .and_then(|fid| {
+                let d = self.languages.get(&fid)?;
+                Some((fid, d.lexicon.get(&key)?.clone()))
+            })
+            .or_else(|| {
+                self.languages
+                    .values()
+                    .find_map(|d| Some((d.id, d.lexicon.get(&key)?.clone())))
+            });
+        if let Some((donor_id, donor_origin)) = donor_opt {
+            if let Some(lang) = self.languages.get_mut(&recipient_lang_id) {
+                lang.borrow_concept_origin(key, donor_id, &donor_origin);
+            }
+        }
+    }
+
+    /// Resolve a city's linguistic name in `viewer_lang` (if known), falling back to its
+    /// founding language or any language attesting `ConceptKey::City(city_id)`.
+    pub fn city_name(&self, city_id: u32, viewer_lang: Option<u32>) -> String {
+        let key = ConceptKey::City(city_id);
+        if let Some(lid) = viewer_lang {
+            if let Some(orig) = self.languages.get(&lid).and_then(|l| l.lexicon.get(&key)) {
+                return orig.word.write(true);
+            }
+        }
+        if let Some(&fid) = self.city_founding_lang.get(&city_id) {
+            if let Some(orig) = self.languages.get(&fid).and_then(|l| l.lexicon.get(&key)) {
+                return orig.word.write(true);
+            }
+        }
+        for lang in self.languages.values() {
+            if let Some(orig) = lang.lexicon.get(&key) {
+                return orig.word.write(true);
+            }
+        }
+        format!("City {}", city_id + 1)
+    }
+
+    pub fn city_name_at_tile(&self, fine_idx: usize, viewer_lang: Option<u32>) -> Option<String> {
+        let &cid = self.tile_cities.get(&fine_idx)?;
+        Some(self.city_name(cid, viewer_lang))
+    }
+
+    fn city_label_at_tile(&self, fine_idx: usize, viewer_lang: Option<u32>) -> String {
+        self.city_name_at_tile(fine_idx, viewer_lang)
+            .unwrap_or_else(|| format!("Tile #{fine_idx}"))
     }
 
     pub fn nation_name(&self, nat_id: u32, display_lang_id: Option<u32>) -> String {
@@ -7375,6 +7483,10 @@ impl HistorySimulation {
                 let sname = self.state_name(id);
                 format!("state #{} ({sname})", id + 1)
             }
+            ConceptKey::City(id) => {
+                let cname = self.city_name(id, None);
+                format!("city ({cname})")
+            }
             ConceptKey::Nation(id) => {
                 let nname = self.nation_name(id, None);
                 format!("nation #{} ({nname})", id + 1)
@@ -7419,7 +7531,10 @@ impl HistorySimulation {
             | ConceptKey::River(_)
             | ConceptKey::MountainRange(_) => "Geo",
             ConceptKey::Species(_) => "Bio",
-            ConceptKey::State(_) | ConceptKey::Nation(_) | ConceptKey::Language(_) => "Polity",
+            ConceptKey::State(_)
+            | ConceptKey::City(_)
+            | ConceptKey::Nation(_)
+            | ConceptKey::Language(_) => "Polity",
             ConceptKey::Rock(_) | ConceptKey::Mineral(_) => "Geo",
         }
     }
@@ -7738,6 +7853,9 @@ impl HistorySimulation {
         let Some(indices) = self.state_chronicle_idx.get(&state_id) else {
             return Vec::new();
         };
+        let viewer_lang = self
+            .primary_language_for_state(state_id)
+            .or_else(|| self.states.get(&state_id).and_then(|s| s.founding_language_id));
         let mut out = Vec::with_capacity(indices.len());
         for &idx in indices {
             let Some(&ev) = self.chronicle.get(idx as usize) else {
@@ -7748,14 +7866,20 @@ impl HistorySimulation {
                 HistoricalEventKind::StateFounded => StateLinkItem {
                     state_id: None,
                     prefix: yr_prefix,
-                    label: format!("Founded at capital (Tile #{})", ev.tile_idx),
+                    label: format!(
+                        "Founded at capital {}",
+                        self.city_label_at_tile(ev.tile_idx as usize, viewer_lang)
+                    ),
                     suffix: String::new(),
                 },
                 HistoricalEventKind::StateSplitFrom => StateLinkItem {
                     state_id: Some(ev.secondary_id),
                     prefix: format!("{yr_prefix}Split from "),
                     label: self.state_name(ev.secondary_id),
-                    suffix: format!(" (capital Tile #{})", ev.tile_idx),
+                    suffix: format!(
+                        " (capital {})",
+                        self.city_label_at_tile(ev.tile_idx as usize, viewer_lang)
+                    ),
                 },
                 HistoricalEventKind::StateSplitLost => StateLinkItem {
                     state_id: Some(ev.secondary_id),
@@ -7789,7 +7913,10 @@ impl HistorySimulation {
                 },
                 HistoricalEventKind::CapitalCaptured => StateLinkItem {
                     state_id: Some(ev.secondary_id),
-                    prefix: format!("{yr_prefix}Capital (Tile #{}) captured by ", ev.tile_idx),
+                    prefix: format!(
+                        "{yr_prefix}Capital {} captured by ",
+                        self.city_label_at_tile(ev.tile_idx as usize, viewer_lang)
+                    ),
                     label: self.state_name(ev.secondary_id),
                     suffix: String::new(),
                 },
@@ -7842,6 +7969,13 @@ impl HistorySimulation {
         let Some(indices) = self.tile_chronicle_idx.get(&fine_idx) else {
             return Vec::new();
         };
+        let viewer_lang = self
+            .tile_states
+            .get(&fine_idx)
+            .and_then(|&sid| self.primary_language_for_state(sid));
+        let city_label = self
+            .city_name_at_tile(fine_idx, viewer_lang)
+            .unwrap_or_else(|| "Capital".to_string());
         let mut out = Vec::with_capacity(indices.len());
         for &idx in indices {
             let Some(&ev) = self.chronicle.get(idx as usize) else {
@@ -7850,15 +7984,15 @@ impl HistorySimulation {
             let yr_label = self.format_chronicle_year(ev.tick);
             let line = match ev.kind {
                 HistoricalEventKind::StateFounded => {
-                    format!("{yr_label}: Capital founded by {}", self.state_name(ev.primary_id))
+                    format!("{yr_label}: {city_label} founded by {}", self.state_name(ev.primary_id))
                 }
                 HistoricalEventKind::StateSplitFrom => format!(
-                    "{yr_label}: Seceded from {} as capital of {}",
+                    "{yr_label}: {city_label} seceded from {} as capital of {}",
                     self.state_name(ev.secondary_id),
                     self.state_name(ev.primary_id)
                 ),
                 HistoricalEventKind::CapitalCaptured => format!(
-                    "{yr_label}: Captured from {} by {}",
+                    "{yr_label}: {city_label} captured from {} by {}",
                     self.state_name(ev.primary_id),
                     self.state_name(ev.secondary_id)
                 ),
@@ -9122,10 +9256,14 @@ impl HistorySimulation {
             }
         }
 
-        let title = match (&state_name, is_capital) {
-            (Some(sname), true) => format!("Tile #{fine_idx} — ★ {sname} Capital"),
-            (Some(sname), false) => format!("Tile #{fine_idx} ({sname})"),
-            (None, _) => format!("Tile #{fine_idx} (Unclaimed Land)"),
+        let city_name = self.city_name_at_tile(fine_idx, primary_tile_lang);
+        let title = match (&city_name, &state_name, is_capital) {
+            (Some(cname), Some(sname), true) => format!("★ {cname} — {sname} Capital (Tile #{fine_idx})"),
+            (Some(cname), Some(sname), false) => format!("{cname} ({sname} · Tile #{fine_idx})"),
+            (Some(cname), None, _) => format!("{cname} (Tile #{fine_idx})"),
+            (None, Some(sname), true) => format!("Tile #{fine_idx} — ★ {sname} Capital"),
+            (None, Some(sname), false) => format!("Tile #{fine_idx} ({sname})"),
+            (None, None, _) => format!("Tile #{fine_idx} (Unclaimed Land)"),
         };
         let extra_suffix = if geo_extras.is_empty() {
             String::new()
@@ -11407,15 +11545,27 @@ mod tests {
         );
         let first_state_id = *sim.states.keys().next().expect("at least one initial state");
         let cap_tile = sim.states[&first_state_id].capital_tile;
+        let cap_city_name = sim
+            .city_name_at_tile(cap_tile, None)
+            .expect("initial capital should have a named city");
+        assert!(
+            !cap_city_name.starts_with("City "),
+            "Expected linguistic city name for capital, got {cap_city_name}"
+        );
         let init_events = sim.format_state_chronicle(first_state_id);
         assert!(
-            init_events.iter().any(|e| e.label.contains("Founded")),
-            "Expected initial StateFounded event in state chronicle"
+            init_events
+                .iter()
+                .any(|e| e.label.contains("Founded at capital") && e.label.contains(&cap_city_name)),
+            "Expected initial StateFounded event with named capital '{cap_city_name}' in state chronicle"
         );
         let tile_events = sim.format_tile_chronicle(cap_tile);
         assert!(
-            tile_events.iter().any(|l| l.contains("Capital founded")),
-            "Expected Capital founded event in tile chronicle"
+            tile_events
+                .iter()
+                .any(|l| l.contains(&cap_city_name) && l.contains("founded by")),
+            "Expected named city founding event in tile chronicle, got {:?}",
+            tile_events
         );
 
         // Advance several ticks and verify chronicle grows and StateInspectionView includes it

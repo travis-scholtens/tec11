@@ -186,6 +186,7 @@ message Concept {
     KIND_MINERAL = 18;
     KIND_TIME_UNIT = 19;
     KIND_MONTH = 20;
+    KIND_CITY = 21;
   }
   Kind kind = 1;
   uint32 id = 2;
