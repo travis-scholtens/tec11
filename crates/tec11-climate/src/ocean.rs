@@ -19,6 +19,8 @@ pub struct OceanCirculation {
     pub sst_anomaly: Vec<f32>,
     /// Marine thermal & moisture influence propagated onto land tiles in `[-1.0, 1.0]`.
     pub coastal_sst_influence: Vec<f32>,
+    /// Fractional sea-ice pack cover in `[0.0, 1.0]` (`0.0` on land or open water, `1.0` dense pack ice).
+    pub sea_ice_cover: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -794,12 +796,20 @@ pub fn solve_seasonal_ocean_circulation_with_geom(
                 std::mem::swap(&mut coastal_buf_a, &mut coastal_buf_b);
             }
 
+            let sea_ice_cover: Vec<f32> = sf
+                .ice_cover
+                .into_iter()
+                .enumerate()
+                .map(|(v, ic)| if elevations[v] > 0.0 { 0.0 } else { ic as f32 })
+                .collect();
+
             OceanCirculation {
                 streamfunction: sf.psi.into_iter().map(|p| p as f32).collect(),
                 velocity_xyz,
                 speed,
                 sst_anomaly,
                 coastal_sst_influence: coastal_buf_a.iter().map(|&t| t as f32).collect(),
+                sea_ice_cover,
             }
         })
         .collect()

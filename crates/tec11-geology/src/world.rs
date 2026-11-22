@@ -1265,6 +1265,23 @@ impl WorldSimulation {
     /// `"climate"` (Köppen climate zones + annual-mean ocean current/SST shading),
     /// `"borders"` (sovereign states + distinct terracotta for stateless populations),
     /// and `"population"` (log-density population heatmap).
+    /// Blend an ocean tile's RGB color toward bright polar sea-ice pack (`[0.84, 0.91, 0.97]`)
+    /// based on fractional `sea_ice` cover in `[0.0, 1.0]`.
+    #[inline]
+    pub fn blend_sea_ice_rgb(base: [f32; 3], sea_ice: f32) -> [f32; 3] {
+        let ice = sea_ice.clamp(0.0, 1.0);
+        if ice <= 0.02 {
+            return base;
+        }
+        let t = (ice * 0.90).clamp(0.0, 0.92);
+        let ice_rgb = [0.84f32, 0.91, 0.97];
+        [
+            base[0] * (1.0 - t) + ice_rgb[0] * t,
+            base[1] * (1.0 - t) + ice_rgb[1] * t,
+            base[2] * (1.0 - t) + ice_rgb[2] * t,
+        ]
+    }
+
     pub fn tile_colors_rgb(&self, aspect: &str, selected_tile: Option<usize>) -> Vec<f32> {
         let mut out = match &self.stage {
             WorldStageState::Tectonics(tec) => {
@@ -1295,7 +1312,10 @@ impl WorldSimulation {
                                     let spd = ocean
                                         .and_then(|o| o.speed.get(t).copied())
                                         .unwrap_or(0.0);
-                                    Self::climate_ocean_rgb(sst, spd)
+                                    let ice = ocean
+                                        .and_then(|o| o.sea_ice_cover.get(t).copied())
+                                        .unwrap_or(0.0);
+                                    Self::blend_sea_ice_rgb(Self::climate_ocean_rgb(sst, spd), ice)
                                 }
                             }
                             "population" => {
@@ -1334,15 +1354,25 @@ impl WorldSimulation {
                                 let scar = scars[t].max(tiles[t].impact_signature());
                                 Self::blend_impact_scar_color(base, scar)
                             }
-                            _ => Self::natural_color_shaded(
-                                h,
-                                tiles[t].mountainosity,
-                                tiles[t].top_felsity(),
-                                koeppen[t],
-                                life[t],
-                                has_atm,
-                                &self.optics,
-                            ),
+                            _ => {
+                                let base = Self::natural_color_shaded(
+                                    h,
+                                    tiles[t].mountainosity,
+                                    tiles[t].top_felsity(),
+                                    koeppen[t],
+                                    life[t],
+                                    has_atm,
+                                    &self.optics,
+                                );
+                                if h <= 0.0 && has_atm {
+                                    let ice = ocean
+                                        .and_then(|o| o.sea_ice_cover.get(t).copied())
+                                        .unwrap_or(0.0);
+                                    Self::blend_sea_ice_rgb(base, ice)
+                                } else {
+                                    base
+                                }
+                            }
                         }
                     })
                     .collect()
@@ -1355,10 +1385,11 @@ impl WorldSimulation {
                 let life = pre.tile_life();
                 let rivers = pre.river_tiles();
                 let populated = pre.populated();
+                let elevs = pre.tile_elevations();
                 let ocean = pre.climate_model().try_ocean();
                 (0..n)
                     .flat_map(|t| {
-                        let h = tiles[t].elevation();
+                        let h = elevs[t];
                         let island_k = island_koeppen.get(t).copied().unwrap_or(0);
                         match aspect {
                             "climate" => {
@@ -1373,7 +1404,10 @@ impl WorldSimulation {
                                     let spd = ocean
                                         .and_then(|o| o.speed.get(t).copied())
                                         .unwrap_or(0.0);
-                                    Self::climate_ocean_rgb(sst, spd)
+                                    let ice = ocean
+                                        .and_then(|o| o.sea_ice_cover.get(t).copied())
+                                        .unwrap_or(0.0);
+                                    Self::blend_sea_ice_rgb(Self::climate_ocean_rgb(sst, spd), ice)
                                 }
                             }
                             "population" => {
@@ -1433,7 +1467,7 @@ impl WorldSimulation {
                                 if h > 0.0 && rivers.get(t).copied().unwrap_or(false) {
                                     [0.35, 0.88, 0.96]
                                 } else {
-                                    Self::natural_color_shaded(
+                                    let base = Self::natural_color_shaded(
                                         h,
                                         tiles[t].mountainosity,
                                         tiles[t].top_felsity(),
@@ -1441,7 +1475,15 @@ impl WorldSimulation {
                                         life[t],
                                         true,
                                         &self.optics,
-                                    )
+                                    );
+                                    if h <= 0.0 {
+                                        let ice = ocean
+                                            .and_then(|o| o.sea_ice_cover.get(t).copied())
+                                            .unwrap_or(0.0);
+                                        Self::blend_sea_ice_rgb(base, ice)
+                                    } else {
+                                        base
+                                    }
                                 }
                             }
                         }
@@ -1482,7 +1524,10 @@ impl WorldSimulation {
                                     let spd = ocean
                                         .and_then(|o| o.speed.get(c).copied())
                                         .unwrap_or(0.0);
-                                    Self::climate_ocean_rgb(sst, spd)
+                                    let ice = ocean
+                                        .and_then(|o| o.sea_ice_cover.get(c).copied())
+                                        .unwrap_or(0.0);
+                                    Self::blend_sea_ice_rgb(Self::climate_ocean_rgb(sst, spd), ice)
                                 }
                             }
                             tec11_math_grid::DisplayFaceSource::OceanCoarse(c_idx) => {
@@ -1492,7 +1537,10 @@ impl WorldSimulation {
                                 let spd = ocean
                                     .and_then(|o| o.speed.get(c_idx).copied())
                                     .unwrap_or(0.0);
-                                Self::climate_ocean_rgb(sst, spd)
+                                let ice = ocean
+                                    .and_then(|o| o.sea_ice_cover.get(c_idx).copied())
+                                    .unwrap_or(0.0);
+                                Self::blend_sea_ice_rgb(Self::climate_ocean_rgb(sst, spd), ice)
                             }
                         })
                         .collect()

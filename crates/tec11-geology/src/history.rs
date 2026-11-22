@@ -10166,6 +10166,8 @@ impl HistorySimulation {
                             true,
                             op_ref,
                         );
+                        let ice = ocean.sea_ice_cover.get(c_idx).copied().unwrap_or(0.0);
+                        let rgb = crate::world::WorldSimulation::blend_sea_ice_rgb(rgb, ice);
                         out.extend_from_slice(&rgb);
                     } else if aspect == "population" {
                         out.extend_from_slice(&[0.03, 0.06, 0.14]);
