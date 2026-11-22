@@ -20,6 +20,7 @@ rust_shared_library(
         "src/prehistory_session.rs",
         "src/racination_session.rs",
         "src/rivers_session.rs",
+        "src/speech.rs",
         "src/split_session.rs",
         "src/sun_session.rs",
         "src/tectonics_session.rs",
@@ -34,6 +35,7 @@ rust_shared_library(
         "//crates/tec11-geology:tec11_geology",
         "//crates/tec11-math-grid:tec11_math_grid",
         "//crates/tec11-proto:tec11_proto",
+        "//crates/tec11-speech:tec11_speech",
         "@rules_rust_wasm_bindgen//3rdparty:wasm_bindgen",
     ],
 )

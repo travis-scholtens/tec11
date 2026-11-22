@@ -1,0 +1,28 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_speech",
+    srcs = [
+        "src/dsp.rs",
+        "src/lib.rs",
+        "src/phonemes.rs",
+        "src/synth.rs",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "tec11_speech_test",
+    crate = ":tec11_speech",
+)
+
+rust_binary(
+    name = "tec11_speech_cli",
+    srcs = ["src/main.rs"],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tec11_speech",
+    ],
+)

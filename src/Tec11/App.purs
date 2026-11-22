@@ -738,6 +738,7 @@ foreign import closeInspectorNation :: Effect Unit
 foreign import selectInspectorState :: Int -> Effect Unit
 foreign import goBackInspectorState :: Effect Unit
 foreign import resetInspectorStateNav :: Effect Unit
+foreign import playIpaWord :: String -> Effect Unit
 foreign import toggleExpandedLangFamily :: Int -> Effect Unit
 foreign import toggleStratigraphySideZoom :: Effect Unit
 
@@ -1017,6 +1018,26 @@ renderStateLinkList items currentStateId onSelectState emptyText =
             items
       }
 
+renderSpeakIpaButton :: String -> JSX
+renderSpeakIpaButton ipa =
+  R.button
+    { type: "button"
+    , title: "Play pronunciation"
+    , onClick: capture_ (playIpaWord ipa)
+    , style:
+        R.css
+          { background: "transparent"
+          , border: "none"
+          , padding: "0 2px"
+          , marginRight: "4px"
+          , cursor: "pointer"
+          , fontSize: "0.75rem"
+          , lineHeight: "1"
+          , verticalAlign: "baseline"
+          }
+    , children: [ R.text "🔊" ]
+    }
+
 renderLanguageDetailCard :: LanguageDetailInfo -> Int -> Int -> JSX
 renderLanguageDetailCard lang activeNationId currentStateId =
   if not lang.hasLanguage then
@@ -1177,9 +1198,10 @@ renderLanguageDetailCard lang activeNationId currentStateId =
                                   , children: [ R.text entry.orthography ]
                                   }
                               , R.span
-                                  { style: R.css { color: "#38bdf8", marginRight: "4px" }
+                                  { style: R.css { color: "#38bdf8", marginRight: "2px" }
                                   , children: [ R.text ("[" <> entry.ipa <> "]") ]
                                   }
+                              , renderSpeakIpaButton entry.ipa
                               , R.span
                                   { style: R.css { color: "#94a3b8", fontSize: "0.71rem" }
                                   , children: [ R.text ("(" <> entry.etymology <> ")") ]
@@ -4809,6 +4831,7 @@ mkApp = do
                                                               { className: "language-word-ipa"
                                                               , children: [ R.text ("[" <> w.sourceIpa <> "]") ]
                                                               }
+                                                          , renderSpeakIpaButton w.sourceIpa
                                                           ]
                                                       }
                                                   ]
@@ -4855,6 +4878,7 @@ mkApp = do
                                                               { className: "language-word-ipa"
                                                               , children: [ R.text ("[" <> w.destIpa <> "]") ]
                                                               }
+                                                          , renderSpeakIpaButton w.destIpa
                                                           ]
                                                       }
                                                   , R.div

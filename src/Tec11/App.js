@@ -21,6 +21,8 @@ import initWasmModule, {
   WasmTidesSession,
   WasmWeatherSession,
   WasmWorldSession,
+  speech_sample_rate,
+  synthesize_ipa_pcm,
 } from "tec11-wasm";
 import {
   applyParsedTileToView,
@@ -2994,6 +2996,32 @@ export const loadFilePlanetIntoPrehistory = (setPrehistoryInfo) => () => {
 // ============================================================================
 
 let activeLanguageSession = null;
+let speechAudioCtx = null;
+
+export const playIpaWord = (ipa) => () => {
+  if (!ipa) return;
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (!speechAudioCtx) {
+      speechAudioCtx = new AudioCtx();
+    }
+    if (speechAudioCtx.state === "suspended") {
+      speechAudioCtx.resume();
+    }
+    const samples = synthesize_ipa_pcm(ipa, 125.0, 1.0);
+    if (!samples || samples.length === 0) return;
+    const sampleRate = speech_sample_rate();
+    const buffer = speechAudioCtx.createBuffer(1, samples.length, sampleRate);
+    buffer.copyToChannel(samples, 0);
+    const source = speechAudioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(speechAudioCtx.destination);
+    source.start();
+  } catch (err) {
+    console.error("Failed to synthesize IPA:", ipa, err);
+  }
+};
 
 function buildLanguageInfo(session) {
   const count = session.word_count();
