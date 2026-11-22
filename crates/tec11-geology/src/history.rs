@@ -7676,6 +7676,43 @@ impl HistorySimulation {
         }
     }
 
+    /// Convert a History tick (`200` Earth years/tick) into the planet's own local orbital years,
+    /// rounded to a clean step matching the tick's resolution (avoiding false precision).
+    pub fn tick_to_local_years(&self, tick: u32) -> u64 {
+        if tick == 0 {
+            return 0;
+        }
+        let period_earth_days = (self.home_star.orbital_period_days as f64).max(5.0);
+        let local_yrs_per_tick = (HISTORY_YEARS_PER_TICK as f64) * 365.25 / period_earth_days;
+        let step: f64 = if local_yrs_per_tick >= 1000.0 {
+            100.0
+        } else if local_yrs_per_tick >= 300.0 {
+            50.0
+        } else if local_yrs_per_tick >= 80.0 {
+            10.0
+        } else if local_yrs_per_tick >= 20.0 {
+            5.0
+        } else {
+            1.0
+        };
+        let raw = (tick as f64) * local_yrs_per_tick;
+        ((raw / step).round() * step).max(0.0) as u64
+    }
+
+    fn format_chronicle_year(&self, tick: u32) -> String {
+        let yr = self.tick_to_local_years(tick);
+        let s = yr.to_string();
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(s.len() + s.len() / 3);
+        for (i, &b) in bytes.iter().enumerate() {
+            if i > 0 && (bytes.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(b as char);
+        }
+        format!("Yr {out}")
+    }
+
     /// Format the chronological history of `state_id` as clickable [`StateLinkItem`] entries.
     pub fn format_state_chronicle(&self, state_id: u32) -> Vec<StateLinkItem> {
         let Some(indices) = self.state_chronicle_idx.get(&state_id) else {
@@ -7686,8 +7723,7 @@ impl HistorySimulation {
             let Some(&ev) = self.chronicle.get(idx as usize) else {
                 continue;
             };
-            let year = ev.tick * HISTORY_YEARS_PER_TICK;
-            let yr_prefix = format!("Yr {year}: ");
+            let yr_prefix = format!("{}: ", self.format_chronicle_year(ev.tick));
             let item = match ev.kind {
                 HistoricalEventKind::StateFounded => StateLinkItem {
                     state_id: None,
@@ -7791,18 +7827,18 @@ impl HistorySimulation {
             let Some(&ev) = self.chronicle.get(idx as usize) else {
                 continue;
             };
-            let year = ev.tick * HISTORY_YEARS_PER_TICK;
+            let yr_label = self.format_chronicle_year(ev.tick);
             let line = match ev.kind {
                 HistoricalEventKind::StateFounded => {
-                    format!("Yr {year}: Capital founded by {}", self.state_name(ev.primary_id))
+                    format!("{yr_label}: Capital founded by {}", self.state_name(ev.primary_id))
                 }
                 HistoricalEventKind::StateSplitFrom => format!(
-                    "Yr {year}: Seceded from {} as capital of {}",
+                    "{yr_label}: Seceded from {} as capital of {}",
                     self.state_name(ev.secondary_id),
                     self.state_name(ev.primary_id)
                 ),
                 HistoricalEventKind::CapitalCaptured => format!(
-                    "Yr {year}: Captured from {} by {}",
+                    "{yr_label}: Captured from {} by {}",
                     self.state_name(ev.primary_id),
                     self.state_name(ev.secondary_id)
                 ),
@@ -11375,5 +11411,14 @@ mod tests {
             .expect("inspect_state should work for both active and conquered former states");
         assert!(!view.chronicle.is_empty());
         assert!(view.to_json().contains("\"chronicle\":["));
+
+        // Verify local orbital year conversion and precision-matched rounding
+        assert_eq!(sim.tick_to_local_years(0), 0);
+        assert_eq!(sim.tick_to_local_years(1), 200); // Earth-like G2V (~365.25d)
+        sim.home_star.orbital_period_days = 36.525; // Fast M-dwarf (~10 local yrs / Earth yr)
+        assert_eq!(sim.tick_to_local_years(1), 2000);
+        assert_eq!(sim.tick_to_local_years(1) % 100, 0);
+        sim.home_star.orbital_period_days = 730.5; // Wide F-star (~0.5 local yrs / Earth yr)
+        assert_eq!(sim.tick_to_local_years(1), 100);
     }
 }
