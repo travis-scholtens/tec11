@@ -1295,6 +1295,8 @@ pub struct StateRecord {
     pub active: bool,
     /// Turchin's collective solidarity / *asabiya* ($S_n \in [0.1, 1.0]$; *Historical Dynamics*, 2003).
     pub asabiya: f32,
+    /// Original founding language ID so conquered / former states retain their endonym in chronicles.
+    pub founding_language_id: Option<u32>,
 }
 
 /// Canonical ordered pair of state IDs (`a <= b`), representing an undirected bilateral relationship
@@ -2158,6 +2160,7 @@ impl HistorySimulation {
                     color_idx: (sid as usize) % NATION_PALETTE.len(),
                     active: true,
                     asabiya: 0.5,
+                    founding_language_id: Some(lid),
                 },
             );
             self.tile_states.insert(city_f, sid);
@@ -2346,6 +2349,7 @@ impl HistorySimulation {
                         color_idx: (sid as usize) % NATION_PALETTE.len(),
                         active: true,
                         asabiya: 0.55,
+                        founding_language_id: Some(lid),
                     },
                 );
             }
@@ -6191,6 +6195,7 @@ impl HistorySimulation {
                         color_idx,
                         active: true,
                         asabiya: breakaway_asabiya,
+                        founding_language_id: Some(maj_lang),
                     },
                 );
                 self.record_event(
@@ -6312,11 +6317,25 @@ impl HistorySimulation {
     }
 
     pub fn state_name(&self, state_id: u32) -> String {
+        let key = ConceptKey::State(state_id);
         if let Some(lid) = self.primary_language_for_state(state_id) {
-            if let Some(lang) = self.languages.get(&lid) {
-                if let Some(orig) = lang.lexicon.get(&ConceptKey::State(state_id)) {
-                    return orig.word.write(true);
-                }
+            if let Some(orig) = self.languages.get(&lid).and_then(|l| l.lexicon.get(&key)) {
+                return orig.word.write(true);
+            }
+        }
+        // Fallback for conquered / former states: check founding language, then any language knowing the state
+        if let Some(fid) = self
+            .states
+            .get(&state_id)
+            .and_then(|s| s.founding_language_id)
+        {
+            if let Some(orig) = self.languages.get(&fid).and_then(|l| l.lexicon.get(&key)) {
+                return orig.word.write(true);
+            }
+        }
+        for lang in self.languages.values() {
+            if let Some(orig) = lang.lexicon.get(&key) {
+                return orig.word.write(true);
             }
         }
         format!("State {}", state_id + 1)
@@ -10036,6 +10055,7 @@ impl HistorySimulation {
                                     color_idx: (pf.state_id as usize) % NATION_PALETTE.len(),
                                     active: true,
                                     asabiya: 0.5,
+                                    founding_language_id: None,
                                 },
                             );
                         }
@@ -11434,5 +11454,15 @@ mod tests {
         assert_eq!(sim.tick_to_local_years(1) % 100, 0);
         sim.home_star.orbital_period_days = 730.5; // Wide F-star (~0.5 local yrs / Earth yr)
         assert_eq!(sim.tick_to_local_years(1), 100);
+
+        // Conquered / former states with 0 tiles should still resolve their real linguistic name
+        let name_while_active = sim.state_name(first_state_id);
+        sim.tile_states.retain(|_, &mut s| s != first_state_id);
+        let name_after_conquest = sim.state_name(first_state_id);
+        assert!(
+            !name_after_conquest.starts_with("State "),
+            "Former state should retain its linguistic name, got {name_after_conquest}"
+        );
+        assert_eq!(name_after_conquest, name_while_active);
     }
 }
