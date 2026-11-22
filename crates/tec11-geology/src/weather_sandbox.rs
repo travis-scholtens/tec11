@@ -993,6 +993,7 @@ mod tests {
                 moon_mass: 1.8,
                 moon_dist_radii: 45,
                 meteor_freq: 1.2,
+                prehistory_glaciation_cycles: 3,
             },
             777,
         );

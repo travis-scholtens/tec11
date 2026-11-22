@@ -5911,6 +5911,10 @@ function buildWorldInfo(view) {
     moonMassTenths: Math.round(moonMass * 10.0),
     moonDistRadii: moonDistTarget,
     meteorFreqTenths: Math.round(meteorFreq * 10.0),
+    prehistoryGlaciationCycles:
+      typeof s.param_prehistory_glaciation_cycles === "function"
+        ? s.param_prehistory_glaciation_cycles()
+        : 3,
     orbitalSummaryText,
     sunFilter: s.star_filter(),
     atmosphereId: s.atmosphere_id(),
@@ -6500,6 +6504,7 @@ export const mountWorldView =
   (moonMassTenths) =>
   (moonDistRadii) =>
   (meteorFreqTenths) =>
+  (prehistoryGlaciationCycles) =>
   (aspect) =>
   (setWorldInfo) =>
   () => {
@@ -6529,6 +6534,7 @@ export const mountWorldView =
       moonMassTenths / 10.0,
       moonDistRadii,
       meteorFreqTenths / 10.0,
+      prehistoryGlaciationCycles,
       seedLo,
       seedHi
     );
@@ -6607,6 +6613,7 @@ export const createWorld =
   (moonMassTenths) =>
   (moonDistRadii) =>
   (meteorFreqTenths) =>
+  (prehistoryGlaciationCycles) =>
   (randomize) =>
   (setWorldInfo) =>
   () => {
@@ -6624,6 +6631,7 @@ export const createWorld =
       moonMassTenths / 10.0,
       moonDistRadii,
       meteorFreqTenths / 10.0,
+      prehistoryGlaciationCycles,
       randomize
     );
     activeView.dirtySnapshot = true;

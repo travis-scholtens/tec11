@@ -130,6 +130,9 @@ pub struct WorldCreateParams {
     pub moon_mass: f32,
     pub moon_dist_radii: u32,
     pub meteor_freq: f32,
+    /// Minimum number of full Pleistocene glaciation cycles (`32` Prehistory ticks = `128 kyr`
+    /// each) before agriculture can be invented (normally distributed around `3` in random mode).
+    pub prehistory_glaciation_cycles: u32,
 }
 
 impl Default for WorldCreateParams {
@@ -146,6 +149,7 @@ impl Default for WorldCreateParams {
             moon_mass: 1.0,
             moon_dist_radii: 60,
             meteor_freq: 1.0,
+            prehistory_glaciation_cycles: 3,
         }
     }
 }
@@ -549,6 +553,8 @@ impl WorldSimulation {
             params.atm_dt_myr = random_time_myr(&mut self.rng);
             params.life_dt_myr = random_time_myr(&mut self.rng);
             params.people_dt_myr = random_time_myr(&mut self.rng);
+            params.prehistory_glaciation_cycles =
+                self.rng.gauss(3.0, 1.2).round().clamp(0.0, 8.0) as u32;
 
             // Randomize number of moons (0 or more, weighted toward 1 Earth-like moon or 2 harmonic moons):
             let moon_count_choices = [0u32, 0, 1, 1, 1, 1, 2, 2, 3, 4];
@@ -712,6 +718,7 @@ impl WorldSimulation {
         if let WorldStageState::Tectonics(tec) = &mut self.stage {
             let _sub_seed = self.rng.next_u64();
             let mut pre = PrehistorySimulation::from_tectonics_mut(tec);
+            pre.set_min_glaciation_cycles(self.params.prehistory_glaciation_cycles);
             pre.step();
             self.prehistory_ticks = pre.prehistory_ticks();
             self.stage = WorldStageState::Prehistory(pre);
@@ -2285,6 +2292,7 @@ mod tests {
             moon_mass: 1.0,
             moon_dist_radii: 60,
             meteor_freq: 1.0,
+            prehistory_glaciation_cycles: 0,
         };
         let mut world = WorldSimulation::new(params, 42);
         assert_eq!(world.stage_index(), 0);
@@ -2322,6 +2330,7 @@ mod tests {
             moon_mass: 1.0,
             moon_dist_radii: 60,
             meteor_freq: 1.0,
+            prehistory_glaciation_cycles: 0,
         };
         let mut world = WorldSimulation::new(params, 77);
         world.set_sun_and_atmosphere(3, 0); // K-class orange dwarf
@@ -2367,6 +2376,7 @@ mod tests {
             moon_mass: 1.0,
             moon_dist_radii: 60,
             meteor_freq: 0.5,
+            prehistory_glaciation_cycles: 0,
         };
         let mut world = WorldSimulation::new(params, 123);
         assert_eq!(world.stage_index(), 0);
@@ -2527,6 +2537,7 @@ mod tests {
             moon_mass: 1.0,
             moon_dist_radii: 60,
             meteor_freq: 1.0,
+            prehistory_glaciation_cycles: 0,
         };
         let mut world = WorldSimulation::new(params, 42);
         while world.stage_index() == 0 {
@@ -2823,5 +2834,53 @@ mod tests {
         let world2 = WorldSimulation::new(p2, 42);
         let text2 = world2.calendar_summary_text();
         assert!(text2.contains("Months:") && text2.contains(" / "), "got: {text2}");
+    }
+
+    #[test]
+    fn test_prehistory_glaciation_cycles_gates_agriculture_and_randomizes_around_3() {
+        // 1. Random mode samples prehistory_glaciation_cycles normally around 3 (clamped 0..=8)
+        let mut world = WorldSimulation::new(WorldCreateParams {
+            grid_size: 2,
+            ..Default::default()
+        }, 777);
+        let mut sum = 0.0f64;
+        let samples = 60usize;
+        let mut distinct = std::collections::BTreeSet::new();
+        for _ in 0..samples {
+            let p = world.create(
+                WorldCreateParams {
+                    grid_size: 2,
+                    ..Default::default()
+                },
+                true,
+            );
+            assert!(p.prehistory_glaciation_cycles <= 8);
+            sum += p.prehistory_glaciation_cycles as f64;
+            distinct.insert(p.prehistory_glaciation_cycles);
+        }
+        let mean = sum / (samples as f64);
+        assert!(
+            (2.2..=3.8).contains(&mean),
+            "Expected randomized prehistory_glaciation_cycles mean near 3.0, got {mean:.2}"
+        );
+        assert!(
+            distinct.len() >= 3,
+            "Expected variation in randomized prehistory_glaciation_cycles, got {:?}",
+            distinct
+        );
+
+        // 2. Gating: with 1 required glaciation cycle (32 ticks), agriculture cannot spark before tick 32
+        let mut pre = PrehistorySimulation::new_earth(42);
+        pre.set_min_glaciation_cycles(1);
+        assert_eq!(pre.min_ag_ticks(), 2 * crate::prehistory::PREHISTORY_GLACIATION_STEP);
+        for _ in 0..10 {
+            pre.step();
+            assert_eq!(
+                pre.active_agricultural_race_count(),
+                0,
+                "Agriculture must not spark before min_ag_ticks has elapsed (tick={})",
+                pre.prehistory_ticks()
+            );
+        }
     }
 }

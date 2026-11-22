@@ -165,6 +165,8 @@ pub struct PrehistorySimulation {
     tilt_deg: f64,
     tectonics_ticks: u32,
     prehistory_ticks: u32,
+    /// Minimum Prehistory ticks before agriculture can be invented (`cycles * 2 * PREHISTORY_GLACIATION_STEP`).
+    min_ag_ticks: u32,
     glaciation_tick: u32,
     glaciation: f64,
     /// Eustatic sea-level offset in model elevation units (`<= 0.0` during glacial periods,
@@ -380,6 +382,7 @@ impl PrehistorySimulation {
             tilt_deg: 23.0,
             tectonics_ticks: 0,
             prehistory_ticks: 0,
+            min_ag_ticks: 0,
             glaciation_tick: 0,
             glaciation: EARTH_GLACIATION,
             eustatic_sea_level_km: Self::compute_eustatic_sea_level(EARTH_GLACIATION, false),
@@ -454,6 +457,7 @@ impl PrehistorySimulation {
             tilt_deg,
             tectonics_ticks,
             prehistory_ticks: 0,
+            min_ag_ticks: 0,
             glaciation_tick: initial_glaciation_tick,
             glaciation: initial_glaciation,
             eustatic_sea_level_km: Self::compute_eustatic_sea_level(initial_glaciation, true),
@@ -540,6 +544,7 @@ impl PrehistorySimulation {
             tilt_deg,
             tectonics_ticks: self.tectonics_ticks,
             prehistory_ticks: self.prehistory_ticks,
+            min_ag_ticks: self.min_ag_ticks,
             glaciation_tick: self.glaciation_tick,
             glaciation,
             eustatic_sea_level_km: Self::compute_eustatic_sea_level(glaciation, self.is_custom),
@@ -686,6 +691,8 @@ impl PrehistorySimulation {
         //    weighted by each river basin's seasonal flooding swing, and seafaring along coastal tiles.
         //    Rivergoing and seafaring develop independently of agriculture and of each other, though
         //    having one boosts the probability of developing the other (`3.0x`).
+        //    Agriculture is gated until `min_ag_ticks` (configured glaciation cycles) have elapsed.
+        let can_spark_ag = self.prehistory_ticks >= self.min_ag_ticks;
         let gfactor = agriculture_glaciation_factor(glaciation);
         let mut river_tile_flood: BTreeMap<usize, f64> = BTreeMap::new();
         for r in &self.rivers {
@@ -703,12 +710,14 @@ impl PrehistorySimulation {
         }
         for (t, flood_mult) in river_tile_flood {
             if let Some(&hid) = self.populated.get(&t) {
-                let ag_mult = (self.tile_ag_potential.get(t).copied().unwrap_or(1.0)
-                    * self.glacial_soil_fertility_modifier(t)) as f64;
-                let prob =
-                    gfactor * agriculture_spark_prob(self.tile_koeppen[t]) * ag_mult * flood_mult;
-                if prob > 0.0 && self.rng.uniform(0.0, 1.0) < prob {
-                    self.agricultural_heritages.insert(hid);
+                if can_spark_ag {
+                    let ag_mult = (self.tile_ag_potential.get(t).copied().unwrap_or(1.0)
+                        * self.glacial_soil_fertility_modifier(t)) as f64;
+                    let prob =
+                        gfactor * agriculture_spark_prob(self.tile_koeppen[t]) * ag_mult * flood_mult;
+                    if prob > 0.0 && self.rng.uniform(0.0, 1.0) < prob {
+                        self.agricultural_heritages.insert(hid);
+                    }
                 }
                 if !self.rivergoing_heritages.contains(&hid) {
                     let sea_synergy = if self.seafaring_heritages.contains(&hid) {
@@ -741,7 +750,8 @@ impl PrehistorySimulation {
             };
             // Low-probability rainfed crop domestication on humid farmable non-river tiles so low-relief
             // cratons or archipelagos without major mountain-fed rivers can still invent agriculture.
-            if !self.agricultural_heritages.contains(&hid)
+            if can_spark_ag
+                && !self.agricultural_heritages.contains(&hid)
                 && !self.river_tiles.get(t).copied().unwrap_or(false)
                 && can_rainfed_farm
                 && self.tile_precip_norm.get(t).copied().unwrap_or(0.0) >= 0.30
@@ -1196,6 +1206,7 @@ impl PrehistorySimulation {
                     tilt_deg,
                     tectonics_ticks: tec.tectonics_ticks,
                     prehistory_ticks: 0,
+                    min_ag_ticks: 0,
                     glaciation_tick: 0,
                     glaciation: 0.5,
                     eustatic_sea_level_km: Self::compute_eustatic_sea_level(0.5, true),
@@ -1363,6 +1374,7 @@ impl PrehistorySimulation {
             tilt_deg,
             tectonics_ticks: pre.tectonics_ticks,
             prehistory_ticks: pre.prehistory_ticks,
+            min_ag_ticks: 0,
             glaciation_tick: pre.glaciation_tick,
             glaciation,
             eustatic_sea_level_km: Self::compute_eustatic_sea_level(glaciation, true),
@@ -1581,6 +1593,16 @@ impl PrehistorySimulation {
     pub fn compute_eustatic_sea_level(glaciation: f64, is_custom: bool) -> f32 {
         let max_drop = if is_custom { 0.12f32 } else { 120.0 / 550.0 };
         -max_drop * (1.0 - glaciation as f32).clamp(0.0, 1.0)
+    }
+
+    /// Require at least `cycles` full Pleistocene glaciation cycles (`2 * PREHISTORY_GLACIATION_STEP`
+    /// ticks per cycle) before agriculture can be invented.
+    pub fn set_min_glaciation_cycles(&mut self, cycles: u32) {
+        self.min_ag_ticks = cycles.saturating_mul(2 * PREHISTORY_GLACIATION_STEP);
+    }
+
+    pub fn min_ag_ticks(&self) -> u32 {
+        self.min_ag_ticks
     }
 
     /// Current eustatic sea-level offset in physical meters (`-120.0` at glacial maximum to `0.0`

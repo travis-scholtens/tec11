@@ -24,6 +24,7 @@ impl WasmWorldSession {
         moon_mass: f32,
         moon_dist_radii: u32,
         meteor_freq: f32,
+        prehistory_glaciation_cycles: u32,
         seed_lo: u32,
         seed_hi: u32,
     ) -> Self {
@@ -39,6 +40,7 @@ impl WasmWorldSession {
             moon_mass,
             moon_dist_radii,
             meteor_freq,
+            prehistory_glaciation_cycles,
         };
         let raw_seed = ((seed_hi as u64) << 32) | (seed_lo as u64);
         let seed = if raw_seed == 0 { 42 } else { raw_seed };
@@ -61,6 +63,7 @@ impl WasmWorldSession {
         moon_mass: f32,
         moon_dist_radii: u32,
         meteor_freq: f32,
+        prehistory_glaciation_cycles: u32,
         randomize: bool,
     ) {
         let params = WorldCreateParams {
@@ -75,6 +78,7 @@ impl WasmWorldSession {
             moon_mass,
             moon_dist_radii,
             meteor_freq,
+            prehistory_glaciation_cycles,
         };
         self.sim.create(params, randomize);
     }
@@ -157,6 +161,10 @@ impl WasmWorldSession {
 
     pub fn param_meteor_freq(&self) -> f32 {
         self.sim.params().meteor_freq
+    }
+
+    pub fn param_prehistory_glaciation_cycles(&self) -> u32 {
+        self.sim.params().prehistory_glaciation_cycles
     }
 
     pub fn current_day_hours(&self) -> f32 {

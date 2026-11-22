@@ -387,6 +387,7 @@ type WorldInfo =
   , moonMassTenths :: Int
   , moonDistRadii :: Int
   , meteorFreqTenths :: Int
+  , prehistoryGlaciationCycles :: Int
   , orbitalSummaryText :: String
   , sunFilter :: Int
   , atmosphereId :: Int
@@ -658,8 +659,8 @@ foreign import loadSavedPlanetIntoTravel :: (TravelInfo -> Effect Unit) -> Effec
 foreign import loadFilePlanetIntoTravel :: (TravelInfo -> Effect Unit) -> Effect Unit
 
 -- Complete World Simulation mode FFI
-foreign import mountWorldView :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> String -> (WorldInfo -> Effect Unit) -> Effect (Effect Unit)
-foreign import createWorld :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Boolean -> (WorldInfo -> Effect Unit) -> Effect Unit
+foreign import mountWorldView :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> String -> (WorldInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import createWorld :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Boolean -> (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import stepWorld :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import advanceWorldStage :: (WorldInfo -> Effect Unit) -> Effect Unit
 foreign import toggleWorldRunning :: (WorldInfo -> Effect Unit) -> Effect Unit
@@ -1775,6 +1776,7 @@ mkApp = do
     worldMoonMassTenths /\ setWorldMoonMassTenths <- useState' 10
     worldMoonDistRadii /\ setWorldMoonDistRadii <- useState' 60
     worldMeteorFreqTenths /\ setWorldMeteorFreqTenths <- useState' 10
+    worldGlacialCycles /\ setWorldGlacialCycles <- useState' 3
     worldSunFilter /\ setWorldSunFilter <- useState' 2
     worldAtmosphereId /\ setWorldAtmosphereId <- useState' 0
     worldRandomize /\ setWorldRandomize <- useState' true
@@ -1797,6 +1799,7 @@ mkApp = do
       , moonMassTenths: 10
       , moonDistRadii: 60
       , meteorFreqTenths: 10
+      , prehistoryGlaciationCycles: 3
       , orbitalSummaryText: "Day: 11.1h (→24h) | Tilt: 23.0° | Moons: 1 (1.0x @ 23.4→60 Rp, Tides 14.5x) | Meteors: 1.0x (0 hits)"
       , sunFilter: 2
       , atmosphereId: 0
@@ -1991,6 +1994,7 @@ mkApp = do
         setWorldMoonMassTenths info.moonMassTenths
         setWorldMoonDistRadii info.moonDistRadii
         setWorldMeteorFreqTenths info.meteorFreqTenths
+        setWorldGlacialCycles info.prehistoryGlaciationCycles
         setWorldSunFilter info.sunFilter
         setWorldAtmosphereId info.atmosphereId
 
@@ -2067,7 +2071,7 @@ mkApp = do
         WorldScreen -> do
           setRotationDeg 0
           setWorldActiveModal Nothing
-          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldAspect syncWorldControlsFromInfo
+          mountWorldView worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldGlacialCycles worldAspect syncWorldControlsFromInfo
         MoonScreen -> do
           setRotationDeg 0
           mountMoonView moonCount moonMassTenths moonDistRadii moonEpochPct moonAspect moonShowTidalScour moonShowFluvial moonShowDeposition setMoonInfo
@@ -2368,6 +2372,11 @@ mkApp = do
         Nothing -> pure unit
         Just dt -> setWorldPeopleDt dt
 
+      handleWorldGlacialCyclesChange :: Maybe String -> Effect Unit
+      handleWorldGlacialCyclesChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just c -> setWorldGlacialCycles c
+
       handleWorldMoonCountChange :: Maybe String -> Effect Unit
       handleWorldMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
         Nothing -> pure unit
@@ -2408,7 +2417,7 @@ mkApp = do
 
       handleCreateWorld :: Effect Unit
       handleCreateWorld =
-        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldRandomize syncWorldControlsFromInfo
+        createWorld worldSize worldDayHours worldTiltDeg worldLandPct worldAtmDt worldLifeDt worldPeopleDt worldMoonCount worldMoonMassTenths worldMoonDistRadii worldMeteorFreqTenths worldGlacialCycles worldRandomize syncWorldControlsFromInfo
 
       handleMoonCountChange :: Maybe String -> Effect Unit
       handleMoonCountChange maybeVal = case maybeVal >>= Int.fromString of
@@ -5845,6 +5854,30 @@ mkApp = do
                               , R.span
                                   { className: "rotation-label"
                                   , children: [ R.text (show worldPeopleDt <> "M") ]
+                                  }
+                              ]
+                          }
+                      , R.div
+                          { className: "slider-row"
+                          , children:
+                              [ R.label
+                                  { className: "slider-inline-label"
+                                  , children: [ R.text "Glacial Cycles:" ]
+                                  }
+                              , R.input
+                                  { id: "world-glacial-cycles-slider"
+                                  , className: "rotate-slider"
+                                  , type: "range"
+                                  , min: "0"
+                                  , max: "8"
+                                  , step: "1"
+                                  , disabled: worldRandomize || worldInfo.isRunning
+                                  , value: show worldGlacialCycles
+                                  , onChange: handler targetValue handleWorldGlacialCyclesChange
+                                  }
+                              , R.span
+                                  { className: "rotation-label"
+                                  , children: [ R.text (show worldGlacialCycles) ]
                                   }
                               ]
                           }
