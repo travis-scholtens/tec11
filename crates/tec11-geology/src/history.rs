@@ -529,6 +529,7 @@ pub enum HistoricalEventKind {
     TradeOpened = 9,
     TradeEnded = 10,
     DialectFormed = 11,
+    SecularCrisis = 12,
 }
 
 /// Compact 20-byte `Copy` historical event record stored in `HistorySimulation::chronicle`
@@ -1301,6 +1302,9 @@ pub struct StateRecord {
     pub active: bool,
     /// Turchin's collective solidarity / *asabiya* ($S_n \in [0.1, 1.0]$; *Historical Dynamics*, 2003).
     pub asabiya: f32,
+    /// Turchin–Nefedov demographic-structural strain ($[0.0, 1.0]$) accumulated while population
+    /// sits near Malthusian carrying capacity, eroding solidarity and triggering secular crises.
+    pub overpop_strain: f32,
     /// Original founding language ID so conquered / former states retain their endonym in chronicles.
     pub founding_language_id: Option<u32>,
 }
@@ -2174,6 +2178,7 @@ impl HistorySimulation {
                     color_idx: (sid as usize) % NATION_PALETTE.len(),
                     active: true,
                     asabiya: 0.5,
+                    overpop_strain: 0.0,
                     founding_language_id: Some(lid),
                 },
             );
@@ -2363,6 +2368,7 @@ impl HistorySimulation {
                         color_idx: (sid as usize) % NATION_PALETTE.len(),
                         active: true,
                         asabiya: 0.55,
+                        overpop_strain: 0.0,
                         founding_language_id: Some(lid),
                     },
                 );
@@ -3336,24 +3342,74 @@ impl HistorySimulation {
     ) {
         const R_FRONTIER: f32 = 0.45;
         const DELTA_CORE: f32 = 0.12;
-        let new_asabiya: Vec<(u32, f32)> = extents
-            .iter()
-            .filter(|(_, tiles)| !tiles.is_empty())
-            .map(|(&sid, tiles)| {
-                let sum_i: f32 = tiles
-                    .iter()
-                    .map(|&f| self.tile_metaethnic_intensity(f, fine_adj))
-                    .sum();
-                // Scale frontier exposure so compact frontier marcher states reach high I_bar while sprawling empires dilute I_bar
-                let mean_i = (sum_i / (tiles.len() as f32) * 2.5).clamp(0.0, 1.0);
-                let s = self.state_asabiya(sid);
-                let ds = R_FRONTIER * mean_i * (1.0 - s) - DELTA_CORE * (1.0 - mean_i) * s;
-                (sid, (s + ds).clamp(0.10, 1.00))
-            })
-            .collect();
-        for (sid, s) in new_asabiya {
+        const DELTA_STRAIN: f32 = 0.28;
+        let mut updates: Vec<(u32, f32, f32, bool)> = Vec::new();
+        for (&sid, tiles) in extents {
+            if tiles.is_empty() {
+                continue;
+            }
+            let sum_i: f32 = tiles
+                .iter()
+                .map(|&f| self.tile_metaethnic_intensity(f, fine_adj))
+                .sum();
+            // Scale frontier exposure so compact frontier marcher states reach high I_bar while sprawling empires dilute I_bar
+            let mean_i = (sum_i / (tiles.len() as f32) * 2.5).clamp(0.0, 1.0);
+            let s = self.state_asabiya(sid);
+            let prev_strain = self
+                .states
+                .get(&sid)
+                .map(|st| st.overpop_strain)
+                .unwrap_or(0.0);
+
+            // Turchin-Nefedov demographic-structural strain: sitting near Malthusian carrying
+            // capacity (pop / K > 0.80) steadily builds fiscal & elite-overproduction strain.
+            let pop = self.state_population_thousands(sid);
+            let cap = self.state_carrying_capacity(tiles).max(1.0);
+            let load = (pop / cap).clamp(0.0, 1.3);
+            let mut strain = if load > 0.80 {
+                (prev_strain + 0.24 * ((load - 0.80) / 0.20).clamp(0.0, 1.5)).min(1.0)
+            } else if load < 0.72 {
+                (prev_strain - 0.20).max(0.0)
+            } else {
+                (prev_strain - 0.05).max(0.0)
+            };
+
+            // Imperial overextension slowly erodes solidarity in sprawling mature empires
+            let overextension = ((tiles.len() as f32 - 30.0).max(0.0) / 160.0).min(0.65);
+            let ds = R_FRONTIER * mean_i * (1.0 - s)
+                - DELTA_CORE * (1.0 - mean_i) * s
+                - DELTA_STRAIN * strain * s
+                - 0.12 * overextension * s;
+            let mut next_s = (s + ds).clamp(0.10, 1.00);
+
+            // Secular crisis: when high demographic strain coincides with eroded solidarity,
+            // internal unrest & famine contract population (~22%), relieving strain and opening
+            // a window of vulnerability to rivals and breakaway provinces.
+            let crisis = strain >= 0.72 && next_s <= 0.36 && tiles.len() >= 10;
+            if crisis {
+                strain *= 0.30;
+                next_s = (next_s + 0.06).clamp(0.15, 0.45);
+            }
+            updates.push((sid, next_s, strain, crisis));
+        }
+
+        for (sid, s, strain, crisis) in updates {
+            let cap_tile = self.states.get(&sid).map(|st| st.capital_tile).unwrap_or(0);
             if let Some(st) = self.states.get_mut(&sid) {
                 st.asabiya = s;
+                st.overpop_strain = strain;
+            }
+            if crisis {
+                if let Some(tiles) = extents.get(&sid) {
+                    for &t in tiles {
+                        if let Some(comms) = self.tile_communities.get_mut(&t) {
+                            for c in comms.iter_mut() {
+                                c.thousands *= 0.78;
+                            }
+                        }
+                    }
+                }
+                self.record_event(HistoricalEventKind::SecularCrisis, sid, 0, cap_tile, false);
             }
         }
     }
@@ -4734,6 +4790,22 @@ impl HistorySimulation {
     /// while low *asabiya* ($S_n \to 0.1$) accelerates imperial fragmentation.
     pub fn split_probability_with_asabiya(len_tiles: usize, asabiya: f32) -> f64 {
         Self::split_probability(len_tiles) * ((1.5 - asabiya).clamp(0.4, 1.5) as f64)
+    }
+
+    /// Secular-cycle imperial split probability combining territorial size, *asabiya* decay,
+    /// and demographic-structural strain (`overpop_strain`). Cohesive states remain stable,
+    /// while strained, low-solidarity empires face realistic ~10-28% fragmentation risk per 200-year tick.
+    pub fn split_probability_with_secular_cycle(
+        len_tiles: usize,
+        asabiya: f32,
+        overpop_strain: f32,
+    ) -> f64 {
+        let base = Self::split_probability_with_asabiya(len_tiles, asabiya);
+        let size_scale = ((len_tiles as f64 - 18.0).max(0.0) / 100.0).clamp(0.0, 1.5);
+        let low_solidarity = ((0.55 - asabiya as f64).max(0.0) / 0.45).clamp(0.0, 1.0);
+        let strain = (overpop_strain as f64).clamp(0.0, 1.0);
+        let secular_risk = size_scale * (0.14 * low_solidarity * low_solidarity + 0.10 * strain * low_solidarity);
+        (base + secular_risk).clamp(0.0, 0.35)
     }
 
     /// City spawning probability per fine face (`historysimulation.py:846-867`), scaled by 1/9 for $N+2$ subdivision
@@ -6154,8 +6226,17 @@ impl HistorySimulation {
                 continue;
             }
             let state_asabiya = self.state_asabiya(n);
+            let state_strain = self
+                .states
+                .get(&n)
+                .map(|st| st.overpop_strain)
+                .unwrap_or(0.0);
             if self.rng.uniform(0.0, 1.0)
-                >= Self::split_probability_with_asabiya(tiles.len(), state_asabiya)
+                >= Self::split_probability_with_secular_cycle(
+                    tiles.len(),
+                    state_asabiya,
+                    state_strain,
+                )
             {
                 continue;
             }
@@ -6220,6 +6301,7 @@ impl HistorySimulation {
                         color_idx,
                         active: true,
                         asabiya: breakaway_asabiya,
+                        overpop_strain: 0.0,
                         founding_language_id: Some(maj_lang),
                     },
                 );
@@ -7958,6 +8040,12 @@ impl HistorySimulation {
                         suffix: String::new(),
                     }
                 }
+                HistoricalEventKind::SecularCrisis => StateLinkItem {
+                    state_id: None,
+                    prefix: yr_prefix,
+                    label: "Demographic & fiscal crisis (population contraction)".to_string(),
+                    suffix: String::new(),
+                },
             };
             out.push(item);
         }
@@ -8191,7 +8279,16 @@ impl HistorySimulation {
         } else {
             "Cohesive"
         };
-        let asabiya_text = format!("{:.0}% ({frontier_label})", st_asabiya * 100.0);
+        let st_strain = self
+            .states
+            .get(&state_id)
+            .map(|st| st.overpop_strain)
+            .unwrap_or(0.0);
+        let asabiya_text = if st_strain >= 0.55 {
+            format!("{:.0}% ({frontier_label} · Strained)", st_asabiya * 100.0)
+        } else {
+            format!("{:.0}% ({frontier_label})", st_asabiya * 100.0)
+        };
 
         let mut nationalities: Vec<DemographicShareItem> = nat_totals
             .into_iter()
@@ -10193,6 +10290,7 @@ impl HistorySimulation {
                                     color_idx: (pf.state_id as usize) % NATION_PALETTE.len(),
                                     active: true,
                                     asabiya: 0.5,
+                                    overpop_strain: 0.0,
                                     founding_language_id: None,
                                 },
                             );
@@ -11614,5 +11712,16 @@ mod tests {
             "Former state should retain its linguistic name, got {name_after_conquest}"
         );
         assert_eq!(name_after_conquest, name_while_active);
+    }
+
+    #[test]
+    fn test_secular_cycle_strain_and_split_risk() {
+        // Cohesive frontier state has very low split probability; strained low-asabiya empire has high risk
+        let p_cohesive = HistorySimulation::split_probability_with_secular_cycle(150, 0.80, 0.0);
+        let p_strained = HistorySimulation::split_probability_with_secular_cycle(150, 0.20, 0.85);
+        assert!(
+            p_strained > p_cohesive * 10.0 && p_strained >= 0.15,
+            "Expected strained low-asabiya empire ({p_strained:.3}) to have much higher split risk than cohesive state ({p_cohesive:.4})"
+        );
     }
 }
