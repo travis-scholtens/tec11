@@ -4808,6 +4808,237 @@ impl HistorySimulation {
         (base + secular_risk).clamp(0.0, 0.35)
     }
 
+    /// Evaluate multi-ethnic and distant/overseas provincial separatism for all active states.
+    /// Contiguous clusters of tiles whose majority nationality/language differs from the capital's
+    /// (or distant/overseas exclaves >= 12 hops from the capital) can secede into new states,
+    /// scaled by distance from capital, ethnic/linguistic mismatch, and imperial *asabiya*/strain.
+    fn resolve_provincial_separatism(&mut self, fine_adj: &[Vec<usize>]) -> usize {
+        let mut extents: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (&t, &sid) in &self.tile_states {
+            extents.entry(sid).or_default().push(t);
+        }
+
+        let mut planned_secessions: Vec<(u32, Vec<usize>, usize, u32, Vec<u32>)> = Vec::new();
+
+        for (sid, tiles) in extents {
+            if tiles.len() < 14 {
+                continue;
+            }
+            let Some(st_rec) = self.states.get(&sid) else {
+                continue;
+            };
+            let cap_tile = st_rec.capital_tile;
+            let state_asabiya = st_rec.asabiya;
+            let state_strain = st_rec.overpop_strain;
+
+            // Ruling nationality and language at the capital (fallback to state-wide majority)
+            let cap_dom = self
+                .tile_communities
+                .get(&cap_tile)
+                .and_then(|cs| {
+                    cs.iter()
+                        .filter(|c| c.thousands > 0.0)
+                        .max_by(|a, b| {
+                            a.thousands
+                                .partial_cmp(&b.thousands)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|c| (c.nationality_id, c.language_id))
+                })
+                .or_else(|| {
+                    let dom_l = self.primary_language_for_state(sid)?;
+                    Some((sid, dom_l))
+                });
+            let Some((cap_nat, cap_lang)) = cap_dom else {
+                continue;
+            };
+
+            let state_tile_set: BTreeSet<usize> = tiles.iter().copied().collect();
+            // BFS hop distance from capital over state-owned land tiles
+            let mut dist_from_cap: BTreeMap<usize, u32> = BTreeMap::new();
+            let mut q = VecDeque::new();
+            if state_tile_set.contains(&cap_tile) {
+                dist_from_cap.insert(cap_tile, 0);
+                q.push_back(cap_tile);
+                while let Some(u) = q.pop_front() {
+                    let d = dist_from_cap[&u];
+                    for &nb in &fine_adj[u] {
+                        if state_tile_set.contains(&nb) && !dist_from_cap.contains_key(&nb) {
+                            dist_from_cap.insert(nb, d + 1);
+                            q.push_back(nb);
+                        }
+                    }
+                }
+            }
+
+            // Collect restive tiles: foreign majority nationality/language OR distant/overseas (>= 12 hops / unreachable)
+            let mut restive_tiles: BTreeSet<usize> = BTreeSet::new();
+            let mut tile_is_alien: BTreeSet<usize> = BTreeSet::new();
+            for &t in &tiles {
+                if t == cap_tile {
+                    continue;
+                }
+                let alien = self
+                    .tile_communities
+                    .get(&t)
+                    .and_then(|cs| {
+                        cs.iter()
+                            .filter(|c| c.thousands > 0.0)
+                            .max_by(|a, b| {
+                                a.thousands
+                                    .partial_cmp(&b.thousands)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                    })
+                    .is_some_and(|c| c.nationality_id != cap_nat || c.language_id != cap_lang);
+                let hop_d = dist_from_cap.get(&t).copied().unwrap_or(20);
+                if alien {
+                    tile_is_alien.insert(t);
+                    if hop_d >= 3 {
+                        restive_tiles.insert(t);
+                    }
+                } else if hop_d >= 12 {
+                    restive_tiles.insert(t);
+                }
+            }
+            if restive_tiles.len() < 4 {
+                continue;
+            }
+
+            // Connected components of restive tiles
+            let mut visited: BTreeSet<usize> = BTreeSet::new();
+            let mut remaining_parent_tiles = tiles.len();
+            let mut secessions_for_state = 0usize;
+
+            for &start in &restive_tiles {
+                if visited.contains(&start) || secessions_for_state >= 2 {
+                    continue;
+                }
+                let mut comp = Vec::new();
+                let mut cq = VecDeque::new();
+                visited.insert(start);
+                cq.push_back(start);
+                while let Some(u) = cq.pop_front() {
+                    comp.push(u);
+                    for &nb in &fine_adj[u] {
+                        if restive_tiles.contains(&nb) && visited.insert(nb) {
+                            cq.push_back(nb);
+                        }
+                    }
+                }
+                if comp.len() < 4 || remaining_parent_tiles.saturating_sub(comp.len()) < 6 {
+                    continue;
+                }
+
+                let mean_dist: f64 = comp
+                    .iter()
+                    .map(|t| dist_from_cap.get(t).copied().unwrap_or(18) as f64)
+                    .sum::<f64>()
+                    / (comp.len() as f64);
+                let ethnic_mismatch: f64 = comp
+                    .iter()
+                    .filter(|t| tile_is_alien.contains(t))
+                    .count() as f64
+                    / (comp.len() as f64);
+
+                let dist_factor = ((mean_dist - 3.5).max(0.0) / 13.0).clamp(0.15, 1.4);
+                let imperial_weakness =
+                    (1.15 - (state_asabiya as f64) + 0.55 * (state_strain as f64)).clamp(0.25, 1.6);
+                let secede_prob = (0.045
+                    * dist_factor
+                    * (0.4 + 1.2 * ethnic_mismatch)
+                    * imperial_weakness)
+                    .clamp(0.0, 0.28);
+
+                if self.rng.uniform(0.0, 1.0) >= secede_prob {
+                    continue;
+                }
+
+                // Pick province's highest-capacity tile as its new capital and find majority language
+                let new_cap = *comp
+                    .iter()
+                    .max_by(|&&a, &&b| {
+                        self.capacities[a]
+                            .partial_cmp(&self.capacities[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(&comp[0]);
+                let mut lang_pops: BTreeMap<u32, f32> = BTreeMap::new();
+                for &t in &comp {
+                    if let Some(comms) = self.tile_communities.get(&t) {
+                        for c in comms {
+                            if c.thousands > 0.0 {
+                                *lang_pops.entry(c.language_id).or_insert(0.0) += c.thousands;
+                            }
+                        }
+                    }
+                }
+                let mut langs_by_pop: Vec<(u32, f32)> = lang_pops.into_iter().collect();
+                langs_by_pop
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let Some(&(maj_lang, _)) = langs_by_pop.first() else {
+                    continue;
+                };
+                let min_langs: Vec<u32> = langs_by_pop.iter().skip(1).map(|&(l, _)| l).collect();
+
+                remaining_parent_tiles -= comp.len();
+                secessions_for_state += 1;
+                planned_secessions.push((sid, comp, new_cap, maj_lang, min_langs));
+            }
+        }
+
+        let count = planned_secessions.len();
+        for (parent_sid, prov_tiles, new_cap, maj_lang, min_langs) in planned_secessions {
+            let new_state = self.next_state_id;
+            self.next_state_id += 1;
+            for &f in &prov_tiles {
+                self.tile_states.insert(f, new_state);
+            }
+            let color_idx = (self.rng.next_u64() as usize) % NATION_PALETTE.len();
+            self.states.insert(
+                new_state,
+                StateRecord {
+                    id: new_state,
+                    capital_tile: new_cap,
+                    color_idx,
+                    active: true,
+                    asabiya: 0.72,
+                    overpop_strain: 0.0,
+                    founding_language_id: Some(maj_lang),
+                },
+            );
+            let cap_cid = self.ensure_city_at_tile(new_cap, maj_lang);
+            let mut temp_rng = self.rng.clone();
+            if let Some(lang) = self.languages.get_mut(&maj_lang) {
+                lang.coin_concept(ConceptKey::State(new_state), &mut temp_rng);
+            }
+            self.rng = temp_rng;
+            if let Some(donor) = self.languages.get(&maj_lang).cloned() {
+                for min_lang in min_langs {
+                    if let Some(lang) = self.languages.get_mut(&min_lang) {
+                        lang.borrow_concept(ConceptKey::State(new_state), &donor);
+                        lang.borrow_concept(ConceptKey::City(cap_cid), &donor);
+                    }
+                }
+            }
+            self.record_event(
+                HistoricalEventKind::StateSplitFrom,
+                new_state,
+                parent_sid,
+                new_cap,
+                true,
+            );
+            self.record_event(
+                HistoricalEventKind::StateSplitLost,
+                parent_sid,
+                new_state,
+                new_cap,
+                false,
+            );
+        }
+        count
+    }
+
     /// City spawning probability per fine face (`historysimulation.py:846-867`), scaled by 1/9 for $N+2$ subdivision
     /// and boosted on high-intensity metaethnic frontiers $(1 + 1.5 I_f)$ per Turchin (2003).
     fn city_prob(
@@ -6339,6 +6570,10 @@ impl HistorySimulation {
             }
             self.trade_partners.retain(|pair| !pair.contains(n));
         }
+
+        // 7b. Multi-ethnic & distant-province separatism: conquered foreign-language / foreign-nationality
+        //     provinces and distant overseas territories can break away into independent states.
+        self.resolve_provincial_separatism(&fine_adj);
         drop(_span_war);
 
         // 8. Update trade, conflicts, concept accumulation, and recolor nations
@@ -11722,6 +11957,70 @@ mod tests {
         assert!(
             p_strained > p_cohesive * 10.0 && p_strained >= 0.15,
             "Expected strained low-asabiya empire ({p_strained:.3}) to have much higher split risk than cohesive state ({p_cohesive:.4})"
+        );
+    }
+
+    #[test]
+    fn test_provincial_separatism_breaks_away_foreign_distant_province() {
+        let mut sim = HistorySimulation::new_earth(42);
+        let fine_adj = std::sync::Arc::clone(&sim.fine_adj);
+        // Pick the largest initial state and mark a distant cluster of its tiles with a foreign
+        // nationality & language + strained low asabiya so separatism fires cleanly.
+        let mut by_state: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (&t, &sid) in &sim.tile_states {
+            by_state.entry(sid).or_default().push(t);
+        }
+        let (&parent_sid, parent_tiles) = by_state
+            .iter()
+            .max_by_key(|(_, ts)| ts.len())
+            .expect("at least one state");
+        let foreign_lang = sim
+            .languages
+            .keys()
+            .copied()
+            .find(|&lid| Some(lid) != sim.primary_language_for_state(parent_sid))
+            .unwrap_or(0);
+        let foreign_nat = parent_sid + 100;
+        let cap_tile = sim.states[&parent_sid].capital_tile;
+        if let Some(st) = sim.states.get_mut(&parent_sid) {
+            st.asabiya = 0.20;
+            st.overpop_strain = 0.85;
+        }
+        // BFS from capital to mark the farthest 8 tiles as a foreign-nationality province
+        let pset: BTreeSet<usize> = parent_tiles.iter().copied().collect();
+        let mut order = Vec::new();
+        let mut visited = BTreeSet::from([cap_tile]);
+        let mut q = VecDeque::from([cap_tile]);
+        while let Some(u) = q.pop_front() {
+            order.push(u);
+            for &nb in &fine_adj[u] {
+                if pset.contains(&nb) && visited.insert(nb) {
+                    q.push_back(nb);
+                }
+            }
+        }
+        for &t in order.iter().rev().take(8) {
+            if t == cap_tile {
+                continue;
+            }
+            if let Some(comms) = sim.tile_communities.get_mut(&t) {
+                for c in comms.iter_mut() {
+                    c.nationality_id = foreign_nat;
+                    c.language_id = foreign_lang;
+                }
+            }
+        }
+
+        let mut total_secessions = 0usize;
+        for _ in 0..40 {
+            total_secessions += sim.resolve_provincial_separatism(&fine_adj);
+            if total_secessions > 0 {
+                break;
+            }
+        }
+        assert!(
+            total_secessions > 0,
+            "Expected distant foreign-nationality province in strained empire to secede"
         );
     }
 }
