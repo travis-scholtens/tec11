@@ -178,6 +178,11 @@ pub struct PrehistorySimulation {
     tile_life: Vec<f32>,
     tile_precip_norm: Vec<f32>,
     tile_ag_potential: Vec<f32>,
+    /// Cumulative Prehistory ticks each coarse tile spent under continental ice sheets (`EF`/`ET`).
+    glaciated_ticks: Vec<u16>,
+    /// Cumulative Prehistory ticks each coarse tile spent as ice-free land within 2 hops of an
+    /// ice sheet (accumulating mineral-rich periglacial loess and glacial outwash/till).
+    periglacial_ticks: Vec<u16>,
     rivers: Vec<Vec<usize>>,
     river_tiles: Vec<bool>,
     populated: BTreeMap<usize, u32>,
@@ -386,6 +391,8 @@ impl PrehistorySimulation {
             tile_life: vec![0; n].into_iter().map(|_| 0.0).collect(),
             tile_precip_norm: vec![0.0; n],
             tile_ag_potential: vec![1.0; n],
+            glaciated_ticks: vec![0; n],
+            periglacial_ticks: vec![0; n],
             rivers: Vec::new(),
             river_tiles: vec![false; n],
             populated: BTreeMap::new(),
@@ -458,6 +465,8 @@ impl PrehistorySimulation {
             tile_life: vec![0; n].into_iter().map(|_| 0.0).collect(),
             tile_precip_norm: vec![0.0; n],
             tile_ag_potential: vec![1.0; n],
+            glaciated_ticks: vec![0; n],
+            periglacial_ticks: vec![0; n],
             rivers: Vec::new(),
             river_tiles: vec![false; n],
             populated: BTreeMap::new(),
@@ -542,6 +551,8 @@ impl PrehistorySimulation {
             tile_life: std::mem::take(&mut self.tile_life),
             tile_precip_norm: std::mem::take(&mut self.tile_precip_norm),
             tile_ag_potential: std::mem::take(&mut self.tile_ag_potential),
+            glaciated_ticks: std::mem::take(&mut self.glaciated_ticks),
+            periglacial_ticks: std::mem::take(&mut self.periglacial_ticks),
             rivers: std::mem::take(&mut self.rivers),
             river_tiles: std::mem::take(&mut self.river_tiles),
             populated: std::mem::take(&mut self.populated),
@@ -574,6 +585,8 @@ impl PrehistorySimulation {
         self.glaciation = initial_glaciation;
         self.eustatic_sea_level_km =
             Self::compute_eustatic_sea_level(initial_glaciation, self.is_custom);
+        self.glaciated_ticks.fill(0);
+        self.periglacial_ticks.fill(0);
         self.populated.clear();
         self.heritages.clear();
         self.agricultural_heritages.clear();
@@ -611,6 +624,7 @@ impl PrehistorySimulation {
 
         // 3. Recompute climate and remove populated tiles that became uninhabitable (`prehistorysimulation.py:110-114`).
         self.refresh_climate();
+        self.record_glacial_soil_history();
         let ag_heritages = &self.agricultural_heritages;
         let subgrid_koeppen = &self.subgrid_island_koeppen;
         let tile_koeppen = &self.tile_koeppen;
@@ -689,7 +703,8 @@ impl PrehistorySimulation {
         }
         for (t, flood_mult) in river_tile_flood {
             if let Some(&hid) = self.populated.get(&t) {
-                let ag_mult = self.tile_ag_potential.get(t).copied().unwrap_or(1.0) as f64;
+                let ag_mult = (self.tile_ag_potential.get(t).copied().unwrap_or(1.0)
+                    * self.glacial_soil_fertility_modifier(t)) as f64;
                 let prob =
                     gfactor * agriculture_spark_prob(self.tile_koeppen[t]) * ag_mult * flood_mult;
                 if prob > 0.0 && self.rng.uniform(0.0, 1.0) < prob {
@@ -731,7 +746,8 @@ impl PrehistorySimulation {
                 && can_rainfed_farm
                 && self.tile_precip_norm.get(t).copied().unwrap_or(0.0) >= 0.30
             {
-                let ag_mult = self.tile_ag_potential.get(t).copied().unwrap_or(1.0) as f64;
+                let ag_mult = (self.tile_ag_potential.get(t).copied().unwrap_or(1.0)
+                    * self.glacial_soil_fertility_modifier(t)) as f64;
                 let rainfed_prob = gfactor * 0.0003 * ag_mult;
                 if rainfed_prob > 0.0 && self.rng.uniform(0.0, 1.0) < rainfed_prob {
                     self.agricultural_heritages.insert(hid);
@@ -879,6 +895,59 @@ impl PrehistorySimulation {
             .collect();
         self.climate_model.update_for_glaciation_step(&land_elevs, true);
         self.sync_classification_arrays();
+    }
+
+    /// Record per-tile continental ice-sheet scouring (`EF`/`ET` interior) and periglacial
+    /// loess/till deposition (ice-free land within 2 hops of an active ice sheet).
+    fn record_glacial_soil_history(&mut self) {
+        let n = self.tiles.len();
+        if self.glaciated_ticks.len() != n {
+            self.glaciated_ticks.resize(n, 0);
+        }
+        if self.periglacial_ticks.len() != n {
+            self.periglacial_ticks.resize(n, 0);
+        }
+        let sea_level = self.eustatic_sea_level_km;
+        let mut is_ice = vec![false; n];
+        for t in 0..n {
+            let eff_e = self.tiles[t].elevation() - sea_level;
+            if eff_e > 0.0 && matches!(self.tile_koeppen[t], 12 | 13) {
+                is_ice[t] = true;
+                self.glaciated_ticks[t] = self.glaciated_ticks[t].saturating_add(1);
+            }
+        }
+        // Mark ice-free land within 2 hops of an active ice sheet as receiving loess/outwash till
+        let mut hop1 = vec![false; n];
+        for t in 0..n {
+            if is_ice[t] {
+                for &nb in &self.adjacency[t] {
+                    if !is_ice[nb] {
+                        hop1[nb] = true;
+                    }
+                }
+            }
+        }
+        for t in 0..n {
+            let eff_e = self.tiles[t].elevation() - sea_level;
+            if eff_e <= 0.0 || is_ice[t] {
+                continue;
+            }
+            let near_ice = hop1[t] || self.adjacency[t].iter().any(|&nb| hop1[nb]);
+            if near_ice {
+                self.periglacial_ticks[t] = self.periglacial_ticks[t].saturating_add(1);
+            }
+        }
+    }
+
+    /// Soil fertility multiplier from Pleistocene glaciation history:
+    /// - Heavily ice-scoured shield interiors (`glaciated_ticks`) drop toward `0.68x` (bare bedrock).
+    /// - Periglacial loess & glacial till margins (`periglacial_ticks`) rise up to `1.35x` (prime farmland).
+    pub fn glacial_soil_fertility_modifier(&self, tile_idx: usize) -> f32 {
+        let g = self.glaciated_ticks.get(tile_idx).copied().unwrap_or(0) as f32;
+        let p = self.periglacial_ticks.get(tile_idx).copied().unwrap_or(0) as f32;
+        let scour_penalty = (0.04 * g).min(0.32);
+        let loess_bonus = (0.045 * p).min(0.35);
+        (1.0 + loess_bonus - scour_penalty).clamp(0.65, 1.38)
     }
 
     fn refresh_rivers(&mut self, elevations: &[f32]) {
@@ -1138,6 +1207,8 @@ impl PrehistorySimulation {
                     tile_life: vec![0.0; n],
                     tile_precip_norm: vec![0.0; n],
                     tile_ag_potential: vec![1.0; n],
+                    glaciated_ticks: vec![0; n],
+                    periglacial_ticks: vec![0; n],
                     rivers: Vec::new(),
                     river_tiles: vec![false; n],
                     populated: BTreeMap::new(),
@@ -1303,6 +1374,8 @@ impl PrehistorySimulation {
             tile_life: vec![0; n].into_iter().map(|_| 0.0).collect(),
             tile_precip_norm: vec![0.0; n],
             tile_ag_potential: vec![1.0; n],
+            glaciated_ticks: vec![0; n],
+            periglacial_ticks: vec![0; n],
             rivers: Vec::new(),
             river_tiles: vec![false; n],
             populated,
@@ -2045,6 +2118,39 @@ mod tests {
         assert!(
             lgm_land > interglacial_land,
             "Expected eustatic sea-level drop at LGM to expose shallow continental shelves ({lgm_land} vs {interglacial_land} land tiles)"
+        );
+    }
+
+    #[test]
+    fn test_glacial_scouring_vs_periglacial_loess_fertility() {
+        let mut sim = PrehistorySimulation::new_earth(42);
+        sim.glaciation_tick = 0;
+        // Run 6 ticks near glacial maximum so ice sheets scour interiors and deposit loess on margins
+        for _ in 0..6 {
+            sim.step();
+        }
+        let mut scoured_count = 0usize;
+        let mut loess_count = 0usize;
+        let mut min_mod = 1.0f32;
+        let mut max_mod = 1.0f32;
+        for t in 0..sim.tiles.len() {
+            let m = sim.glacial_soil_fertility_modifier(t);
+            if m < 0.90 {
+                scoured_count += 1;
+            }
+            if m > 1.10 {
+                loess_count += 1;
+            }
+            min_mod = min_mod.min(m);
+            max_mod = max_mod.max(m);
+        }
+        assert!(
+            scoured_count > 10 && min_mod < 0.85,
+            "Expected ice-scoured shield interiors with reduced fertility (count={scoured_count}, min={min_mod:.3})"
+        );
+        assert!(
+            loess_count > 10 && max_mod > 1.15,
+            "Expected periglacial loess/till margins with boosted fertility (count={loess_count}, max={max_mod:.3})"
         );
     }
 }

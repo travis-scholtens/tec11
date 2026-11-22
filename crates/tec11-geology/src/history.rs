@@ -1924,7 +1924,8 @@ impl HistorySimulation {
             let soil_mult = geo_tiles
                 .get(c)
                 .map(|t| t.surface_soil_fertility())
-                .unwrap_or(1.0);
+                .unwrap_or(1.0)
+                * self.prehistory.glacial_soil_fertility_modifier(c);
             if coarse_elevs[c] > 0.0 {
                 if !is_habitable(coarse_elevs[c], koeppen[c]) {
                     continue;
