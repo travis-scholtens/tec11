@@ -53,6 +53,7 @@ derive instance eqScreen :: Eq Screen
 
 data WorldModal
   = CosmosModal
+  | WeatherModal
   | GeologyModal
   | SkyModal
   | LifeModal
@@ -374,6 +375,7 @@ type TravelInfo =
 
 type WorldInfo =
   { stageIndex :: Int
+  , hasAtmosphere :: Boolean
   , stageName :: String
   , tileCount :: Int
   , yearsText :: String
@@ -722,6 +724,8 @@ foreign import loadFilePlanetIntoTides :: (TidesInfo -> Effect Unit) -> Effect U
 
 -- Global Coupled Weather & Storm Surge on Full-Sphere Coarse+2 Grid (`WeatherScreen`)
 foreign import mountWeatherView :: Int -> Int -> Int -> Int -> Int -> Int -> String -> String -> (WeatherInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import mountWorldWeatherModal :: String -> String -> (WeatherInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import rotateWorldWeatherModal :: Number -> Effect Unit
 foreign import stepWeatherHours :: Int -> (WeatherInfo -> Effect Unit) -> Effect Unit
 foreign import toggleWeatherRunning :: (WeatherInfo -> Effect Unit) -> Effect Unit
 foreign import resetWeatherSim :: (WeatherInfo -> Effect Unit) -> Effect Unit
@@ -1784,8 +1788,10 @@ mkApp = do
     worldRandomize /\ setWorldRandomize <- useState' true
     worldAspect /\ setWorldAspectState <- useState' "color"
     worldActiveModal /\ setWorldActiveModal <- useState' (Nothing :: Maybe WorldModal)
+    worldWeatherRotDeg /\ setWorldWeatherRotDeg <- useState' 0
     worldInfo /\ setWorldInfo <- useState'
       { stageIndex: 0
+      , hasAtmosphere: false
       , stageName: "Tectonics (Hadean / Early Crust)"
       , tileCount: 2432
       , yearsText: "0"
@@ -2098,6 +2104,13 @@ mkApp = do
       when (screen == WorldScreen && worldActiveModal == Just StateModal) notifyWorldStateModalOpen
       pure (setWorldCosmosModalActive false)
 
+    useEffect (screen /\ (worldActiveModal == Just WeatherModal)) do
+      if screen == WorldScreen && worldActiveModal == Just WeatherModal then do
+        setWorldWeatherRotDeg 0
+        mountWorldWeatherModal weatherAspect weatherArrowMode syncWeatherControlsFromInfo
+      else
+        pure (pure unit)
+
     let
       handleRotateChange :: Maybe String -> Effect Unit
       handleRotateChange maybeVal = case maybeVal >>= Int.fromString of
@@ -2105,6 +2118,13 @@ mkApp = do
         Just deg -> do
           setRotationDeg deg
           rotateGrid (Int.toNumber deg)
+
+      handleWorldWeatherRotateChange :: Maybe String -> Effect Unit
+      handleWorldWeatherRotateChange maybeVal = case maybeVal >>= Int.fromString of
+        Nothing -> pure unit
+        Just deg -> do
+          setWorldWeatherRotDeg deg
+          rotateWorldWeatherModal (Int.toNumber deg)
 
       handlePlanetSizeChange :: Maybe String -> Effect Unit
       handlePlanetSizeChange maybeVal = case maybeVal >>= Int.fromString of
@@ -5655,6 +5675,28 @@ mkApp = do
                                   , onClick: capture_ (setWorldActiveModal (Just CosmosModal))
                                   , children: [ R.text "Cosmos" ]
                                   }
+                              , R.button
+                                  { id: "world-weather-btn"
+                                  , className: "action-btn secondary"
+                                  , disabled: worldInfo.isRunning || not worldInfo.hasAtmosphere
+                                  , title:
+                                      if not worldInfo.hasAtmosphere then
+                                        "Weather is unavailable until the planet develops an atmosphere"
+                                      else if worldInfo.isRunning then
+                                        "Pause the main simulation to open Weather"
+                                      else
+                                        "Run live coupled weather & tides on an isolated copy of this world"
+                                  , style:
+                                      R.css
+                                        { width: "auto"
+                                        , flex: "0 0 auto"
+                                        , padding: "0.42rem 0.8rem"
+                                        , fontSize: "0.88rem"
+                                        , whiteSpace: "nowrap"
+                                        }
+                                  , onClick: capture_ (setWorldActiveModal (Just WeatherModal))
+                                  , children: [ R.text "Weather" ]
+                                  }
                               ]
                           }
                       ]
@@ -6394,6 +6436,257 @@ mkApp = do
                                                             , lineHeight: "1.35"
                                                             }
                                                       , children: [ R.text worldInfo.planetsSummaryText ]
+                                                      }
+                                                  ]
+                                              }
+                                          ]
+                                      }
+                                  ]
+                              }
+                          ]
+                      }
+                  Just WeatherModal ->
+                    R.div
+                      { id: "world-weather-modal"
+                      , className: "world-modal-backdrop"
+                      , children:
+                          [ R.div
+                              { style: R.css { position: "fixed", inset: "0" }
+                              , onClick: capture_ (setWorldActiveModal Nothing)
+                              , children: []
+                              }
+                          , R.div
+                              { className: "world-modal-card"
+                              , style: R.css { position: "relative", zIndex: "1", maxWidth: "min(1060px, 96vw)" }
+                              , children:
+                                  [ R.div
+                                      { className: "world-modal-header"
+                                      , children:
+                                          [ R.div
+                                              { className: "world-modal-title"
+                                              , children: [ R.text ("Live Weather & Tides — " <> weatherInfo.planetName) ]
+                                              }
+                                          , R.button
+                                              { id: "world-modal-close-btn"
+                                              , className: "world-modal-close-btn"
+                                              , onClick: capture_ (setWorldActiveModal Nothing)
+                                              , children: [ R.text "Close ×" ]
+                                              }
+                                          ]
+                                      }
+                                  , R.div
+                                      { className: "world-modal-body"
+                                      , children:
+                                          [ R.div
+                                              { style:
+                                                  R.css
+                                                    { display: "grid"
+                                                    , gridTemplateColumns: "minmax(340px, 1.15fr) minmax(290px, 0.85fr)"
+                                                    , gap: "0.9rem"
+                                                    , alignItems: "start"
+                                                    }
+                                              , children:
+                                                  [ R.div
+                                                      { style: R.css { display: "flex", flexDirection: "column", gap: "0.55rem" }
+                                                      , children:
+                                                          [ R.div
+                                                              { className: "canvas-container"
+                                                              , style: R.css { maxWidth: "100%" }
+                                                              , children:
+                                                                  [ R.canvas
+                                                                      { id: "world-weather-modal-canvas"
+                                                                      , className: "sphere-canvas interactive-canvas"
+                                                                      }
+                                                                  ]
+                                                              }
+                                                          , R.div
+                                                              { className: "slider-row"
+                                                              , children:
+                                                                  [ R.input
+                                                                      { id: "world-weather-rotate-slider"
+                                                                      , className: "rotate-slider"
+                                                                      , type: "range"
+                                                                      , min: "-180"
+                                                                      , max: "180"
+                                                                      , step: "1"
+                                                                      , value: show worldWeatherRotDeg
+                                                                      , onChange: handler targetValue handleWorldWeatherRotateChange
+                                                                      }
+                                                                  , R.span
+                                                                      { className: "rotation-label"
+                                                                      , children: [ R.text (show worldWeatherRotDeg <> "°") ]
+                                                                      }
+                                                                  ]
+                                                              }
+                                                          , if weatherInfo.tileView.hasTile then
+                                                              renderSparklineBox
+                                                                { canvasId: "weather-meteogram-canvas"
+                                                                , title: "48-Hour Meteogram (Temp · SLP · Precip)"
+                                                                , subtitle: weatherInfo.sparkSubtitle
+                                                                , minLabel: weatherInfo.sparkMinLabel
+                                                                , maxLabel: weatherInfo.sparkMaxLabel
+                                                                , currentLabel: weatherInfo.sparkCurrentLabel
+                                                                }
+                                                            else
+                                                              React.empty
+                                                          , R.div
+                                                              { className: "tile-details-box"
+                                                              , style: R.css { maxHeight: "145px" }
+                                                              , children: [ R.text weatherInfo.selectedReport ]
+                                                              }
+                                                          ]
+                                                      }
+                                                  , R.div
+                                                      { style: R.css { display: "flex", flexDirection: "column", gap: "0.65rem" }
+                                                      , children:
+                                                          [ R.div
+                                                              { className: "grid-stats"
+                                                              , children:
+                                                                  [ R.div
+                                                                      { className: "stat-line"
+                                                                      , children:
+                                                                          [ R.text
+                                                                              ( "Subdivided Copy: Size "
+                                                                                  <> show weatherInfo.coarseGridSize
+                                                                                  <> " → "
+                                                                                  <> show weatherInfo.fineGridSize
+                                                                                  <> " ("
+                                                                                  <> show weatherInfo.tileCount
+                                                                                  <> " tiles)"
+                                                                              )
+                                                                          ]
+                                                                      }
+                                                                  , R.div
+                                                                      { className: "stat-line"
+                                                                      , style: R.css { color: "#fde047", fontWeight: "600" }
+                                                                      , children: [ R.text ("Clock: " <> weatherInfo.clockLabel) ]
+                                                                      }
+                                                                  , R.div
+                                                                      { className: "stat-line"
+                                                                      , children: [ R.text ("Mean T: " <> weatherInfo.meanTempText <> " · SLP: " <> weatherInfo.slpRangeText) ]
+                                                                      }
+                                                                  , R.div
+                                                                      { className: "stat-line"
+                                                                      , children: [ R.text ("Peak Wind: " <> weatherInfo.maxWindText <> " · 300 hPa Jet: " <> weatherInfo.maxJetText) ]
+                                                                      }
+                                                                  , R.div
+                                                                      { className: "stat-line"
+                                                                      , children: [ R.text ("Peak Precip: " <> weatherInfo.maxPrecipText <> " · Surge: " <> weatherInfo.maxSurgeText) ]
+                                                                      }
+                                                                  ]
+                                                              }
+                                                          , R.div
+                                                              { className: "button-row"
+                                                              , children:
+                                                                  [ R.button
+                                                                      { id: "world-weather-play-btn"
+                                                                      , className: "action-btn"
+                                                                      , onClick: capture_ (toggleWeatherRunning setWeatherInfo)
+                                                                      , children: [ R.text (if weatherInfo.isRunning then "⏸ Pause" else "▶ Play") ]
+                                                                      }
+                                                                  , R.button
+                                                                      { className: "action-btn secondary"
+                                                                      , disabled: weatherInfo.isRunning
+                                                                      , onClick: capture_ (stepWeatherHours 1 setWeatherInfo)
+                                                                      , children: [ R.text "+1h" ]
+                                                                      }
+                                                                  , R.button
+                                                                      { className: "action-btn secondary"
+                                                                      , disabled: weatherInfo.isRunning
+                                                                      , onClick: capture_ (stepWeatherHours 24 setWeatherInfo)
+                                                                      , children: [ R.text "+24h" ]
+                                                                      }
+                                                                  , R.button
+                                                                      { className: "action-btn secondary"
+                                                                      , onClick: capture_ (resetWeatherSim setWeatherInfo)
+                                                                      , children: [ R.text "Reset" ]
+                                                                      }
+                                                                  ]
+                                                              }
+                                                          , R.div
+                                                              { className: "control-group"
+                                                              , children:
+                                                                  [ R.label
+                                                                      { className: "control-label"
+                                                                      , children: [ R.text "Globe Weather Mode" ]
+                                                                      }
+                                                                  , R.div
+                                                                      { className: "button-row"
+                                                                      , children:
+                                                                          [ R.button
+                                                                              { className: if weatherAspect == "satellite" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherAspectChange "satellite")
+                                                                              , children: [ R.text "Satellite" ]
+                                                                              }
+                                                                          , R.button
+                                                                              { className: if weatherAspect == "pressure_fronts" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherAspectChange "pressure_fronts")
+                                                                              , children: [ R.text "Pressure & Fronts" ]
+                                                                              }
+                                                                          ]
+                                                                      }
+                                                                  , R.div
+                                                                      { className: "button-row"
+                                                                      , children:
+                                                                          [ R.button
+                                                                              { className: if weatherAspect == "temperature" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherAspectChange "temperature")
+                                                                              , children: [ R.text "Surface Temp" ]
+                                                                              }
+                                                                          , R.button
+                                                                              { className: if weatherAspect == "precipitation" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherAspectChange "precipitation")
+                                                                              , children: [ R.text "Precip & Clouds" ]
+                                                                              }
+                                                                          ]
+                                                                      }
+                                                                  , R.div
+                                                                      { className: "button-row"
+                                                                      , children:
+                                                                          [ R.button
+                                                                              { className: if weatherAspect == "winds_jet" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherAspectChange "winds_jet")
+                                                                              , children: [ R.text "300 hPa Jet" ]
+                                                                              }
+                                                                          , R.button
+                                                                              { className: if weatherAspect == "storm_surge" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherAspectChange "storm_surge")
+                                                                              , children: [ R.text "Tides & Surge" ]
+                                                                              }
+                                                                          ]
+                                                                      }
+                                                                  , R.label
+                                                                      { className: "control-label"
+                                                                      , children: [ R.text "3D Vector Arrows" ]
+                                                                      }
+                                                                  , R.div
+                                                                      { className: "button-row"
+                                                                      , children:
+                                                                          [ R.button
+                                                                              { className: if weatherArrowMode == "none" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherArrowModeChange "none")
+                                                                              , children: [ R.text "Off" ]
+                                                                              }
+                                                                          , R.button
+                                                                              { className: if weatherArrowMode == "surface_wind" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherArrowModeChange "surface_wind")
+                                                                              , children: [ R.text "Surface Wind" ]
+                                                                              }
+                                                                          , R.button
+                                                                              { className: if weatherArrowMode == "jet_stream" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherArrowModeChange "jet_stream")
+                                                                              , children: [ R.text "Upper Jet" ]
+                                                                              }
+                                                                          , R.button
+                                                                              { className: if weatherArrowMode == "tidal_current" then "action-btn" else "action-btn secondary"
+                                                                              , onClick: capture_ (handleWeatherArrowModeChange "tidal_current")
+                                                                              , children: [ R.text "Tidal Current" ]
+                                                                              }
+                                                                          ]
+                                                                      }
+                                                                  ]
+                                                              }
+                                                          ]
                                                       }
                                                   ]
                                               }

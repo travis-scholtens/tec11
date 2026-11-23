@@ -784,6 +784,13 @@ impl WorldSimulation {
         }
     }
 
+    pub fn has_atmosphere(&self) -> bool {
+        match &self.stage {
+            WorldStageState::Tectonics(tec) => tec.has_atmosphere(),
+            WorldStageState::Prehistory(_) | WorldStageState::History(_) => true,
+        }
+    }
+
     pub fn stage_name(&self) -> &'static str {
         match &self.stage {
             WorldStageState::Tectonics(tec) => {

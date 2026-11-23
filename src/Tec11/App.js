@@ -5898,6 +5898,7 @@ function buildWorldInfo(view) {
   const bundle = buildHistoryInspectorBundle(view);
   return {
     stageIndex: s.stage_index(),
+    hasAtmosphere: typeof s.has_atmosphere === "function" ? s.has_atmosphere() : s.stage_index() > 0,
     stageName: s.stage_name(),
     tileCount: s.tile_count(),
     yearsText: s.years_formatted(),
@@ -9917,22 +9918,124 @@ export const mountWeatherView =
     };
   };
 
+let worldWeatherModalView = null;
+
+function getActiveWeatherView() {
+  if (worldWeatherModalView && worldWeatherModalView.session) {
+    return worldWeatherModalView;
+  }
+  if (activeView && activeView.inspectorMode === "weather" && activeView.session) {
+    return activeView;
+  }
+  return null;
+}
+
+export const mountWorldWeatherModal =
+  (aspect) =>
+  (arrowMode) =>
+  (setWeatherInfo) =>
+  () => {
+    const canvas = document.getElementById("world-weather-modal-canvas");
+    if (!canvas) {
+      return () => {};
+    }
+
+    // Copy the current World planet via immutable snapshot bytes so the Weather modal
+    // runs on a completely independent subdivided WeatherSandbox without mutating WorldSimulation.
+    let snapBytes = null;
+    if (
+      activeView &&
+      activeView.session &&
+      typeof activeView.session.encode_snapshot === "function"
+    ) {
+      snapBytes = activeView.session.encode_snapshot();
+    }
+
+    const view = createBaseSphereView(canvas, false);
+    view.material.dispose();
+    view.material = new THREE.MeshBasicMaterial({
+      side: THREE.FrontSide,
+      vertexColors: true,
+    });
+    view.mesh.material = view.material;
+    view.unlit = true;
+
+    view.session =
+      snapBytes && snapBytes.length > 0
+        ? WasmWeatherSession.from_snapshot_or_earth(snapBytes)
+        : new WasmWeatherSession();
+    view.aspect = aspect;
+    view.arrowMode = arrowMode;
+    view.selectedTileIdx = -1;
+    view.inspectorMode = "weather";
+    view.timerId = null;
+    view.loadedFileName = null;
+    view.setWeatherInfo = setWeatherInfo;
+
+    const raycaster = new THREE.Raycaster();
+    const pointerNdc = new THREE.Vector2();
+
+    const handleCanvasClick = (ev) => {
+      if (!view.session) return;
+      const rect = canvas.getBoundingClientRect();
+      const u = (ev.clientX - rect.left) / rect.width;
+      const v = (ev.clientY - rect.top) / rect.height;
+
+      pointerNdc.set(2.0 * u - 1.0, 1.0 - 2.0 * v);
+      view.mesh.updateMatrixWorld(true);
+      view.camera.updateMatrixWorld(true);
+      raycaster.setFromCamera(pointerNdc, view.camera);
+      const hits = raycaster.intersectObject(view.mesh, false);
+      if (hits.length > 0 && hits[0].face && view.vertexTileIds) {
+        view.selectedTileIdx = view.vertexTileIds[hits[0].face.a];
+        updateWeatherDataBuffers(view, false);
+        view.setWeatherInfo(buildWeatherInfo(view))();
+      }
+    };
+
+    canvas.addEventListener("click", handleCanvasClick);
+
+    worldWeatherModalView = view;
+    updateWeatherDataBuffers(view, true);
+    setWeatherInfo(buildWeatherInfo(view))();
+
+    return () => {
+      stopWeatherTimer(view);
+      canvas.removeEventListener("click", handleCanvasClick);
+      if (worldWeatherModalView === view) {
+        worldWeatherModalView = null;
+      }
+      view.dispose();
+      view.session.free();
+    };
+  };
+
+export const rotateWorldWeatherModal = (deg) => () => {
+  if (!worldWeatherModalView) return;
+  const angleRad = (deg * Math.PI) / 180.0;
+  worldWeatherModalView.rotationAngleRad = angleRad;
+  worldWeatherModalView.mesh.setRotationFromAxisAngle(_yAxis, angleRad);
+  worldWeatherModalView.paint();
+};
+
 export const stepWeatherHours = (hours) => (setWeatherInfo) => () => {
-  if (!activeView || !activeView.session) return;
-  activeView.session.step_hours(Math.max(1, hours | 0));
-  updateWeatherDataBuffers(activeView, false);
-  setWeatherInfo(buildWeatherInfo(activeView))();
+  const view = getActiveWeatherView();
+  if (!view) return;
+  view.session.step_hours(Math.max(1, hours | 0));
+  updateWeatherDataBuffers(view, false);
+  setWeatherInfo(buildWeatherInfo(view))();
 };
 
 export const toggleWeatherRunning = (setWeatherInfo) => () => {
-  if (!activeView || !activeView.session) return;
-  if (activeView.timerId !== null) {
-    stopWeatherTimer(activeView);
+  const view = getActiveWeatherView();
+  if (!view) return;
+  if (view.timerId !== null) {
+    stopWeatherTimer(view);
   } else {
-    const viewRef = activeView;
+    const viewRef = view;
     const scheduleNextTick = (delayMs) => {
       viewRef.timerId = setTimeout(() => {
-        if (activeView !== viewRef || !viewRef.session) {
+        if (getActiveWeatherView() !== viewRef || !viewRef.session) {
           stopWeatherTimer(viewRef);
           return;
         }
@@ -9941,29 +10044,31 @@ export const toggleWeatherRunning = (setWeatherInfo) => () => {
         updateWeatherDataBuffers(viewRef, false);
         setWeatherInfo(buildWeatherInfo(viewRef))();
         const elapsed = (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0;
-        if (activeView === viewRef && viewRef.timerId !== null) {
+        if (getActiveWeatherView() === viewRef && viewRef.timerId !== null) {
           scheduleNextTick(Math.max(16, Math.round(180 - elapsed)));
         }
       }, delayMs);
     };
     scheduleNextTick(16);
   }
-  setWeatherInfo(buildWeatherInfo(activeView))();
+  setWeatherInfo(buildWeatherInfo(view))();
 };
 
 export const resetWeatherSim = (setWeatherInfo) => () => {
-  if (!activeView || !activeView.session) return;
-  stopWeatherTimer(activeView);
-  activeView.session.reset_weather();
-  updateWeatherDataBuffers(activeView, false);
-  setWeatherInfo(buildWeatherInfo(activeView))();
+  const view = getActiveWeatherView();
+  if (!view) return;
+  stopWeatherTimer(view);
+  view.session.reset_weather();
+  updateWeatherDataBuffers(view, false);
+  setWeatherInfo(buildWeatherInfo(view))();
 };
 
 export const setWeatherDayOfYear = (day) => (setWeatherInfo) => () => {
-  if (!activeView || !activeView.session) return;
-  activeView.session.set_day_of_year(Math.max(0, day | 0));
-  updateWeatherDataBuffers(activeView, false);
-  setWeatherInfo(buildWeatherInfo(activeView))();
+  const view = getActiveWeatherView();
+  if (!view) return;
+  view.session.set_day_of_year(Math.max(0, day | 0));
+  updateWeatherDataBuffers(view, false);
+  setWeatherInfo(buildWeatherInfo(view))();
 };
 
 export const setWeatherEnvParams =
@@ -9974,23 +10079,25 @@ export const setWeatherEnvParams =
   (moonDistRadii) =>
   (setWeatherInfo) =>
   () => {
-    if (!activeView || !activeView.session) return;
-    activeView.session.set_environment_params(
+    const view = getActiveWeatherView();
+    if (!view) return;
+    view.session.set_environment_params(
       Math.max(0, atmId | 0),
       Math.max(0.0, Math.min(1.0, glacPct / 100.0)),
       Math.max(0, moonCount | 0),
       Math.max(0.1, moonMassTenths / 10.0),
       Math.max(20.0, moonDistRadii)
     );
-    updateWeatherDataBuffers(activeView, false);
-    setWeatherInfo(buildWeatherInfo(activeView))();
+    updateWeatherDataBuffers(view, false);
+    setWeatherInfo(buildWeatherInfo(view))();
   };
 
 export const setWeatherDisplayOptions = (aspect) => (arrowMode) => () => {
-  if (!activeView || !activeView.session) return;
-  activeView.aspect = aspect;
-  activeView.arrowMode = arrowMode;
-  updateWeatherDataBuffers(activeView, false);
+  const view = getActiveWeatherView();
+  if (!view) return;
+  view.aspect = aspect;
+  view.arrowMode = arrowMode;
+  updateWeatherDataBuffers(view, false);
 };
 
 export const loadEarthIntoWeather = (setWeatherInfo) => () => {

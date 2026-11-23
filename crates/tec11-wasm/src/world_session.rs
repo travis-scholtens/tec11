@@ -103,6 +103,10 @@ impl WasmWorldSession {
         self.sim.stage_index()
     }
 
+    pub fn has_atmosphere(&self) -> bool {
+        self.sim.has_atmosphere()
+    }
+
     pub fn stage_name(&self) -> String {
         self.sim.stage_name().to_string()
     }
