@@ -14,11 +14,15 @@ Planets are simulated in a few phases with different timesteps.
 
 The structure of the solar system and its location in a galaxy determine what it's night sky will look like, and have consequences for things like tides. The type of sun impacts the color of the sky when an atmosphere develops.
 
+![Cosmos — Host galaxy, solar system, and celestial hemispheres](docs/screenshots/cosmos.png)
+
 ### Tectonics
 
 Each simulated step is 5 million years as contents break up and come back together in a supercontinent cycle. Each hexagonal tile is about 285km (distance between the centers of adjacent tiles).
 
 Geological processes and (when an atmosphere develops) a global climate model affect the composition of each tile and shape the land through erosion.
+
+![Tectonics — Continents, mountain ranges, and biosphere on a hexagonal globe](docs/screenshots/tectonics.png)
 
 ### Prehistory
 
@@ -26,15 +30,21 @@ Each simulated step is 4000 years as glaciers advance and retreat in the cycle b
 
 The climate model continues to cause erosion, and early hunter-gatherer humans can spread throughout the habitable world starting from an initial location.
 
+![Prehistory — Climate zones, ocean currents, and glacial cycles](docs/screenshots/prehistory.png)
+
 ### History
 
 Once agriculture is invented somewhere, each simulated step is 200 years, and land tiles are subdivided into smaller parts, about 95km apart.
 
 Populations coalesce into nationalities with unique languages and form states that evolve over time.
 
+![History — Subdivided terrain with states, borders, and trade routes](docs/screenshots/history.png)
+
 ### Weather
 
 A model can show global weather evolving at a 1 hour timestep, driven by the position of the sun, lunar tides, atmospheric cells and ocean currents.
+
+![Weather — Live coupled global weather, clouds, surface winds, and 48-hour meteogram](docs/screenshots/weather.png)
 
 ## Design Philosophy
 
