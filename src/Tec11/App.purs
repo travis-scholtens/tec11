@@ -2949,6 +2949,20 @@ mkApp = do
                           }
                       ]
                   }
+              , R.a
+                  { id: "github-link"
+                  , href: "https://github.com/travis-scholtens/tec11"
+                  , target: "_blank"
+                  , rel: "noopener noreferrer"
+                  , style:
+                      R.css
+                        { marginTop: "1.5rem"
+                        , fontSize: "0.85rem"
+                        , color: "#94a3b8"
+                        , textDecoration: "none"
+                        }
+                  , children: [ R.text "https://github.com/travis-scholtens/tec11" ]
+                  }
               ]
           }
 
