@@ -4,3 +4,8 @@
 /output/
 /dist/
 MODULE.bazel.lock
+/.agents/
+/.specify/*
+!/.specify/memory/
+/.specify/memory/*
+!/.specify/memory/constitution.md
