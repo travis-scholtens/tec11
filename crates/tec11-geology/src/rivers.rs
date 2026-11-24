@@ -58,11 +58,11 @@ fn compute_downstream_targets(elevations: &[f32], adjacency: &[Vec<usize>]) -> V
 
 /// Trace coarse rivers from local elevation peaks (`elevation >= hmin`) down to the sea,
 /// starting each active river where cumulative normalized precipitation reaches `pmin`
-/// in a non-polar (`koeppen` not `ET`/`EF`) tile (`riversmethod.py:18-32`).
+/// on an unglaciated (`glacier_cover < 0.50`) land tile.
 pub fn trace_coarse_rivers(
     elevations: &[f32],
     precip_norm: &[f32],
-    koeppen_ids: &[u8],
+    glacier_cover: &[f32],
     adjacency: &[Vec<usize>],
     hmin: f32,
     pmin: f32,
@@ -95,9 +95,8 @@ pub fn trace_coarse_rivers(
                     if elevations[u] > 0.0 {
                         p_cum += precip_norm[u];
                     }
-                    let k = koeppen_ids[u];
-                    // Non-ocean (k != 0) and non-polar (`k != 12` EF and `k != 13` ET)
-                    if k != 0 && k != 12 && k != 13 && p_cum >= pmin {
+                    let is_glaciated = glacier_cover.get(u).copied().unwrap_or(0.0) >= 0.50;
+                    if elevations[u] > 0.0 && !is_glaciated && p_cum >= pmin {
                         rivers.push(ts[i..].to_vec());
                         break;
                     }
@@ -258,7 +257,7 @@ impl RiversSandbox {
         self.rivers = trace_coarse_rivers(
             &elevations,
             &self.tile_precip_norm,
-            &self.tile_koeppen,
+            self.climate_model.tile_glacier_cover(),
             &self.adjacency,
             self.hmin,
             self.pmin,

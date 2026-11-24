@@ -155,6 +155,9 @@ pub struct ClimateModel {
     seasons: Vec<SeasonalSnapshot>,
     /// Computed annual Köppen and summary classification per tile.
     classifications: Vec<TileClimateClassification>,
+    /// Physical land glacier / ice-sheet cover in `[0.0, 1.0]` derived from 8-season temperature
+    /// and snowfall mass balance (`>= 0.50` = active perennial glacier / ice sheet, independent of Köppen).
+    land_glacier_cover: Vec<f32>,
 }
 
 impl ClimateModel {
@@ -226,6 +229,7 @@ impl ClimateModel {
             ocean_seasons: Vec::new(),
             seasons: Vec::new(),
             classifications: Vec::new(),
+            land_glacier_cover: Vec::new(),
         };
         model.recompute();
         model
@@ -263,6 +267,7 @@ impl ClimateModel {
             ocean_seasons: Vec::new(),
             seasons: Vec::new(),
             classifications: Vec::new(),
+            land_glacier_cover: Vec::new(),
         }
     }
 
@@ -402,6 +407,19 @@ impl ClimateModel {
         self.seasons.get(season_idx)
     }
 
+    /// Physical land glacier / ice-sheet cover per tile in `[0.0, 1.0]`, derived from 8-season
+    /// temperature and snowfall mass balance (`>= 0.50` = active perennial glacier / ice sheet).
+    pub fn tile_glacier_cover(&self) -> &[f32] {
+        &self.land_glacier_cover
+    }
+
+    /// Whether land tile `v` carries an active perennial glacier or continental ice sheet
+    /// (`tile_glacier_cover()[v] >= 0.50`), derived strictly from physical temperature & snowfall.
+    #[inline]
+    pub fn is_tile_glaciated(&self, v: usize) -> bool {
+        self.land_glacier_cover.get(v).copied().unwrap_or(0.0) >= 0.50
+    }
+
     /// Update `cells` and `glaciation` parameters and recompute only what changed.
     pub fn set_params(&mut self, cells: u32, glaciation: f64) {
         let cells = cells.max(1);
@@ -492,6 +510,7 @@ impl ClimateModel {
             ocean_seasons: Vec::new(),
             seasons: Vec::new(),
             classifications: Vec::new(),
+            land_glacier_cover: Vec::new(),
         };
         model.compute_wind_dest_map();
         let quant_spin = (spin * 20.0).round() / 20.0;
@@ -515,6 +534,7 @@ impl ClimateModel {
         self.ocean_seasons.clear();
         self.seasons.clear();
         self.classifications.clear();
+        self.land_glacier_cover.clear();
         self.compute_wind_dest_map();
         let quant_spin = (spin * 20.0).round() / 20.0;
         self.cached_dest_params = Some(WindDestCacheKey {
@@ -661,8 +681,16 @@ impl ClimateModel {
             })
             .collect();
 
+        let land_glacier_cover = compute_glacier_cover_from_seasons(
+            &self.elevations,
+            &self.adjacency,
+            &snapshots,
+            templimits,
+        );
+
         self.seasons = snapshots;
         self.classifications = classifications;
+        self.land_glacier_cover = land_glacier_cover;
     }
 
     fn recompute(&mut self) {
@@ -792,6 +820,87 @@ impl ClimateModel {
             .map(|opt| opt.map_or(0.0, |b| ((d_f64 - b as f64) / d_f64).powi(2)))
             .collect();
     }
+}
+
+/// Derive per-tile physical land glacier / ice-sheet cover (`[0.0, 1.0]`) directly from
+/// 8-season temperature and precipitation (cold-season snowfall vs. warm-season positive-degree-day
+/// melt, plus 1-hop cold-margin ice-sheet outflow), with zero dependence on descriptive Köppen codes.
+///
+/// Both snowfall and melt are expressed as Earth-year-equivalent annualized rates (`mm / Earth-yr`),
+/// so orbital year length cancels out cleanly across planets with arbitrary orbital periods.
+/// Values `>= 0.50` represent active perennial glaciers / scouring continental ice sheets;
+/// values in `(0.0, 0.45]` represent seasonal or patchy snow cover.
+pub fn compute_glacier_cover_from_seasons(
+    elevations: &[f32],
+    adjacency: &[Vec<usize>],
+    seasons: &[SeasonalSnapshot],
+    templimits: TemperatureRange,
+) -> Vec<f32> {
+    let n = elevations.len();
+    let mut cover = vec![0.0_f32; n];
+    if n == 0 || seasons.is_empty() {
+        return cover;
+    }
+
+    let n_seasons = seasons.len() as f64;
+    let mm_per_season = 2000.0 / n_seasons;
+    let mut max_temps_c = vec![f64::NEG_INFINITY; n];
+
+    for v in 0..n {
+        if elevations[v] <= 0.0 {
+            continue;
+        }
+        let mut max_t_c = f64::NEG_INFINITY;
+        let mut snowfall_mm = 0.0_f64;
+        let mut pos_deg_seasons = 0.0_f64;
+        for snap in seasons {
+            let t_c = templimits.to_celsius(snap.temperature[v] as f64);
+            let p_mm = (snap.precipitation[v] as f64).max(0.0) * mm_per_season;
+            if t_c > max_t_c {
+                max_t_c = t_c;
+            }
+            if t_c <= 0.0 {
+                snowfall_mm += p_mm;
+            } else {
+                pos_deg_seasons += t_c;
+            }
+        }
+        max_temps_c[v] = max_t_c;
+
+        // Annualized positive-degree-day melt (~2.4 mm/°C/Earth-day * 45.6 Earth-days/season).
+        let melt_mm = pos_deg_seasons * 110.0;
+        let c = if max_t_c <= -1.0 && snowfall_mm >= 15.0 {
+            (0.65 + (snowfall_mm / 300.0).min(0.35)).min(1.0)
+        } else if snowfall_mm >= 40.0 && snowfall_mm > melt_mm {
+            (0.55 + ((snowfall_mm - melt_mm) / 300.0).min(0.45)).min(1.0)
+        } else if snowfall_mm >= 25.0 && max_t_c <= 8.0 {
+            ((snowfall_mm / (melt_mm + 120.0)) * 0.45).clamp(0.0, 0.45)
+        } else {
+            0.0
+        };
+        cover[v] = c as f32;
+    }
+
+    // 1-hop continental ice-sheet outflow onto adjacent cold land margins (`max_t_c <= 4.0 °C`).
+    let mut outflow = vec![false; n];
+    for v in 0..n {
+        if cover[v] >= 0.70 {
+            if let Some(nbs) = adjacency.get(v) {
+                for &nb in nbs {
+                    if nb < n && elevations[nb] > 0.0 && max_temps_c[nb] <= 4.0 {
+                        outflow[nb] = true;
+                    }
+                }
+            }
+        }
+    }
+    for v in 0..n {
+        if outflow[v] && cover[v] < 0.55 {
+            cover[v] = 0.55;
+        }
+    }
+
+    cover
 }
 
 #[cfg(test)]
@@ -1117,5 +1226,49 @@ mod tests {
             "Expected polar Köppen on Arctic island, got {:?}",
             polar_isl.koeppen
         );
+    }
+
+    #[test]
+    fn test_physical_glacier_mass_balance_independent_of_koeppen() {
+        let tr = TemperatureRange::new(-30.0, 40.0);
+        let mk_season = |temps_c: [f64; 5], precips_norm: [f32; 5]| SeasonalSnapshot {
+            season_value: 0.0,
+            insolation: vec![0.5; 5],
+            temperature: temps_c.iter().map(|&t| tr.from_celsius(t) as f32).collect(),
+            precipitation: precips_norm.to_vec(),
+            ocean: OceanCirculation {
+                streamfunction: vec![0.0; 5],
+                velocity_xyz: vec![[0.0; 3]; 5],
+                speed: vec![0.0; 5],
+                sst_anomaly: vec![0.0; 5],
+                coastal_sst_influence: vec![0.0; 5],
+                sea_ice_cover: vec![0.0; 5],
+            },
+        };
+        // 5 land tiles:
+        // 0: Polar accumulation zone (year-round <= -4 °C, steady snowfall) -> active glacier (>= 0.70)
+        // 1: Adjacent cold margin (+2 °C summer, light snowfall) -> 1-hop glacial outflow (>= 0.55)
+        // 2: Arid polar desert (-5 °C year-round, almost zero snowfall) -> NOT glaciated
+        // 3: Warm-summer tundra (+8 °C summer, moderate winter snow; Köppen ET) -> seasonal snow only (< 0.50)
+        // 4: Snowy subpolar/alpine (+1 °C brief summer, heavy winter snow) -> active glacier (>= 0.55)
+        let seasons = vec![
+            mk_season([-12.0, -10.0, -14.0, -15.0, -8.0], [0.20, 0.05, 0.002, 0.12, 0.35]),
+            mk_season([-10.0, -6.0, -12.0, -10.0, -6.0], [0.20, 0.05, 0.002, 0.12, 0.35]),
+            mk_season([-6.0, -2.0, -8.0, 0.0, -3.0], [0.20, 0.05, 0.002, 0.12, 0.35]),
+            mk_season([-4.0, 2.0, -5.0, 8.0, 1.0], [0.20, 0.05, 0.002, 0.12, 0.35]),
+            mk_season([-6.0, 1.0, -8.0, 6.0, 0.5], [0.20, 0.05, 0.002, 0.12, 0.35]),
+            mk_season([-10.0, -4.0, -11.0, -4.0, -5.0], [0.20, 0.05, 0.002, 0.12, 0.35]),
+            mk_season([-12.0, -8.0, -13.0, -10.0, -7.0], [0.20, 0.05, 0.002, 0.12, 0.35]),
+            mk_season([-14.0, -10.0, -15.0, -14.0, -9.0], [0.20, 0.05, 0.002, 0.12, 0.35]),
+        ];
+        let elevs = vec![1.0_f32; 5];
+        let adj = vec![vec![1], vec![0], vec![], vec![], vec![]];
+        let cover = compute_glacier_cover_from_seasons(&elevs, &adj, &seasons, tr);
+
+        assert!(cover[0] >= 0.70, "Polar snowy tile should glaciate: {}", cover[0]);
+        assert!(cover[1] >= 0.55, "Cold neighbor of ice sheet should get outflow: {}", cover[1]);
+        assert!(cover[2] < 0.50, "Arid polar desert should NOT glaciate: {}", cover[2]);
+        assert!(cover[3] < 0.50, "Warm-summer tundra (ET) should NOT glaciate: {}", cover[3]);
+        assert!(cover[4] >= 0.55, "Snowy subpolar/alpine tile should glaciate: {}", cover[4]);
     }
 }

@@ -92,29 +92,38 @@ impl WeatherSandbox {
 
         // 2. Initial Manabe soil moisture & perennial icecap/tundra snowpack from coarse Köppen & precip:
         let koeppen_ids = &base.effective_coarse_koeppen;
+        let glacier_cover = cm.tile_glacier_cover();
         let precip_norm = base.prehistory.tile_precip_norm();
         let mut coarse_soil = vec![0.45_f32; nc];
         let mut coarse_snow_m = vec![0.0_f32; nc];
         for c in 0..nc {
             let k = koeppen_ids.get(c).copied().unwrap_or(0);
             let p = precip_norm.get(c).copied().unwrap_or(0.3).clamp(0.0, 1.5);
-            coarse_soil[c] = match k {
-                0 => 1.0,                                 // Ocean
-                1 => 0.88,                                // Af rainforest
-                2 => 0.80,                                // Am monsoon
-                3 => 0.50,                                // Aw savanna
-                4 => 0.24,                                // BS steppe
-                5 => 0.06,                                // BW desert
-                6 | 8 | 9 | 11 => (0.58 + 0.18 * p).min(0.85), // Humid temperate / boreal
-                7 | 10 => (0.40 + 0.16 * p).min(0.70),    // Dry-summer Mediterranean / boreal
-                12 => 0.72,                               // EF icecap
-                13 => 0.56,                               // ET tundra
-                _ => (0.35 + 0.25 * p).clamp(0.10, 0.85),
+            let glac = glacier_cover.get(c).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            coarse_soil[c] = if k == 0 {
+                1.0 // Ocean
+            } else if glac >= 0.50 {
+                0.72 // Active glacier / continental ice sheet
+            } else if glac >= 0.15 {
+                (0.50 + 0.16 * glac).min(0.66) // Seasonal snowpack / cold moist ground
+            } else {
+                match k {
+                    1 => 0.88,                                     // Af rainforest
+                    2 => 0.80,                                     // Am monsoon
+                    3 => 0.50,                                     // Aw savanna
+                    4 => 0.24,                                     // BS steppe
+                    5 => 0.06,                                     // BW desert
+                    6 | 8 | 9 | 11 => (0.58 + 0.18 * p).min(0.85), // Humid temperate / boreal
+                    7 | 10 => (0.40 + 0.16 * p).min(0.70),         // Dry-summer Mediterranean / boreal
+                    _ => (0.35 + 0.25 * p).clamp(0.10, 0.85),
+                }
             };
-            coarse_snow_m[c] = match k {
-                12 => 1.40, // Perennial continental ice sheet / firn
-                13 => 0.05, // Light tundra snow cover
-                _ => 0.0,
+            coarse_snow_m[c] = if glac >= 0.50 {
+                0.80 + 0.80 * glac // Perennial continental ice sheet / firn
+            } else if glac > 0.05 {
+                0.35 * glac // Seasonal / patchy snow cover
+            } else {
+                0.0
             };
         }
 
@@ -676,6 +685,7 @@ impl WeatherSandbox {
                 fine_primary_coarse: &self.base.fine_primary_coarse,
                 coarse_tiles: self.base.prehistory.tiles(),
                 coarse_koeppen_ids: &self.base.effective_coarse_koeppen,
+                coarse_glacier_cover: self.base.prehistory.climate_model().tile_glacier_cover(),
                 coarse_tile_life: &self.base.effective_coarse_life,
                 radius_km: self.base.prehistory.radius_km(),
                 day_hours: self.base.day_hours(),

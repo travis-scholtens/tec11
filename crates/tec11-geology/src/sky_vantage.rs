@@ -698,6 +698,7 @@ pub struct CoarseTileSkyParams<'a> {
     pub adjacency: &'a [Vec<usize>],
     pub tiles: &'a [TileGeology],
     pub koeppen_ids: &'a [u8],
+    pub glacier_cover: &'a [f32],
     pub tile_life: &'a [f32],
     pub river_tiles: Option<&'a [bool]>,
     pub radius_km: f64,
@@ -821,11 +822,12 @@ pub fn build_coarse_tile_inspection_view(
             .river_tiles
             .and_then(|r| r.get(tile_idx).copied())
             .unwrap_or(false);
+    let obs_is_glaciated = params.has_atmosphere
+        && params.glacier_cover.get(tile_idx).copied().unwrap_or(0.0) >= 0.50;
     let obs_veg_frac = if !params.has_atmosphere
         || !params.has_life
         || obs_elev_km <= 0.0
-        || obs_koeppen == 12
-        || obs_koeppen == 13
+        || obs_is_glaciated
     {
         0.0
     } else {
@@ -903,6 +905,7 @@ pub struct UniformFineTileSkyParams<'a> {
     pub fine_primary_coarse: &'a [usize],
     pub coarse_tiles: &'a [TileGeology],
     pub coarse_koeppen_ids: &'a [u8],
+    pub coarse_glacier_cover: &'a [f32],
     pub coarse_tile_life: &'a [f32],
     pub radius_km: f64,
     pub day_hours: f64,
@@ -970,11 +973,12 @@ pub fn build_uniform_fine_tile_inspection_view(
         } else {
             0
         };
+        let is_glaciated = params.has_atmosphere
+            && params.coarse_glacier_cover.get(c_idx).copied().unwrap_or(0.0) >= 0.50;
         let veg_frac = if !params.has_atmosphere
             || !params.has_life
             || !is_land
-            || koeppen == 12
-            || koeppen == 13
+            || is_glaciated
         {
             0.0
         } else {
@@ -1222,6 +1226,7 @@ mod tests {
                 fine_primary_coarse: &primary_coarse,
                 coarse_tiles: &coarse_tiles,
                 coarse_koeppen_ids: &coarse_koeppen,
+                coarse_glacier_cover: &[],
                 coarse_tile_life: &coarse_life,
                 radius_km: 6371.0,
                 day_hours: 24.0,

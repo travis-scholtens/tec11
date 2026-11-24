@@ -1953,7 +1953,7 @@ impl HistorySimulation {
         self.rivers = trace_coarse_rivers(
             &coarse_elevs,
             &precip,
-            &koeppen,
+            self.prehistory.climate_model().tile_glacier_cover(),
             &coarse_adj,
             HISTORY_MIN_RIVER_ELEV,
             HISTORY_MIN_RIVER_PRECIP,
@@ -8941,7 +8941,8 @@ impl HistorySimulation {
             };
             let is_land = elev_km > 0.0;
             let koeppen = koeppen_slice.get(c_idx).copied().unwrap_or(0);
-            let veg_frac = if !is_land || koeppen == 12 || koeppen == 13 {
+            let is_glaciated = self.prehistory.climate_model().is_tile_glaciated(c_idx);
+            let veg_frac = if !is_land || is_glaciated {
                 0.0
             } else {
                 let base_life = life_slice.get(c_idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
@@ -9115,7 +9116,17 @@ impl HistorySimulation {
                     format!("Open Ocean ({elev_km:.2} km)")
                 }
             } else {
-                let cover = if koeppen == 12 || koeppen == 13 {
+                let nb_c_idx = match self.terrain.display_faces[nb_d].source {
+                    DisplayFaceSource::Fine(f_idx) => self
+                        .fine_primary_coarse
+                        .get(f_idx)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            self.terrain.primary_coarse_tile(f_idx, &self.coarse_elevs)
+                        }),
+                    DisplayFaceSource::OceanCoarse(c) => c,
+                };
+                let cover = if self.prehistory.climate_model().is_tile_glaciated(nb_c_idx) {
                     "Glaciated"
                 } else if veg_frac >= 0.60 {
                     "Lush"

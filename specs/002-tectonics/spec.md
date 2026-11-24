@@ -67,14 +67,14 @@ Once an atmosphere develops, the global climate model computes seasonal temperat
 - **FR-001**: System MUST simulate plate tectonics on a uniform hexagonal geodesic grid (plus 12 pentagons) at 5 Myr per step, supporting Small (2,432), Medium (7,292), and Large (21,872) tile counts.
 - **FR-002**: System MUST model crustal thickness, elevation, mountainosity, volcanism, continental rifting (weighted by continental size/weight), subduction, and meteor impacts.
 - **FR-003**: System MUST track per-tile stratigraphy and mineral/compositional properties emerging from geological processes rather than static age counters.
-- **FR-004**: System MUST activate the global climate and erosion model when planetary age reaches `Atm Δt`, and biosphere/vegetation when age reaches `Life Δt`, while keeping Köppen climate labels strictly descriptive.
+- **FR-004**: System MUST activate the global climate and erosion model when planetary age reaches `Atm Δt`, and biosphere/vegetation when age reaches `Life Δt`. `ClimateModel` MUST compute physical land glacier/ice-sheet presence from seasonal temperature and snowfall mass balance (independent of Köppen codes), and physical outputs (rivers, snow/ice rendering, sky vantage) MUST use physical climate/glacier fields rather than Köppen `EF`/`ET`.
 - **FR-005**: System MUST support stepping, continuous play/pause, tile inspection, and lossless `PlanetSnapshot` export/import at any point in Tectonics.
 
 ### Key Entities
 
 - **SphericalGrid**: Uniform hexagonal geodesic sphere tessellation with 12 pentagonal tiles and neighbor adjacency.
 - **TectonicTile**: Crustal thickness, elevation, mountainosity, plate assignment, volcanic/orogenic activity, and stratigraphic rock layers.
-- **ClimateModel**: Seasonal temperature, precipitation, atmospheric circulation cells, ocean currents, sea-ice extent, and descriptive Köppen classification.
+- **ClimateModel**: Seasonal temperature, precipitation, atmospheric circulation cells, ocean currents, polar sea-ice extent, physical land glacier/ice-sheet mass balance, and descriptive Köppen classification.
 
 ## Success Criteria *(mandatory)*
 

@@ -5,7 +5,7 @@
 ### I. Emergent Physical Processes Over Reified Abstractions
 Every simulated property MUST emerge from physical, geological, biological, or social processes rather than being tracked as an artificial label or script. For example:
 - Mountain size, shape, and mineral composition emerge from plate tectonics, erosion, and geological metamorphism rather than a stored "mountain age."
-- Climate classifications (e.g., Köppen zones) are purely descriptive readouts derived from temperature, precipitation, and seasonality—never inputs that drive downstream simulation mechanics.
+- Climate classifications (e.g., Köppen zones) are purely descriptive readouts for physical systems—never inputs into physical mechanics like glaciers, river headwaters, surface albedo, or terrain rendering. Because Köppen classes are anthropocentric by design, they MAY be used as shorthand only for human survivability, habitability, and passability.
 - Political instability, empire collapse, trade routes, and linguistic divergence emerge from underlying demographics, geography, resource disparities, and contact rather than arbitrary scripted events.
 
 ### II. Model-Derived Stochasticity

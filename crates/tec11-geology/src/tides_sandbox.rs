@@ -101,11 +101,12 @@ impl FinePlanetBase {
         // Route coarse rivers onto the fine grid using `PrehistorySimulation`'s climate elevations.
         let climate_elevs = prehistory.tile_elevations();
         let koeppen_ids = prehistory.tile_koeppen_ids();
+        let glacier_cover = prehistory.climate_model().tile_glacier_cover();
         let precip_norm = prehistory.tile_precip_norm();
         let coarse_rivers = trace_coarse_rivers(
             &climate_elevs,
             precip_norm,
-            koeppen_ids,
+            glacier_cover,
             coarse_adj,
             TERRAIN_MIN_RIVER_ELEV,
             TERRAIN_MIN_RIVER_PRECIP,
@@ -387,60 +388,69 @@ impl FinePlanetBase {
         let fol = self.optics.plant_foliage_rgb;
         let hi = self.optics.plant_highlight_rgb;
 
-        let (raw_veg_w, mut base_rgb) = match koeppen {
-            1 => (0.90, [fol[0] * 0.84, fol[1] * 0.84, fol[2] * 0.84]), // Af rainforest
-            2 => (
-                0.82,
-                [
-                    0.72 * fol[0] + 0.18 * hi[0],
-                    0.72 * fol[1] + 0.18 * hi[1],
-                    0.72 * fol[2] + 0.18 * hi[2],
-                ],
-            ), // Am monsoon
-            3 => (
-                0.62,
-                [
-                    0.50 * fol[0] + 0.18 * hi[0] + 0.24,
-                    0.50 * fol[1] + 0.18 * hi[1] + 0.20,
-                    0.50 * fol[2] + 0.18 * hi[2] + 0.12,
-                ],
-            ), // Aw savanna
-            4 => (
-                0.28,
-                [
-                    0.38 * fol[0] + 0.40,
-                    0.38 * fol[1] + 0.35,
-                    0.38 * fol[2] + 0.23,
-                ],
-            ), // BS steppe
-            5 => (0.05, [0.78, 0.67, 0.46]), // BW desert
-            6 | 7 | 8 => (
-                0.74,
-                [
-                    0.58 * fol[0] + 0.30 * hi[0],
-                    0.58 * fol[1] + 0.30 * hi[1],
-                    0.58 * fol[2] + 0.30 * hi[2],
-                ],
-            ),
-            9 | 10 | 11 => (0.68, [fol[0] * 0.68, fol[1] * 0.68, fol[2] * 0.68]), // Boreal taiga
-            13 => (
-                0.22,
-                [
-                    0.35 * fol[0] + 0.30,
-                    0.35 * fol[1] + 0.30,
-                    0.35 * fol[2] + 0.27,
-                ],
-            ), // ET tundra
-            12 => (0.0, [0.88, 0.92, 0.96]), // EF icecap
-            _ => (
-                0.45,
-                [
-                    0.55 * fol[0] + 0.20,
-                    0.55 * fol[1] + 0.18,
-                    0.55 * fol[2] + 0.15,
-                ],
-            ),
+        let glac = self
+            .prehistory
+            .climate_model()
+            .tile_glacier_cover()
+            .get(c_idx)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let (raw_veg_w, mut base_rgb) = if glac >= 0.50 {
+            (0.0, [0.88_f32, 0.92, 0.96]) // Active glacier / ice sheet
+        } else {
+            match koeppen {
+                1 => (0.90, [fol[0] * 0.84, fol[1] * 0.84, fol[2] * 0.84]), // Af rainforest
+                2 => (
+                    0.82,
+                    [
+                        0.72 * fol[0] + 0.18 * hi[0],
+                        0.72 * fol[1] + 0.18 * hi[1],
+                        0.72 * fol[2] + 0.18 * hi[2],
+                    ],
+                ), // Am monsoon
+                3 => (
+                    0.62,
+                    [
+                        0.50 * fol[0] + 0.18 * hi[0] + 0.24,
+                        0.50 * fol[1] + 0.18 * hi[1] + 0.20,
+                        0.50 * fol[2] + 0.18 * hi[2] + 0.12,
+                    ],
+                ), // Aw savanna
+                4 => (
+                    0.28,
+                    [
+                        0.38 * fol[0] + 0.40,
+                        0.38 * fol[1] + 0.35,
+                        0.38 * fol[2] + 0.23,
+                    ],
+                ), // BS steppe
+                5 => (0.05, [0.78, 0.67, 0.46]), // BW desert
+                6 | 7 | 8 => (
+                    0.74,
+                    [
+                        0.58 * fol[0] + 0.30 * hi[0],
+                        0.58 * fol[1] + 0.30 * hi[1],
+                        0.58 * fol[2] + 0.30 * hi[2],
+                    ],
+                ),
+                9 | 10 | 11 => (0.68, [fol[0] * 0.68, fol[1] * 0.68, fol[2] * 0.68]), // Boreal taiga
+                _ => (
+                    0.45,
+                    [
+                        0.55 * fol[0] + 0.20,
+                        0.55 * fol[1] + 0.18,
+                        0.55 * fol[2] + 0.15,
+                    ],
+                ),
+            }
         };
+        if glac > 0.05 && glac < 0.50 {
+            let snow_w = (glac * 1.4).clamp(0.0, 0.70);
+            for k in 0..3 {
+                base_rgb[k] = snow_w * [0.86, 0.90, 0.94][k] + (1.0 - snow_w) * base_rgb[k];
+            }
+        }
         let veg_w = if self.has_life { raw_veg_w } else { 0.0 };
 
         let alpine = ((elev_km - 2.6) / 2.2).clamp(0.0, 1.0);
@@ -808,6 +818,7 @@ impl TidesSandbox {
                 fine_primary_coarse: &self.base.fine_primary_coarse,
                 coarse_tiles: self.base.prehistory.tiles(),
                 coarse_koeppen_ids: &self.base.effective_coarse_koeppen,
+                coarse_glacier_cover: self.base.prehistory.climate_model().tile_glacier_cover(),
                 coarse_tile_life: &self.base.effective_coarse_life,
                 radius_km: self.base.prehistory.radius_km(),
                 day_hours: self.base.day_hours(),

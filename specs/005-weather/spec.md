@@ -66,7 +66,7 @@ Clicking any fine tile on the weather globe displays a detailed local weather re
 
 ### Functional Requirements
 
-- **FR-001**: System MUST run a coupled moist baroclinic weather and storm-surge solver at a 1-hour timestep on a uniform `coarse + 2` spherical finite-volume grid driven by solar declination/diurnal cycle, lunar/solar tides, atmospheric circulation, and ocean SST anomalies.
+- **FR-001**: System MUST run a coupled moist baroclinic weather and storm-surge solver at a 1-hour timestep on a uniform `coarse + 2` spherical finite-volume grid driven by solar declination/diurnal cycle, lunar/solar tides, atmospheric circulation, and ocean SST anomalies, deriving surface snow/ice albedo from `ClimateModel`'s physical land glacier/temperature state rather than Köppen `EF`/`ET`.
 - **FR-002**: System MUST gate the World simulation's **Weather** button so it is enabled ONLY when the main simulation is paused AND `has_atmosphere()` is true.
 - **FR-003**: System MUST initialize the World Weather modal exclusively from an immutable `encode_snapshot()` copy of the current world, ensuring zero mutation or subdivision of the base `WorldSimulation`.
 - **FR-004**: System MUST provide Play/Pause, `+1h`, `+24h`, and Reset controls, 6 globe visualization modes, 4 3D vector arrow overlays, independent globe rotation, and click-to-inspect tile reports with a 48-hour meteogram.

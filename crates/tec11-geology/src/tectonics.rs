@@ -2705,6 +2705,7 @@ impl TectonicsSimulation {
                 adjacency: &self.adjacency,
                 tiles: &self.tiles,
                 koeppen_ids: &self.tile_koeppen,
+                glacier_cover: self.climate_model.tile_glacier_cover(),
                 tile_life: &self.tile_life,
                 river_tiles: None,
                 radius_km: self.radius_km(),

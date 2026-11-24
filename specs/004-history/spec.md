@@ -65,7 +65,7 @@ Populations develop evolving languages with phonological inventories, diachronic
 
 ### Functional Requirements
 
-- **FR-001**: System MUST subdivide land tiles upon entering History using orogeny-scaled procedural relief and step History at 200 years per step.
+- **FR-001**: System MUST subdivide land tiles upon entering History using orogeny-scaled procedural relief and step History at 200 years per step. Natural-color snow/ice groundcover and sky vantage MUST derive from `ClimateModel`'s physical glacier/temperature state rather than Köppen `EF`/`ET` (while human settlement/passability may use Köppen as anthropocentric shorthand).
 - **FR-002**: System MUST simulate state formation, cities, capitals, diplomacy, trade routes, warfare, Turchin–Nefedov secular cycles, and multi-ethnic/distant-province separatism.
 - **FR-003**: System MUST simulate diachronic language evolution (sound changes, areal sprachbund diffusion, prestige borrowing doublets, adaptive calendar/time vocabulary) and generate linguistic names for states, capitals, and cities.
 - **FR-004**: System MUST record per-state and per-city historical chronicles timestamped in rounded local orbital years with clickable state cross-links.

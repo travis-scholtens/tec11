@@ -1308,7 +1308,7 @@ impl PopulationSandbox {
         let rivers = trace_coarse_rivers(
             &elevations,
             &self.tile_precip_norm,
-            &self.tile_koeppen,
+            self.climate_model.tile_glacier_cover(),
             &self.adjacency,
             5.0,
             0.5,

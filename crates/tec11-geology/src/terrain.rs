@@ -61,13 +61,13 @@ impl TerrainSandbox {
             coarse_thicks.as_deref(),
         );
 
-        let koeppen_ids = prehistory.tile_koeppen_ids();
+        let glacier_cover = prehistory.climate_model().tile_glacier_cover();
         let precip_norm = prehistory.tile_precip_norm();
 
         let coarse_rivers = trace_coarse_rivers(
             &coarse_elevs,
             precip_norm,
-            koeppen_ids,
+            glacier_cover,
             coarse_adj,
             TERRAIN_MIN_RIVER_ELEV,
             TERRAIN_MIN_RIVER_PRECIP,

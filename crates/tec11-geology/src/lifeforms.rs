@@ -558,13 +558,19 @@ pub fn settle_species_on_climate(
     let land_tiles: Vec<usize> = (0..n).filter(|&t| elevations[t] > 0.0).collect();
     let sea_tiles: Vec<usize> = (0..n).filter(|&t| elevations[t] <= 0.0).collect();
 
-    let koeppen_ids = climate_model.koeppen_ids();
     let mean_precip: Vec<f32> = climate_model
         .classifications()
         .iter()
         .map(|c| c.mean_precipitation as f32)
         .collect();
-    let rivers = trace_coarse_rivers(elevations, &mean_precip, &koeppen_ids, &adj, 2.0, 0.25);
+    let rivers = trace_coarse_rivers(
+        elevations,
+        &mean_precip,
+        climate_model.tile_glacier_cover(),
+        &adj,
+        2.0,
+        0.25,
+    );
     let mut is_river_or_wetland = vec![false; n];
     for r in rivers {
         for t in r {

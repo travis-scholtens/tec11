@@ -10,18 +10,19 @@
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 - Glacial / Interglacial Cycles & Sea-Level Land Bridges (Priority: P1)
+### User Story 1 - Glacial / Interglacial Cycles, Physical Ice Sheets & Sea-Level Land Bridges (Priority: P1)
 
-When a planet enters Prehistory, the timestep shifts to 4,000 years per step. Global glaciation oscillates between warm interglacial ("hothouse") and cold glacial ("snowball"/ice age) extremes, expanding and retreating ice sheets, dropping eustatic sea level to expose continental-shelf land bridges during glacial maxima, and submerging them during interglacials.
+When a planet enters Prehistory, the timestep shifts to 4,000 years per step. Global glaciation oscillates between warm interglacial ("hothouse") and cold glacial ("snowball"/ice age) extremes, expanding and retreating continental and alpine ice sheets, dropping eustatic sea level to expose continental-shelf land bridges during glacial maxima, and submerging them during interglacials. Where glaciers and ice sheets exist MUST be determined physically from `ClimateModel` seasonal temperature and precipitation (snow accumulation vs. summer melt mass balance, plus adjacent cold-margin outflow) rather than from descriptive Köppen climate classifications (`EF`/`ET`).
 
-**Why this priority**: Ice-age cycles reshape coastlines, fertility, and migration corridors—creating the geographic bottlenecking and isolation that drive human diversity before civilization.
+**Why this priority**: Ice-age cycles reshape coastlines, fertility, and migration corridors—and determining ice sheets physically from climate fields upholds Constitution Principle I while keeping dry cold tundra (e.g., Pleistocene Siberian mammoth steppe) distinct from active scouring ice sheets.
 
-**Independent Test**: Advance a planet to Prehistory, step through at least one full glacial cycle, and observe ice-sheet expansion/retreat, sea-level coastline changes, and polar sea-ice caps updating in both Natural Color and Climate views.
+**Independent Test**: Advance a planet to Prehistory, step through at least one full glacial cycle, and verify that active land glaciers emerge where snow accumulation survives summer melt (not on warm/dry tundra), while ice-sheet extent, eustatic sea-level land bridges, and polar sea-ice caps update coherently in Natural Color and Climate views.
 
 **Acceptance Scenarios**:
 
-1. **Given** a planet entering Prehistory, **When** the user steps forward, **Then** each step advances time by 4,000 years and updates global glaciation, ice-sheet extent, and eustatic sea level.
-2. **Given** a glacial maximum, **When** continental shelves drop below sea level, **Then** shallow straits expose temporary land bridges allowing migration across previously separated landmasses; during interglacials, those shelves re-submerge.
+1. **Given** a planet entering Prehistory, **When** the user steps forward, **Then** each step advances time by 4,000 years and updates global glaciation, physically derived ice-sheet extent (from seasonal temperature and snowfall mass balance, independent of Köppen codes), and eustatic sea level.
+2. **Given** a cold dry tundra tile with warm-enough summers or negligible snowfall versus a snowy subpolar/alpine tile where winter snow survives summer melt, **When** determining glaciated land tiles, **Then** the snowy tile develops an active glacier/ice sheet while the dry warm-summer tundra remains ice-free (periglacial steppe).
+3. **Given** a glacial maximum, **When** continental shelves drop below sea level, **Then** shallow straits expose temporary land bridges allowing migration across previously separated landmasses; during interglacials, those shelves re-submerge.
 
 ---
 
@@ -66,10 +67,11 @@ Early hunter-gatherer humans emerge at an initial habitable origin and spread ac
 ### Functional Requirements
 
 - **FR-001**: System MUST simulate Prehistory at 4,000 years per step with oscillating glacial/interglacial cycles controlled by the planet's `prehistory_glaciation_cycles` parameter.
-- **FR-002**: System MUST model eustatic sea-level drop during glacial maxima to expose and re-submerge continental-shelf land bridges.
-- **FR-003**: System MUST model ice-sheet bedrock scouring and periglacial loess/till soil deposition, carrying resulting soil fertility forward into History.
-- **FR-004**: System MUST simulate hunter-gatherer population growth, migration, limited seafaring bridging, isolation-by-distance heritage branching, and localized contact-zone admixture.
-- **FR-005**: System MUST continue climate-driven erosion during Prehistory and preserve full Prehistory state in `PlanetSnapshot`.
+- **FR-002**: System MUST determine active land glaciers and continental ice sheets physically from `ClimateModel` seasonal temperature and precipitation (cold-season snow accumulation vs. warm-season melt mass balance, with optional outflow onto adjacent cold margins), NEVER from descriptive Köppen climate classifications (`EF`/`ET`). River headwater gating MUST also use physical glacier/temperature state rather than Köppen `EF`/`ET`.
+- **FR-003**: System MUST model eustatic sea-level drop during glacial maxima to expose and re-submerge continental-shelf land bridges.
+- **FR-004**: System MUST model ice-sheet bedrock scouring and periglacial loess/till soil deposition driven by the physical ice-sheet mask from FR-002, carrying resulting soil fertility forward into History.
+- **FR-005**: System MUST simulate hunter-gatherer population growth, migration, limited seafaring bridging, isolation-by-distance heritage branching, and localized contact-zone admixture (human habitability and passability may use Köppen classes as anthropocentric shorthand).
+- **FR-006**: System MUST continue climate-driven erosion during Prehistory and preserve full Prehistory state in `PlanetSnapshot`.
 
 ### Key Entities
 

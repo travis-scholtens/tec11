@@ -921,7 +921,7 @@ impl PrehistorySimulation {
         let mut is_ice = vec![false; n];
         for t in 0..n {
             let eff_e = self.tiles[t].elevation() - sea_level;
-            if eff_e > 0.0 && matches!(self.tile_koeppen[t], 12 | 13) {
+            if eff_e > 0.0 && self.climate_model.is_tile_glaciated(t) {
                 is_ice[t] = true;
                 self.glaciated_ticks[t] = self.glaciated_ticks[t].saturating_add(1);
             }
@@ -971,7 +971,7 @@ impl PrehistorySimulation {
         self.rivers = trace_coarse_rivers(
             elevations,
             &self.tile_precip_norm,
-            &self.tile_koeppen,
+            self.climate_model.tile_glacier_cover(),
             &self.adjacency,
             hmin,
             pmin,
@@ -1852,6 +1852,7 @@ impl PrehistorySimulation {
                 adjacency: &self.adjacency,
                 tiles: &self.tiles,
                 koeppen_ids: &self.tile_koeppen,
+                glacier_cover: self.climate_model.tile_glacier_cover(),
                 tile_life: &self.tile_life,
                 river_tiles: Some(&self.river_tiles),
                 radius_km: self.radius_km(),
