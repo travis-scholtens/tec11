@@ -51,6 +51,7 @@ type TileViewInfo =
   , vantageBearingSummary :: String
   , vantageNeighborSummary :: String
   , stratigraphySummary :: String
+  , soilSummary :: String
   , stratigraphyLines :: Array String
   }
 
@@ -75,6 +76,7 @@ defaultTileViewInfo =
   , vantageBearingSummary: ""
   , vantageNeighborSummary: ""
   , stratigraphySummary: ""
+  , soilSummary: ""
   , stratigraphyLines: []
   }
 

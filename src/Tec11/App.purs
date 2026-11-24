@@ -1534,6 +1534,13 @@ renderHistoryTwoLevelInspector st tile lang nat fallbackPrompt =
                                         { style: R.css { fontWeight: "700", color: "#38bdf8", marginBottom: "3px" }
                                         , children: [ R.text tile.stratigraphySummary ]
                                         }
+                                    , if tile.soilSummary == "" then
+                                        R.text ""
+                                      else
+                                        R.div
+                                          { style: R.css { fontWeight: "600", color: "#86efac", marginBottom: "4px" }
+                                          , children: [ R.text tile.soilSummary ]
+                                          }
                                     , R.div
                                         { children:
                                             map
@@ -6748,9 +6755,16 @@ mkApp = do
                                               , style: R.css { maxHeight: "260px" }
                                               , children:
                                                   [ R.div
-                                                      { style: R.css { fontWeight: "700", color: "#fde047", marginBottom: "6px" }
+                                                      { style: R.css { fontWeight: "700", color: "#fde047", marginBottom: "4px" }
                                                       , children: [ R.text worldInfo.tileView.stratigraphySummary ]
                                                       }
+                                                  , if worldInfo.tileView.soilSummary == "" then
+                                                      R.text ""
+                                                    else
+                                                      R.div
+                                                        { style: R.css { fontWeight: "600", color: "#86efac", marginBottom: "6px", fontSize: "0.78rem" }
+                                                        , children: [ R.text worldInfo.tileView.soilSummary ]
+                                                        }
                                                   , renderStringBulletList
                                                       worldInfo.tileView.stratigraphyLines
                                                       "No rock layers recorded on this tile."

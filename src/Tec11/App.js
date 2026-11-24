@@ -3285,6 +3285,7 @@ function emptyTileView() {
     vantageBearingSummary: "",
     vantageNeighborSummary: "",
     stratigraphySummary: "",
+    soilSummary: "",
     stratigraphyLines: [],
   };
 }

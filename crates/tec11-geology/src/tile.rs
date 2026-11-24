@@ -175,6 +175,10 @@ pub struct TileGeology {
     pub subduction: f32,
     pub intrusion: Option<(f32, f32)>,
     pub impact_scar: f32,
+    /// Physical thickness of weathered regolith + deposited loess/till in meters (`[0.0, 25.0]`).
+    pub soil_depth_m: f32,
+    /// Nutrient richness of the surficial soil (`[0.45, 1.50]`), initialized from bedrock parent material.
+    pub soil_fertility: f32,
 }
 
 impl TileGeology {
@@ -187,6 +191,7 @@ impl TileGeology {
 
     /// Continental column initialized with a base crust of 9 km + surface relief `h`.
     pub fn empty_land(rock: Rock, h: f32) -> Self {
+        let soil_fertility = rock.soil_fertility().clamp(0.55, 1.40);
         Self {
             bottom: -9.0,
             layers: vec![RockLayer {
@@ -197,6 +202,8 @@ impl TileGeology {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: if h > 0.0 { 2.0 } else { 0.0 },
+            soil_fertility,
         }
     }
 
@@ -208,6 +215,7 @@ impl TileGeology {
     /// Oceanic column initialized with 5 km basaltic crust at the specified submarine elevation (`<= 0.0 km`).
     pub fn empty_ocean_with_depth(rock: Rock, elevation_km: f32) -> Self {
         let clamped_elev = elevation_km.min(-0.05);
+        let soil_fertility = rock.soil_fertility().clamp(0.55, 1.40);
         Self {
             bottom: clamped_elev - 5.0,
             layers: vec![RockLayer {
@@ -218,6 +226,8 @@ impl TileGeology {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 0.0,
+            soil_fertility,
         }
     }
 
@@ -225,6 +235,8 @@ impl TileGeology {
     /// 3.0 km lower gabbro + 2.0 km upper pillow basalt = 5.0 km total thickness,
     /// thermally buoyant at `bottom = -7.5 km` (`elevation = -2.5 km` ridge crest).
     pub fn birth_seafloor() -> Self {
+        let seafloor = Rock::seafloor();
+        let soil_fertility = seafloor.soil_fertility().clamp(0.55, 1.40);
         Self {
             bottom: -7.5,
             layers: vec![
@@ -233,7 +245,7 @@ impl TileGeology {
                     thickness: 3.0,
                 },
                 RockLayer {
-                    rock: Rock::seafloor(),
+                    rock: seafloor,
                     thickness: 2.0,
                 },
             ],
@@ -241,6 +253,8 @@ impl TileGeology {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 0.0,
+            soil_fertility,
         }
     }
 
@@ -309,6 +323,26 @@ impl TileGeology {
                 .map(|l| l.rock.soil_fertility())
                 .unwrap_or(1.0)
         }
+    }
+
+    /// Initialize `soil_depth_m` and `soil_fertility` from current elevation and exposed bedrock.
+    pub fn reset_surficial_soil_from_bedrock(&mut self) {
+        self.soil_depth_m = if self.elevation() > 0.0 { 2.0 } else { 0.0 };
+        self.soil_fertility = self.surface_soil_fertility();
+    }
+
+    /// Effective surficial soil fertility combining physical `soil_fertility` and `soil_depth_m`:
+    /// - `0.0 m` (bare scoured bedrock) → `0.68x`
+    /// - `2.0 m` (normal weathered regolith) → `1.00x`
+    /// - `10.0+ m` (deep periglacial loess/till) → up to `1.08x`
+    pub fn effective_soil_fertility(&self) -> f32 {
+        let d = self.soil_depth_m.clamp(0.0, 25.0);
+        let depth_factor = if d <= 2.0 {
+            0.68 + 0.32 * (d / 2.0)
+        } else {
+            1.00 + 0.08 * ((d - 2.0) / 8.0).clamp(0.0, 1.0)
+        };
+        (self.soil_fertility * depth_factor).clamp(0.45, 1.55)
     }
 
     /// Detect stratigraphic impact crater / ejecta breccia signature in the near-surface rock layers:
@@ -617,6 +651,8 @@ impl TileGeology {
                     subduction: 0.0,
                     intrusion: None,
                     impact_scar: s.impact_scar,
+                    soil_depth_m: 0.0,
+                    soil_fertility: 1.0,
                     layers: s.layers,
                 };
                 tmp.compact();
@@ -1027,6 +1063,8 @@ impl TileGeology {
             bottom: self.bottom,
             mountainosity: self.mountainosity,
             layers,
+            soil_depth_m: Some(self.soil_depth_m),
+            soil_fertility: Some(self.soil_fertility),
         }
     }
 
@@ -1105,8 +1143,14 @@ impl TileGeology {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 0.0,
+            soil_fertility: 1.0,
             layers,
         };
+        let default_depth = if tile.elevation() > 0.0 { 2.0 } else { 0.0 };
+        let default_fert = tile.surface_soil_fertility();
+        tile.soil_depth_m = pt.soil_depth_m.unwrap_or(default_depth).clamp(0.0, 25.0);
+        tile.soil_fertility = pt.soil_fertility.unwrap_or(default_fert).clamp(0.45, 1.50);
         tile.impact_scar = tile.stratigraphic_impact_signature();
         Some(tile)
     }
@@ -2637,8 +2681,10 @@ impl TileGeology {
             depth_from_surface = contact_depth;
         }
 
+        let bedrock_soil_fertility = self.surface_soil_fertility();
+        let effective_soil_fertility = self.effective_soil_fertility();
         format!(
-            "{{\"hasColumn\":true,\"tileIdx\":{},\"bottomKm\":{:.4},\"elevationKm\":{:.4},\"thicknessKm\":{:.4},\"mountainosity\":{:.4},\"mountainosityNorm\":{:.4},\"subduction\":{:.4},\"impactScar\":{:.4},\"layers\":[{}],\"interfaces\":[{}]}}",
+            "{{\"hasColumn\":true,\"tileIdx\":{},\"bottomKm\":{:.4},\"elevationKm\":{:.4},\"thicknessKm\":{:.4},\"mountainosity\":{:.4},\"mountainosityNorm\":{:.4},\"subduction\":{:.4},\"impactScar\":{:.4},\"soilDepthM\":{:.4},\"soilFertility\":{:.4},\"bedrockSoilFertility\":{:.4},\"effectiveSoilFertility\":{:.4},\"layers\":[{}],\"interfaces\":[{}]}}",
             tile_idx,
             bottom_km,
             surface_elev,
@@ -2647,6 +2693,10 @@ impl TileGeology {
             self.mountainosity_norm(),
             self.subduction,
             impact_sig,
+            self.soil_depth_m,
+            self.soil_fertility,
+            bedrock_soil_fertility,
+            effective_soil_fertility,
             layers_json.join(","),
             interfaces_json.join(",")
         )
@@ -2742,6 +2792,8 @@ mod tests {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 2.0,
+            soil_fertility: 1.0,
             layers: vec![
                 RockLayer {
                     rock: deep_eclogite.clone(),
@@ -2782,6 +2834,8 @@ mod tests {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 2.0,
+            soil_fertility: 1.0,
             layers: vec![
                 RockLayer {
                     rock: deep_eclogite,
@@ -2805,6 +2859,8 @@ mod tests {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 2.0,
+            soil_fertility: 1.0,
             layers: vec![
                 RockLayer {
                     rock: Rock::intrusive(0.75), // adjacent felsic granite pegmatite
@@ -2882,6 +2938,8 @@ mod tests {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 2.0,
+            soil_fertility: 1.0,
             layers: vec![
                 RockLayer {
                     rock: Rock::intrusive(0.65),
@@ -2929,6 +2987,8 @@ mod tests {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 2.0,
+            soil_fertility: 1.0,
             layers: vec![
                 RockLayer {
                     rock: Rock {
@@ -3019,6 +3079,8 @@ mod tests {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 2.0,
+            soil_fertility: 1.0,
             layers: vec![
                 RockLayer {
                     rock: Rock::intrusive(0.70),
@@ -3065,6 +3127,8 @@ mod tests {
             subduction: 0.0,
             intrusion: None,
             impact_scar: 0.0,
+            soil_depth_m: 2.0,
+            soil_fertility: 1.0,
             layers: (0..500)
                 .map(|i| RockLayer {
                     rock: if i % 2 == 0 {
@@ -3116,5 +3180,58 @@ mod tests {
         assert!(arc_tile.surface_soil_fertility() > 1.20);
         assert!(atoll_tile.surface_soil_fertility() < 0.80);
         assert!(granite_tile.surface_soil_fertility() < 0.90);
+    }
+
+    #[test]
+    fn test_effective_soil_fertility_and_proto_roundtrip_with_legacy_fallback() {
+        let mut tile = TileGeology::empty_land(Rock::intrusive(0.74), 1.0);
+        let bedrock = tile.surface_soil_fertility();
+        assert!((tile.soil_depth_m - 2.0).abs() < 1e-6);
+        assert!((tile.soil_fertility - bedrock).abs() < 1e-6);
+        // At 2.0 m normal regolith, depth_factor == 1.00.
+        assert!((tile.effective_soil_fertility() - bedrock).abs() < 1e-5);
+
+        // Bare scoured bedrock (0.0 m) drops effective fertility by 0.68x.
+        tile.soil_depth_m = 0.0;
+        assert!((tile.effective_soil_fertility() - (bedrock * 0.68)).abs() < 1e-5);
+
+        // Deep enriched periglacial loess (10.0 m, fertility 1.35) gets 1.08x depth factor.
+        tile.soil_depth_m = 10.0;
+        tile.soil_fertility = 1.35;
+        assert!((tile.effective_soil_fertility() - (1.35 * 1.08)).abs() < 1e-5);
+
+        // Protobuf round-trip preserves exact soil_depth_m and soil_fertility.
+        let proto = tile.to_proto_geological_tile();
+        assert_eq!(proto.soil_depth_m, Some(10.0));
+        assert_eq!(proto.soil_fertility, Some(1.35));
+        let decoded = TileGeology::from_proto_geological_tile(&proto).unwrap();
+        assert!((decoded.soil_depth_m - 10.0).abs() < 1e-6);
+        assert!((decoded.soil_fertility - 1.35).abs() < 1e-6);
+
+        // Stratigraphy JSON exposes physical surficial soil fields for the Geology Detail Modal.
+        let strat_json = tile.to_stratigraphy_json(7, None);
+        assert!(strat_json.contains("\"soilDepthM\":10.0000"));
+        assert!(strat_json.contains("\"soilFertility\":1.3500"));
+        assert!(strat_json.contains("\"bedrockSoilFertility\":"));
+        assert!(strat_json.contains("\"effectiveSoilFertility\":1.4580"));
+
+        // Legacy snapshots omitting optional soil fields fall back cleanly to 2.0 m (land) / 0.0 m (ocean)
+        // and bedrock surface_soil_fertility().
+        let mut legacy_land = proto.clone();
+        legacy_land.soil_depth_m = None;
+        legacy_land.soil_fertility = None;
+        let decoded_land = TileGeology::from_proto_geological_tile(&legacy_land).unwrap();
+        assert!((decoded_land.soil_depth_m - 2.0).abs() < 1e-6);
+        assert!((decoded_land.soil_fertility - decoded_land.surface_soil_fertility()).abs() < 1e-6);
+
+        let ocean = TileGeology::empty_ocean(Rock::seafloor());
+        let mut legacy_ocean = ocean.to_proto_geological_tile();
+        legacy_ocean.soil_depth_m = None;
+        legacy_ocean.soil_fertility = None;
+        let decoded_ocean = TileGeology::from_proto_geological_tile(&legacy_ocean).unwrap();
+        assert!((decoded_ocean.soil_depth_m - 0.0).abs() < 1e-6);
+        assert!(
+            (decoded_ocean.soil_fertility - decoded_ocean.surface_soil_fertility()).abs() < 1e-6
+        );
     }
 }

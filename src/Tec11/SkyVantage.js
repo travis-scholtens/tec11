@@ -2236,6 +2236,7 @@ export function applyParsedTileToView(view, parsedTile) {
   }
 
   let stratigraphySummary = "";
+  let soilSummary = "";
   const stratigraphyLines = [];
   if (strat && strat.hasColumn && Array.isArray(strat.layers) && strat.layers.length > 0) {
     const elevKm = typeof strat.elevationKm === "number" ? strat.elevationKm : 0.0;
@@ -2248,6 +2249,25 @@ export function applyParsedTileToView(view, parsedTile) {
           ? " · Impact Ejecta Rim"
           : "";
     stratigraphySummary = `Crust: ${thickKm.toFixed(1)} km | Elev: ${elevKm >= 0 ? "+" : ""}${elevKm.toFixed(2)} km | ${strat.layers.length} layers (surface → Moho)${scarNote}`;
+    if (typeof strat.soilDepthM === "number" && typeof strat.effectiveSoilFertility === "number") {
+      if (elevKm > 0.0) {
+        const d = strat.soilDepthM;
+        const surfF = typeof strat.soilFertility === "number" ? strat.soilFertility : strat.effectiveSoilFertility;
+        const effF = strat.effectiveSoilFertility;
+        const bedF = typeof strat.bedrockSoilFertility === "number" ? strat.bedrockSoilFertility : surfF;
+        const soilClass =
+          d < 0.35
+            ? "Bare scoured bedrock"
+            : d < 1.2
+              ? "Thin regolith"
+              : d >= 3.5
+                ? "Deep loess/till"
+                : "Weathered regolith";
+        soilSummary = `Surficial Soil: ${soilClass} · Depth: ${d.toFixed(1)} m · Fertility: ${surfF.toFixed(2)}× (effective ${effF.toFixed(2)}×, bedrock ${bedF.toFixed(2)}×)`;
+      } else {
+        soilSummary = "Surficial Soil: Submarine seafloor (no terrestrial soil)";
+      }
+    }
     const interfaces = Array.isArray(strat.interfaces) ? strat.interfaces : [];
     for (let i = 0; i < strat.layers.length; i++) {
       const l = strat.layers[i];
@@ -2292,6 +2312,7 @@ export function applyParsedTileToView(view, parsedTile) {
     vantageBearingSummary: vSum.bearingSummary,
     vantageNeighborSummary: vSum.neighborSummary,
     stratigraphySummary,
+    soilSummary,
     stratigraphyLines,
   };
 }

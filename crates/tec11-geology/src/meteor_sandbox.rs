@@ -67,6 +67,8 @@ impl MeteorSandbox {
                     subduction: 0.0,
                     intrusion: None,
                     impact_scar: 0.0,
+                    soil_depth_m: 2.0,
+                    soil_fertility: 1.0,
                     layers: vec![RockLayer {
                         rock: Rock {
                             kind: RockKind::Sedimentary,
@@ -84,6 +86,7 @@ impl MeteorSandbox {
                     }],
                 };
                 t.limit();
+                t.reset_surficial_soil_from_bedrock();
                 tiles.push(t);
             } else {
                 let bathy_km = ((elev_m as f32) / 1000.0).clamp(-7.0, -0.2);
@@ -93,6 +96,8 @@ impl MeteorSandbox {
                     subduction: 0.0,
                     intrusion: None,
                     impact_scar: 0.0,
+                    soil_depth_m: 0.0,
+                    soil_fertility: 1.0,
                     layers: vec![RockLayer {
                         rock: Rock::extrusive(0.5),
                         thickness: 5.0,

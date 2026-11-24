@@ -26,18 +26,20 @@ When a planet enters Prehistory, the timestep shifts to 4,000 years per step. Gl
 
 ---
 
-### User Story 2 - Ice-Sheet Scouring & Periglacial Soil Fertility (Priority: P2)
+### User Story 2 - Physical Surficial Soil, Ice-Sheet Scouring & Periglacial Loess (Priority: P2)
 
-Advancing ice sheets scour underlying bedrock (reducing soil fertility on heavily glaciated shields), while ice-margin meltwater and windblown dust deposit fertile periglacial loess and till soils along glacial margins, permanently influencing carrying capacity in Prehistory and History.
+Each tile maintains physical surficial soil state (`soil_depth_m` and `soil_fertility`) sitting atop its bedrock `TileGeology` strata, updated directly each tick rather than via elapsed-tick history counters. Advancing ice sheets physically strip `soil_depth_m` toward bare bedrock, ice-margin windblown dust and glacial outwash deposit mineral-rich loess/till (increasing `soil_depth_m` and enriching `soil_fertility`), and ice-free weathering slowly rebuilds soil toward the underlying exposed bedrock's mineral potential (`Rock::soil_fertility()`). This physical soil state persists in `PlanetSnapshot`, directly drives carrying capacity in Prehistory and History, and is displayed in the Geology Detail Modal for inspected tiles.
 
-**Why this priority**: Demonstrates emergent physical causality—post-glacial breadbaskets and barren shields arise from ice-sheet history rather than random fertility noise.
+**Why this priority**: Demonstrates emergent physical causality (Constitution Principle I)—post-glacial breadbaskets and scoured shields arise from physical soil thickness and nutrient state rather than tick counters or random fertility noise.
 
-**Independent Test**: Step through multiple glacial cycles and inspect tiles that were under deep ice sheets versus tiles along the glacial margin to verify scoured vs. loess-enriched soil fertility.
+**Independent Test**: Step through multiple glacial cycles and inspect tiles that were under deep ice sheets versus tiles along the glacial margin in the Geology Detail Modal to verify stripped `soil_depth_m` vs. deepened, loess-enriched `soil_depth_m`/`soil_fertility` and effective fertility, and verify those exact values survive `PlanetSnapshot` save/reload into History.
 
 **Acceptance Scenarios**:
 
-1. **Given** tiles covered by thick continental ice sheets, **When** the ice retreats, **Then** bedrock scouring reduces baseline soil fertility on those tiles.
-2. **Given** tiles along the periglacial margin, **When** ice sheets advance and retreat, **Then** loess/till deposition enriches soil fertility and increases subsequent carrying capacity.
+1. **Given** tiles covered by thick continental ice sheets, **When** Prehistory steps forward, **Then** ice-sheet scouring strips `soil_depth_m` toward bare bedrock, reducing effective carrying capacity until post-glacial weathering gradually rebuilds soil.
+2. **Given** ice-free tiles along the periglacial margin, **When** ice sheets are active nearby, **Then** loess/till deposition increases `soil_depth_m` and enriches `soil_fertility`, raising carrying capacity in Prehistory and History.
+3. **Given** ice-free tiles with an atmosphere and precipitation, **When** ticks elapse without glaciation, **Then** bedrock weathering slowly rebuilds `soil_depth_m` and relaxes `soil_fertility` toward the underlying exposed rock's `Rock::soil_fertility()`.
+4. **Given** a selected land tile, **When** the user opens the Geology Detail Modal, **Then** the modal displays the tile's surficial soil thickness (`soil_depth_m`), surficial fertility, bedrock parent-material fertility, and effective fertility (alongside a descriptive surficial condition label such as bare scoured bedrock, weathered regolith, or deep periglacial loess/till).
 
 ---
 
@@ -69,7 +71,7 @@ Early hunter-gatherer humans emerge at an initial habitable origin and spread ac
 - **FR-001**: System MUST simulate Prehistory at 4,000 years per step with oscillating glacial/interglacial cycles controlled by the planet's `prehistory_glaciation_cycles` parameter.
 - **FR-002**: System MUST determine active land glaciers and continental ice sheets physically from `ClimateModel` seasonal temperature and precipitation (cold-season snow accumulation vs. warm-season melt mass balance, with optional outflow onto adjacent cold margins), NEVER from descriptive Köppen climate classifications (`EF`/`ET`). River headwater gating MUST also use physical glacier/temperature state rather than Köppen `EF`/`ET`.
 - **FR-003**: System MUST model eustatic sea-level drop during glacial maxima to expose and re-submerge continental-shelf land bridges.
-- **FR-004**: System MUST model ice-sheet bedrock scouring and periglacial loess/till soil deposition driven by the physical ice-sheet mask from FR-002, carrying resulting soil fertility forward into History.
+- **FR-004**: System MUST store physical surficial soil state (`soil_depth_m` and `soil_fertility`) on `TileGeology`, updating it each tick via ice-sheet stripping (driven by the physical ice-sheet mask from FR-002), periglacial loess/till deposition, and climate-driven bedrock weathering (replacing elapsed tick counters), persisting it in `PlanetSnapshot`, using it to drive carrying capacity in Prehistory and History, and displaying it in the Geology Detail Modal.
 - **FR-005**: System MUST simulate hunter-gatherer population growth, migration, limited seafaring bridging, isolation-by-distance heritage branching, and localized contact-zone admixture (human habitability and passability may use Köppen classes as anthropocentric shorthand).
 - **FR-006**: System MUST continue climate-driven erosion during Prehistory and preserve full Prehistory state in `PlanetSnapshot`.
 

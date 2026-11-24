@@ -1979,17 +1979,16 @@ impl HistorySimulation {
         }
 
         // 3. Carrying capacity on subdivided fine faces (`historysimulation.py:capacity`, 1/9 of coarse parent),
-        //    modulated by near-surface bedrock/regolith soil fertility (`TileGeology::surface_soil_fertility`:
-        //    basaltic/andesitic volcanic Andisols & organic siltstones vs. carbonate coral atolls & granitic shields).
+        //    modulated by physical surficial soil state (`TileGeology::effective_soil_fertility`:
+        //    bedrock parent material, ice-sheet scouring depth, and periglacial loess/till enrichment).
         let ocean = main_ocean(&coarse_elevs, &coarse_adj);
         let geo_tiles = self.prehistory.tiles();
         let mut coarse_caps = vec![0.0f32; num_coarse];
         for c in 0..num_coarse {
             let soil_mult = geo_tiles
                 .get(c)
-                .map(|t| t.surface_soil_fertility())
-                .unwrap_or(1.0)
-                * self.prehistory.glacial_soil_fertility_modifier(c);
+                .map(|t| t.effective_soil_fertility())
+                .unwrap_or(1.0);
             if coarse_elevs[c] > 0.0 {
                 if !is_habitable(coarse_elevs[c], koeppen[c]) {
                     continue;

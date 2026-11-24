@@ -96,6 +96,8 @@ message GeologicalTile {
   float bottom = 1;
   float mountainosity = 2;
   repeated RockLayer layers = 3;
+  optional float soil_depth_m = 4;
+  optional float soil_fertility = 5;
 }
 
 // 2. Prehistory tile (composes GeologicalTile + optional prehistoric human heritage)

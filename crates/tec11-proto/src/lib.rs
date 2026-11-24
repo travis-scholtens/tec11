@@ -139,6 +139,8 @@ mod tests {
                             }),
                             thickness: 5.0,
                         }],
+                        soil_depth_m: None,
+                        soil_fertility: None,
                     },
                     GeologicalTile {
                         bottom: -35.0,
@@ -174,6 +176,8 @@ mod tests {
                                 thickness: 12.0,
                             },
                         ],
+                        soil_depth_m: Some(2.5),
+                        soil_fertility: Some(1.15),
                     },
                 ],
                 groups: vec![LithosphericGroup {
