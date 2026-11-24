@@ -1,0 +1,29 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_local_terrain",
+    srcs = [
+        "src/anchor.rs",
+        "src/chunk.rs",
+        "src/delta.rs",
+        "src/geomorphology.rs",
+        "src/lib.rs",
+        "src/materials.rs",
+        "src/mesher.rs",
+        "src/rivers.rs",
+        "src/stratigraphy.rs",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/tec11-climate:tec11_climate",
+        "//crates/tec11-geology:tec11_geology",
+        "//crates/tec11-math-grid:tec11_math_grid",
+        "//crates/tec11-proto:tec11_proto",
+    ],
+)
+
+rust_test(
+    name = "tec11_local_terrain_test",
+    crate = ":tec11_local_terrain",
+)

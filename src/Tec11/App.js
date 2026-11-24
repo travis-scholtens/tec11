@@ -6,6 +6,7 @@ import initWasmModule, {
   WasmHistorySession,
   WasmLanguageSession,
   WasmLifeformsSession,
+  WasmLocalTerrainSession,
   WasmMeteorSession,
   WasmMoonSession,
   WasmMoveSession,
@@ -10148,4 +10149,347 @@ export const rotateGrid = (deg) => () => {
   activeView.rotationAngleRad = angleRad;
   activeView.mesh.setRotationFromAxisAngle(_yAxis, angleRad);
   activeView.paint();
+};
+
+// --- Isolated Local 3D Hex-Prism Terrain & Underground Zoom Modal (Spec 008) ---
+
+let worldLocalTerrainModal = null;
+
+function buildLocalTerrainInfo(state, inspectSummaryOverride) {
+  if (!state || !state.session) {
+    return {
+      zoomLevel: 0,
+      zMin: -48,
+      zMax: 24,
+      zSlice: 24,
+      surfaceElevM: 0,
+      canStepUp: false,
+      isLeaf: false,
+      levelLabel: "Level 0",
+      inspectSummary: "",
+      pois: [],
+    };
+  }
+  let parsed = {};
+  try {
+    parsed = JSON.parse(state.session.status_json());
+  } catch (_) {}
+  const inspectSummary =
+    typeof inspectSummaryOverride === "string"
+      ? inspectSummaryOverride
+      : state.lastInspectSummary ||
+        (parsed.isLeaf
+          ? "Drag to orbit · Scroll to zoom · Scrub Z-slice · Click any hex prism to inspect"
+          : "Drag to orbit · Scroll to zoom · Click any hex to drill down one level");
+  state.lastInspectSummary = inspectSummary;
+  return {
+    zoomLevel: parsed.zoomLevel ?? 0,
+    zMin: parsed.zMin ?? -48,
+    zMax: parsed.zMax ?? 24,
+    zSlice: parsed.zSlice ?? 24,
+    surfaceElevM: parsed.surfaceElevM ?? 0,
+    canStepUp: !!parsed.canStepUp,
+    isLeaf: !!parsed.isLeaf,
+    levelLabel: parsed.levelLabel || "Level 0",
+    inspectSummary,
+    pois: Array.isArray(parsed.pois) ? parsed.pois : [],
+  };
+}
+
+function uploadLocalTerrainMesh(state, recenterCamera) {
+  if (!state || !state.session) return;
+  const pos = state.session.mesh_positions();
+  const norm = state.session.mesh_normals();
+  const col = state.session.mesh_colors();
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geom.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(norm), 3));
+  geom.setAttribute("color", new THREE.BufferAttribute(new Float32Array(col), 3));
+  geom.computeBoundingBox();
+
+  const oldGeom = state.mesh.geometry;
+  state.mesh.geometry = geom;
+  if (oldGeom) oldGeom.dispose();
+
+  if (recenterCamera && geom.boundingBox) {
+    const center = new THREE.Vector3();
+    const size = new THREE.Vector3();
+    geom.boundingBox.getCenter(center);
+    geom.boundingBox.getSize(size);
+    state.target.copy(center);
+    const maxDim = Math.max(size.x, size.y, size.z, 12.0);
+    state.distance = maxDim * 1.45;
+  }
+  state.paint();
+}
+
+export const mountWorldLocalTerrainModal = (setInfo) => () => {
+  const canvas = document.getElementById("world-local-terrain-modal-canvas");
+  if (!canvas || !activeView || !activeView.session) {
+    return () => {};
+  }
+  if (typeof activeView.session.encode_snapshot !== "function") {
+    return () => {};
+  }
+
+  const snapBytes = activeView.session.encode_snapshot();
+  if (!snapBytes || snapBytes.length === 0) {
+    return () => {};
+  }
+
+  let coarseTileId =
+    activeView.tileStratigraphy && typeof activeView.tileStratigraphy.tileIdx === "number"
+      ? activeView.tileStratigraphy.tileIdx
+      : activeView.selectedTileIdx;
+  if (typeof coarseTileId !== "number" || coarseTileId < 0) {
+    coarseTileId = 0;
+  }
+  const surfaceElevOverrideKm =
+    activeView.tileStratigraphy &&
+    typeof activeView.tileStratigraphy.elevationKm === "number" &&
+    Number.isFinite(activeView.tileStratigraphy.elevationKm)
+      ? activeView.tileStratigraphy.elevationKm
+      : undefined;
+
+  let session = null;
+  try {
+    session = new WasmLocalTerrainSession(snapBytes, coarseTileId, surfaceElevOverrideKm);
+  } catch (err) {
+    setInfo({
+      zoomLevel: 0,
+      zMin: 0,
+      zMax: 0,
+      zSlice: 0,
+      surfaceElevM: 0,
+      canStepUp: false,
+      isLeaf: false,
+      levelLabel: "Error",
+      inspectSummary: String(err),
+      pois: [],
+    })();
+    return () => {};
+  }
+
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x0b1120, 1);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(42, 16 / 9, 0.2, 5000);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.58));
+  const dir1 = new THREE.DirectionalLight(0xfffbeb, 0.92);
+  dir1.position.set(120, 180, 90);
+  scene.add(dir1);
+  const dir2 = new THREE.DirectionalLight(0x93c5fd, 0.35);
+  dir2.position.set(-100, 60, -120);
+  scene.add(dir2);
+
+  const material = new THREE.MeshLambertMaterial({
+    vertexColors: true,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
+  scene.add(mesh);
+
+  const state = {
+    session,
+    renderer,
+    scene,
+    camera,
+    mesh,
+    setInfo,
+    target: new THREE.Vector3(0, 8, 0),
+    yaw: Math.PI * 0.25,
+    pitch: 0.62,
+    distance: 75,
+    lastInspectSummary: "",
+    paint() {
+      const w = canvas.clientWidth || 640;
+      const h = canvas.clientHeight || 420;
+      if (canvas.width !== Math.round(w * renderer.getPixelRatio()) || canvas.height !== Math.round(h * renderer.getPixelRatio())) {
+        renderer.setSize(w, h, false);
+        camera.aspect = w / Math.max(h, 1);
+        camera.updateProjectionMatrix();
+      }
+      const cp = Math.cos(state.pitch);
+      camera.position.set(
+        state.target.x + state.distance * cp * Math.sin(state.yaw),
+        state.target.y + state.distance * Math.sin(state.pitch),
+        state.target.z + state.distance * cp * Math.cos(state.yaw)
+      );
+      camera.lookAt(state.target);
+      renderer.render(scene, camera);
+    },
+  };
+
+  let dragging = false;
+  let movedPx = 0;
+  let lastX = 0;
+  let lastY = 0;
+
+  const onPointerDown = (ev) => {
+    dragging = true;
+    movedPx = 0;
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+    canvas.setPointerCapture?.(ev.pointerId);
+  };
+  const onPointerMove = (ev) => {
+    if (!dragging) return;
+    const dx = ev.clientX - lastX;
+    const dy = ev.clientY - lastY;
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+    movedPx += Math.hypot(dx, dy);
+    state.yaw -= dx * 0.008;
+    state.pitch = Math.max(0.12, Math.min(Math.PI * 0.48, state.pitch + dy * 0.007));
+    state.paint();
+  };
+  const onPointerUp = (ev) => {
+    const wasClick = dragging && movedPx < 5;
+    dragging = false;
+    canvas.releasePointerCapture?.(ev.pointerId);
+    if (!wasClick || !state.session) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const u = ((ev.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1;
+    const v = -((ev.clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1;
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(u, v), camera);
+    const hits = raycaster.intersectObject(mesh, false);
+    if (hits.length === 0) return;
+    const pt = hits[0].point;
+
+    if (state.session.zoom_level() < 3) {
+      if (state.session.drill_down_at_mesh_xz(pt.x, pt.z)) {
+        state.lastInspectSummary = "";
+        uploadLocalTerrainMesh(state, true);
+        setInfo(buildLocalTerrainInfo(state))();
+      }
+    } else {
+      let summary = "";
+      try {
+        const insp = JSON.parse(state.session.inspect_hit_json(pt.x, pt.y, pt.z));
+        summary = insp.summary || "";
+      } catch (_) {}
+      setInfo(buildLocalTerrainInfo(state, summary))();
+    }
+  };
+  const onWheel = (ev) => {
+    ev.preventDefault();
+    const factor = ev.deltaY > 0 ? 1.12 : 0.89;
+    state.distance = Math.max(10, Math.min(600, state.distance * factor));
+    state.paint();
+  };
+  const onResize = () => state.paint();
+  const onKeyDown = (ev) => {
+    if (!state.session) return;
+    // Camera-relative lateral pan with WASD / Arrow keys
+    let forward = 0;
+    let right = 0;
+    if (ev.key === "w" || ev.key === "W" || ev.key === "ArrowUp") forward = 1;
+    else if (ev.key === "s" || ev.key === "S" || ev.key === "ArrowDown") forward = -1;
+    else if (ev.key === "d" || ev.key === "D" || ev.key === "ArrowRight") right = 1;
+    else if (ev.key === "a" || ev.key === "A" || ev.key === "ArrowLeft") right = -1;
+    else return;
+    ev.preventDefault();
+    const sy = Math.sin(state.yaw);
+    const cy = Math.cos(state.yaw);
+    // Forward looks from camera toward target: (-sin(yaw), -cos(yaw)) in (x, z)
+    const dirEast = -sy * forward + cy * right;
+    const dirNorth = -cy * forward - sy * right;
+    state.session.pan_lateral(dirEast, dirNorth);
+    state.lastInspectSummary = "";
+    uploadLocalTerrainMesh(state, false);
+    setInfo(buildLocalTerrainInfo(state))();
+  };
+
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+  window.addEventListener("resize", onResize);
+  window.addEventListener("keydown", onKeyDown);
+
+  worldLocalTerrainModal = state;
+  uploadLocalTerrainMesh(state, true);
+  setInfo(buildLocalTerrainInfo(state))();
+
+  return () => {
+    canvas.removeEventListener("pointerdown", onPointerDown);
+    canvas.removeEventListener("pointermove", onPointerMove);
+    canvas.removeEventListener("pointerup", onPointerUp);
+    canvas.removeEventListener("wheel", onWheel);
+    window.removeEventListener("resize", onResize);
+    window.removeEventListener("keydown", onKeyDown);
+    if (worldLocalTerrainModal === state) {
+      worldLocalTerrainModal = null;
+    }
+    if (mesh.geometry) mesh.geometry.dispose();
+    material.dispose();
+    renderer.dispose();
+    session.free();
+  };
+};
+
+export const localTerrainStepUp = (setInfo) => () => {
+  const st = worldLocalTerrainModal;
+  if (!st || !st.session) return;
+  if (st.session.step_up()) {
+    st.lastInspectSummary = "";
+    uploadLocalTerrainMesh(st, true);
+    setInfo(buildLocalTerrainInfo(st))();
+  }
+};
+
+export const localTerrainJumpToLeaf = (setInfo) => () => {
+  const st = worldLocalTerrainModal;
+  if (!st || !st.session) return;
+  st.session.jump_to_leaf();
+  st.lastInspectSummary = "";
+  uploadLocalTerrainMesh(st, true);
+  setInfo(buildLocalTerrainInfo(st))();
+};
+
+export const localTerrainSetZSlice = (zSlice) => (setInfo) => () => {
+  const st = worldLocalTerrainModal;
+  if (!st || !st.session) return;
+  st.session.set_z_slice(zSlice);
+  uploadLocalTerrainMesh(st, false);
+  setInfo(buildLocalTerrainInfo(st))();
+};
+
+export const localTerrainShiftZWindow = (deltaZ) => (setInfo) => () => {
+  const st = worldLocalTerrainModal;
+  if (!st || !st.session) return;
+  st.session.shift_z_window(deltaZ);
+  uploadLocalTerrainMesh(st, false);
+  setInfo(buildLocalTerrainInfo(st))();
+};
+
+export const localTerrainPan = (dirEast) => (dirNorth) => (setInfo) => () => {
+  const st = worldLocalTerrainModal;
+  if (!st || !st.session) return;
+  st.session.pan_lateral(dirEast, dirNorth);
+  st.lastInspectSummary = "";
+  uploadLocalTerrainMesh(st, false);
+  setInfo(buildLocalTerrainInfo(st))();
+};
+
+export const localTerrainJumpToPoi = (poiIndex) => (setInfo) => () => {
+  const st = worldLocalTerrainModal;
+  if (!st || !st.session) return;
+  if (st.session.jump_to_poi(poiIndex)) {
+    let desc = "";
+    try {
+      const parsed = JSON.parse(st.session.status_json());
+      if (Array.isArray(parsed.pois) && parsed.pois[poiIndex]) {
+        desc = parsed.pois[poiIndex].description || "";
+      }
+    } catch (_) {}
+    uploadLocalTerrainMesh(st, true);
+    setInfo(buildLocalTerrainInfo(st, desc))();
+  }
 };

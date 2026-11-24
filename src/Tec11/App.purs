@@ -55,11 +55,31 @@ data WorldModal
   = CosmosModal
   | WeatherModal
   | GeologyModal
+  | LocalTerrainModal
   | SkyModal
   | LifeModal
   | StateModal
 
 derive instance eqWorldModal :: Eq WorldModal
+
+type LocalTerrainPoi =
+  { kind :: String
+  , label :: String
+  , description :: String
+  }
+
+type LocalTerrainInfo =
+  { zoomLevel :: Int
+  , zMin :: Int
+  , zMax :: Int
+  , zSlice :: Int
+  , surfaceElevM :: Int
+  , canStepUp :: Boolean
+  , isLeaf :: Boolean
+  , levelLabel :: String
+  , inspectSummary :: String
+  , pois :: Array LocalTerrainPoi
+  }
 
 type GridInfo =
   { size :: Int
@@ -726,6 +746,13 @@ foreign import loadFilePlanetIntoTides :: (TidesInfo -> Effect Unit) -> Effect U
 foreign import mountWeatherView :: Int -> Int -> Int -> Int -> Int -> Int -> String -> String -> (WeatherInfo -> Effect Unit) -> Effect (Effect Unit)
 foreign import mountWorldWeatherModal :: String -> String -> (WeatherInfo -> Effect Unit) -> Effect (Effect Unit)
 foreign import rotateWorldWeatherModal :: Number -> Effect Unit
+foreign import mountWorldLocalTerrainModal :: (LocalTerrainInfo -> Effect Unit) -> Effect (Effect Unit)
+foreign import localTerrainStepUp :: (LocalTerrainInfo -> Effect Unit) -> Effect Unit
+foreign import localTerrainJumpToLeaf :: (LocalTerrainInfo -> Effect Unit) -> Effect Unit
+foreign import localTerrainSetZSlice :: Int -> (LocalTerrainInfo -> Effect Unit) -> Effect Unit
+foreign import localTerrainShiftZWindow :: Int -> (LocalTerrainInfo -> Effect Unit) -> Effect Unit
+foreign import localTerrainPan :: Number -> Number -> (LocalTerrainInfo -> Effect Unit) -> Effect Unit
+foreign import localTerrainJumpToPoi :: Int -> (LocalTerrainInfo -> Effect Unit) -> Effect Unit
 foreign import stepWeatherHours :: Int -> (WeatherInfo -> Effect Unit) -> Effect Unit
 foreign import toggleWeatherRunning :: (WeatherInfo -> Effect Unit) -> Effect Unit
 foreign import resetWeatherSim :: (WeatherInfo -> Effect Unit) -> Effect Unit
@@ -1796,6 +1823,18 @@ mkApp = do
     worldAspect /\ setWorldAspectState <- useState' "color"
     worldActiveModal /\ setWorldActiveModal <- useState' (Nothing :: Maybe WorldModal)
     worldWeatherRotDeg /\ setWorldWeatherRotDeg <- useState' 0
+    localTerrainInfo /\ setLocalTerrainInfo <- useState'
+      { zoomLevel: 0
+      , zMin: -48
+      , zMax: 24
+      , zSlice: 24
+      , surfaceElevM: 0
+      , canStepUp: false
+      , isLeaf: false
+      , levelLabel: "Level 0"
+      , inspectSummary: ""
+      , pois: []
+      }
     worldInfo /\ setWorldInfo <- useState'
       { stageIndex: 0
       , hasAtmosphere: false
@@ -2115,6 +2154,12 @@ mkApp = do
       if screen == WorldScreen && worldActiveModal == Just WeatherModal then do
         setWorldWeatherRotDeg 0
         mountWorldWeatherModal weatherAspect weatherArrowMode syncWeatherControlsFromInfo
+      else
+        pure (pure unit)
+
+    useEffect (screen /\ (worldActiveModal == Just LocalTerrainModal)) do
+      if screen == WorldScreen && worldActiveModal == Just LocalTerrainModal then
+        mountWorldLocalTerrainModal setLocalTerrainInfo
       else
         pure (pure unit)
 
@@ -6294,6 +6339,18 @@ mkApp = do
                                               , children: [ R.text "Geology" ]
                                               }
                                           , R.button
+                                              { id: "world-local-terrain-btn"
+                                              , className: "action-btn secondary"
+                                              , disabled: worldInfo.isRunning
+                                              , title:
+                                                  if worldInfo.isRunning then
+                                                    "Pause simulation to open Local 3D Terrain"
+                                                  else
+                                                    "Zoom into ~1 m 3D hex-prism terrain & underground"
+                                              , onClick: capture_ (setWorldActiveModal (Just LocalTerrainModal))
+                                              , children: [ R.text "Local 3D Terrain" ]
+                                              }
+                                          , R.button
                                               { id: "world-sky-btn"
                                               , className: "action-btn secondary"
                                               , onClick: capture_ (setWorldActiveModal (Just SkyModal))
@@ -6769,6 +6826,186 @@ mkApp = do
                                                       worldInfo.tileView.stratigraphyLines
                                                       "No rock layers recorded on this tile."
                                                   ]
+                                              }
+                                          ]
+                                      }
+                                  ]
+                              }
+                          ]
+                      }
+                  Just LocalTerrainModal ->
+                    R.div
+                      { id: "world-local-terrain-modal"
+                      , className: "world-modal-backdrop"
+                      , children:
+                          [ R.div
+                              { style: R.css { position: "fixed", inset: "0" }
+                              , onClick: capture_ (setWorldActiveModal Nothing)
+                              , children: []
+                              }
+                          , R.div
+                              { className: "world-modal-card"
+                              , style: R.css { position: "relative", zIndex: "1", maxWidth: "min(860px, 96vw)", width: "100%" }
+                              , children:
+                                  [ R.div
+                                      { className: "world-modal-header"
+                                      , children:
+                                          [ R.div
+                                              { className: "world-modal-title"
+                                              , children:
+                                                  [ R.text ("Local 3D Terrain — " <> localTerrainInfo.levelLabel) ]
+                                              }
+                                          , R.button
+                                              { id: "world-modal-close-btn"
+                                              , className: "world-modal-close-btn"
+                                              , onClick: capture_ (setWorldActiveModal Nothing)
+                                              , children: [ R.text "Close ×" ]
+                                              }
+                                          ]
+                                      }
+                                  , R.div
+                                      { className: "world-modal-body"
+                                      , children:
+                                          [ R.div
+                                              { className: "button-row"
+                                              , style: R.css { flexWrap: "wrap", gap: "0.45rem", alignItems: "center" }
+                                              , children:
+                                                  [ R.button
+                                                      { className: "action-btn secondary"
+                                                      , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.38rem 0.75rem" }
+                                                      , disabled: not localTerrainInfo.canStepUp
+                                                      , onClick: capture_ (localTerrainStepUp setLocalTerrainInfo)
+                                                      , children: [ R.text "← Step Up" ]
+                                                      }
+                                                  , if not localTerrainInfo.isLeaf then
+                                                      R.button
+                                                        { className: "action-btn"
+                                                        , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.38rem 0.75rem" }
+                                                        , onClick: capture_ (localTerrainJumpToLeaf setLocalTerrainInfo)
+                                                        , children: [ R.text "Jump to 1 m 3D" ]
+                                                        }
+                                                    else
+                                                      React.empty
+                                                  , R.div
+                                                      { style: R.css { display: "flex", alignItems: "center", gap: "0.25rem" }
+                                                      , children:
+                                                          [ R.span
+                                                              { style: R.css { fontSize: "0.75rem", color: "#94a3b8", marginRight: "2px" }
+                                                              , children: [ R.text "Pan:" ]
+                                                              }
+                                                          , R.button
+                                                              { className: "action-btn secondary"
+                                                              , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.3rem 0.55rem" }
+                                                              , title: "Move West (or A / Left)"
+                                                              , onClick: capture_ (localTerrainPan (-1.0) 0.0 setLocalTerrainInfo)
+                                                              , children: [ R.text "← W" ]
+                                                              }
+                                                          , R.button
+                                                              { className: "action-btn secondary"
+                                                              , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.3rem 0.55rem" }
+                                                              , title: "Move North (or W / Up)"
+                                                              , onClick: capture_ (localTerrainPan 0.0 (-1.0) setLocalTerrainInfo)
+                                                              , children: [ R.text "↑ N" ]
+                                                              }
+                                                          , R.button
+                                                              { className: "action-btn secondary"
+                                                              , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.3rem 0.55rem" }
+                                                              , title: "Move South (or S / Down)"
+                                                              , onClick: capture_ (localTerrainPan 0.0 1.0 setLocalTerrainInfo)
+                                                              , children: [ R.text "↓ S" ]
+                                                              }
+                                                          , R.button
+                                                              { className: "action-btn secondary"
+                                                              , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.3rem 0.55rem" }
+                                                              , title: "Move East (or D / Right)"
+                                                              , onClick: capture_ (localTerrainPan 1.0 0.0 setLocalTerrainInfo)
+                                                              , children: [ R.text "E →" ]
+                                                              }
+                                                          ]
+                                                      }
+                                                  , if localTerrainInfo.isLeaf then
+                                                      R.div
+                                                        { style: R.css { display: "flex", alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }
+                                                        , children:
+                                                            [ R.span
+                                                                { style: R.css { fontSize: "0.78rem", color: "#cbd5e1", fontWeight: "600" }
+                                                                , children: [ R.text ("Z-Slice: " <> show localTerrainInfo.zSlice <> " m") ]
+                                                                }
+                                                            , R.button
+                                                                { className: "action-btn secondary"
+                                                                , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.3rem 0.6rem" }
+                                                                , onClick: capture_ (localTerrainSetZSlice (localTerrainInfo.zSlice - 1) setLocalTerrainInfo)
+                                                                , children: [ R.text "-1 m" ]
+                                                                }
+                                                            , R.input
+                                                                { type: "range"
+                                                                , min: show localTerrainInfo.zMin
+                                                                , max: show localTerrainInfo.zMax
+                                                                , step: "1"
+                                                                , value: show localTerrainInfo.zSlice
+                                                                , style: R.css { width: "160px" }
+                                                                , onChange: handler targetValue \mv ->
+                                                                    case mv >>= Int.fromString of
+                                                                      Nothing -> pure unit
+                                                                      Just z -> localTerrainSetZSlice z setLocalTerrainInfo
+                                                                }
+                                                            , R.button
+                                                                { className: "action-btn secondary"
+                                                                , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.3rem 0.6rem" }
+                                                                , onClick: capture_ (localTerrainSetZSlice (localTerrainInfo.zSlice + 1) setLocalTerrainInfo)
+                                                                , children: [ R.text "+1 m" ]
+                                                                }
+                                                            , R.button
+                                                                { className: "action-btn secondary"
+                                                                , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.3rem 0.6rem" }
+                                                                , onClick: capture_ (localTerrainShiftZWindow (-100) setLocalTerrainInfo)
+                                                                , children: [ R.text "Depth -100 m" ]
+                                                                }
+                                                            , R.button
+                                                                { className: "action-btn secondary"
+                                                                , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.3rem 0.6rem" }
+                                                                , onClick: capture_ (localTerrainShiftZWindow 100 setLocalTerrainInfo)
+                                                                , children: [ R.text "Depth +100 m" ]
+                                                                }
+                                                            ]
+                                                        }
+                                                    else
+                                                      React.empty
+                                                  ]
+                                              }
+                                          , if Array.null localTerrainInfo.pois then
+                                              React.empty
+                                            else
+                                              R.div
+                                                { className: "button-row"
+                                                , style: R.css { flexWrap: "wrap", gap: "0.35rem", alignItems: "center" }
+                                                , children:
+                                                    Array.cons
+                                                      ( R.span
+                                                          { style: R.css { fontSize: "0.75rem", color: "#94a3b8", fontWeight: "600" }
+                                                          , children: [ R.text "Jump to:" ]
+                                                          }
+                                                      )
+                                                      ( Array.mapWithIndex
+                                                          ( \idx poi ->
+                                                              R.button
+                                                                { className: "action-btn secondary"
+                                                                , style: R.css { width: "auto", flex: "0 0 auto", padding: "0.26rem 0.6rem", fontSize: "0.75rem" }
+                                                                , title: poi.description
+                                                                , onClick: capture_ (localTerrainJumpToPoi idx setLocalTerrainInfo)
+                                                                , children: [ R.text poi.label ]
+                                                                }
+                                                          )
+                                                          localTerrainInfo.pois
+                                                      )
+                                                }
+                                          , R.canvas
+                                              { id: "world-local-terrain-modal-canvas"
+                                              , style: R.css { width: "100%", height: "440px", borderRadius: "8px", border: "1px solid #334155", display: "block", cursor: "grab" }
+                                              }
+                                          , R.div
+                                              { style: R.css { fontSize: "0.78rem", color: "#e2e8f0", padding: "0.45rem 0.65rem", background: "#0b1021", border: "1px solid #1e293b", borderRadius: "6px" }
+                                              , children: [ R.text localTerrainInfo.inspectSummary ]
                                               }
                                           ]
                                       }

@@ -11,6 +11,7 @@ rust_shared_library(
         "src/language_session.rs",
         "src/lib.rs",
         "src/lifeforms_session.rs",
+        "src/local_terrain_session.rs",
         "src/mesh.rs",
         "src/meteor_session.rs",
         "src/moon_session.rs",
@@ -33,6 +34,7 @@ rust_shared_library(
     deps = [
         "//crates/tec11-climate:tec11_climate",
         "//crates/tec11-geology:tec11_geology",
+        "//crates/tec11-local-terrain:tec11_local_terrain",
         "//crates/tec11-math-grid:tec11_math_grid",
         "//crates/tec11-proto:tec11_proto",
         "//crates/tec11-speech:tec11_speech",
