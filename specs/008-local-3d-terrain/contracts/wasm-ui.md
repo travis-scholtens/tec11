@@ -10,9 +10,16 @@ pub struct LocalTerrainSession { /* owns LocalTerrainWorld, current zoom level s
 
 #[wasm_bindgen]
 impl LocalTerrainSession {
-    /// Construct from immutable PlanetSnapshot bytes + selected parent tile index.
+    /// Construct from immutable PlanetSnapshot bytes + selected parent tile index
+    /// (plus optional isolated-island elevation override & History geographic `(lat, lon)` center).
     #[wasm_bindgen(constructor)]
-    pub fn new(snapshot_bytes: &[u8], parent_tile_id: usize) -> Result<LocalTerrainSession, JsValue>;
+    pub fn new(
+        snapshot_bytes: &[u8],
+        parent_tile_id: usize,
+        surface_elev_override_km: Option<f32>,
+        target_lat_deg: Option<f32>,
+        target_lon_deg: Option<f32>,
+    ) -> Result<WasmLocalTerrainSession, JsValue>;
 
     /// Current zoom level (`0..=3`, where `3` is the ~1 m 3D hex-prism volume).
     pub fn zoom_level(&self) -> u8;

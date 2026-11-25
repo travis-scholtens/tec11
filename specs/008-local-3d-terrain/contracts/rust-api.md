@@ -13,6 +13,18 @@ pub struct LocalVolumeConfig {
     pub z_step_m: f32,
 }
 
+impl PlanetaryTerrainContext {
+    /// Decode `.tec11` PlanetSnapshot bytes once (including History `SubdividedTerrainGrid`
+    /// reconstruction when `stage == History`) so anchors can be built for any tile in `< 1 ms`.
+    pub fn from_snapshot_bytes(snapshot_bytes: &[u8]) -> Result<Self, LocalTerrainError>;
+
+    /// Build a 2-ring `LocalZoomAnchor` centered on `parent_tile_id` in `< 1 ms`.
+    pub fn build_anchor(&self, parent_tile_id: usize) -> Result<LocalZoomAnchor, LocalTerrainError>;
+
+    /// Find the closest coarse tile ID to geographic `(lat_deg, lon_deg)`.
+    pub fn nearest_tile_id(&self, lat_deg: f32, lon_deg: f32) -> usize;
+}
+
 impl LocalZoomAnchor {
     /// Load an immutable anchor from `.tec11` PlanetSnapshot bytes (Tectonics, Prehistory, or History).
     /// Does not mutate any external simulation.
@@ -23,6 +35,10 @@ impl LocalZoomAnchor {
 
     /// Deterministic hash identifying this `(world_seed, stage, parent_tile_id)`.
     pub fn anchor_hash(&self) -> u64;
+
+    /// Project geographic `(lat_deg, lon_deg)` to local tangent-plane `(x_m, y_m)` and back.
+    pub fn project_lat_lon_to_xy_m(&self, lat_deg: f32, lon_deg: f32) -> [f64; 2];
+    pub fn xy_m_to_lat_lon(&self, xy_m: [f64; 2]) -> (f32, f32);
 }
 ```
 

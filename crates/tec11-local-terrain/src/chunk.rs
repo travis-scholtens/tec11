@@ -2,12 +2,13 @@
 //! and `LocalTerrainVolume` on-demand chunk streaming with `DeltaOverlay` support.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::anchor::LocalZoomAnchor;
 use crate::delta::DeltaOverlay;
 use crate::geomorphology::{sample_cell_at_z, synthesize_column};
 use crate::materials::{cell_flags, HexPrismCell};
-use crate::rivers::RiverSplineSegment;
+use crate::rivers::{DrainageNetwork, DrainageReach};
 use crate::stratigraphy::RegionalStratigraphyField;
 use crate::{LocalTerrainError, LocalVolumeConfig};
 
@@ -221,7 +222,7 @@ pub struct LocalTerrainVolume {
     anchor: LocalZoomAnchor,
     config: LocalVolumeConfig,
     stratigraphy: RegionalStratigraphyField,
-    rivers: Vec<RiverSplineSegment>,
+    drainage: Arc<DrainageNetwork>,
     pub center_xy_m: [f64; 2],
     pub surface_z_center: i32,
     chunks: HashMap<ChunkCoord, HexChunk>,
@@ -233,22 +234,52 @@ impl LocalTerrainVolume {
         anchor: LocalZoomAnchor,
         config: LocalVolumeConfig,
         stratigraphy: RegionalStratigraphyField,
-        rivers: Vec<RiverSplineSegment>,
+        drainage: Arc<DrainageNetwork>,
         center_xy_m: [f64; 2],
     ) -> Self {
-        let center_col = synthesize_column(&anchor, &stratigraphy, &rivers, center_xy_m[0], center_xy_m[1]);
+        let center_col =
+            synthesize_column(&anchor, &stratigraphy, &drainage, center_xy_m[0], center_xy_m[1]);
         let surface_z_center = (center_col.surface_elev_m / config.z_step_m).round() as i32;
         let anchor_hash = anchor.anchor_hash();
         Self {
             anchor,
             config,
             stratigraphy,
-            rivers,
+            drainage,
             center_xy_m,
             surface_z_center,
             chunks: HashMap::new(),
             delta: DeltaOverlay::new(anchor_hash),
         }
+    }
+
+    /// Maximum surface Z across the centered embark window (`[-half_extent..=half_extent]`) so
+    /// Level 3 fits `z_max` above steep coastal or mountain slopes without decapitating terrain.
+    pub fn max_surface_z_in_window(&self, half_extent: i32) -> i32 {
+        let mut max_z = self.surface_z_center;
+        let spacing = self.config.hex_spacing_m;
+        let z_step = self.config.z_step_m;
+        for q in (-half_extent..=half_extent).step_by(4) {
+            for r in (-half_extent..=half_extent).step_by(4) {
+                let rel = axial_to_xy_m(q, r, spacing);
+                let col = synthesize_column(
+                    &self.anchor,
+                    &self.stratigraphy,
+                    &self.drainage,
+                    self.center_xy_m[0] + rel[0],
+                    self.center_xy_m[1] + rel[1],
+                );
+                let top_m = col
+                    .water_elev_m
+                    .unwrap_or(col.surface_elev_m)
+                    .max(col.surface_elev_m + col.ice_thickness_m);
+                let sz = (top_m / z_step).ceil() as i32;
+                if sz > max_z {
+                    max_z = sz;
+                }
+            }
+        }
+        max_z
     }
 
     pub fn config(&self) -> LocalVolumeConfig {
@@ -263,8 +294,12 @@ impl LocalTerrainVolume {
         &self.stratigraphy
     }
 
-    pub fn rivers(&self) -> &[RiverSplineSegment] {
-        &self.rivers
+    pub fn rivers(&self) -> &[DrainageReach] {
+        &self.drainage.reaches
+    }
+
+    pub fn drainage(&self) -> &DrainageNetwork {
+        &self.drainage
     }
 
     /// Generate (if not cached) and return a `16×16×32` `HexChunk`, applying any `DeltaOverlay` edits.
@@ -290,7 +325,7 @@ impl LocalTerrainVolume {
                 let rel_xy = axial_to_xy_m(q, r, self.config.hex_spacing_m);
                 let wx = self.center_xy_m[0] + rel_xy[0];
                 let wy = self.center_xy_m[1] + rel_xy[1];
-                let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.rivers, wx, wy);
+                let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.drainage, wx, wy);
 
                 let col_offset = (lq * (CHUNK_R as usize) + lr) * (CHUNK_Z as usize);
                 for lz in 0..(CHUNK_Z as usize) {
@@ -340,7 +375,7 @@ impl LocalTerrainVolume {
         let rel_xy = axial_to_xy_m(q, r, self.config.hex_spacing_m);
         let wx = self.center_xy_m[0] + rel_xy[0];
         let wy = self.center_xy_m[1] + rel_xy[1];
-        let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.rivers, wx, wy);
+        let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.drainage, wx, wy);
         let elev_m = (z as f32) * self.config.z_step_m;
         let depth_below = (col.surface_elev_m - elev_m).max(0.0);
         let summary = format!(

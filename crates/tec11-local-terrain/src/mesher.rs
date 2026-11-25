@@ -88,7 +88,7 @@ impl LocalTerrainMesher {
             let y_bot = 0.0f32;
 
             let mat = if col.water_elev_m.is_some() {
-                if col.is_river {
+                if col.is_river || col.is_lake {
                     MaterialId::WATER
                 } else {
                     MaterialId::OCEAN_WATER
@@ -170,7 +170,14 @@ impl LocalTerrainMesher {
                     }
 
                     let y_bot = (iz as f32) * z_step;
-                    let y_top = y_bot + z_step;
+                    let above_is_air = iz + 1 >= z_len || grid[idx3(iq, ir, iz + 1)].is_air();
+                    let y_top = if cell.material.is_fluid() && above_is_air {
+                        // Recess exposed water surfaces slightly so sea/river level reads cleanly
+                        // below even a low 0–1 m shoreline bank.
+                        y_bot + z_step * 0.78
+                    } else {
+                        y_bot + z_step
+                    };
                     let mut rgb = cell.material.rgb();
 
                     // Slight brightness lift for flora-covered surface topsoil or ore veins

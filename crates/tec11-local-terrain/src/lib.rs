@@ -16,9 +16,10 @@ pub mod rivers;
 pub mod stratigraphy;
 
 use std::fmt;
+use std::sync::Arc;
 
 pub use anchor::{
-    CoarseRiverEdge, LayerMineralHint, LocalZoomAnchor, NeighborTileSample,
+    CoarseRiverEdge, FineGroundSample, LayerMineralHint, LocalZoomAnchor, NeighborTileSample,
     PlanetaryTerrainContext, SnapshotStage,
 };
 pub use chunk::{
@@ -29,7 +30,10 @@ pub use delta::{DeltaOverlay, DELTA_FORMAT_VERSION};
 pub use geomorphology::{sample_cell_at_z, synthesize_column, ColumnSynthesis};
 pub use materials::{cell_flags, HexPrismCell, MaterialId};
 pub use mesher::{HexMeshBuffers, LocalTerrainMesher};
-pub use rivers::{build_river_splines, query_rivers, RiverQueryResult, RiverSplineSegment};
+pub use rivers::{
+    build_river_splines, classify_lake_state, query_rivers, DrainageNetwork, DrainageReach,
+    LakeBasin, LakeQueryResult, LakeState, RiverQueryResult, RiverSplineSegment,
+};
 pub use stratigraphy::{
     CorrelatedStratum, InterpolatedLocalContext, LocalStratumSlice, MineralVeinSpec,
     RegionalStratigraphyField,
@@ -95,6 +99,7 @@ pub struct PatchColumn {
     pub surface_material: MaterialId,
     pub soil_depth_m: f32,
     pub is_river: bool,
+    pub is_lake: bool,
 }
 
 /// 2.5D hex-column patch rendered at progressive drill-down Levels 0–2 (`data-model.md`).
@@ -122,7 +127,7 @@ pub struct LocalTerrainWorld {
     anchor: LocalZoomAnchor,
     config: LocalVolumeConfig,
     stratigraphy: RegionalStratigraphyField,
-    rivers: Vec<RiverSplineSegment>,
+    drainage: Arc<DrainageNetwork>,
 }
 
 impl LocalTerrainWorld {
@@ -130,12 +135,12 @@ impl LocalTerrainWorld {
         config.hex_spacing_m = config.hex_spacing_m.clamp(0.5, 2.0);
         config.z_step_m = config.z_step_m.clamp(0.5, 2.0);
         let stratigraphy = RegionalStratigraphyField::from_anchor(&anchor);
-        let rivers = build_river_splines(&anchor, &stratigraphy);
+        let drainage = Arc::new(DrainageNetwork::build(&anchor, &stratigraphy));
         Self {
             anchor,
             config,
             stratigraphy,
-            rivers,
+            drainage,
         }
     }
 
@@ -160,8 +165,12 @@ impl LocalTerrainWorld {
         &self.stratigraphy
     }
 
-    pub fn rivers(&self) -> &[RiverSplineSegment] {
-        &self.rivers
+    pub fn rivers(&self) -> &[DrainageReach] {
+        &self.drainage.reaches
+    }
+
+    pub fn drainage(&self) -> &DrainageNetwork {
+        &self.drainage
     }
 
     /// Horizontal hex spacing (meters) for progressive drill-down level `0..=3`.
@@ -184,6 +193,7 @@ impl LocalTerrainWorld {
         let clamped_lvl = level.min(2);
         let spacing = self.hex_spacing_for_level(clamped_lvl);
         let r_hex = radius_hex.clamp(4, 40);
+        let include_tributaries = clamped_lvl >= 1;
         let mut columns = Vec::with_capacity(((2 * r_hex + 1) * (2 * r_hex + 1)) as usize);
 
         for q in -r_hex..=r_hex {
@@ -193,13 +203,14 @@ impl LocalTerrainWorld {
                 let rel = axial_to_xy_m(q, r, spacing);
                 let wx = center_xy_m[0] + rel[0];
                 let wy = center_xy_m[1] + rel[1];
-                let col = geomorphology::synthesize_column_with_river_min_half_w(
+                let col = geomorphology::synthesize_column_with_options(
                     &self.anchor,
                     &self.stratigraphy,
-                    &self.rivers,
+                    &self.drainage,
                     wx,
                     wy,
-                    spacing * 0.55,
+                    spacing * 0.52,
+                    include_tributaries,
                 );
                 let surface_material = if col.ice_thickness_m > 0.0 {
                     MaterialId::SNOW
@@ -215,6 +226,7 @@ impl LocalTerrainWorld {
                     surface_material,
                     soil_depth_m: col.soil_depth_m,
                     is_river: col.is_river,
+                    is_lake: col.is_lake,
                 });
             }
         }
@@ -234,22 +246,25 @@ impl LocalTerrainWorld {
             self.anchor.clone(),
             self.config,
             self.stratigraphy.clone(),
-            self.rivers.clone(),
+            Arc::clone(&self.drainage),
             center_xy_m,
         )
     }
 
     /// Scan the local tile neighborhood (< 5 ms) to discover notable physical features
-    /// present on this tile (River, Highest Peak, Coastline, Karst, Ore Outcrop, Impact Crater).
+    /// present on this tile (River, Lake, Highest Peak, Coastline, Karst, Ore Outcrop, Impact Crater).
     pub fn find_points_of_interest(&self) -> Vec<LocalPointOfInterest> {
         let mut pois = Vec::new();
         let sea_m = self.anchor.sea_level_m as f32;
         let max_r = self.anchor.parent_tile_radius_m * 1.15;
 
-        // 1. River / Gorge: pick the river segment midpoint closest to tile center
-        if !self.rivers.is_empty() {
+        // 1. River / Great River: anchor POI right on the riverbank so Level 3 opens showing both bank & water
+        if !self.drainage.reaches.is_empty() {
             let mut best_river: Option<([f64; 2], f32, f64, f32)> = None;
-            for seg in &self.rivers {
+            for seg in &self.drainage.reaches {
+                if seg.order > 0 {
+                    continue;
+                }
                 let z_w = 0.5 * (seg.z_water_0_m + seg.z_water_1_m);
                 if z_w <= sea_m + 1.0 {
                     continue;
@@ -263,19 +278,58 @@ impl LocalTerrainWorld {
                         Some((_, _, best_d, _)) => d < best_d,
                     };
                     if replace {
-                        best_river = Some(([mx, my], z_w, d, seg.channel_width_m));
+                        let vx = seg.p1_m[0] - seg.p0_m[0];
+                        let vy = seg.p1_m[1] - seg.p0_m[1];
+                        let vlen = (vx * vx + vy * vy).sqrt().max(1.0);
+                        let bank_off = (seg.channel_width_m as f64) * 0.45;
+                        let bank_xy = [mx + (-vy / vlen) * bank_off, my + (vx / vlen) * bank_off];
+                        best_river = Some((bank_xy, z_w, d, seg.channel_width_m));
                     }
                 }
             }
             if let Some((xy, z_w, _, w)) = best_river {
+                let label = if w >= 600.0 {
+                    format!("Great River (~{:.1} km)", w / 1000.0)
+                } else {
+                    "River".to_string()
+                };
                 pois.push(LocalPointOfInterest {
                     kind: "river",
-                    label: "River".to_string(),
+                    label,
                     local_xy_m: xy,
                     elevation_m: z_w,
-                    description: format!("River channel (~{:.0} m wide) at {:.0} m elevation", w, z_w),
+                    description: format!("Riverbank (~{:.0} m wide channel) at {:.0} m elevation", w, z_w),
                 });
             }
+        }
+
+        // 2. Structural Lake / Salt Flat / Frozen Lake
+        if let Some(lake) = self.drainage.lakes.iter().find(|l| {
+            let d = (l.center_xy_m[0].powi(2) + l.center_xy_m[1].powi(2)).sqrt();
+            d <= max_r * 1.25 && (l.state == LakeState::Freshwater || l.state == LakeState::Frozen || l.state == LakeState::SaltFlat)
+        }) {
+            let (label, desc) = match lake.state {
+                LakeState::Freshwater => (
+                    "Lake".to_string(),
+                    format!("Freshwater lake basin at {:.0} m elevation", lake.z_water_m),
+                ),
+                LakeState::Frozen => (
+                    "Frozen Lake".to_string(),
+                    format!("Ice-covered alpine lake at {:.0} m elevation", lake.z_water_m),
+                ),
+                LakeState::SaltFlat => (
+                    "Salt Flat".to_string(),
+                    format!("Evaporite salt playa basin at {:.0} m elevation", lake.z_water_m),
+                ),
+                LakeState::DryPlaya => ("Basin".to_string(), "Dry basin".to_string()),
+            };
+            pois.push(LocalPointOfInterest {
+                kind: "lake",
+                label,
+                local_xy_m: lake.center_xy_m,
+                elevation_m: lake.z_water_m,
+                description: desc,
+            });
         }
 
         // Sample Level 0 columns across the tile neighborhood for peaks, coast, karst, ore, craters
@@ -297,7 +351,7 @@ impl LocalTerrainWorld {
                 if (xy[0] * xy[0] + xy[1] * xy[1]).sqrt() > max_r {
                     continue;
                 }
-                let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.rivers, xy[0], xy[1]);
+                let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.drainage, xy[0], xy[1]);
                 if col.is_ocean {
                     has_ocean = true;
                 } else {
@@ -526,6 +580,8 @@ mod tests {
                 },
             ],
             river_edges: vec![],
+            fine_samples: vec![],
+            fine_spacing_m: 0.0,
         };
 
         let strat = RegionalStratigraphyField::from_anchor(&anchor);
@@ -654,5 +710,69 @@ mod tests {
             "Projected neighbor center in its own anchor should be near (0,0), got {:?}",
             b_xy
         );
+    }
+
+    #[test]
+    fn non_negative_relief_envelope_prevents_aqueducts_and_uphill_waterfalls() {
+        let mut sim = PrehistorySimulation::new_earth(314);
+        for _ in 0..4 {
+            sim.step();
+        }
+        let bytes = sim.encode_snapshot();
+        // Find a land tile with an active river
+        let mut verified_reaches = 0usize;
+        for tid in 0..sim.tiles().len() {
+            if sim.tiles()[tid].elevation() <= 0.2 {
+                continue;
+            }
+            let world =
+                LocalTerrainWorld::from_snapshot_bytes(&bytes, tid, LocalVolumeConfig::default())
+                    .expect("World should load");
+            if world.rivers().is_empty() {
+                continue;
+            }
+            for seg in world.rivers() {
+                assert!(
+                    seg.z_water_1_m <= seg.z_water_0_m + 1.0e-4,
+                    "River reach on tile {tid} must be strictly non-increasing downstream: {} -> {}",
+                    seg.z_water_0_m,
+                    seg.z_water_1_m
+                );
+                // Sample perpendicular banks on both sides of the reach midpoint:
+                // banks must NEVER dip below `z_water` (zero floating aqueducts!).
+                let mx = 0.5 * (seg.p0_m[0] + seg.p1_m[0]);
+                let my = 0.5 * (seg.p0_m[1] + seg.p1_m[1]);
+                let vx = seg.p1_m[0] - seg.p0_m[0];
+                let vy = seg.p1_m[1] - seg.p0_m[1];
+                let vlen = (vx * vx + vy * vy).sqrt().max(1.0);
+                let bank_d = (seg.channel_width_m as f64) * 0.75 + 25.0;
+                for &side in &[-1.0f64, 1.0] {
+                    let bx = mx + (-vy / vlen) * side * bank_d;
+                    let by = my + (vx / vlen) * side * bank_d;
+                    let col = synthesize_column(
+                        world.anchor(),
+                        world.stratigraphy(),
+                        world.drainage(),
+                        bx,
+                        by,
+                    );
+                    if !col.is_ocean && !col.is_river && !col.is_lake {
+                        if let Some(rh_bank) = world.drainage().query_rivers(bx, by, 0.0, true) {
+                            assert!(
+                                col.surface_elev_m >= rh_bank.z_water_m,
+                                "Bank dipped below nearest river z_water on tile {tid}: bank={} < z_w={}",
+                                col.surface_elev_m,
+                                rh_bank.z_water_m
+                            );
+                        }
+                    }
+                }
+                verified_reaches += 1;
+            }
+            if verified_reaches >= 40 {
+                break;
+            }
+        }
+        assert!(verified_reaches > 0, "Expected to verify at least one river reach");
     }
 }

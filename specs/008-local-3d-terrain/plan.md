@@ -5,7 +5,7 @@
 
 ## Summary
 
-Introduce a pure-Rust, browser-independent crate `tec11-local-terrain` that takes immutable `.tec11` `PlanetSnapshot` bytes (across Tectonics, Prehistory, and History stages) and performs lazy hierarchical zoom from a ~95–285 km parent tile down to a local tangent-plane **~0.5–1.0 m hexagonal-prism 3D volume** with underground stratigraphy, caves, ore veins, monotonic carved rivers, and physical surficial soil. Surface landforms and underground geology emerge from laterally continuous neighbor-correlated stratigraphy (with realistic pinch-out wedges and continuous structural dip/folding) and six composable physical geomorphology operators. Expose a thin `tec11-wasm` `LocalTerrainSession` wrapper and an isolated, paused-only **Local 3D Terrain** modal in the World UI featuring progressive multi-step 3D hex-column drill-down, 3D cutaway/orbit inspection, interactive Z-level slicing, and click-to-inspect voxel details—plus a self-contained binary `DeltaOverlay` codec for downstream games.
+Introduce a pure-Rust, browser-independent crate `tec11-local-terrain` that takes immutable `.tec11` `PlanetSnapshot` bytes (across Tectonics, Prehistory, and History stages, grounding coastlines and mainstem rivers 1:1 on History's `SubdividedTerrainGrid` when in History and on the coarse geology grid in Tectonics/Prehistory) and performs seamless 4-level lazy zoom (`Level 0 → 1 → 2 → 3`) down to a local tangent-plane **~0.5–1.0 m hexagonal-prism 3D volume**. Terrain surface height is constructed **hydrology-first**: a continuous, anchor-invariant vector **`DrainageNetwork`** (Chaikin $C^1$ mainstems, multi-order tributaries snapping strictly downhill to parent $Z_{\text{water}}$, Leopold-Maddock channel widths with braided sandbars and estuaries, and climate/evaporation/permeability/freezing-gated structural `LakeBasin`s) establishes a strictly monotonic lower water-surface envelope, and land elevation rises **strictly upward** from the drainage floor ($z = z_{\text{valley}} + R(d, x, y)$, $R \ge 0$) driven by Tec11's `mountainosity`, `Rock::toughness`, glacial U-valley vs. fluvial V-valley profiles, and neighbor-correlated stratigraphy — eliminating floating aqueducts, uphill waterfalls, upsampling beads, and tile seams while staying $O(1)$ (`< 50 ms` in WASM). Expose a thin `tec11-wasm` `WasmLocalTerrainSession` wrapper with `< 1 ms` pan re-anchoring (`PlanetaryTerrainContext`) and an isolated, paused-only **Local 3D Terrain** modal in the World UI.
 
 ## Technical Context
 
@@ -50,11 +50,11 @@ crates/tec11-local-terrain/
 ├── BUILD.bazel             # rust_library + rust_test targets (pure Rust, zero WASM deps)
 └── src/
     ├── lib.rs              # Public API exports, LocalTerrainWorld, LocalVolumeConfig
-    ├── anchor.rs           # PlanetSnapshot (Tectonics/Prehistory/History) -> LocalZoomAnchor & tangent frame
+    ├── anchor.rs           # PlanetaryTerrainContext (with History SubdividedTerrainGrid grounding) -> LocalZoomAnchor & tangent frame
     ├── materials.rs        # MaterialId(u16) palette, HexPrismCell, RGB colors & inspection metadata
     ├── stratigraphy.rs     # Neighbor bed correlation, pinch-out wedges, structural dip/folding/faults/intrusions
-    ├── rivers.rs           # Monotonic hierarchical RiverSplineSegment subdivision & valley/channel carving
-    ├── geomorphology.rs    # Composable 6-operator surface & underground synthesis (erosion, glacial/fluvial, karst, soil/mantle, coast)
+    ├── rivers.rs           # Hydrology-first DrainageNetwork (anchor-invariant Chaikin mainstems, multi-order tributaries, climate/rock-gated LakeBasins)
+    ├── geomorphology.rs    # Non-negative relief envelope (z = z_valley + R(d, x, y), R >= 0) + 6 physical geomorphology operators
     ├── chunk.rs            # ChunkCoord, HexChunk (Uniform/RLE/Dense), LocalTerrainVolume streaming
     ├── delta.rs            # Self-contained versioned binary DeltaOverlay (T11D) codec
     └── mesher.rs           # Face-culled hex-prism mesher for Levels 0–2 patches & Level 3 Z-sliced volumes
@@ -72,11 +72,10 @@ src/Tec11/
 
 ## Phased Delivery Strategy
 
-1. **Phase A — Foundation & Anchor (`tec11-local-terrain` scaffold)**: Bazel build, `MaterialId`/`HexPrismCell`, `LocalZoomAnchor::from_snapshot_bytes` across Tectonics/Prehistory/History with pentagon-safe tangent frame.
-2. **Phase B — Continuous Stratigraphy, Geomorphology & Monotonic Rivers**: Neighbor bed correlation + pinch-outs + structural deformation (`stratigraphy.rs`), monotonic river spline subdivision & carving (`rivers.rs`), and the 6 physical geomorphology operators (`geomorphology.rs`).
-3. **Phase C — Chunked Volume, Sparse Delta & Mesher**: `HexChunk` (`Uniform`/`RLE`/`Dense`), `LocalTerrainVolume` streaming & Level 0–2 `DrillDownPatch`, `DeltaOverlay` binary codec (`delta.rs`), and face-culled `LocalTerrainMesher` with fast Z-level slicing (`mesher.rs`).
-4. **Phase D — WASM Wrapper & World UI Modal**: `LocalTerrainSession` in `tec11-wasm` (including `shift_z_window` for inspecting deep multi-layer crust down toward the Moho), `LocalTerrainModal` in `App.purs`, and Three.js cutaway/orbit/drill-down/raycast renderer in `App.js` with strict WebGL + WASM cleanup.
-5. **Phase E — Comprehensive Verification**: Unit & integration tests covering all 6 success criteria (`SC-001`–`SC-006`) + `//:web_bundle` build.
+1. **Phase A — History Fine-Grid Grounding (`anchor.rs`)**: Extend `PlanetaryTerrainContext` to reconstruct History's `SubdividedTerrainGrid` (`from_coarse_with_crust` + `route_rivers`), populating `anchor.fine_samples` and directed History fine `river_edges` for a 1:1 match with the Regional View.
+2. **Phase B — Hydrology-First Vector Drainage Network (`rivers.rs`)**: Build `DrainageNetwork` with anchor-invariant Chaikin $C^1$ mainstems (strictly non-increasing $Z_{\text{water}}$ even through high mountain tiles), deterministic 1st/2nd-order tributaries snapping cleanly to parent $Z_{\text{water}}$, Leopold-Maddock width/depth/estuary flaring & braided sandbars, and climate/evaporation/permeability/freezing-gated `LakeBasin`s.
+3. **Phase C — Non-Negative Relief Envelope (`geomorphology.rs`, `chunk.rs`, `lib.rs`, `mesher.rs`)**: Construct terrain strictly upward from the drainage floor ($z = z_{\text{valley}} + R(d, x, y)$, $R \ge 0$, $R(0) = 0$) with glacial U-valley ($u^2$) vs. fluvial V-valley ($u$) wall profiles, `mountainosity`-scaled ridges, `Rock::toughness`-stepped plateaus, lake basin carving/freezing/salt flats, coastal beaches, and Level 3 `z_max` auto-fit so coastal/mountain hills are never decapitated.
+4. **Phase D — Verification & Tests**: Comprehensive Rust unit tests verifying strict downstream monotonicity across all mainstems & tributaries, `surface_elev_m >= z_water` everywhere outside channels (zero aqueducts, zero uphill waterfalls), climate/permeability/freezing lake gating, History 1:1 grounding, and `//:web_bundle` build.
 
 ## Complexity Tracking
 

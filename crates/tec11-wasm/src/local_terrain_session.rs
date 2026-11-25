@@ -187,16 +187,13 @@ impl WasmLocalTerrainSession {
         if self.zoom_level < 3 {
             self.rebuild_for_current_level();
         } else {
-            // Preserve the user's current depth offset relative to local surface elevation
-            let prev_offset = self
-                .active_volume
-                .as_ref()
-                .map(|v| self.z_slice - v.surface_z_center)
-                .unwrap_or(LEAF_Z_SPAN - 48);
+            // Preserve the user's current slice depth below the top of the window
+            let prev_below_top = (self.z_max - self.z_slice).max(0);
             let mut vol = self.world.create_leaf_volume(self.center_xy_m);
-            self.z_min = vol.surface_z_center - 48;
-            self.z_max = self.z_min + LEAF_Z_SPAN;
-            self.z_slice = (vol.surface_z_center + prev_offset).clamp(self.z_min, self.z_max);
+            let max_surf_z = vol.max_surface_z_in_window(LEAF_HALF_EXTENT);
+            self.z_max = max_surf_z + 4;
+            self.z_min = self.z_max - LEAF_Z_SPAN;
+            self.z_slice = (self.z_max - prev_below_top).clamp(self.z_min, self.z_max);
             self.mesh = LocalTerrainMesher::build_volume_mesh(
                 &mut vol,
                 -LEAF_HALF_EXTENT..LEAF_HALF_EXTENT,
@@ -288,13 +285,19 @@ impl WasmLocalTerrainSession {
             let scale = 40.0 / span_xy.max(1.0);
             let (q, r) = xy_m_to_axial((x_mesh / scale) as f64, (z_mesh / scale) as f64, patch.hex_spacing_m);
             if let Some(col) = patch.columns.iter().find(|c| c.q == q && c.r == r) {
-                let river_tag = if col.is_river { " · River" } else { "" };
+                let water_tag = if col.is_lake {
+                    " · Lake"
+                } else if col.is_river {
+                    " · River"
+                } else {
+                    ""
+                };
                 let summary = format!(
                     "{} · Elev {:.0} m · Soil {:.1} m{} (click to drill down)",
                     col.surface_material.name(),
                     col.surface_elev_m,
                     col.soil_depth_m,
-                    river_tag
+                    water_tag
                 );
                 return format!(
                     "{{\"q\":{},\"r\":{},\"z\":0,\"materialName\":\"{}\",\"summary\":\"{}\"}}",
@@ -418,9 +421,10 @@ impl WasmLocalTerrainSession {
             self.active_volume = None;
         } else {
             let mut vol = self.world.create_leaf_volume(self.center_xy_m);
-            // Center vertical window around local surface so both relief & ~50 m underground show cleanly
-            self.z_min = vol.surface_z_center - 48;
-            self.z_max = self.z_min + LEAF_Z_SPAN;
+            // Fit vertical Z window above the highest hill in the visible 56x56 m embark window
+            let max_surf_z = vol.max_surface_z_in_window(LEAF_HALF_EXTENT);
+            self.z_max = max_surf_z + 4;
+            self.z_min = self.z_max - LEAF_Z_SPAN;
             self.z_slice = self.z_max;
             self.mesh = LocalTerrainMesher::build_volume_mesh(
                 &mut vol,

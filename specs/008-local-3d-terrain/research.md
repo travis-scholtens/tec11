@@ -45,12 +45,31 @@
   6. **Coastal Wave & Tide Beveling Operator**: Near eustatic sea level (`z ≈ 0`), tough rock coasts carve sea cliffs and wave-cut platforms while soft sedimentary/low-slope coasts form beaches, barrier bars, and tidal flats scaled by local tidal range.
 - **Rationale**: Directly enforces Constitution Principles I & II without reifying "mountain age" or hardcoded biome templates.
 
-## 4. Monotonic Hierarchical River Subdivision & Valley Carving
+## 4. Hydrology-First Vector Drainage Network & Non-Negative Relief Envelope
 
-- **Decision**: Represent rivers entering/crossing the anchor neighborhood as deterministic `RiverSplineSegment` chains subdivided across zoom levels (midpoint displacement perpendicular to flow, amplitude scaled inversely by local slope so lowland rivers meander and mountain torrents run straighter):
-  - **Strict monotonicity**: At every subdivision vertex, enforce $Z_{\text{water}}(s_{k+1}) \le Z_{\text{water}}(s_k)$ downstream. Steep drops over tough rock beds form clean waterfall/rapids steps while remaining non-increasing.
-  - **Carving & valley envelope**: Within channel half-width $W/2$ (scaled by discharge), carve riverbed strictly below $Z_{\text{water}}$ and deposit alluvial gravel/sand/silt bed material, filling up to $Z_{\text{water}}$ with `Water`. Within valley/floodplain half-width $V$, smoothly blend surrounding terrain down into the banks so the river never flows uphill or sits perched above terrain, exposing cut stratigraphic beds on canyon walls.
-  - **Cross-chunk determinism**: Splines are seeded purely from `(world_seed, parent_river_edge_id)` so adjacent chunks evaluate the exact same spline segments with zero seams (SC-005).
+- **Decision**: Replace signed-noise + spline-stamping (which causes aqueducts and uphill waterfalls) and finite-tile D6 pyramids (which suffer tile-boundary seams and 1 m single-cell collapse) with a **Hydrology-First Vector Drainage Network (`DrainageNetwork`) + Non-Negative Relief Envelope** inspired by Génevaux et al. (2013):
+  1. **Stage-Faithful Grounding**: In `History` stage, `PlanetaryTerrainContext` reconstructs History's `SubdividedTerrainGrid` (`from_coarse_with_crust` + `route_rivers`), grounding Level 0–3 coastlines and mainstem rivers 1:1 on the Regional View. In `Tectonics` and `Prehistory`, grounding uses the 2-ring coarse geology grid + `ClimateModel` + `trace_coarse_rivers`.
+  2. **Anchor-Invariant Mainstem & Multi-Order Tributary Tree**:
+     - Subdivide each mainstem edge with slope- and `Rock::toughness`-dependent meandering followed by 3 Chaikin $C^1$ corner-cutting passes, keyed purely on edge-local coordinates so curves never shift during unlimited pan re-anchoring.
+     - Assign strictly non-increasing $Z_{\text{water}}$ downstream across the entire graph (allowing a river to incise a deep canyon through a higher coarse tile without contradicting tile average elevation).
+     - On humid valley walls (`precip_norm > 0.22`), spawn deterministic 1st/2nd-order `DrainageReach` tributaries branching uphill from mainstem reaches, snapping their mouths to the parent's exact $Z_{\text{water}}$ at the confluence and rising monotonically up the valley slopes.
+     - Scale active channel width and depth via Leopold-Maddock hydraulic geometry ($W \propto Q^{0.52}$, `10 m` creeks up to `2,500+ m` wet-basin mainstems; $D \propto Q^{0.40}$), with rock-toughness gorge narrowing, coastal estuary flaring near sea level, asymmetric outer cut-bank / inner point-bar profiles, and streamlined braided sandbars in wide low-slope channels.
+  3. **Non-Negative Relief Envelope ($z = z_{\text{valley}} + R(d, x, y)$)**:
+     - Inside the active drainage corridor (`valley_blend > 0`), construct surrounding land elevation **strictly upward** from the river's $Z_{\text{water}}$:
+       - At the channel bank ($d = W/2$): $R = 0$, so bank elevation equals $Z_{\text{water}}$ cleanly.
+       - Moving away from the bank ($d > W/2$): $R(d, x, y) \ge 0$ rises using a **glacial parabolic U-valley** profile ($\propto u^2$) where `is_glaciated || glacier_cover > 0.2` or a **fluvial V-valley** profile ($\propto u$) otherwise, scaled by `mountainosity` and modulated by **non-negative** ridge/macro/meso noise + `Rock::toughness` stepped cliff-and-bench plateaus, blending smoothly into the regional elevation field outside the valley envelope.
+     - Because $R \ge 0$ everywhere inside the valley corridor, terrain **never** dips below $Z_{\text{water}}$ — eliminating floating aqueducts and uphill waterfalls by mathematical construction, with zero clamps and zero tile seams across all 4 zoom levels (`6 km` → `750 m` → `32 m` → `1 m`).
+  4. **Climate- & Rock-Gated Structural Lakes (`LakeBasin`)**:
+     - Detect structural basins (impact craters where `impact_scar > 0.25`, glaciated alpine cirques/troughs, and inland depressions) as flat-water nodes (`z_lake`) in the drainage graph.
+     - Gate surface water physically:
+       - **Evaporation vs. inflow**: Hot, arid basins where `evap(annual_temp_c, precip_norm) > inflow` dry into `SALT_CRUST` playas or dry bowls.
+       - **Bedrock permeability**: High-`calcity` karst (`calcity > 0.65`) and coarse permeable sandstone drain underground into aquifers/caverns rather than holding surface lakes; impermeable granite/basalt/claystone/glacially scoured shields retain surface lakes.
+       - **Freezing**: Lakes with `annual_temp_c < -2 °C` freeze over with `ICE` / `SNOW`.
+- **Rationale**:
+  - Gives the scale consistency of an ideal 1 m globe in $O(1)$ per column (`< 50 ms` per update in WASM), preserves true physical river widths at Level 3 (`1 m/hex`), supports unlimited panning with zero tile seams, and upholds Constitution Principles I & II.
+- **Alternatives Considered**:
+  - *Signed fBM + clamped river splines (Pass 1)*: Produced floating aqueducts and uphill waterfalls whenever noise dipped below $Z_{\text{water}}$.
+  - *Tiled Priority-Flood + D6 erosion pyramid (Pass 2)*: Suffered border-portal seams across tiles, circular upsampling beads, and 1-pixel D6 collapse at `1 m/hex`.
 
 ## 5. Compact Chunk Storage, Material Palette & Dynamic Z-Slicing Mesher
 

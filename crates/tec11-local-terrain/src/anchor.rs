@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 use tec11_climate::{nominal_cells_for_spin, ClimateModel};
 use tec11_geology::rock::RockLayer;
 use tec11_geology::{trace_coarse_rivers, PangeaWorld, TileGeology};
-use tec11_math_grid::SphericalGrid;
+use tec11_math_grid::{SphericalGrid, SubdividedTerrainGrid};
 use tec11_proto::{Message as _, PlanetSnapshot, PlanetStageOneof};
 
 use crate::materials::MaterialId;
@@ -72,6 +72,14 @@ pub struct NeighborTileSample {
     pub occurrences: Vec<LayerMineralHint>,
 }
 
+/// Subdivided History fine-grid sample projected into the anchor tangent plane so History
+/// coastlines and emergent volcanic islands match the Regional View 1:1.
+#[derive(Copy, Clone, Debug)]
+pub struct FineGroundSample {
+    pub local_xy_m: [f64; 2],
+    pub elevation_m: f32,
+}
+
 /// Immutable planetary reference extracted from `.tec11` snapshot bytes (`data-model.md`).
 #[derive(Clone, Debug)]
 pub struct LocalZoomAnchor {
@@ -90,6 +98,22 @@ pub struct LocalZoomAnchor {
     pub is_pentagon: bool,
     pub neighbors: Vec<NeighborTileSample>,
     pub river_edges: Vec<CoarseRiverEdge>,
+    /// Populated in `History` stage with `SubdividedTerrainGrid` fine-hex elevations within the
+    /// 2-ring neighborhood so coastlines and emergent islands match History's Regional View 1:1.
+    pub fine_samples: Vec<FineGroundSample>,
+    /// Characteristic center-to-center spacing of `fine_samples` in meters (`0.0` if empty).
+    pub fine_spacing_m: f64,
+}
+
+struct HistoryFineGround {
+    subdiv: SubdividedTerrainGrid,
+    fine_edge_discharge: std::collections::BTreeMap<(usize, usize), f32>,
+    fine_edge_first_idx: std::collections::BTreeMap<(usize, usize), usize>,
+    /// Terminal estuary edges connecting the last subdivided land fine face of a History river
+    /// (`from_fine`) to its downstream coarse ocean tile (`to_coarse_ocean`) so rivers flow
+    /// continuously into the sea instead of terminating at the last land fine face.
+    fine_mouth_discharge: std::collections::BTreeMap<(usize, usize), f32>,
+    fine_mouth_first_idx: std::collections::BTreeMap<(usize, usize), usize>,
 }
 
 /// Precomputed planet-wide immutable terrain, climate, and river-discharge context decoded
@@ -111,6 +135,7 @@ pub struct PlanetaryTerrainContext {
     climate_opt: Option<ClimateModel>,
     edge_discharge: std::collections::BTreeMap<(usize, usize), f32>,
     edge_first_idx: std::collections::BTreeMap<(usize, usize), usize>,
+    history_fine: Option<HistoryFineGround>,
 }
 
 impl PlanetaryTerrainContext {
@@ -284,6 +309,118 @@ impl PlanetaryTerrainContext {
             }
         }
 
+        // In History stage, reconstruct the exact subdivided fine-grid terrain & routed rivers
+        // (`SubdividedTerrainGrid`) so coastlines and rivers match the Regional View 1:1.
+        let history_fine = if stage == SnapshotStage::History {
+            let coarse_elevs: Vec<f32> = geo_tiles.iter().map(|t| t.elevation()).collect();
+            let coarse_mounts: Vec<f32> = geo_tiles.iter().map(|t| t.mountainosity).collect();
+            let coarse_thicks: Vec<f32> = geo_tiles.iter().map(|t| t.thickness()).collect();
+            let subdiv = SubdividedTerrainGrid::from_coarse_with_crust(
+                &grid,
+                &coarse_elevs,
+                &coarse_mounts,
+                Some(&coarse_thicks),
+            );
+            let fine_routes = subdiv.route_rivers(&grid, &rivers_raw);
+            let num_fine = subdiv.terrain_grid.faces.len();
+            let mut fine_edge_discharge: std::collections::BTreeMap<(usize, usize), f32> =
+                std::collections::BTreeMap::new();
+            let mut fine_edge_first_idx: std::collections::BTreeMap<(usize, usize), usize> =
+                std::collections::BTreeMap::new();
+            let mut fine_mouth_discharge: std::collections::BTreeMap<(usize, usize), f32> =
+                std::collections::BTreeMap::new();
+            let mut fine_mouth_first_idx: std::collections::BTreeMap<(usize, usize), usize> =
+                std::collections::BTreeMap::new();
+            for (r_idx, route) in fine_routes.iter().enumerate() {
+                let mut running_q = 0.0f32;
+                for w in route.windows(2) {
+                    let fa = w[0];
+                    let fb = w[1];
+                    if fa >= num_fine || fb >= num_fine {
+                        continue;
+                    }
+                    let c_id = subdiv.primary_coarse_tile(fa, &coarse_elevs);
+                    let local_runoff = if let Some(ref cm) = climate_opt {
+                        let p = (cm.classifications()[c_id].mean_precipitation as f32).clamp(0.05, 1.0);
+                        let g = cm.tile_glacier_cover().get(c_id).copied().unwrap_or(0.0);
+                        (p * 0.65 + g * 0.25).max(0.08)
+                    } else {
+                        0.15
+                    };
+                    running_q += local_runoff;
+                    *fine_edge_discharge.entry((fa, fb)).or_insert(0.0) += running_q;
+                    fine_edge_first_idx.entry((fa, fb)).or_insert(r_idx);
+                }
+                // `SubdividedTerrainGrid::route_rivers` uses `.filter_map` (so `r_idx` does not
+                // necessarily match `rivers_raw[r_idx]`) and stops at the last subdivided land
+                // fine face because coarse ocean tiles aren't subdivided. Extend every terminal
+                // mouth directly through its lowest adjacent submarine fine face (if any) and
+                // out into the nearest coarse ocean tile so the estuary always reaches open sea.
+                if let Some(&last_fine) = route.last() {
+                    if last_fine < num_fine {
+                        // 1. Step through the lowest adjacent submarine fine face (e.g., coastal bay)
+                        let mut mouth_start_fine = last_fine;
+                        if let Some(&sub_nb) = subdiv.terrain_adj[last_fine]
+                            .iter()
+                            .filter(|&&nb| nb < num_fine && subdiv.fine_elevations[nb] <= 0.0)
+                            .min_by(|&&a, &&b| {
+                                subdiv.fine_elevations[a]
+                                    .partial_cmp(&subdiv.fine_elevations[b])
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                        {
+                            *fine_edge_discharge
+                                .entry((last_fine, sub_nb))
+                                .or_insert(0.0) += running_q.max(0.5);
+                            fine_edge_first_idx
+                                .entry((last_fine, sub_nb))
+                                .or_insert(r_idx);
+                            mouth_start_fine = sub_nb;
+                        }
+
+                        // 2. Continue from `mouth_start_fine` into the nearest coarse ocean tile
+                        let p_mouth = normalize3(subdiv.terrain_grid.faces[mouth_start_fine].0);
+                        let c_id = subdiv.primary_coarse_tile(mouth_start_fine, &coarse_elevs);
+                        let mut best_ocean: Option<(usize, f64)> = None;
+                        // Check 1-ring and 2-ring coarse neighbors first
+                        let mut cand_coarse = Vec::new();
+                        cand_coarse.push(c_id);
+                        for &nb1 in &adjacency[c_id] {
+                            cand_coarse.push(nb1);
+                            for &nb2 in &adjacency[nb1] {
+                                cand_coarse.push(nb2);
+                            }
+                        }
+                        for &cid in &cand_coarse {
+                            if cid < signed_elevs_km.len() && signed_elevs_km[cid] <= 0.0 {
+                                let d = dot3(p_mouth, normalize3(grid.faces[cid].0));
+                                if best_ocean.map_or(true, |(_, best_d)| d > best_d) {
+                                    best_ocean = Some((cid, d));
+                                }
+                            }
+                        }
+                        if let Some((ocean_coarse, _)) = best_ocean {
+                            *fine_mouth_discharge
+                                .entry((mouth_start_fine, ocean_coarse))
+                                .or_insert(0.0) += running_q.max(0.5);
+                            fine_mouth_first_idx
+                                .entry((mouth_start_fine, ocean_coarse))
+                                .or_insert(r_idx);
+                        }
+                    }
+                }
+            }
+            Some(HistoryFineGround {
+                subdiv,
+                fine_edge_discharge,
+                fine_edge_first_idx,
+                fine_mouth_discharge,
+                fine_mouth_first_idx,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             world_seed,
             stage,
@@ -299,6 +436,7 @@ impl PlanetaryTerrainContext {
             climate_opt,
             edge_discharge,
             edge_first_idx,
+            history_fine,
         })
     }
 
@@ -489,6 +627,102 @@ impl PlanetaryTerrainContext {
             });
         }
 
+        // Project History fine-grid samples (`SubdividedTerrainGrid`) within the 2-ring neighborhood,
+        // and replace `river_edges` with History's exact directed fine river edges so the drainage
+        // network follows History's Regional View 1:1.
+        let mut fine_samples = Vec::new();
+        let mut fine_spacing_m = 0.0f64;
+        if let Some(ref hf) = self.history_fine {
+            // Coarse center-to-center spacing is ~2 * parent_tile_radius_m; 2 subdivision levels
+            // produce fine hex spacing ~0.60 * parent_tile_radius_m.
+            fine_spacing_m = parent_tile_radius_m * 0.60;
+            let project_fine = |f_idx: usize| -> [f64; 2] {
+                let p = normalize3(hf.subdiv.terrain_grid.faces[f_idx].0);
+                let dot = dot3(anchor_normal, p).clamp(-1.0, 1.0);
+                let ang = dot.acos();
+                if ang < 1e-12 {
+                    return [0.0, 0.0];
+                }
+                let diff = [
+                    p[0] - dot * anchor_normal[0],
+                    p[1] - dot * anchor_normal[1],
+                    p[2] - dot * anchor_normal[2],
+                ];
+                let dlen = (diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2])
+                    .sqrt()
+                    .max(1e-12);
+                let dir = [diff[0] / dlen, diff[1] / dlen, diff[2] / dlen];
+                let arc_m = ang * radius_m;
+                [dot3(dir, tangent_east) * arc_m, dot3(dir, tangent_north) * arc_m]
+            };
+
+            let mut seen_fine = std::collections::BTreeSet::new();
+            for &tid in &sample_ids {
+                if let Some(children) = hf.subdiv.coarse_to_fine_children.get(tid) {
+                    for &f_idx in children {
+                        if seen_fine.insert(f_idx) {
+                            fine_samples.push(FineGroundSample {
+                                local_xy_m: project_fine(f_idx),
+                                elevation_m: hf.subdiv.fine_elevations[f_idx] * 1000.0,
+                            });
+                        }
+                    }
+                }
+            }
+
+            let mut fine_river_edges = Vec::new();
+            for (&(fa, fb), &discharge) in &hf.fine_edge_discharge {
+                if seen_fine.contains(&fa) || seen_fine.contains(&fb) {
+                    let from_xy_m = project_fine(fa);
+                    let to_xy_m = project_fine(fb);
+                    let from_elev_m =
+                        (hf.subdiv.fine_elevations[fa] * 1000.0).max(self.sea_level_m as f32);
+                    let to_elev_m = (hf.subdiv.fine_elevations[fb] * 1000.0)
+                        .max(self.sea_level_m as f32)
+                        .min(from_elev_m);
+                    let r_idx = hf.fine_edge_first_idx.get(&(fa, fb)).copied().unwrap_or(0);
+                    let edge_id = ((r_idx as u64) << 32) ^ ((fa as u64) << 16) ^ (fb as u64);
+                    fine_river_edges.push(CoarseRiverEdge {
+                        edge_id,
+                        from_xy_m,
+                        to_xy_m,
+                        from_elev_m,
+                        to_elev_m,
+                        discharge: discharge.clamp(0.3, 400.0),
+                    });
+                }
+            }
+            for (&(last_fine, ocean_coarse), &discharge) in &hf.fine_mouth_discharge {
+                if seen_fine.contains(&last_fine) || sample_ids.contains(&ocean_coarse) {
+                    let from_xy_m = project_fine(last_fine);
+                    let to_xy_m = project_xy(ocean_coarse);
+                    let from_elev_m =
+                        (hf.subdiv.fine_elevations[last_fine] * 1000.0).max(self.sea_level_m as f32);
+                    let to_elev_m = self.sea_level_m as f32;
+                    let r_idx = hf
+                        .fine_mouth_first_idx
+                        .get(&(last_fine, ocean_coarse))
+                        .copied()
+                        .unwrap_or(0);
+                    let edge_id = ((r_idx as u64) << 32)
+                        ^ ((last_fine as u64) << 16)
+                        ^ (ocean_coarse as u64)
+                        ^ 0x55aa_0001;
+                    fine_river_edges.push(CoarseRiverEdge {
+                        edge_id,
+                        from_xy_m,
+                        to_xy_m,
+                        from_elev_m,
+                        to_elev_m,
+                        discharge: discharge.clamp(0.3, 400.0),
+                    });
+                }
+            }
+            if !fine_river_edges.is_empty() {
+                river_edges = fine_river_edges;
+            }
+        }
+
         Ok(LocalZoomAnchor {
             world_seed: self.world_seed,
             stage: self.stage,
@@ -505,6 +739,8 @@ impl PlanetaryTerrainContext {
             is_pentagon,
             neighbors,
             river_edges,
+            fine_samples,
+            fine_spacing_m,
         })
     }
 }
@@ -603,6 +839,49 @@ impl LocalZoomAnchor {
         let lat_deg = p[2].clamp(-1.0, 1.0).asin().to_degrees() as f32;
         let lon_deg = p[1].atan2(p[0]).to_degrees() as f32;
         (lat_deg, lon_deg)
+    }
+
+    /// Sample History's subdivided fine-grid elevation at `(x_m, y_m)`,
+    /// blending smoothly back to `coarse_elev_m` over open ocean where coarse tiles are not subdivided.
+    pub fn sample_history_fine_ground(&self, x_m: f64, y_m: f64, coarse_elev_m: f32) -> f32 {
+        if self.fine_samples.is_empty() || self.fine_spacing_m <= 1.0 {
+            return coarse_elev_m;
+        }
+        let r_ref = self.fine_spacing_m;
+        // Fine hex circumradius is ~0.55 * fine_spacing_m; keep full fine-ground weight inside
+        // subdivided land hexes and taper cleanly to `coarse_elev_m` right across the coastal hex
+        // boundary (`0.52..0.95 * r_ref`) so un-subdivided ocean tiles are never buried under land.
+        let max_r = r_ref * 1.35;
+        let max_r2 = max_r * max_r;
+        let mut w_sum = 0.0f64;
+        let mut e_sum = 0.0f64;
+        let mut min_d2 = f64::INFINITY;
+        for fs in &self.fine_samples {
+            let dx = x_m - fs.local_xy_m[0];
+            let dy = y_m - fs.local_xy_m[1];
+            let d2 = dx * dx + dy * dy;
+            if d2 < min_d2 {
+                min_d2 = d2;
+            }
+            if d2 <= max_r2 {
+                let u = d2.sqrt() / r_ref;
+                let w = 1.0 / (u * u * u + 0.015);
+                w_sum += w;
+                e_sum += w * (fs.elevation_m as f64);
+            }
+        }
+        if w_sum <= 1e-12 || !min_d2.is_finite() {
+            return coarse_elev_m;
+        }
+        let fine_elev = (e_sum / w_sum) as f32;
+        let min_d = min_d2.sqrt();
+        let blend = if min_d <= r_ref * 0.62 {
+            1.0f32
+        } else {
+            let t = ((min_d - r_ref * 0.62) / (r_ref * 0.43)).clamp(0.0, 1.0) as f32;
+            1.0 - t * t * (3.0 - 2.0 * t)
+        };
+        coarse_elev_m * (1.0 - blend) + fine_elev * blend
     }
 
     /// Apply a fine-tile surface elevation override ONLY for isolated emergent oceanic
