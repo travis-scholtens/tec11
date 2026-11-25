@@ -17,7 +17,10 @@ pub mod stratigraphy;
 
 use std::fmt;
 
-pub use anchor::{CoarseRiverEdge, LayerMineralHint, LocalZoomAnchor, NeighborTileSample, SnapshotStage};
+pub use anchor::{
+    CoarseRiverEdge, LayerMineralHint, LocalZoomAnchor, NeighborTileSample,
+    PlanetaryTerrainContext, SnapshotStage,
+};
 pub use chunk::{
     axial_to_xy_m, xy_m_to_axial, CellInspection, ChunkCoord, ChunkStorage, HexChunk,
     LocalTerrainVolume, CHUNK_Q, CHUNK_R, CHUNK_VOLUME, CHUNK_Z,
@@ -576,5 +579,80 @@ mod tests {
         // Verify mesher builds a clean Z-sliced volume mesh
         let mesh = LocalTerrainMesher::build_volume_mesh(&mut vol2, -8..8, -8..8, z_tunnel - 8, z_tunnel + 16);
         assert!(mesh.vertex_count() > 0);
+    }
+
+    #[test]
+    fn river_endpoints_and_ring2_neighbors_are_present_in_anchor() {
+        let mut sim = PrehistorySimulation::new_earth(777);
+        for _ in 0..4 {
+            sim.step();
+        }
+        let bytes = sim.encode_snapshot();
+
+        let n_tiles = sim.tiles().len();
+        let mut checked = 0usize;
+        for tid in 0..n_tiles {
+            if sim.tiles()[tid].elevation() <= 0.0 {
+                continue;
+            }
+            let anchor = LocalZoomAnchor::from_snapshot_bytes(&bytes, tid)
+                .expect("Prehistory anchor should build");
+            if anchor.river_edges.is_empty() {
+                continue;
+            }
+            assert!(
+                anchor.neighbors.len() > 7,
+                "Expected 2-ring neighbors (>7) on tile {tid}, got {}",
+                anchor.neighbors.len()
+            );
+            for edge in &anchor.river_edges {
+                let has_from = anchor.neighbors.iter().any(|nb| {
+                    (nb.local_xy_m[0] - edge.from_xy_m[0]).abs() < 1.0
+                        && (nb.local_xy_m[1] - edge.from_xy_m[1]).abs() < 1.0
+                });
+                let has_to = anchor.neighbors.iter().any(|nb| {
+                    (nb.local_xy_m[0] - edge.to_xy_m[0]).abs() < 1.0
+                        && (nb.local_xy_m[1] - edge.to_xy_m[1]).abs() < 1.0
+                });
+                assert!(has_from, "River edge start missing from anchor.neighbors on tile {tid}");
+                assert!(has_to, "River edge end missing from anchor.neighbors on tile {tid}");
+            }
+            checked += 1;
+            if checked >= 8 {
+                break;
+            }
+        }
+        assert!(checked > 0, "Expected at least one tile with river edges");
+    }
+
+    #[test]
+    fn planetary_context_reanchors_and_roundtrips_lat_lon() {
+        let mut sim = PrehistorySimulation::new_earth(123);
+        for _ in 0..3 {
+            sim.step();
+        }
+        let bytes = sim.encode_snapshot();
+        let ctx = PlanetaryTerrainContext::from_snapshot_bytes(&bytes)
+            .expect("PlanetaryTerrainContext should decode");
+        let anchor_a = ctx.build_anchor(0).expect("Anchor A should build");
+        let nb = &anchor_a.neighbors[1];
+        let (lat, lon) = anchor_a.xy_m_to_lat_lon(nb.local_xy_m);
+        let back_xy = anchor_a.project_lat_lon_to_xy_m(lat, lon);
+        let err_m = ((back_xy[0] - nb.local_xy_m[0]).powi(2)
+            + (back_xy[1] - nb.local_xy_m[1]).powi(2))
+        .sqrt();
+        assert!(
+            err_m < 25.0,
+            "xy_m_to_lat_lon round-trip error should be tiny, got {err_m:.2} m"
+        );
+        assert_eq!(ctx.nearest_tile_id(lat, lon), nb.tile_id);
+
+        let anchor_b = ctx.build_anchor(nb.tile_id).expect("Anchor B should build");
+        let b_xy = anchor_b.project_lat_lon_to_xy_m(lat, lon);
+        assert!(
+            b_xy[0].abs() < 25.0 && b_xy[1].abs() < 25.0,
+            "Projected neighbor center in its own anchor should be near (0,0), got {:?}",
+            b_xy
+        );
     }
 }

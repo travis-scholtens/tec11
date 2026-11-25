@@ -2,7 +2,7 @@
 
 use tec11_local_terrain::{
     xy_m_to_axial, DrillDownPatch, HexMeshBuffers, LocalPointOfInterest, LocalTerrainMesher,
-    LocalTerrainVolume, LocalTerrainWorld, LocalVolumeConfig,
+    LocalTerrainVolume, LocalTerrainWorld, LocalVolumeConfig, PlanetaryTerrainContext,
 };
 use wasm_bindgen::prelude::*;
 
@@ -12,10 +12,12 @@ const LEAF_Z_SPAN: i32 = 72; // 72 vertical 1m z-levels per loaded depth window
 
 #[wasm_bindgen]
 pub struct WasmLocalTerrainSession {
+    context: PlanetaryTerrainContext,
     world: LocalTerrainWorld,
     pois: Vec<LocalPointOfInterest>,
-    /// Stack of `(level, center_xy_m)` for progressive drill-down & stepping back up.
-    history: Vec<(u8, [f64; 2])>,
+    /// Stack of `(level, lat_deg, lon_deg)` for progressive drill-down & stepping back up
+    /// across unlimited lateral panning and coarse-tile re-anchoring.
+    history: Vec<(u8, f32, f32)>,
     zoom_level: u8,
     center_xy_m: [f64; 2],
     active_patch: Option<DrillDownPatch>,
@@ -33,24 +35,40 @@ impl WasmLocalTerrainSession {
         snapshot_bytes: &[u8],
         parent_tile_id: usize,
         surface_elev_override_km: Option<f32>,
+        target_lat_deg: Option<f32>,
+        target_lon_deg: Option<f32>,
     ) -> Result<WasmLocalTerrainSession, JsValue> {
-        let mut anchor = tec11_local_terrain::LocalZoomAnchor::from_snapshot_bytes(
-            snapshot_bytes,
-            parent_tile_id,
-        )
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let context = PlanetaryTerrainContext::from_snapshot_bytes(snapshot_bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let mut anchor = context
+            .build_anchor(parent_tile_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         if let Some(elev_km) = surface_elev_override_km {
             anchor.apply_surface_elevation_override(elev_km);
         }
+        let initial_center_xy_m = match (target_lat_deg, target_lon_deg) {
+            (Some(lat), Some(lon)) if lat.is_finite() && lon.is_finite() => {
+                let xy = anchor.project_lat_lon_to_xy_m(lat, lon);
+                let max_off = anchor.parent_tile_radius_m * 1.35;
+                let d = (xy[0] * xy[0] + xy[1] * xy[1]).sqrt();
+                if d > max_off && d > 1e-6 {
+                    [xy[0] * (max_off / d), xy[1] * (max_off / d)]
+                } else {
+                    xy
+                }
+            }
+            _ => [0.0, 0.0],
+        };
         let world = LocalTerrainWorld::new(anchor, LocalVolumeConfig::default());
 
         let pois = world.find_points_of_interest();
         let mut session = Self {
+            context,
             world,
             pois,
             history: Vec::new(),
             zoom_level: 0,
-            center_xy_m: [0.0, 0.0],
+            center_xy_m: initial_center_xy_m,
             active_patch: None,
             active_volume: None,
             z_min: -48,
@@ -98,16 +116,18 @@ impl WasmLocalTerrainSession {
             .map(|c| c.local_xy_m)
             .unwrap_or([self.center_xy_m[0] + rel_x, self.center_xy_m[1] + rel_y]);
 
-        self.history.push((self.zoom_level, self.center_xy_m));
+        let (cur_lat, cur_lon) = self.world.anchor().xy_m_to_lat_lon(self.center_xy_m);
+        self.history.push((self.zoom_level, cur_lat, cur_lon));
         self.zoom_level += 1;
         self.center_xy_m = next_center;
+        self.maybe_reanchor_to_nearest();
         self.rebuild_for_current_level();
         true
     }
 
     /// Step back up one zoom level.
     pub fn step_up(&mut self) -> bool {
-        let Some((prev_lvl, prev_center)) = self.history.pop() else {
+        let Some((prev_lvl, prev_lat, prev_lon)) = self.history.pop() else {
             if self.zoom_level > 0 {
                 self.zoom_level -= 1;
                 self.rebuild_for_current_level();
@@ -116,7 +136,18 @@ impl WasmLocalTerrainSession {
             return false;
         };
         self.zoom_level = prev_lvl;
-        self.center_xy_m = prev_center;
+        let target_tid = self.context.nearest_tile_id(prev_lat, prev_lon);
+        if target_tid != self.world.anchor().parent_tile_id {
+            if let Ok(new_anchor) = self.context.build_anchor(target_tid) {
+                self.center_xy_m = new_anchor.project_lat_lon_to_xy_m(prev_lat, prev_lon);
+                self.world = LocalTerrainWorld::new(new_anchor, LocalVolumeConfig::default());
+                self.pois = self.world.find_points_of_interest();
+            } else {
+                self.center_xy_m = self.world.anchor().project_lat_lon_to_xy_m(prev_lat, prev_lon);
+            }
+        } else {
+            self.center_xy_m = self.world.anchor().project_lat_lon_to_xy_m(prev_lat, prev_lon);
+        }
         self.rebuild_for_current_level();
         true
     }
@@ -124,7 +155,8 @@ impl WasmLocalTerrainSession {
     /// Jump straight to Level 3 (~1 m 3D cutaway & Z-level slicer) at the current center.
     pub fn jump_to_leaf(&mut self) {
         if self.zoom_level < 3 {
-            self.history.push((self.zoom_level, self.center_xy_m));
+            let (cur_lat, cur_lon) = self.world.anchor().xy_m_to_lat_lon(self.center_xy_m);
+            self.history.push((self.zoom_level, cur_lat, cur_lon));
             self.zoom_level = 3;
             self.rebuild_for_current_level();
         }
@@ -133,6 +165,8 @@ impl WasmLocalTerrainSession {
     /// Pan laterally in the local tangent plane at ANY zoom level (`0..=3`).
     /// `(dir_east, dir_north)` is a unit or cardinal direction vector; each step moves by
     /// ~half the current visible patch/embark width so consecutive views overlap seamlessly.
+    /// Automatically re-anchors onto the nearest coarse tile when panning across tile boundaries
+    /// so continental rivers, mountain ranges, and coastlines stream seamlessly without limits.
     pub fn pan_lateral(&mut self, dir_east: f32, dir_north: f32) {
         let len = (dir_east * dir_east + dir_north * dir_north).sqrt();
         if len < 1e-4 {
@@ -148,6 +182,7 @@ impl WasmLocalTerrainSession {
         let dy = ((dir_north / len) as f64) * step_m;
         self.center_xy_m[0] += dx;
         self.center_xy_m[1] += dy;
+        self.maybe_reanchor_to_nearest();
 
         if self.zoom_level < 3 {
             self.rebuild_for_current_level();
@@ -179,11 +214,13 @@ impl WasmLocalTerrainSession {
         let Some(poi) = self.pois.get(poi_index) else {
             return false;
         };
-        self.history.push((self.zoom_level, self.center_xy_m));
+        let (cur_lat, cur_lon) = self.world.anchor().xy_m_to_lat_lon(self.center_xy_m);
+        self.history.push((self.zoom_level, cur_lat, cur_lon));
         self.center_xy_m = poi.local_xy_m;
         if self.zoom_level < 2 {
             self.zoom_level = 2;
         }
+        self.maybe_reanchor_to_nearest();
         self.rebuild_for_current_level();
         true
     }
@@ -335,6 +372,38 @@ impl WasmLocalTerrainSession {
             self.world.anchor().parent_tile_id,
             pois_json.join(",")
         )
+    }
+
+    /// Seamlessly re-anchor the local tangent plane onto the closest coarse tile whenever
+    /// lateral panning moves `self.center_xy_m` closer to a neighboring coarse tile than the
+    /// current anchor (with hysteresis to prevent border oscillation).
+    fn maybe_reanchor_to_nearest(&mut self) {
+        let anchor = self.world.anchor();
+        let center_dist =
+            (self.center_xy_m[0] * self.center_xy_m[0] + self.center_xy_m[1] * self.center_xy_m[1])
+                .sqrt();
+        if center_dist <= anchor.parent_tile_radius_m * 0.90 {
+            return;
+        }
+        let mut best_tid = anchor.parent_tile_id;
+        let mut best_dist = center_dist;
+        for nb in anchor.neighbors.iter().skip(1) {
+            let dx = self.center_xy_m[0] - nb.local_xy_m[0];
+            let dy = self.center_xy_m[1] - nb.local_xy_m[1];
+            let d = (dx * dx + dy * dy).sqrt();
+            if d < best_dist {
+                best_dist = d;
+                best_tid = nb.tile_id;
+            }
+        }
+        if best_tid != anchor.parent_tile_id && best_dist < center_dist * 0.92 {
+            let (lat_deg, lon_deg) = anchor.xy_m_to_lat_lon(self.center_xy_m);
+            if let Ok(new_anchor) = self.context.build_anchor(best_tid) {
+                self.center_xy_m = new_anchor.project_lat_lon_to_xy_m(lat_deg, lon_deg);
+                self.world = LocalTerrainWorld::new(new_anchor, LocalVolumeConfig::default());
+                self.pois = self.world.find_points_of_interest();
+            }
+        }
     }
 
     fn rebuild_for_current_level(&mut self) {

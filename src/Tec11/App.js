@@ -10251,10 +10251,28 @@ export const mountWorldLocalTerrainModal = (setInfo) => () => {
     Number.isFinite(activeView.tileStratigraphy.elevationKm)
       ? activeView.tileStratigraphy.elevationKm
       : undefined;
+  const targetLatDeg =
+    activeView.tileSky &&
+    typeof activeView.tileSky.latDeg === "number" &&
+    Number.isFinite(activeView.tileSky.latDeg)
+      ? activeView.tileSky.latDeg
+      : undefined;
+  const targetLonDeg =
+    activeView.tileSky &&
+    typeof activeView.tileSky.lonDeg === "number" &&
+    Number.isFinite(activeView.tileSky.lonDeg)
+      ? activeView.tileSky.lonDeg
+      : undefined;
 
   let session = null;
   try {
-    session = new WasmLocalTerrainSession(snapBytes, coarseTileId, surfaceElevOverrideKm);
+    session = new WasmLocalTerrainSession(
+      snapBytes,
+      coarseTileId,
+      surfaceElevOverrideKm,
+      targetLatDeg,
+      targetLonDeg
+    );
   } catch (err) {
     setInfo({
       zoomLevel: 0,
