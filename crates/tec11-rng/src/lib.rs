@@ -65,3 +65,20 @@ impl Pcg64Mcg {
         mean + std_dev * z0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_sequence_and_roundtrip() {
+        let mut a = Pcg64Mcg::from_seed_u64(42);
+        let mut b = Pcg64Mcg::from_seed_u64(42);
+        for _ in 0..32 {
+            assert_eq!(a.next_u64(), b.next_u64());
+        }
+        let bytes = a.to_bytes();
+        let mut c = Pcg64Mcg::from_bytes(bytes);
+        assert_eq!(a.next_u64(), c.next_u64());
+    }
+}

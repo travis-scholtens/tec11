@@ -1,0 +1,15 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_vec3",
+    srcs = [
+        "src/lib.rs",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "tec11_vec3_test",
+    crate = ":tec11_vec3",
+)
