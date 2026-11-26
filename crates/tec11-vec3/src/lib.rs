@@ -128,3 +128,18 @@ pub fn rotate(p: Vec3, axis: Vec3, theta: f64) -> Vec3 {
             / l2,
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotate_and_great_circle() {
+        let x = [1.0, 0.0, 0.0];
+        let z = [0.0, 0.0, 1.0];
+        let y = rotate(x, z, std::f64::consts::FRAC_PI_2);
+        assert!((y[0]).abs() < 1e-12);
+        assert!((y[1] - 1.0).abs() < 1e-12);
+        assert!((great_circle_distance(x, y) - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    }
+}
