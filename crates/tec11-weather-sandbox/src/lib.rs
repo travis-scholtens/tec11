@@ -5,13 +5,13 @@ use tec11_weather::{
     MoistBaroclinicSolver, WeatherInitConfig,
 };
 
-use crate::sky_vantage::{
+use tec11_sky_view::{
     build_uniform_fine_tile_inspection_view, json_escape, TileInspectionView, TileLiveEnvironment,
     TileSkyMoon, UniformFineTileSkyParams,
 };
-use crate::sun_sky::AtmosphereType;
-use crate::tides_sandbox::{live_tide_diverging_rgb, FinePlanetBase};
-use crate::world::koeppen_climate_name;
+use tec11_cosmos::AtmosphereType;
+use tec11_tides_sandbox::{live_tide_diverging_rgb, FinePlanetBase};
+use tec11_koeppen::koeppen_climate_name;
 
 /// Standalone Global Coupled Weather & Storm Surge simulation (`WeatherScreen`) on a uniform
 /// `coarse + 2` spherical finite-volume grid.
@@ -677,7 +677,13 @@ impl WeatherSandbox {
             storm_darkening,
         };
 
-        let coarse_surf = crate::tile_surface_infos(self.base.prehistory.tiles());
+        let coarse_surf: Vec<tec11_sky_view::TileSurfaceInfo> = self
+            .base
+            .prehistory
+            .tiles()
+            .iter()
+            .map(|t| tec11_sky_view::TileSurfaceInfo::from_tuple(t.surface_info_tuple()))
+            .collect();
         let mut view = build_uniform_fine_tile_inspection_view(
             fine_idx,
             UniformFineTileSkyParams {
@@ -992,8 +998,8 @@ mod tests {
 
     #[test]
     fn test_weather_and_tides_preserve_world_sun_atmosphere_moons_and_sky_colors() {
-        use crate::tides_sandbox::TidesSandbox;
-        use crate::world::{WorldCreateParams, WorldSimulation};
+        use tec11_tides_sandbox::TidesSandbox;
+        use tec11_world::{WorldCreateParams, WorldSimulation};
 
         let mut world = WorldSimulation::new(
             WorldCreateParams {

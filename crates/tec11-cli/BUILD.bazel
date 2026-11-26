@@ -9,6 +9,7 @@ rust_binary(
         "//crates/tec11-geology:tec11_geology",
         "//crates/tec11-math-grid:tec11_math_grid",
         "//crates/tec11-proto:tec11_proto",
+        "//crates/tec11-world:tec11_world",
     ],
 )
 

@@ -1,4 +1,4 @@
-use tec11_geology::TidesSandbox;
+use tec11_tides_sandbox::TidesSandbox;
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids, rotate_axes};

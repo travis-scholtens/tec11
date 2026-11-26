@@ -2,11 +2,11 @@ use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M, ME
 use tec11_math_grid::SphericalGrid;
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::rock::{
+use tec11_geology::rock::{
     deposit_sedimentary, DepositClimate, ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
-use crate::tectonics::TectonicsSimulation;
-use crate::tile::TileGeology;
+use tec11_geology::tectonics::TectonicsSimulation;
+use tec11_geology::tile::TileGeology;
 
 /// Standalone erosion & sedimentary deposition sandbox (`erosionsimulation.py`).
 pub struct ErosionSandbox {
@@ -319,9 +319,9 @@ mod tests {
 
     #[test]
     fn test_tectonics_erosion_rivers_load_all_snapshot_stages() {
-        use crate::history::HistorySimulation;
-        use crate::prehistory::PrehistorySimulation;
-        use crate::rivers::RiversSandbox;
+        use tec11_geology::history::HistorySimulation;
+        use tec11_geology::prehistory::PrehistorySimulation;
+        use tec11_geology::rivers::RiversSandbox;
 
         let mut tec = TectonicsSimulation::new(4, 29.0, 42);
         tec.step();

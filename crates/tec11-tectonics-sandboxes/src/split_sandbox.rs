@@ -2,7 +2,7 @@ use std::f64::consts::PI;
 
 use tec11_math_grid::{normal, rotate, Pcg64Mcg, SphericalGrid, SphericalPolygon};
 
-use crate::movement::split_group;
+use tec11_geology::movement::split_group;
 
 /// Standalone continent rifting / splitting sandbox (`splitpoints.py`).
 pub struct SplitSandbox {

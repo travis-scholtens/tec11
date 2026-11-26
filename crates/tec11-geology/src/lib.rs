@@ -1,9 +1,5 @@
-pub mod erosion_sandbox;
 pub mod history;
 pub mod lifeforms;
-pub mod meteor_sandbox;
-pub mod moon_sandbox;
-pub mod move_sandbox;
 pub mod movement;
 pub mod pangea;
 pub mod population;
@@ -12,13 +8,9 @@ pub mod profile;
 pub mod racination;
 pub mod rivers;
 pub mod rock;
-pub mod split_sandbox;
 pub mod tectonics;
 pub mod terrain;
-pub mod tides_sandbox;
 pub mod tile;
-pub mod weather_sandbox;
-pub mod world;
 
 pub use tec11_cosmos as sun_sky;
 pub use tec11_language as language;
@@ -45,7 +37,6 @@ pub fn tile_surface_infos(tiles: &[tile::TileGeology]) -> Vec<tec11_sky_view::Ti
         .collect()
 }
 
-pub use erosion_sandbox::ErosionSandbox;
 pub use history::{
     Community, ConceptKey, HistorySimulation, LanguageDetailView, LanguageRecord, LexiconEntryView,
     NationDetailView, StateInspectionView, StatePair, StateRecord, StateTopology, TravelRoute,
@@ -66,9 +57,6 @@ pub use language::{
 pub use lifeforms::{
     settle_species_on_climate, LifeformsSandbox, SettledBiosphere, SettledSpecies, SpeciesKind,
 };
-pub use meteor_sandbox::MeteorSandbox;
-pub use moon_sandbox::MoonSandbox;
-pub use move_sandbox::MoveSandbox;
 pub use pangea::PangeaWorld;
 pub use population::{
     agricultural_density, eden_tile, expand_population, expand_population_with_technologies,
@@ -82,7 +70,6 @@ pub use prehistory::PrehistorySimulation;
 pub use racination::{racinate, racination_shades, Heritage, RacinationSandbox};
 pub use rivers::{trace_coarse_rivers, RiversSandbox};
 pub use rock::{Rock, RockKind, RockLayer};
-pub use split_sandbox::SplitSandbox;
 pub use sun_sky::{
     build_constellations_from_stars, build_constellations_from_stars_with_limit, bv_to_rgb,
     bv_to_temp_k, classify_star,
@@ -99,7 +86,4 @@ pub use tectonics::{
     SpreadingRidgeArc, TectonicsSimulation,
 };
 pub use terrain::TerrainSandbox;
-pub use tides_sandbox::{FinePlanetBase, TidesSandbox};
 pub use tile::TileGeology;
-pub use weather_sandbox::WeatherSandbox;
-pub use world::{WorldCreateParams, WorldSimulation, WorldStageState};

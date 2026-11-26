@@ -4,7 +4,7 @@ use tec11_math_grid::{
     cross, length, normal, rotate, Pcg64Mcg, PointTree, SphericalGrid, SphericalPolygon, Vec3,
 };
 
-use crate::movement::{average_vec3, move_group};
+use tec11_geology::movement::{average_vec3, move_group};
 
 /// Standalone plate movement / spherical advection sandbox (`movepoints.py`).
 pub struct MoveSandbox {

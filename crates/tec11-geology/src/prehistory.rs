@@ -1723,12 +1723,12 @@ impl PrehistorySimulation {
         let mut lines = vec![if is_subgrid_island {
             format!(
                 "Coarse Tile #{tile_idx} (Sub-grid Island) | Bathymetry: {elev:+.2} km | Island Climate: {}",
-                crate::world::koeppen_climate_name(koeppen)
+                tec11_koeppen::koeppen_climate_name(koeppen)
             )
         } else {
             format!(
                 "Coarse Tile #{tile_idx} | Elevation: {elev:+.2} km | Climate: {}",
-                crate::world::koeppen_climate_name(koeppen)
+                tec11_koeppen::koeppen_climate_name(koeppen)
             )
         }];
         if let Some(top) = tile.layers.last() {
@@ -1841,14 +1841,14 @@ impl PrehistorySimulation {
         let loc_summary = if is_subgrid_island {
             format!(
                 "Sub-grid Island ({}) | Bathymetry: {elev:.2} km",
-                crate::world::koeppen_climate_name(koeppen)
+                tec11_koeppen::koeppen_climate_name(koeppen)
             )
         } else if elev <= 0.0 {
             format!("Marine Basin | Bathymetry: {elev:.2} km")
         } else {
             format!(
                 "{} | Elevation: +{elev:.2} km",
-                crate::world::koeppen_climate_name(koeppen)
+                tec11_koeppen::koeppen_climate_name(koeppen)
             )
         };
         let (pop_summary, tech_str) = if let Some(&hid) = self.populated.get(&tile_idx) {

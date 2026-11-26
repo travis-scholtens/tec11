@@ -5,19 +5,19 @@ use tec11_math_grid::{FineParentage, FiniteVolumeSphereGeom, FullSphereFineGrid,
 use tec11_proto::PlanetSnapshotExt;
 use tec11_tides::LaplaceTidalSolver;
 
-use crate::prehistory::PrehistorySimulation;
-use crate::rivers::trace_coarse_rivers;
-use crate::sky_vantage::{
+use tec11_geology::prehistory::PrehistorySimulation;
+use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_sky_view::{
     build_uniform_fine_tile_inspection_view, json_escape, TileInspectionView, TileLiveEnvironment,
     TileSkyMoon, UniformFineTileSkyParams,
 };
-use crate::sun_sky::{
+use tec11_cosmos::{
     generate_default_constellations, generate_solar_system_with_rng, substitute_simulated_planet,
     AtmosphereType, Constellation, HomeStar, PlanetaryOptics, ReconstructedSkyEnvironment,
     SolarSystemPlanet,
 };
-use crate::terrain::{TERRAIN_MIN_RIVER_ELEV, TERRAIN_MIN_RIVER_PRECIP};
-use crate::world::koeppen_climate_name;
+use tec11_geology::terrain::{TERRAIN_MIN_RIVER_ELEV, TERRAIN_MIN_RIVER_PRECIP};
+use tec11_koeppen::koeppen_climate_name;
 
 /// Shared full-sphere `coarse + 2` planetary substrate used by both `TidesSandbox` and `WeatherSandbox`.
 pub struct FinePlanetBase {
@@ -805,7 +805,13 @@ impl TidesSandbox {
             storm_darkening: 0.0,
         };
 
-        let coarse_surf = crate::tile_surface_infos(self.base.prehistory.tiles());
+        let coarse_surf: Vec<tec11_sky_view::TileSurfaceInfo> = self
+            .base
+            .prehistory
+            .tiles()
+            .iter()
+            .map(|t| tec11_sky_view::TileSurfaceInfo::from_tuple(t.surface_info_tuple()))
+            .collect();
         let mut view = build_uniform_fine_tile_inspection_view(
             fine_idx,
             UniformFineTileSkyParams {
@@ -895,7 +901,7 @@ impl TidesSandbox {
 }
 
 #[inline]
-pub(crate) fn live_tide_diverging_rgb(eta_m: f32, day_shade: f32) -> [f32; 3] {
+pub fn live_tide_diverging_rgb(eta_m: f32, day_shade: f32) -> [f32; 3] {
     // Soft tanh normalization around +-1.2 m so open-ocean +-0.4 m waves AND +-3 m shelf tides both pop!
     let x = (eta_m / 0.85).tanh();
     let shade = 0.82 + 0.18 * day_shade;
@@ -997,5 +1003,163 @@ mod tests {
         assert!(view.live_env.as_ref().unwrap().sim_locked);
         let series_json = sb.tile_tide_series_json(10);
         assert!(series_json.contains("\"series\""));
+    }
+}
+
+#[cfg(test)]
+mod volcanic_island_integration_tests {
+    use tec11_geology::terrain::TerrainSandbox;
+    use tec11_geology::prehistory::PrehistorySimulation;
+    use tec11_math_grid::FineParentage;
+    use tec11_geology::history::HistorySimulation;
+    use tec11_geology::tectonics::TectonicsSimulation;
+    use std::collections::BTreeSet;
+    use crate::FinePlanetBase;
+
+    #[test]
+    fn test_subgrid_volcanic_islands_emerge_across_terrain_history_and_fine_planet() {
+        // 1. Canned ETOPO2 Earth leaves all submarine coarse centers un-subdivided (`OceanCoarse`)
+        let earth_terrain = TerrainSandbox::new_earth();
+        let earth_tiles = earth_terrain.tiles();
+        for (c, tile) in earth_tiles.iter().enumerate() {
+            if tile.elevation() <= 0.0 {
+                assert!(
+                    !earth_terrain
+                        .terrain
+                        .coarse_to_fine_children[c]
+                        .iter()
+                        .any(|&f| matches!(earth_terrain.terrain.parentage[f], FineParentage::CoarseFace(_))),
+                    "Canned Earth submarine tile #{c} should not synthesize sub-grid volcanic summits"
+                );
+            }
+        }
+
+        // 2. Step a custom tectonics planet so mantle plumes and intra-oceanic arcs build submarine edifices
+        let mut tec = TectonicsSimulation::new(4, 28.0, 2026);
+        for _ in 0..45 {
+            tec.step();
+        }
+        let snap = tec.to_snapshot();
+        let mut pre = PrehistorySimulation::from_snapshot(&snap, 42).unwrap();
+        for _ in 0..6 {
+            pre.step();
+        }
+        let hist = HistorySimulation::from_prehistory(pre, 77);
+        let pre_snap = hist.to_snapshot();
+        let pre_for_terrain = PrehistorySimulation::from_snapshot(&pre_snap, 42).unwrap();
+        let pre_for_fine = PrehistorySimulation::from_snapshot(&pre_snap, 42).unwrap();
+
+        let terrain_sb = TerrainSandbox::from_prehistory(pre_for_terrain);
+        let fine_base = FinePlanetBase::from_prehistory(pre_for_fine);
+
+        let coarse_elevs = terrain_sb.prehistory.tile_elevations();
+        let coarse_adj = terrain_sb.prehistory.adjacency();
+        let mut emergent_submarine_parents = Vec::new();
+        for (c, &ce) in coarse_elevs.iter().enumerate() {
+            if ce <= 0.0 {
+                let summit_face = terrain_sb.terrain.coarse_to_fine_children[c]
+                    .iter()
+                    .copied()
+                    .find(|&f| {
+                        matches!(terrain_sb.terrain.parentage[f], FineParentage::CoarseFace(_))
+                            && terrain_sb.terrain.fine_elevations[f] > 0.0
+                    });
+                if let Some(sf) = summit_face {
+                    let emergent_children: Vec<usize> = terrain_sb.terrain.coarse_to_fine_children[c]
+                        .iter()
+                        .copied()
+                        .filter(|&f| terrain_sb.terrain.fine_elevations[f] > 0.0)
+                        .collect();
+                    emergent_submarine_parents.push((c, sf, emergent_children));
+                }
+            }
+        }
+
+        assert!(
+            !emergent_submarine_parents.is_empty(),
+            "Expected custom tectonic planet to subdivide shallow submarine volcanic seamounts/arcs into emergent fine-grid islands"
+        );
+
+        for &(vc, summit_f, ref island_faces) in &emergent_submarine_parents {
+            // Exact summit elevation parity between `TerrainSandbox` and `FinePlanetBase` (`Weather` / `Tides`)
+            let full_summit = fine_base.fine.coarse_to_fine_children[vc]
+                .iter()
+                .copied()
+                .find(|&ff| matches!(fine_base.fine.parentage[ff], FineParentage::CoarseFace(_)))
+                .expect("CoarseFace child in FullSphereFineGrid");
+            assert!(fine_base.fine_is_land[full_summit]);
+            assert!(
+                (fine_base.fine.fine_elevations_km[full_summit]
+                    - terrain_sb.terrain.fine_elevations[summit_f])
+                    .abs()
+                    < 1e-5
+            );
+
+            // Open-ocean volcanic tiles (no adjacent coarse continent) must keep a sub-grid island footprint (`1..=4` emergent faces)
+            // and have identical emergent face counts across `SubdividedTerrainGrid` and `FullSphereFineGrid`.
+            let is_pelagic = coarse_adj[vc].iter().all(|&nb| coarse_elevs[nb] <= 0.0);
+            if is_pelagic {
+                assert!(
+                    island_faces.len() <= 4,
+                    "Pelagic submarine volcanic tile #{vc} should produce a sub-grid island (1..=4 emergent faces), got {}",
+                    island_faces.len()
+                );
+                let full_emergent_count = fine_base.fine.coarse_to_fine_children[vc]
+                    .iter()
+                    .filter(|&&ff| fine_base.fine_is_land[ff])
+                    .count();
+                assert_eq!(full_emergent_count, island_faces.len());
+            }
+
+            // Island Köppen climate comes directly from `ClimateModel::classify_emergent_island`
+            let summit_elev = terrain_sb.terrain.fine_elevations[summit_f];
+            let expected_fine_clim = fine_base
+                .prehistory
+                .climate_model()
+                .classify_emergent_island(vc, summit_elev, true);
+            let expected_hist_clim = hist
+                .prehistory()
+                .climate_model()
+                .classify_emergent_island(vc, summit_elev, true);
+            assert_ne!(expected_fine_clim.koeppen as u8, 0);
+            assert_ne!(expected_hist_clim.koeppen as u8, 0);
+            assert_eq!(
+                fine_base.effective_coarse_koeppen[vc],
+                expected_fine_clim.koeppen as u8
+            );
+            assert_eq!(hist.coarse_koeppen()[vc], expected_hist_clim.koeppen as u8);
+            assert!(
+                hist.continent_label_for_tile(vc, None)
+                    .contains("Oceanic Island"),
+                "Expected Oceanic Island region label for submarine parent #{vc}, got {}",
+                hist.continent_label_for_tile(vc, None)
+            );
+
+            // Display face index for fine face `summit_f` equals `summit_f` in `SubdividedTerrainGrid`
+            let desc = terrain_sb.inspect_face(summit_f);
+            assert!(desc.contains("Emergent Volcanic / Atoll Island"), "{desc}");
+
+            if hist.coarse_koeppen()[vc] != 12 {
+                let view = hist.inspect_tile_structured(summit_f).unwrap();
+                assert!(
+                    !view.flora.is_empty() || !view.fauna.is_empty(),
+                    "Expected dispersed island flora/fauna on habitable volcanic island face #{summit_f}"
+                );
+            }
+        }
+
+        // Verify at least one habitable emergent volcanic island is connected to the maritime sea-lane network
+        let island_set: BTreeSet<usize> = emergent_submarine_parents
+            .iter()
+            .map(|&(vc, _, _)| vc)
+            .collect();
+        let any_island_route = hist
+            .potential_travel_routes()
+            .iter()
+            .any(|r| island_set.contains(&r.from_coarse_tile) || island_set.contains(&r.to_coarse_tile));
+        assert!(
+            any_island_route,
+            "Expected emergent oceanic islands to be linked into potential wind/current maritime routes"
+        );
     }
 }
