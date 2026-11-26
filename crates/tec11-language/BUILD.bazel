@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_language",
+    srcs = [
+        "src/lib.rs",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/tec11-rng:tec11_rng",
+    ],
+)
+
+rust_test(
+    name = "tec11_language_test",
+    crate = ":tec11_language",
+)

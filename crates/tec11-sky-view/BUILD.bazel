@@ -1,0 +1,24 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_sky_view",
+    srcs = [
+        "src/lib.rs",
+        "src/sky_vantage.rs",
+        "src/sun_viewer.rs",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/tec11-cosmos:tec11_cosmos",
+        "//crates/tec11-math-grid:tec11_math_grid",
+        "//crates/tec11-proto:tec11_proto",
+        "//crates/tec11-rng:tec11_rng",
+        "//crates/tec11-vec3:tec11_vec3",
+    ],
+)
+
+rust_test(
+    name = "tec11_sky_view_test",
+    crate = ":tec11_sky_view",
+)
