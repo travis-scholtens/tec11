@@ -1,6 +1,5 @@
 pub mod erosion_sandbox;
 pub mod history;
-pub mod language;
 pub mod lifeforms;
 pub mod meteor_sandbox;
 pub mod moon_sandbox;
@@ -13,15 +12,38 @@ pub mod profile;
 pub mod racination;
 pub mod rivers;
 pub mod rock;
-pub mod sky_vantage;
 pub mod split_sandbox;
-pub mod sun_sky;
 pub mod tectonics;
 pub mod terrain;
 pub mod tides_sandbox;
 pub mod tile;
 pub mod weather_sandbox;
 pub mod world;
+
+pub use tec11_cosmos as sun_sky;
+pub use tec11_language as language;
+pub use tec11_sky_view as sky_vantage;
+
+/// Convert `&[TileGeology]` into lightweight `TileSurfaceInfo` entries for `tec11-sky-view`.
+pub fn tile_surface_infos(tiles: &[tile::TileGeology]) -> Vec<tec11_sky_view::TileSurfaceInfo> {
+    tiles
+        .iter()
+        .map(|t| {
+            let (rock_name, rock_kind_code) = if let Some(top) = t.layers.last() {
+                (top.rock.name, top.rock.kind.code())
+            } else {
+                ("basalt", "I")
+            };
+            tec11_sky_view::TileSurfaceInfo {
+                elev_km: t.elevation(),
+                mountainosity_norm: t.mountainosity_norm(),
+                top_felsity: t.top_felsity(),
+                rock_name,
+                rock_kind_code,
+            }
+        })
+        .collect()
+}
 
 pub use erosion_sandbox::ErosionSandbox;
 pub use history::{
@@ -69,8 +91,9 @@ pub use sun_sky::{
     sample_galactic_home_with_rng, sample_home_star_with_rng, substitute_simulated_planet,
     synthesize_galactic_sky_constellations, AtmosphereType, CelestialStar, Constellation,
     GalacticSkyBackdrop, GalacticVantage, GalaxyType, HomeStar, PlanetKind, PlanetaryOptics,
-    ReconstructedSkyEnvironment, SolarSystemPlanet, SunSandbox,
+    ReconstructedSkyEnvironment, SolarSystemPlanet,
 };
+pub use tec11_sky_view::SunSandbox;
 pub use tectonics::{
     classify_submarine_tile, LithosphericGroup, MantleHotspot, OceanicSubductionArc,
     SpreadingRidgeArc, TectonicsSimulation,

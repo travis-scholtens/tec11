@@ -1,0 +1,24 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_cosmos",
+    srcs = [
+        "src/lib.rs",
+    ],
+    compile_data = [
+        "data/hipparcos_naked.tsv",
+        "data/hist.pgm",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/tec11-proto:tec11_proto",
+        "//crates/tec11-rng:tec11_rng",
+        "//crates/tec11-vec3:tec11_vec3",
+    ],
+)
+
+rust_test(
+    name = "tec11_cosmos_test",
+    crate = ":tec11_cosmos",
+)

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tec11_math_grid::Pcg64Mcg;
+use tec11_rng::Pcg64Mcg;
 
 pub const ALL_VOWEL_INDICES: [usize; 32] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,

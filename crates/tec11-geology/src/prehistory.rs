@@ -1873,12 +1873,13 @@ impl PrehistorySimulation {
         } else {
             ("Uninhabited".to_string(), "Prehistory".to_string())
         };
+        let surf_infos = crate::tile_surface_infos(&self.tiles);
         let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
             tile_idx,
             crate::sky_vantage::CoarseTileSkyParams {
                 grid: &self.grid,
                 adjacency: &self.adjacency,
-                tiles: &self.tiles,
+                tiles: &surf_infos,
                 koeppen_ids: &self.tile_koeppen,
                 glacier_cover: self.climate_model.tile_glacier_cover(),
                 tile_life: &self.tile_life,

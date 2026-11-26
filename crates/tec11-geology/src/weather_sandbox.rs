@@ -677,6 +677,7 @@ impl WeatherSandbox {
             storm_darkening,
         };
 
+        let coarse_surf = crate::tile_surface_infos(self.base.prehistory.tiles());
         let mut view = build_uniform_fine_tile_inspection_view(
             fine_idx,
             UniformFineTileSkyParams {
@@ -687,7 +688,7 @@ impl WeatherSandbox {
                 fine_is_land: &self.base.fine_is_land,
                 fine_is_river: &self.base.fine_is_river,
                 fine_primary_coarse: &self.base.fine_primary_coarse,
-                coarse_tiles: self.base.prehistory.tiles(),
+                coarse_tiles: &coarse_surf,
                 coarse_koeppen_ids: &self.base.effective_coarse_koeppen,
                 coarse_glacier_cover: self.base.prehistory.climate_model().tile_glacier_cover(),
                 coarse_tile_life: &self.base.effective_coarse_life,

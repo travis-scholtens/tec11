@@ -989,12 +989,13 @@ impl WorldSimulation {
                         koeppen_climate_name(k_code)
                     )
                 };
+                let surf_infos = crate::tile_surface_infos(tec.tiles());
                 let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
                     tile_idx,
                     crate::sky_vantage::CoarseTileSkyParams {
                         grid: tec.grid(),
                         adjacency: tec.adjacency(),
-                        tiles: tec.tiles(),
+                        tiles: &surf_infos,
                         koeppen_ids: tec.tile_koeppen_ids(),
                         glacier_cover: tec.climate_model().tile_glacier_cover(),
                         tile_life: tec.tile_life(),
@@ -1077,12 +1078,13 @@ impl WorldSimulation {
                 } else {
                     ("Uninhabited".to_string(), "Prehistory".to_string())
                 };
+                let surf_infos = crate::tile_surface_infos(pre.tiles());
                 let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
                     tile_idx,
                     crate::sky_vantage::CoarseTileSkyParams {
                         grid: pre.grid(),
                         adjacency: pre.adjacency(),
-                        tiles: pre.tiles(),
+                        tiles: &surf_infos,
                         koeppen_ids: pre.tile_koeppen_ids(),
                         glacier_cover: pre.climate_model().tile_glacier_cover(),
                         tile_life: pre.tile_life(),

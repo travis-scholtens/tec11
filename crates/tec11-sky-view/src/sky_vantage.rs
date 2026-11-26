@@ -1,9 +1,44 @@
 use std::collections::VecDeque;
 
-use tec11_math_grid::{normal, Pcg64Mcg, SphericalGrid};
+use tec11_cosmos::{Constellation, HomeStar, PlanetaryOptics, SolarSystemPlanet};
+use tec11_math_grid::SphericalGrid;
+use tec11_rng::Pcg64Mcg;
+use tec11_vec3::normal;
 
-use crate::sun_sky::{Constellation, HomeStar, PlanetaryOptics, SolarSystemPlanet};
-use crate::tile::TileGeology;
+/// Lightweight surface geology summary for a coarse tile, decoupling `tec11-sky-view`
+/// from `TileGeology` while preserving rock coloration and elevation horizon profiles.
+#[derive(Clone, Copy, Debug)]
+pub struct TileSurfaceInfo {
+    pub elev_km: f32,
+    pub mountainosity_norm: f32,
+    pub top_felsity: f32,
+    pub rock_name: &'static str,
+    pub rock_kind_code: &'static str,
+}
+
+impl TileSurfaceInfo {
+    pub fn from_tuple(t: (f32, f32, f32, &'static str, &'static str)) -> Self {
+        Self {
+            elev_km: t.0,
+            mountainosity_norm: t.1,
+            top_felsity: t.2,
+            rock_name: t.3,
+            rock_kind_code: t.4,
+        }
+    }
+}
+
+impl Default for TileSurfaceInfo {
+    fn default() -> Self {
+        Self {
+            elev_km: 0.0,
+            mountainosity_norm: 0.0,
+            top_felsity: 0.5,
+            rock_name: "basalt",
+            rock_kind_code: "I",
+        }
+    }
+}
 
 pub fn format_thousands_compact(thousands: f32) -> String {
     if thousands >= 1000.0 {
@@ -31,7 +66,7 @@ pub fn format_share_percent(thousands: f32, total: f32) -> String {
     }
 }
 
-pub(crate) fn json_escape(s: &str) -> String {
+pub fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for ch in s.chars() {
@@ -49,7 +84,7 @@ pub(crate) fn json_escape(s: &str) -> String {
     out
 }
 
-pub(crate) fn json_str_array(items: &[String]) -> String {
+pub fn json_str_array(items: &[String]) -> String {
     let inner: Vec<String> = items.iter().map(|s| json_escape(s)).collect();
     format!("[{}]", inner.join(","))
 }
@@ -696,7 +731,7 @@ fn local_east_north(center: [f64; 3]) -> ([f64; 3], [f64; 3]) {
 pub struct CoarseTileSkyParams<'a> {
     pub grid: &'a SphericalGrid,
     pub adjacency: &'a [Vec<usize>],
-    pub tiles: &'a [TileGeology],
+    pub tiles: &'a [TileSurfaceInfo],
     pub koeppen_ids: &'a [u8],
     pub glacier_cover: &'a [f32],
     pub tile_life: &'a [f32],
@@ -768,15 +803,11 @@ pub fn build_coarse_tile_inspection_view(
             let dist_km = (ang_rad as f32) * planet_radius_km;
             ring1_dist_sum += dist_km;
 
-            let nb_elev = params
-                .tiles
-                .get(nb_idx)
-                .map(|t| t.elevation())
-                .unwrap_or(0.0);
+            let nb_elev = params.tiles.get(nb_idx).map(|t| t.elev_km).unwrap_or(0.0);
             let nb_mount = params
                 .tiles
                 .get(nb_idx)
-                .map(|t| t.mountainosity_norm())
+                .map(|t| t.mountainosity_norm)
                 .unwrap_or(0.0);
             let nb_is_land = !params.has_atmosphere || nb_elev > 0.0;
             let nb_is_river = params.has_atmosphere
@@ -809,8 +840,8 @@ pub fn build_coarse_tile_inspection_view(
         300.0
     };
 
-    let obs_elev_km = tile.elevation();
-    let obs_mountainosity_norm = tile.mountainosity_norm();
+    let obs_elev_km = tile.elev_km;
+    let obs_mountainosity_norm = tile.mountainosity_norm;
     let obs_is_land = !params.has_atmosphere || obs_elev_km > 0.0;
     let obs_koeppen = if params.has_atmosphere {
         params.koeppen_ids.get(tile_idx).copied().unwrap_or(0)
@@ -844,15 +875,11 @@ pub fn build_coarse_tile_inspection_view(
         };
         (base_life * alpine_atten).clamp(0.0, 1.0)
     };
-    let obs_felsity = tile.top_felsity().clamp(0.0, 1.0);
-    let (obs_rock_name, obs_rock_kind) = if let Some(top_layer) = tile.layers.last() {
-        (
-            top_layer.rock.name.to_string(),
-            top_layer.rock.kind.code().to_string(),
-        )
-    } else {
-        ("basalt".to_string(), "I".to_string())
-    };
+    let obs_felsity = tile.top_felsity.clamp(0.0, 1.0);
+    let (obs_rock_name, obs_rock_kind) = (
+        tile.rock_name.to_string(),
+        tile.rock_kind_code.to_string(),
+    );
 
     let vantage = TileVantageView {
         obs_is_coarse: true,
@@ -903,7 +930,7 @@ pub struct UniformFineTileSkyParams<'a> {
     pub fine_is_land: &'a [bool],
     pub fine_is_river: &'a [bool],
     pub fine_primary_coarse: &'a [usize],
-    pub coarse_tiles: &'a [TileGeology],
+    pub coarse_tiles: &'a [TileSurfaceInfo],
     pub coarse_koeppen_ids: &'a [u8],
     pub coarse_glacier_cover: &'a [f32],
     pub coarse_tile_life: &'a [f32],
@@ -996,16 +1023,11 @@ pub fn build_uniform_fine_tile_inspection_view(
             (base_life * alpine_atten).clamp(0.0, 1.0)
         };
         let (felsity, rock_name, rock_kind) = if let Some(ct) = params.coarse_tiles.get(c_idx) {
-            let f = ct.top_felsity().clamp(0.0, 1.0);
-            if let Some(top_layer) = ct.layers.last() {
-                (
-                    f,
-                    top_layer.rock.name.to_string(),
-                    top_layer.rock.kind.code().to_string(),
-                )
-            } else {
-                (f, "basalt".to_string(), "I".to_string())
-            }
+            (
+                ct.top_felsity.clamp(0.0, 1.0),
+                ct.rock_name.to_string(),
+                ct.rock_kind_code.to_string(),
+            )
         } else {
             (0.5, "basalt".to_string(), "I".to_string())
         };
@@ -1186,7 +1208,7 @@ pub fn build_uniform_fine_tile_inspection_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sun_sky::{
+    use tec11_cosmos::{
         generate_default_constellations, generate_solar_system_with_rng, AtmosphereType, HomeStar,
         PlanetaryOptics,
     };
@@ -1202,7 +1224,7 @@ mod tests {
         let fine_is_land: Vec<bool> = fine_elev.iter().map(|&e| e > 0.0).collect();
         let fine_mount: Vec<f32> = (0..n).map(|i| ((i % 5) as f32) * 0.2).collect();
         let primary_coarse = vec![0usize; n];
-        let coarse_tiles = vec![TileGeology::birth_seafloor()];
+        let coarse_tiles = vec![TileSurfaceInfo::default()];
         let coarse_koeppen = vec![7u8];
         let coarse_life = vec![0.65f32];
         let river_tiles = vec![false; n];
