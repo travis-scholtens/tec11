@@ -15,6 +15,7 @@ rust_library(
         "//crates/tec11-geology:tec11_geology",
         "//crates/tec11-math-grid:tec11_math_grid",
         "//crates/tec11-proto:tec11_proto",
+        "//crates/tec11-tectonics:tec11_tectonics",
     ],
 )
 
@@ -24,5 +25,6 @@ rust_test(
     deps = [
         "//crates/tec11-history:tec11_history",
         "//crates/tec11-prehistory:tec11_prehistory",
+        "//crates/tec11-rivers-sandbox:tec11_rivers_sandbox",
     ],
 )

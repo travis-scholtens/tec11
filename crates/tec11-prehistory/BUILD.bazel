@@ -22,10 +22,14 @@ rust_library(
         "//crates/tec11-koeppen:tec11_koeppen",
         "//crates/tec11-math-grid:tec11_math_grid",
         "//crates/tec11-proto:tec11_proto",
+        "//crates/tec11-rivers:tec11_rivers",
     ],
 )
 
 rust_test(
     name = "tec11_prehistory_test",
     crate = ":tec11_prehistory",
+    deps = [
+        "//crates/tec11-tectonics:tec11_tectonics",
+    ],
 )

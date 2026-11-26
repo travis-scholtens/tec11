@@ -3,7 +3,7 @@ use tec11_math_grid::{normal, PointTree, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::population::{identify_continents_and_oceans_with_adj, PlanetaryGeography};
-use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_rivers::trace_coarse_rivers;
 use tec11_geology::tile::tiles_from_snapshot;
 
 const ANIMALS_TSV: &str = include_str!("../data/animals.tsv");

@@ -13,7 +13,7 @@ use crate::population::{
 use crate::racination::{
     branch_wide_heritages_by_distance, racinate_with_technologies, racination_shades, Heritage,
 };
-use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_rivers::trace_coarse_rivers;
 use tec11_geology::rock::{Rock, RockKind, RockLayer};
 use tec11_geology::tile::{planet_radius_km, LithosphericGroup, TileGeology};
 
@@ -1840,7 +1840,7 @@ mod tests {
 
     #[test]
     fn test_custom_planet_prehistory_rivers_use_physical_km_threshold() {
-        let mut tec = tec11_geology::TectonicsSimulation::new(4, 30.0, 2026);
+        let mut tec = tec11_tectonics::TectonicsSimulation::new(4, 30.0, 2026);
         for _ in 0..35 {
             tec.step();
         }

@@ -5,8 +5,8 @@ use tec11_math_grid::{
     SphericalPolygon, Vec3,
 };
 
-use crate::rock::Rock;
-use crate::tile::TileGeology;
+use tec11_geology::rock::Rock;
+use tec11_geology::tile::TileGeology;
 
 /// Initial planet state generated with a single supercontinent (Pangaea) and surrounding ocean floor.
 #[derive(Clone, Debug)]
@@ -23,7 +23,7 @@ impl PangeaWorld {
     /// Scales by ~sqrt(3) per subdivision so every tile is ~285 km across (~70,000 km^2).
     /// `grid_size = 6` (`6,400 km`) is Earth-sized.
     pub fn planet_radius_km(grid_size: u32) -> f64 {
-        crate::tile::planet_radius_km(grid_size)
+        tec11_geology::tile::planet_radius_km(grid_size)
     }
 
     /// Generates a new planet with the given `grid_size` (4..8) and target `land_percent` (1..75).

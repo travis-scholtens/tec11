@@ -5,7 +5,7 @@ use tec11_proto::PlanetSnapshotExt;
 use tec11_geology::rock::{
     deposit_sedimentary, DepositClimate, ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
-use tec11_geology::tectonics::TectonicsSimulation;
+use tec11_tectonics::tectonics::TectonicsSimulation;
 use tec11_geology::tile::TileGeology;
 
 /// Standalone erosion & sedimentary deposition sandbox (`erosionsimulation.py`).
@@ -321,7 +321,7 @@ mod tests {
     fn test_tectonics_erosion_rivers_load_all_snapshot_stages() {
         use tec11_history::HistorySimulation;
         use tec11_prehistory::PrehistorySimulation;
-        use tec11_geology::rivers::RiversSandbox;
+        use tec11_rivers_sandbox::RiversSandbox;
 
         let mut tec = TectonicsSimulation::new(4, 29.0, 42);
         tec.step();

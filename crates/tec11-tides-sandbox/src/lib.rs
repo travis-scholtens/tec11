@@ -6,7 +6,7 @@ use tec11_proto::PlanetSnapshotExt;
 use tec11_tides::LaplaceTidalSolver;
 
 use tec11_prehistory::prehistory::PrehistorySimulation;
-use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_rivers::trace_coarse_rivers;
 use tec11_sky_view::{
     build_uniform_fine_tile_inspection_view, json_escape, TileInspectionView, TileLiveEnvironment,
     TileSkyMoon, UniformFineTileSkyParams,
@@ -1012,7 +1012,7 @@ mod volcanic_island_integration_tests {
     use tec11_prehistory::prehistory::PrehistorySimulation;
     use tec11_math_grid::FineParentage;
     use tec11_history::HistorySimulation;
-    use tec11_geology::tectonics::TectonicsSimulation;
+    use tec11_tectonics::tectonics::TectonicsSimulation;
     use std::collections::BTreeSet;
     use crate::FinePlanetBase;
 
