@@ -1,4 +1,4 @@
-use tec11_geology::HistorySimulation;
+use tec11_history::HistorySimulation;
 use tec11_math_grid::DisplayMesh;
 use wasm_bindgen::prelude::*;
 

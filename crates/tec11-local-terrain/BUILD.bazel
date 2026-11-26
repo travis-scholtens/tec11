@@ -27,4 +27,7 @@ rust_library(
 rust_test(
     name = "tec11_local_terrain_test",
     crate = ":tec11_local_terrain",
+    deps = [
+        "//crates/tec11-prehistory:tec11_prehistory",
+    ],
 )

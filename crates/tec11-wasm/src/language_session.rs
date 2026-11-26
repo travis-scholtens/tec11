@@ -1,4 +1,4 @@
-use tec11_geology::{LanguageSandbox, SoundChangeKind};
+use tec11_language::{LanguageSandbox, SoundChangeKind};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]

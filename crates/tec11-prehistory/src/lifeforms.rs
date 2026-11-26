@@ -3,8 +3,8 @@ use tec11_math_grid::{normal, PointTree, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::population::{identify_continents_and_oceans_with_adj, PlanetaryGeography};
-use crate::rivers::trace_coarse_rivers;
-use crate::tectonics::TectonicsSimulation;
+use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_geology::tile::tiles_from_snapshot;
 
 const ANIMALS_TSV: &str = include_str!("../data/animals.tsv");
 const PLANTS_TSV: &str = include_str!("../data/plants.tsv");
@@ -1243,10 +1243,12 @@ impl LifeformsSandbox {
         let Ok(snap) = tec11_proto::PlanetSnapshot::decode_bytes(bytes) else {
             return false;
         };
-        let Some(tec_sim) = TectonicsSimulation::from_snapshot(&snap, 42) else {
+        let Some((grid, tiles, geoticks)) = tiles_from_snapshot(&snap) else {
             return false;
         };
-        let grid = tec_sim.grid().clone();
+        let n = grid.faces.len();
+        let land_cnt = tiles.iter().filter(|t| t.elevation() > 0.0).count();
+        let land_pct = ((land_cnt as f64) * 100.0 / (n.max(1) as f64)).round() as u32;
         let indexed_pts: Vec<(Vec3, usize)> = grid
             .faces
             .iter()
@@ -1254,12 +1256,11 @@ impl LifeformsSandbox {
             .map(|(i, (c, _))| (*c, i))
             .collect();
         let tree = PointTree::new(&indexed_pts);
-        let elevations: Vec<f32> = tec_sim
-            .tiles()
+        let elevations: Vec<f32> = tiles
             .iter()
             .map(|t| t.elevation().max(0.0))
             .collect();
-        let felsities: Vec<f32> = tec_sim.tiles().iter().map(|t| t.top_felsity()).collect();
+        let felsities: Vec<f32> = tiles.iter().map(|t| t.top_felsity()).collect();
         let glaciation = self.climate_model.glaciation();
         let climate_model =
             ClimateModel::with_elevations(grid.clone(), elevations.clone(), 3, glaciation);
@@ -1271,8 +1272,8 @@ impl LifeformsSandbox {
         self.felsities = felsities;
         self.climate_model = climate_model;
         self.biosphere = biosphere;
-        self.custom_geoticks = Some(tec_sim.geoticks());
-        self.custom_land_percent = Some(tec_sim.land_percent());
+        self.custom_geoticks = Some(geoticks);
+        self.custom_land_percent = Some(land_pct);
         true
     }
 

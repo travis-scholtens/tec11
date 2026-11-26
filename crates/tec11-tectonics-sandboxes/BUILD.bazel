@@ -21,4 +21,8 @@ rust_library(
 rust_test(
     name = "tec11_tectonics_sandboxes_test",
     crate = ":tec11_tectonics_sandboxes",
+    deps = [
+        "//crates/tec11-history:tec11_history",
+        "//crates/tec11-prehistory:tec11_prehistory",
+    ],
 )

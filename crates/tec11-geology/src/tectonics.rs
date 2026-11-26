@@ -16,11 +16,7 @@ use crate::rock::{
 use crate::tile::{TileGeology, TileSourceColumn};
 
 /// A moving continental / lithospheric group (`Group` in `tile.py:17-20`).
-#[derive(Clone, Debug)]
-pub struct LithosphericGroup {
-    pub tiles: Vec<usize>,
-    pub velocity: Vec3,
-}
+pub use crate::tile::LithosphericGroup;
 
 /// An active mid-ocean spreading ridge segment on the unit sphere (`Section 5.4` of the design doc).
 #[derive(Clone, Debug)]
@@ -123,7 +119,6 @@ pub struct TectonicsSimulation {
     last_impact_tile: Option<usize>,
     last_impact_diameter_km: f32,
     saved_environment: Option<tec11_proto::PlanetaryEnvironment>,
-    cached_biosphere: std::cell::RefCell<Option<(u32, crate::lifeforms::SettledBiosphere)>>,
     rng: Pcg64Mcg,
 }
 
@@ -284,7 +279,6 @@ impl TectonicsSimulation {
             last_impact_tile: None,
             last_impact_diameter_km: 0.0,
             saved_environment: None,
-            cached_biosphere: std::cell::RefCell::new(None),
             rng,
         };
         sim.climate_model
@@ -821,7 +815,7 @@ impl TectonicsSimulation {
         }
     }
 
-    pub(crate) fn take_parts_for_prehistory(
+    pub fn take_parts_for_prehistory(
         &mut self,
     ) -> (
         SphericalGrid,
@@ -2636,135 +2630,6 @@ impl TectonicsSimulation {
         self.saved_environment = env;
     }
 
-    pub fn inspect_tile_structured(
-        &self,
-        tile_idx: usize,
-    ) -> Option<crate::sky_vantage::TileInspectionView> {
-        let tile = self.tiles.get(tile_idx)?;
-        let (home_star, optics, solar_system, constellations) =
-            if let Some(ref env_proto) = self.saved_environment {
-                let dummy_snap = tec11_proto::PlanetSnapshot {
-                    rng_state_16b: Vec::new(),
-                    grid_size: self.grid.size,
-                    radius_km: self.radius_km() as f32,
-                    spin: self.current_spin() as f32,
-                    tilt_deg: self.current_tilt_deg() as f32,
-                    stage: None,
-                    environment: Some(env_proto.clone()),
-                };
-                let sky = crate::sun_sky::ReconstructedSkyEnvironment::from_snapshot(
-                    &dummy_snap,
-                    self.radius_km() as f32,
-                    self.land_percent(),
-                );
-                (sky.home_star, sky.optics, sky.solar_system, sky.constellations)
-            } else {
-                let home_star = crate::sun_sky::HomeStar::sol();
-                let optics = crate::sun_sky::PlanetaryOptics::compute(
-                    &home_star,
-                    crate::sun_sky::AtmosphereType::EarthLikeN2O2,
-                );
-                let mut sys_rng =
-                    Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95 ^ (self.grid.size as u64));
-                let ecliptic_pole = [0.0, -0.398, 0.917];
-                let mut solar_system = crate::sun_sky::generate_solar_system_with_rng(
-                    &mut sys_rng,
-                    &home_star,
-                    ecliptic_pole,
-                    true,
-                );
-                crate::sun_sky::substitute_simulated_planet(
-                    &mut solar_system,
-                    &home_star,
-                    self.radius_km() as f32,
-                    self.land_percent(),
-                    self.moon_count,
-                    ecliptic_pole,
-                );
-                let constellations = crate::sun_sky::generate_default_constellations(42);
-                (home_star, optics, solar_system, constellations)
-            };
-        let elev = tile.elevation();
-        let has_atm = self.has_atmosphere();
-        let has_life = self.has_life();
-        let loc_summary = if !has_atm {
-            format!("Pre-atmosphere Crust | Elevation: {elev:+.2} km")
-        } else if elev <= 0.0 {
-            format!("{} | Bathymetry: {elev:.2} km", classify_submarine_tile(tile))
-        } else {
-            let k_code = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
-            format!(
-                "{} | Elevation: +{elev:.2} km",
-                tec11_koeppen::koeppen_climate_name(k_code)
-            )
-        };
-        let surf_infos = crate::tile_surface_infos(&self.tiles);
-        let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
-            tile_idx,
-            crate::sky_vantage::CoarseTileSkyParams {
-                grid: &self.grid,
-                adjacency: &self.adjacency,
-                tiles: &surf_infos,
-                koeppen_ids: &self.tile_koeppen,
-                glacier_cover: self.climate_model.tile_glacier_cover(),
-                tile_life: &self.tile_life,
-                river_tiles: None,
-                radius_km: self.radius_km(),
-                day_hours: self.current_day_hours(),
-                tilt_deg: self.current_tilt_deg(),
-                has_atmosphere: has_atm,
-                has_life,
-                current_year: 0,
-                moon_count: self.moon_count,
-                home_star: &home_star,
-                optics: &optics,
-                solar_system: &solar_system,
-                constellations: &constellations,
-                title: format!("Coarse Tile #{tile_idx}"),
-                location_summary: loc_summary,
-                population_summary: "Pre-human Geological Epoch".to_string(),
-                technology: if has_life {
-                    "Biosphere".to_string()
-                } else if has_atm {
-                    "Hydrosphere".to_string()
-                } else {
-                    "Hadean".to_string()
-                },
-                stratigraphy_json: self.inspect_tile_stratigraphy_json(tile_idx),
-            },
-        )?;
-        if has_atm && has_life {
-            let (flora, fauna) = self.salient_flora_and_fauna_for_tile(tile_idx, 6, 6);
-            view.flora = flora;
-            view.fauna = fauna;
-        }
-        Some(view)
-    }
-
-    pub fn salient_flora_and_fauna_for_tile(
-        &self,
-        tile_idx: usize,
-        max_flora: usize,
-        max_fauna: usize,
-    ) -> (Vec<String>, Vec<String>) {
-        if !self.has_atmosphere() || !self.has_life() {
-            return (Vec::new(), Vec::new());
-        }
-        let mut guard = self.cached_biosphere.borrow_mut();
-        if !guard.as_ref().is_some_and(|(gt, _)| *gt == self.geoticks) {
-            let elevations: Vec<f32> = self.tiles.iter().map(|t| t.elevation()).collect();
-            let bio =
-                crate::lifeforms::settle_species_on_climate(&elevations, &self.climate_model);
-            *guard = Some((self.geoticks, bio));
-        }
-        match guard.as_ref() {
-            Some((_, bio)) => {
-                bio.select_salient_flora_and_fauna_names(tile_idx, max_flora, max_fauna)
-            }
-            None => (Vec::new(), Vec::new()),
-        }
-    }
-
     fn refresh_climate_fields(&mut self) {
         self.climate_model
             .set_spin_and_tilt_for_tectonics(self.current_spin(), self.current_tilt_deg());
@@ -3226,7 +3091,6 @@ impl TectonicsSimulation {
             last_impact_tile: None,
             last_impact_diameter_km: 0.0,
             saved_environment: snap.environment.clone(),
-            cached_biosphere: std::cell::RefCell::new(None),
             rng,
         };
         sim.climate_model

@@ -5,10 +5,9 @@ use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{dot, Pcg64Mcg, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::rivers::trace_coarse_rivers;
-use crate::rock::{Rock, RockKind, RockLayer};
-use crate::tectonics::TectonicsSimulation;
-use crate::tile::TileGeology;
+use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_geology::rock::{Rock, RockKind, RockLayer};
+use tec11_geology::tile::{tiles_from_snapshot, TileGeology};
 
 /// Simple union-find (`disjoint.py`) over indices `0..n`.
 #[derive(Clone, Debug)]
@@ -1164,15 +1163,16 @@ impl PopulationSandbox {
         let Ok(snap) = tec11_proto::PlanetSnapshot::decode_bytes(bytes) else {
             return false;
         };
-        let Some(tec_sim) = TectonicsSimulation::from_snapshot(&snap, 42) else {
+        let Some((grid, tiles, geoticks)) = tiles_from_snapshot(&snap) else {
             return false;
         };
-        let grid = tec_sim.grid().clone();
         let adjacency = grid.adjacency();
         let n = grid.faces.len();
+        let land_cnt = tiles.iter().filter(|t| t.elevation() > 0.0).count();
+        let land_pct = ((land_cnt as f64) * 100.0 / (n.max(1) as f64)).round() as u32;
         self.grid = grid.clone();
         self.adjacency = adjacency;
-        self.tiles = tec_sim.tiles().to_vec();
+        self.tiles = tiles;
         self.climate_model = ClimateModel::new_for_tectonics(grid, 3, 1.0, 23.0);
         self.tile_koeppen = vec![0; n];
         self.tile_life = vec![0.0; n];
@@ -1181,8 +1181,8 @@ impl PopulationSandbox {
         self.populated.clear();
         self.popcache.clear();
         self.ticks = 0;
-        self.custom_geoticks = Some(tec_sim.geoticks());
-        self.custom_land_percent = Some(tec_sim.land_percent());
+        self.custom_geoticks = Some(geoticks);
+        self.custom_land_percent = Some(land_pct);
         self.recompute_climate_and_rivers();
         true
     }

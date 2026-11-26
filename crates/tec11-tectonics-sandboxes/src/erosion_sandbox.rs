@@ -319,8 +319,8 @@ mod tests {
 
     #[test]
     fn test_tectonics_erosion_rivers_load_all_snapshot_stages() {
-        use tec11_geology::history::HistorySimulation;
-        use tec11_geology::prehistory::PrehistorySimulation;
+        use tec11_history::HistorySimulation;
+        use tec11_prehistory::PrehistorySimulation;
         use tec11_geology::rivers::RiversSandbox;
 
         let mut tec = TectonicsSimulation::new(4, 29.0, 42);

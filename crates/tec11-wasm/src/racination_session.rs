@@ -1,4 +1,4 @@
-use tec11_geology::RacinationSandbox;
+use tec11_prehistory::RacinationSandbox;
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids};

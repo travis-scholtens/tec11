@@ -1,10 +1,10 @@
 use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
-use tec11_geology::history::HistorySimulation;
-use tec11_geology::population::tile_population_thousands_with_water_tech;
-use tec11_geology::prehistory::PrehistorySimulation;
-use tec11_geology::racination::Heritage;
+use tec11_history::HistorySimulation;
+use tec11_prehistory::population::tile_population_thousands_with_water_tech;
+use tec11_prehistory::prehistory::PrehistorySimulation;
+use tec11_prehistory::racination::Heritage;
 use tec11_cosmos::{
     build_star_map_buffers_from_sky, format_solar_system_summary,
     generate_solar_system_with_rng, sample_atmosphere_with_rng, sample_galactic_home_with_rng,
@@ -143,6 +143,7 @@ pub struct WorldSimulation {
     sys_rng_bytes: [u8; 16],
     is_sol_system: bool,
     rng: Pcg64Mcg,
+    cached_tectonics_biosphere: std::cell::RefCell<Option<(u32, tec11_prehistory::SettledBiosphere)>>,
 }
 
 impl WorldSimulation {
@@ -212,6 +213,7 @@ impl WorldSimulation {
             sys_rng_bytes,
             is_sol_system: true,
             rng: Pcg64Mcg::from_seed_u64(seed.wrapping_add(1000)),
+            cached_tectonics_biosphere: std::cell::RefCell::new(None),
         };
         sim.sync_counters();
         sim
@@ -678,7 +680,10 @@ impl WorldSimulation {
         let _span = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::StageToPrehistory);
         if let WorldStageState::Tectonics(tec) = &mut self.stage {
             let _sub_seed = self.rng.next_u64();
-            let mut pre = PrehistorySimulation::from_tectonics_mut(tec);
+            let mut pre = PrehistorySimulation::from_tectonics_parts(
+                tec.saved_environment().cloned(),
+                tec.take_parts_for_prehistory(),
+            );
             pre.set_min_glaciation_cycles(self.params.prehistory_glaciation_cycles);
             pre.step();
             self.prehistory_ticks = pre.prehistory_ticks();
@@ -947,7 +952,7 @@ impl WorldSimulation {
     pub fn inspect_state_for_tile(
         &self,
         tile_idx: usize,
-    ) -> Option<tec11_geology::history::StateInspectionView> {
+    ) -> Option<tec11_history::StateInspectionView> {
         match &self.stage {
             WorldStageState::History(hist) => hist.inspect_state_for_tile(tile_idx),
             _ => None,
@@ -958,7 +963,7 @@ impl WorldSimulation {
         &self,
         state_id: u32,
         selected_fine_idx: Option<usize>,
-    ) -> Option<tec11_geology::history::StateInspectionView> {
+    ) -> Option<tec11_history::StateInspectionView> {
         match &self.stage {
             WorldStageState::History(hist) => hist.inspect_state(state_id, selected_fine_idx),
             _ => None,
@@ -989,7 +994,11 @@ impl WorldSimulation {
                         koeppen_climate_name(k_code)
                     )
                 };
-                let surf_infos = tec11_geology::tile_surface_infos(tec.tiles());
+                let surf_infos: Vec<tec11_sky_view::TileSurfaceInfo> = tec
+                    .tiles()
+                    .iter()
+                    .map(|t| tec11_sky_view::TileSurfaceInfo::from_tuple(t.surface_info_tuple()))
+                    .collect();
                 let mut view = tec11_sky_view::build_coarse_tile_inspection_view(
                     tile_idx,
                     tec11_sky_view::CoarseTileSkyParams {
@@ -1025,9 +1034,22 @@ impl WorldSimulation {
                     },
                 )?;
                 if has_atm && has_life {
-                    let (flora, fauna) = tec.salient_flora_and_fauna_for_tile(tile_idx, 6, 6);
-                    view.flora = flora;
-                    view.fauna = fauna;
+                    let mut guard = self.cached_tectonics_biosphere.borrow_mut();
+                    if !guard.as_ref().is_some_and(|(gt, _)| *gt == tec.geoticks()) {
+                        let elevations: Vec<f32> =
+                            tec.tiles().iter().map(|t| t.elevation()).collect();
+                        let bio = tec11_prehistory::settle_species_on_climate(
+                            &elevations,
+                            tec.climate_model(),
+                        );
+                        *guard = Some((tec.geoticks(), bio));
+                    }
+                    if let Some((_, bio)) = guard.as_ref() {
+                        let (flora, fauna) =
+                            bio.select_salient_flora_and_fauna_names(tile_idx, 6, 6);
+                        view.flora = flora;
+                        view.fauna = fauna;
+                    }
                 }
                 Some(view)
             }
@@ -1078,7 +1100,11 @@ impl WorldSimulation {
                 } else {
                     ("Uninhabited".to_string(), "Prehistory".to_string())
                 };
-                let surf_infos = tec11_geology::tile_surface_infos(pre.tiles());
+                let surf_infos: Vec<tec11_sky_view::TileSurfaceInfo> = pre
+                    .tiles()
+                    .iter()
+                    .map(|t| tec11_sky_view::TileSurfaceInfo::from_tuple(t.surface_info_tuple()))
+                    .collect();
                 let mut view = tec11_sky_view::build_coarse_tile_inspection_view(
                     tile_idx,
                     tec11_sky_view::CoarseTileSkyParams {
@@ -1119,14 +1145,14 @@ impl WorldSimulation {
     pub fn inspect_language(
         &self,
         lang_id: u32,
-    ) -> Option<tec11_geology::history::LanguageDetailView> {
+    ) -> Option<tec11_history::LanguageDetailView> {
         match &self.stage {
             WorldStageState::History(hist) => hist.inspect_language(lang_id),
             _ => None,
         }
     }
 
-    pub fn inspect_nation(&self, nat_id: u32) -> Option<tec11_geology::history::NationDetailView> {
+    pub fn inspect_nation(&self, nat_id: u32) -> Option<tec11_history::NationDetailView> {
         match &self.stage {
             WorldStageState::History(hist) => hist.inspect_nation(nat_id),
             _ => None,
@@ -1241,17 +1267,7 @@ impl WorldSimulation {
     /// based on fractional `sea_ice` cover in `[0.0, 1.0]`.
     #[inline]
     pub fn blend_sea_ice_rgb(base: [f32; 3], sea_ice: f32) -> [f32; 3] {
-        let ice = sea_ice.clamp(0.0, 1.0);
-        if ice <= 0.02 {
-            return base;
-        }
-        let t = (ice * 0.90).clamp(0.0, 0.92);
-        let ice_rgb = [0.84f32, 0.91, 0.97];
-        [
-            base[0] * (1.0 - t) + ice_rgb[0] * t,
-            base[1] * (1.0 - t) + ice_rgb[1] * t,
-            base[2] * (1.0 - t) + ice_rgb[2] * t,
-        ]
+        tec11_sky_view::blend_sea_ice_rgb(base, sea_ice)
     }
 
     pub fn tile_colors_rgb(&self, aspect: &str, selected_tile: Option<usize>) -> Vec<f32> {
@@ -2083,69 +2099,15 @@ impl WorldSimulation {
         has_atm: bool,
         optics: &PlanetaryOptics,
     ) -> [f32; 3] {
-        if h <= 0.0 {
-            return Self::natural_color_with_optics(h, felsity, koeppen, life, has_atm, optics);
-        }
-        let u_elev = ((h - 0.45).max(0.0) / 4.8).clamp(0.0, 1.0);
-        let u_mount = (mountainosity / 12.0).clamp(0.0, 1.0);
-        if has_atm && (koeppen == 12 || koeppen == 13) {
-            let shade = (1.0 - 0.30 * u_elev - 0.08 * u_mount).clamp(0.58, 1.0);
-            [0.96 * shade, 0.98 * shade, 1.0 * (shade + 0.02).min(1.0)]
-        } else {
-            let rock_r = (0.5 * 128.0) / 255.0;
-            let rock_g = (0.5 * (64.0 + 64.0 * felsity)) / 255.0;
-            let rock_b = (0.5 * (128.0 * felsity)) / 255.0;
-            // Taper alpine foliage above 1.8 km so high ridges expose darker craggy rock:
-            let alpine_taper = (1.0 - ((h - 1.8).max(0.0) / 2.6)).clamp(0.0, 1.0);
-            let veg = life.clamp(0.0, 1.0) * alpine_taper;
-            let pf = optics.plant_foliage_rgb;
-            let shade = (1.0 - 0.52 * u_elev.powf(0.85) - 0.12 * u_mount).clamp(0.32, 1.0);
-            [
-                ((rock_r * (1.0 - 0.55 * veg) + pf[0] * 0.85 * veg) * shade).clamp(0.0, 1.0),
-                ((rock_g * (1.0 - 0.55 * veg) + pf[1] * 0.85 * veg) * shade).clamp(0.0, 1.0),
-                ((rock_b * (1.0 - 0.55 * veg) + pf[2] * 0.85 * veg) * shade).clamp(0.0, 1.0),
-            ]
-        }
-    }
-
-    fn natural_color_with_optics(
-        h: f32,
-        felsity: f32,
-        koeppen: u8,
-        life: f32,
-        has_atm: bool,
-        optics: &PlanetaryOptics,
-    ) -> [f32; 3] {
-        if h <= 0.0 {
-            if has_atm {
-                let d = (-h / 6.0).clamp(0.0, 1.0);
-                // Ocean water reflects the planet's daytime sky color (`optics.sky_zenith_rgb`):
-                let sky = optics.sky_zenith_rgb;
-                [
-                    ((0.02 + 0.36 * sky[0]) * (1.0 - 0.75 * d)).clamp(0.0, 1.0),
-                    ((0.05 + 0.44 * sky[1]) * (1.0 - 0.70 * d)).clamp(0.0, 1.0),
-                    ((0.15 + 0.58 * sky[2]) * (1.0 - 0.50 * d)).clamp(0.0, 1.0),
-                ]
-            } else {
-                let s = ((7.5 + h) / 7.5).clamp(0.12, 1.0);
-                [0.24 * s, 0.27 * s, 0.34 * s]
-            }
-        } else if has_atm && (koeppen == 12 || koeppen == 13) {
-            [1.0, 1.0, 1.0]
-        } else {
-            // Bare rock color (mafic dark brown-grey to felsic tan-granite):
-            let rock_r = (0.5 * 128.0) / 255.0;
-            let rock_g = (0.5 * (64.0 + 64.0 * felsity)) / 255.0;
-            let rock_b = (0.5 * (128.0 * felsity)) / 255.0;
-            // Blend bare rock with the planet's photosynthetic plant foliage color (`optics.plant_foliage_rgb`):
-            let veg = life.clamp(0.0, 1.0);
-            let pf = optics.plant_foliage_rgb;
-            [
-                (rock_r * (1.0 - 0.55 * veg) + pf[0] * 0.85 * veg).clamp(0.0, 1.0),
-                (rock_g * (1.0 - 0.55 * veg) + pf[1] * 0.85 * veg).clamp(0.0, 1.0),
-                (rock_b * (1.0 - 0.55 * veg) + pf[2] * 0.85 * veg).clamp(0.0, 1.0),
-            ]
-        }
+        tec11_sky_view::natural_color_shaded(
+            h,
+            mountainosity,
+            felsity,
+            koeppen,
+            life,
+            has_atm,
+            optics,
+        )
     }
 
     pub fn build_environment_proto(&self) -> tec11_proto::PlanetaryEnvironment {
@@ -2892,7 +2854,7 @@ mod tests {
         // 2. Gating: with 1 required glaciation cycle (32 ticks), agriculture cannot spark before tick 32
         let mut pre = PrehistorySimulation::new_earth(42);
         pre.set_min_glaciation_cycles(1);
-        assert_eq!(pre.min_ag_ticks(), 2 * tec11_geology::prehistory::PREHISTORY_GLACIATION_STEP);
+        assert_eq!(pre.min_ag_ticks(), 2 * tec11_prehistory::prehistory::PREHISTORY_GLACIATION_STEP);
         for _ in 0..10 {
             pre.step();
             assert_eq!(
