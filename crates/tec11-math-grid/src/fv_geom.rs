@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use tec11_math_grid::{SphericalGrid, Vec3, Vec3Key};
+use crate::{SphericalGrid, Vec3, Vec3Key};
 
 /// Directed dual edge connecting cell `left` ($i$) to cell `right` ($j$), with `left < right`.
 ///

@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 
-use tec11_climate::{
-    EARTH_SIZE6_ELEVATIONS_M, FiniteVolumeSphereGeom, LaplaceTidalSolver,
-};
-use tec11_math_grid::{FineParentage, FullSphereFineGrid, Pcg64Mcg};
+use tec11_climate::EARTH_SIZE6_ELEVATIONS_M;
+use tec11_math_grid::{FineParentage, FiniteVolumeSphereGeom, FullSphereFineGrid, Pcg64Mcg};
 use tec11_proto::PlanetSnapshotExt;
+use tec11_tides::LaplaceTidalSolver;
 
 use crate::prehistory::PrehistorySimulation;
 use crate::rivers::trace_coarse_rivers;

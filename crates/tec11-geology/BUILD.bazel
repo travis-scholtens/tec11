@@ -39,8 +39,11 @@ rust_library(
     visibility = ["//visibility:public"],
     deps = [
         "//crates/tec11-climate:tec11_climate",
+        "//crates/tec11-koeppen:tec11_koeppen",
         "//crates/tec11-math-grid:tec11_math_grid",
         "//crates/tec11-proto:tec11_proto",
+        "//crates/tec11-tides:tec11_tides",
+        "//crates/tec11-weather:tec11_weather",
     ],
 )
 

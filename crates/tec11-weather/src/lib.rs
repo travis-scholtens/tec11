@@ -1,9 +1,7 @@
 use std::collections::VecDeque;
 
-use tec11_math_grid::SphericalGrid;
-
-use crate::fv_geom::FiniteVolumeSphereGeom;
-use crate::tides::{AtmosphericTideForcing, LaplaceTidalSolver};
+use tec11_math_grid::{FiniteVolumeSphereGeom, SphericalGrid};
+use tec11_tides::{AtmosphericTideForcing, LaplaceTidalSolver};
 
 const METEOGRAM_HOURS: usize = 48;
 

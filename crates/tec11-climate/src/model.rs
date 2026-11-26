@@ -2,41 +2,13 @@ use std::f64::consts::PI;
 use tec11_math_grid::SphericalGrid;
 
 use crate::earth_data::EARTH_SIZE6_ELEVATIONS_M;
-use crate::koeppen::{classify_tile, TileClimateClassification};
+use tec11_koeppen::{classify_tile, KoeppenCode, TemperatureRange, TileClimateClassification};
 use crate::ocean::{
     solve_seasonal_ocean_circulation_with_geom, OceanCirculation, OceanGridGeometry,
 };
 
 /// Standard 8 seasonal steps used in `Tec-Nine` (`climatesimulation.py:41`).
 pub const DEFAULT_SEASONS: [f64; 8] = [-1.0, -0.5, 0.0, 0.5, 1.0, 0.5, 0.0, -0.5];
-
-/// Global temperature interval `[min_c, max_c]` in degrees Celsius.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TemperatureRange {
-    pub min_c: f64,
-    pub max_c: f64,
-}
-
-impl TemperatureRange {
-    pub const fn new(min_c: f64, max_c: f64) -> Self {
-        Self { min_c, max_c }
-    }
-
-    #[inline]
-    pub fn span(self) -> f64 {
-        self.max_c - self.min_c
-    }
-
-    #[inline]
-    pub fn to_celsius(self, norm: f64) -> f64 {
-        norm * self.span() + self.min_c
-    }
-
-    #[inline]
-    pub fn from_celsius(self, celsius: f64) -> f64 {
-        (celsius - self.min_c) / self.span()
-    }
-}
 
 /// Weighted downwind edge in the atmospheric advection graph (`climatemethod.py`).
 #[derive(Clone, Copy, Debug)]
@@ -376,7 +348,7 @@ impl ClimateModel {
             return TileClimateClassification {
                 mean_temperature: 0.0,
                 mean_precipitation: 0.0,
-                koeppen: crate::koeppen::KoeppenCode::Ocean,
+                koeppen: KoeppenCode::Ocean,
                 life: false,
             };
         }
@@ -906,7 +878,7 @@ pub fn compute_glacier_cover_from_seasons(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::koeppen::KoeppenCode;
+    use tec11_koeppen::KoeppenCode;
 
     #[test]
     fn earth_climate_produces_realistic_koeppen_zones() {

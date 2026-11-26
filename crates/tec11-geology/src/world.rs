@@ -16,46 +16,7 @@ use crate::sun_sky::{
 use crate::tectonics::TectonicsSimulation;
 use crate::tile::TileGeology;
 
-/// Köppen climate full descriptive names (`worldpresenter.py:12-25`).
-pub fn koeppen_climate_name(code: u8) -> &'static str {
-    match code {
-        1 => "Af (rainforest)",
-        2 => "Am (monsoon)",
-        3 => "Aw (savanna)",
-        4 => "BS (steppe)",
-        5 => "BW (desert)",
-        6 => "Cf (temperate)",
-        7 => "Cs (temperate, dry summer)",
-        8 => "Cw (temperate, dry winter)",
-        9 => "Df (cold)",
-        10 => "Ds (cold, dry summer)",
-        11 => "Dw (cold, dry winter)",
-        12 => "EF (ice cap)",
-        13 => "ET (tundra)",
-        _ => "Ocean",
-    }
-}
-
-/// Köppen RGB color `[r, g, b]` in `[0.0, 1.0]` (`koeppencolor.py`).
-pub fn koeppen_rgb(code: u8) -> [f32; 3] {
-    let (r, g, b) = match code {
-        1 => (0, 0, 255),
-        2 => (0, 120, 255),
-        3 => (70, 170, 250),
-        4 => (245, 165, 0),
-        5 => (255, 0, 0),
-        6 => (200, 255, 80),
-        7 => (255, 255, 0),
-        8 => (150, 255, 150),
-        9 => (0, 255, 255),
-        10 => (255, 0, 255),
-        11 => (170, 175, 255),
-        12 => (100, 100, 100),
-        13 => (175, 175, 175),
-        _ => (0, 0, 0),
-    };
-    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
-}
+pub use tec11_koeppen::{koeppen_climate_name, koeppen_rgb};
 
 /// Format integer with comma thousands separators (`worldsimulation.py:56`).
 pub fn format_with_commas(n: u64) -> String {

@@ -1,5 +1,9 @@
-use tec11_climate::{MoistBaroclinicSolver, WeatherInitConfig, EARTH_GLACIATION};
+use tec11_climate::EARTH_GLACIATION;
 use tec11_math_grid::FineParentage;
+use tec11_weather::{
+    equilibrium_open_sst_c, glaciation_temp_offset_c, orbital_annual_mean_cos_z,
+    MoistBaroclinicSolver, WeatherInitConfig,
+};
 
 use crate::sky_vantage::{
     build_uniform_fine_tile_inspection_view, json_escape, TileInspectionView, TileLiveEnvironment,
@@ -128,7 +132,7 @@ impl WeatherSandbox {
         }
 
         let tilt_deg = base.prehistory.tilt_deg();
-        let glac_offset_c = tec11_climate::glaciation_temp_offset_c(glaciation);
+        let glac_offset_c = glaciation_temp_offset_c(glaciation);
         let mut base_sst_c = Vec::with_capacity(nf);
         let mut init_soil_moisture = Vec::with_capacity(nf);
         let mut init_snow_depth_m = Vec::with_capacity(nf);
@@ -136,12 +140,12 @@ impl WeatherSandbox {
         for i in 0..nf {
             let sin_phi = base.geom.sin_lat[i];
             let cos_phi = base.geom.cos_lat[i];
-            let annual_mu = tec11_climate::orbital_annual_mean_cos_z(sin_phi, cos_phi, tilt_deg);
+            let annual_mu = orbital_annual_mean_cos_z(sin_phi, cos_phi, tilt_deg);
             let fine_sst_anom = base.fine.interpolate_coarse(i, &coarse_sst_anom);
             // Western boundary currents (+sst_anom) warm midlatitude east-coast waters up to +5.2 C,
             // while eastern boundary upwelling (-sst_anom) cools subtropical west coasts, driven
             // by tilt-general orbital insolation `annual_mu` rather than hardcoded `sin^2(lat)`:
-            let sst = tec11_climate::equilibrium_open_sst_c(annual_mu, 1.0, fine_sst_anom);
+            let sst = equilibrium_open_sst_c(annual_mu, 1.0, fine_sst_anom);
             base_sst_c.push(sst);
 
             let bed_m = base.fine.fine_bed_m[i];

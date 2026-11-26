@@ -1,9 +1,7 @@
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 
-use tec11_math_grid::{SphericalGrid, Vec3};
-
-use crate::fv_geom::FiniteVolumeSphereGeom;
+use tec11_math_grid::{FiniteVolumeSphereGeom, SphericalGrid, Vec3};
 
 const RHO_SEAWATER: f32 = 1025.0;
 const LOVE_GAMMA2: f64 = 0.69;
