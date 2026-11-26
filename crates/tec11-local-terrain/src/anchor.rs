@@ -7,7 +7,8 @@ use tec11_climate::{nominal_cells_for_spin, ClimateModel};
 use tec11_geology::rock::RockLayer;
 use tec11_geology::{planet_radius_km, TileGeology};
 use tec11_rivers::trace_coarse_rivers;
-use tec11_math_grid::{SphericalGrid, SubdividedTerrainGrid};
+use tec11_math_grid::SphericalGrid;
+use tec11_terrain::SubdividedTerrainGrid;
 use tec11_proto::{Message as _, PlanetSnapshot, PlanetStageOneof};
 
 use crate::materials::MaterialId;

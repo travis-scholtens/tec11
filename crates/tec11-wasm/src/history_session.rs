@@ -1,5 +1,5 @@
 use tec11_history::HistorySimulation;
-use tec11_math_grid::DisplayMesh;
+use tec11_terrain::DisplayMesh;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]

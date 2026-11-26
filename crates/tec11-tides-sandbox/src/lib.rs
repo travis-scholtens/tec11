@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 
 use tec11_climate::EARTH_SIZE6_ELEVATIONS_M;
-use tec11_math_grid::{FineParentage, FiniteVolumeSphereGeom, FullSphereFineGrid, Pcg64Mcg};
+use tec11_math_grid::{FiniteVolumeSphereGeom, Pcg64Mcg};
+use tec11_terrain::{FineParentage, FullSphereFineGrid};
 use tec11_proto::PlanetSnapshotExt;
 use tec11_tides::LaplaceTidalSolver;
 
 use tec11_prehistory::prehistory::PrehistorySimulation;
-use tec11_rivers::trace_coarse_rivers;
+use tec11_rivers::{trace_coarse_rivers, TERRAIN_MIN_RIVER_ELEV, TERRAIN_MIN_RIVER_PRECIP};
 use tec11_sky_view::{
     build_uniform_fine_tile_inspection_view, json_escape, TileInspectionView, TileLiveEnvironment,
     TileSkyMoon, UniformFineTileSkyParams,
@@ -16,7 +17,6 @@ use tec11_cosmos::{
     AtmosphereType, Constellation, HomeStar, PlanetaryOptics, ReconstructedSkyEnvironment,
     SolarSystemPlanet,
 };
-use tec11_prehistory::terrain::{TERRAIN_MIN_RIVER_ELEV, TERRAIN_MIN_RIVER_PRECIP};
 use tec11_koeppen::koeppen_climate_name;
 
 /// Shared full-sphere `coarse + 2` planetary substrate used by both `TidesSandbox` and `WeatherSandbox`.
@@ -1008,9 +1008,9 @@ mod tests {
 
 #[cfg(test)]
 mod volcanic_island_integration_tests {
-    use tec11_prehistory::terrain::TerrainSandbox;
+    use tec11_terrain_sandbox::TerrainSandbox;
     use tec11_prehistory::prehistory::PrehistorySimulation;
-    use tec11_math_grid::FineParentage;
+    use tec11_terrain::FineParentage;
     use tec11_history::HistorySimulation;
     use tec11_tectonics::tectonics::TectonicsSimulation;
     use std::collections::BTreeSet;

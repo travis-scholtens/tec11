@@ -17,6 +17,7 @@ rust_library(
         "//crates/tec11-proto:tec11_proto",
         "//crates/tec11-rivers:tec11_rivers",
         "//crates/tec11-sky-view:tec11_sky_view",
+        "//crates/tec11-terrain:tec11_terrain",
         "//crates/tec11-tides:tec11_tides",
     ],
 )
@@ -27,5 +28,6 @@ rust_test(
     deps = [
         "//crates/tec11-history:tec11_history",
         "//crates/tec11-tectonics:tec11_tectonics",
+        "//crates/tec11-terrain-sandbox:tec11_terrain_sandbox",
     ],
 )

@@ -889,7 +889,7 @@ impl PrehistorySimulation {
             for v in 0..n {
                 let eff_e = self.tiles[v].elevation() - self.eustatic_sea_level_km;
                 if eff_e <= 0.0 {
-                    if let Some(pk) = tec11_math_grid::compute_subgrid_volcanic_peak_km(
+                    if let Some(pk) = tec11_terrain::compute_subgrid_volcanic_peak_km(
                         eff_e,
                         self.tiles[v].thickness(),
                         self.tiles[v].mountainosity,

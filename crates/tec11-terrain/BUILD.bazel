@@ -1,0 +1,18 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_terrain",
+    srcs = [
+        "src/lib.rs",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/tec11-math-grid:tec11_math_grid",
+    ],
+)
+
+rust_test(
+    name = "tec11_terrain_test",
+    crate = ":tec11_terrain",
+)

@@ -1,9 +1,9 @@
+use tec11_terrain::{DisplayFaceSource, DisplayMesh, FineParentage, SubdividedTerrainGrid};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use tec11_math_grid::{
-    normal, DisplayFaceSource, DisplayMesh, FineParentage, Pcg64Mcg, PointTree, SphericalGrid,
-    SubdividedTerrainGrid, Vec3,
+    normal, Pcg64Mcg, PointTree, SphericalGrid, Vec3,
 };
 use tec11_proto::PlanetSnapshotExt;
 
