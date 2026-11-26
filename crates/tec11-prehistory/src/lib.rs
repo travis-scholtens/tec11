@@ -2,7 +2,6 @@ pub mod lifeforms;
 pub mod population;
 pub mod prehistory;
 pub mod racination;
-pub mod terrain;
 
 pub use lifeforms::{
     settle_species_on_climate, LifeformsSandbox, SettledBiosphere, SettledSpecies, SpeciesKind,
@@ -17,4 +16,3 @@ pub use population::{
 };
 pub use prehistory::PrehistorySimulation;
 pub use racination::{racinate, racination_shades, Heritage, RacinationSandbox};
-pub use terrain::TerrainSandbox;

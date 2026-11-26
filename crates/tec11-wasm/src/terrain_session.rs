@@ -1,5 +1,5 @@
-use tec11_prehistory::TerrainSandbox;
-use tec11_math_grid::DisplayMesh;
+use tec11_terrain_sandbox::TerrainSandbox;
+use tec11_terrain::DisplayMesh;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]

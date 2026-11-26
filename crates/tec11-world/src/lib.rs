@@ -1496,7 +1496,7 @@ impl WorldSimulation {
                         .display_faces
                         .iter()
                         .flat_map(|face| match face.source {
-                            tec11_math_grid::DisplayFaceSource::Fine(f_idx) => {
+                            tec11_terrain::DisplayFaceSource::Fine(f_idx) => {
                                 let c = terrain.primary_coarse_tile(f_idx, &coarse_elevs);
                                 if terrain.fine_elevations[f_idx] > 0.0 {
                                     let k = if koeppen[c] != 0 {
@@ -1518,7 +1518,7 @@ impl WorldSimulation {
                                     Self::blend_sea_ice_rgb(Self::climate_ocean_rgb(sst, spd), ice)
                                 }
                             }
-                            tec11_math_grid::DisplayFaceSource::OceanCoarse(c_idx) => {
+                            tec11_terrain::DisplayFaceSource::OceanCoarse(c_idx) => {
                                 let sst = ocean
                                     .and_then(|o| o.sst_anomaly.get(c_idx).copied())
                                     .unwrap_or(0.0);
@@ -1828,7 +1828,7 @@ impl WorldSimulation {
                         .display_faces
                         .get(center_idx)
                         .is_some_and(|df| match df.source {
-                            tec11_math_grid::DisplayFaceSource::Fine(f) => {
+                            tec11_terrain::DisplayFaceSource::Fine(f) => {
                                 hist.state_at_tile(f).is_some()
                             }
                             _ => false,
@@ -1965,13 +1965,13 @@ impl WorldSimulation {
                         [0.2, 0.2, 0.2]
                     };
                     let (state_id, is_riv, is_cap) = match df.source {
-                        tec11_math_grid::DisplayFaceSource::Fine(f) => (
+                        tec11_terrain::DisplayFaceSource::Fine(f) => (
                             hist.state_at_tile(f).map(|s| s as i32).unwrap_or(-1),
                             rivers.get(f).copied().unwrap_or(false) && aspect != "population",
                             (aspect == "borders" || aspect == "nations")
                                 && hist.is_state_capital_fine_face(f),
                         ),
-                        tec11_math_grid::DisplayFaceSource::OceanCoarse(_) => (-1, false, false),
+                        tec11_terrain::DisplayFaceSource::OceanCoarse(_) => (-1, false, false),
                     };
                     poly_entries.push(format!(
                         "{{\"tileIdx\":{},\"rgb\":[{:.3},{:.3},{:.3}],\"isSelected\":{},\"isRiver\":{},\"isCapital\":{},\"stateId\":{},\"pts\":[{}]}}",

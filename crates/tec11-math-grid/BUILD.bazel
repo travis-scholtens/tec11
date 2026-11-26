@@ -9,7 +9,6 @@ rust_library(
         "src/lib.rs",
         "src/noise.rs",
         "src/point_tree.rs",
-        "src/terrain.rs",
     ],
     edition = "2021",
     visibility = ["//visibility:public"],

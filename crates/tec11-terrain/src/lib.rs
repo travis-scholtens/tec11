@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::grid::SphericalGrid;
-use crate::noise::snoise3;
-use crate::vec3::{dist2, normal, Vec3, Vec3Key};
+use tec11_math_grid::{dist2, normal, snoise3, SphericalGrid, Vec3, Vec3Key};
 
 /// Parentage of a subdivided `level2` (`N + 2`) terrain face (`terrainmethod.py`).
 #[derive(Clone, Debug)]

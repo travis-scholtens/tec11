@@ -16,6 +16,7 @@ rust_library(
         "//crates/tec11-prehistory:tec11_prehistory",
         "//crates/tec11-proto:tec11_proto",
         "//crates/tec11-sky-view:tec11_sky_view",
+        "//crates/tec11-terrain:tec11_terrain",
         "//crates/tec11-tides-sandbox:tec11_tides_sandbox",
         "//crates/tec11-weather:tec11_weather",
     ],

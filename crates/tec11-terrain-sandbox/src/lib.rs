@@ -1,16 +1,13 @@
 use std::collections::BTreeSet;
 
-use tec11_math_grid::{
-    DisplayFaceSource, DisplayMesh, FineParentage, SphericalGrid, SubdividedTerrainGrid,
-};
+use tec11_math_grid::SphericalGrid;
+use tec11_terrain::{DisplayFaceSource, DisplayMesh, FineParentage, SubdividedTerrainGrid};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::prehistory::PrehistorySimulation;
+use tec11_prehistory::PrehistorySimulation;
 use tec11_rivers::trace_coarse_rivers;
+pub use tec11_rivers::{TERRAIN_MIN_RIVER_ELEV, TERRAIN_MIN_RIVER_PRECIP};
 use tec11_geology::tile::TileGeology;
-
-pub const TERRAIN_MIN_RIVER_ELEV: f32 = 5.0;
-pub const TERRAIN_MIN_RIVER_PRECIP: f32 = 0.5;
 
 /// Elevation colormap matching `color.py:elevationcolor(elevation)`.
 #[inline]

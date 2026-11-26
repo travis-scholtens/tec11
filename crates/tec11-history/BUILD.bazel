@@ -18,6 +18,7 @@ rust_library(
         "//crates/tec11-proto:tec11_proto",
         "//crates/tec11-rivers:tec11_rivers",
         "//crates/tec11-sky-view:tec11_sky_view",
+        "//crates/tec11-terrain:tec11_terrain",
     ],
 )
 

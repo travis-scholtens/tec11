@@ -1,5 +1,5 @@
 use tec11_climate::EARTH_GLACIATION;
-use tec11_math_grid::FineParentage;
+use tec11_terrain::FineParentage;
 use tec11_weather::{
     equilibrium_open_sst_c, glaciation_temp_offset_c, orbital_annual_mean_cos_z,
     MoistBaroclinicSolver, WeatherInitConfig,
