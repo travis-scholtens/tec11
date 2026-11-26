@@ -23,13 +23,7 @@ impl PangeaWorld {
     /// Scales by ~sqrt(3) per subdivision so every tile is ~285 km across (~70,000 km^2).
     /// `grid_size = 6` (`6,400 km`) is Earth-sized.
     pub fn planet_radius_km(grid_size: u32) -> f64 {
-        match grid_size {
-            0..=4 => 2100.0,
-            5 => 3700.0,
-            6 => 6400.0,
-            7 => 11000.0,
-            _ => 19000.0,
-        }
+        crate::tile::planet_radius_km(grid_size)
     }
 
     /// Generates a new planet with the given `grid_size` (4..8) and target `land_percent` (1..75).

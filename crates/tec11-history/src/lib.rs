@@ -7,15 +7,15 @@ use tec11_math_grid::{
 };
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::language::{ArealFeature, Language, SoundChangeKind, Word, WordOrigin};
-use crate::lifeforms::{select_salient_flora_and_fauna_ids, SettledSpecies, SpeciesKind};
-use crate::population::{
+use tec11_language::{ArealFeature, Language, SoundChangeKind, Word, WordOrigin};
+use tec11_prehistory::lifeforms::{select_salient_flora_and_fauna_ids, SettledSpecies, SpeciesKind};
+use tec11_prehistory::population::{
     is_farmable, is_habitable, is_passable, main_ocean, tile_population_thousands,
     PlanetaryGeography,
 };
-use crate::prehistory::PrehistorySimulation;
-use crate::rivers::trace_coarse_rivers;
-use crate::sun_sky::{
+use tec11_prehistory::prehistory::PrehistorySimulation;
+use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_cosmos::{
     generate_default_constellations, generate_solar_system_with_rng, AtmosphereType, Constellation,
     HomeStar, PlanetaryOptics, SolarSystemPlanet,
 };
@@ -414,8 +414,8 @@ impl Community {
     }
 }
 
-use crate::sky_vantage::{json_escape, json_str_array};
-pub use crate::sky_vantage::{
+use tec11_sky_view::{json_escape, json_str_array};
+pub use tec11_sky_view::{
     build_coarse_tile_inspection_view, format_share_percent, format_thousands_compact,
     CoarseTileSkyParams, DemographicShareItem, TileInspectionView, TileLiveEnvironment,
     TileSkyConstellation, TileSkyMoon, TileSkyPlanet, TileSkyView, TileVantageNeighbor,
@@ -1640,7 +1640,7 @@ impl HistorySimulation {
             }
         }
 
-        let _span_subdiv = crate::profile::span(crate::profile::ProfilePhase::HistInitSubdivideAndKdTree);
+        let _span_subdiv = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistInitSubdivideAndKdTree);
         let coarse_elevs: Vec<f32> = prehistory.tile_elevations();
         let coarse_mounts: Vec<f32> = prehistory.tiles().iter().map(|t| t.mountainosity).collect();
         let coarse_thicks: Option<Vec<f32>> = prehistory
@@ -1760,7 +1760,7 @@ impl HistorySimulation {
     }
 
     /// Mutable access to coarse geological tiles (used by tests or world editors, followed by `refresh_mineral_caches`).
-    pub fn prehistory_tiles_mut(&mut self) -> &mut [crate::tile::TileGeology] {
+    pub fn prehistory_tiles_mut(&mut self) -> &mut [tec11_geology::tile::TileGeology] {
         self.prehistory.tiles_mut()
     }
 
@@ -1862,7 +1862,7 @@ impl HistorySimulation {
 
         // 1. Identify continents and ocean basins, settle plants & animals on the planet's coarse climate,
         //    then map culturally/economically salient flora & fauna onto subdivided fine faces (`historysimulation.py:facespecies`).
-        let _span_bio = crate::profile::span(crate::profile::ProfilePhase::HistInitBiosphereAndSpecies);
+        let _span_bio = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistInitBiosphereAndSpecies);
         let biosphere = self.prehistory.take_or_settle_biosphere(&coarse_elevs);
         self.geography = biosphere.geography;
         let mut coarse_species = biosphere.tile_all_species;
@@ -1949,7 +1949,7 @@ impl HistorySimulation {
         drop(_span_bio);
 
         // 2. Trace coarse rivers (`hmin = 2.0`, `pmin = 0.25`) and route them on the subdivided terrain grid (`routerivers`).
-        let _span_riv_cap = crate::profile::span(crate::profile::ProfilePhase::HistInitRiversAndCapacities);
+        let _span_riv_cap = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistInitRiversAndCapacities);
         self.rivers = trace_coarse_rivers(
             &coarse_elevs,
             &precip,
@@ -2072,7 +2072,7 @@ impl HistorySimulation {
             .collect();
 
         drop(_span_riv_cap);
-        let _span_seed = crate::profile::span(crate::profile::ProfilePhase::HistInitSeedStatesAndLexicons);
+        let _span_seed = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistInitSeedStatesAndLexicons);
         // 4. Seed cities & initial states across farmable, riverine, or coastal fine faces (`historysimulation.py:stateboundaries`)
         self.tile_communities.clear();
         self.tile_states.clear();
@@ -2516,13 +2516,13 @@ impl HistorySimulation {
 
         // 5. Apply fishing carrying capacity bonuses from rivergoing/seafaring and activate water travel routes.
         {
-            let _span_routes = crate::profile::span(crate::profile::ProfilePhase::HistInitTravelRoutes);
+            let _span_routes = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistInitTravelRoutes);
             self.refresh_fishing_capacities();
             self.compute_potential_travel_routes(&ocean, &coarse_elevs, &koeppen, &coarse_adj, &fine_adj);
             self.update_travel_routes();
         }
 
-        let _span_init_dip = crate::profile::span(crate::profile::ProfilePhase::HistInitDiplomacyAndTrade);
+        let _span_init_dip = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistInitDiplomacyAndTrade);
         self.recolor_states(&fine_adj);
         self.update_diplomacy_and_trade(&fine_adj);
     }
@@ -3665,7 +3665,7 @@ impl HistorySimulation {
     /// 3. Collins resource + territorial carrying-capacity + demographic/metallurgical tension with Boulding distance decay (`e^{-0.5 d}`).
     fn update_diplomacy_and_trade(&mut self, adjacency: &[Vec<usize>]) {
         let _span_trade = (self.history_ticks > 0)
-            .then(|| crate::profile::span(crate::profile::ProfilePhase::HistStepTradeAndConflicts))
+            .then(|| tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistStepTradeAndConflicts))
             .flatten();
         self.update_travel_routes();
         let StateTopology {
@@ -3891,7 +3891,7 @@ impl HistorySimulation {
 
         // 3. Accumulate concepts and borrow missing words (`historysimulation.py:664-705`)
         let _span_lex = (self.history_ticks > 0)
-            .then(|| crate::profile::span(crate::profile::ProfilePhase::HistStepLexiconConcepts))
+            .then(|| tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistStepLexiconConcepts))
             .flatten();
         self.accumulate_and_borrow_concepts(&extents, &state_species);
     }
@@ -4113,8 +4113,8 @@ impl HistorySimulation {
     /// Determine which Rock and Mineral concept keys are present in the near-surface layers of `tile`.
     /// "Near surface" means within `max_depth_km` of the surface (default 0.5 km for rocks people can
     /// quarry or encounter in outcrops, riverbeds, and caves).
-    fn mineral_kind_to_concept_id(mk: crate::tile::MineralKind) -> Option<u32> {
-        use crate::tile::MineralKind;
+    fn mineral_kind_to_concept_id(mk: tec11_geology::tile::MineralKind) -> Option<u32> {
+        use tec11_geology::tile::MineralKind;
         match mk {
             MineralKind::Iron => Some(MINERAL_IRON),
             MineralKind::Salt => Some(MINERAL_SALT),
@@ -4143,10 +4143,10 @@ impl HistorySimulation {
     }
 
     fn tile_rock_and_mineral_caches(
-        tile: &crate::tile::TileGeology,
+        tile: &tec11_geology::tile::TileGeology,
         max_depth_km: f32,
     ) -> (BTreeSet<u32>, BTreeSet<u32>, BTreeSet<u32>) {
-        use crate::tile::{MineralKind, WORKABLE_GRADE};
+        use tec11_geology::tile::{MineralKind, WORKABLE_GRADE};
         let mut rocks = BTreeSet::new();
         let mut minerals = BTreeSet::new();
         let mut exported = BTreeSet::new();
@@ -5545,7 +5545,7 @@ impl HistorySimulation {
     /// in `historysimulation.py:504-706`).
     pub fn step(&mut self) {
         let fine_adj = {
-            let _span_clones = crate::profile::span(crate::profile::ProfilePhase::HistStepGridClones);
+            let _span_clones = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistStepGridClones);
             std::sync::Arc::clone(&self.fine_adj)
         };
 
@@ -5553,7 +5553,7 @@ impl HistorySimulation {
         // 2-4 cascaded per-language sound changes per 200-year tick, plus areal wave diffusion,
         // tonal contagion, and marked feature convergence across geographical neighbors)
         {
-            let _span_lang = crate::profile::span(crate::profile::ProfilePhase::HistStepLanguageSoundChanges);
+            let _span_lang = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistStepLanguageSoundChanges);
             let active_langs: BTreeSet<u32> = self
                 .tile_communities
                 .values()
@@ -5703,7 +5703,7 @@ impl HistorySimulation {
             self.apply_prestige_borrowing(&contact_weights);
         }
 
-        let _span_growth = crate::profile::span(crate::profile::ProfilePhase::HistStepGrowthSpilloverAndTech);
+        let _span_growth = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistStepGrowthSpilloverAndTech);
         // 2. Verhulst logistic growth and neighborhood spillover (`historysimulation.py:168-220`)
         let tile_pops: BTreeMap<usize, f32> = self
             .tile_communities
@@ -6049,7 +6049,7 @@ impl HistorySimulation {
         self.update_travel_routes();
         drop(_span_growth);
 
-        let _span_assim = crate::profile::span(crate::profile::ProfilePhase::HistStepAssimilationAndDialects);
+        let _span_assim = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistStepAssimilationAndDialects);
         // 3. Intermingle and assimilate (`people/community.py:16-92`), modulated by Turchin asabiya
         let tile_asabiya: BTreeMap<usize, f32> = self
             .tile_states
@@ -6148,7 +6148,7 @@ impl HistorySimulation {
         self.branch_disconnected_dialects(&fine_adj);
         drop(_span_assim);
 
-        let _span_war = crate::profile::span(crate::profile::ProfilePhase::HistStepWarfareConquestAndSplits);
+        let _span_war = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistStepWarfareConquestAndSplits);
         // 5. Update Turchin metaethnic frontier asabiya & resolve conflicts via Collins-Turchin multi-front force allocation & Boulding distance decay
         let StateTopology {
             extents,
@@ -6578,7 +6578,7 @@ impl HistorySimulation {
         // 8. Update trade, conflicts, concept accumulation, and recolor nations
         self.history_ticks += 1;
         {
-            let _span_recolor = crate::profile::span(crate::profile::ProfilePhase::HistStepLexiconConcepts);
+            let _span_recolor = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistStepLexiconConcepts);
             self.recolor_states(&fine_adj);
         }
         self.update_diplomacy_and_trade(&fine_adj);
@@ -8839,10 +8839,10 @@ impl HistorySimulation {
                 .or_else(|| self.languages.values().find_map(|l| l.lexicon.get(&ck)))
                 .map(|orig| orig.word.write(true))
                 .unwrap_or_default();
-            constellations.push(crate::sky_vantage::constellation_to_sky_asterism(c, name));
+            constellations.push(tec11_sky_view::constellation_to_sky_asterism(c, name));
         }
         let (galactic_pole, galactic_center_dir, galaxy_band_mode, galaxy_summary, field_stars) =
-            crate::sky_vantage::extract_galactic_backdrop_fields(&self.constellations);
+            tec11_sky_view::extract_galactic_backdrop_fields(&self.constellations);
 
         TileSkyView {
             has_atmosphere: true,
@@ -10101,7 +10101,7 @@ impl HistorySimulation {
         aspect: &str,
         show_rivers: bool,
         selected_tile: Option<usize>,
-        optics: Option<&crate::sun_sky::PlanetaryOptics>,
+        optics: Option<&tec11_cosmos::PlanetaryOptics>,
     ) -> Vec<f32> {
         let coarse_elevs = self.prehistory.tile_elevations();
         let felsities = self.prehistory.tile_felsities();
@@ -10155,9 +10155,9 @@ impl HistorySimulation {
             };
         let ocean = self.prehistory.climate_model().ocean();
 
-        let default_op = crate::sun_sky::PlanetaryOptics::compute(
-            &crate::sun_sky::HomeStar::sol(),
-            crate::sun_sky::AtmosphereType::EarthLikeN2O2,
+        let default_op = tec11_cosmos::PlanetaryOptics::compute(
+            &tec11_cosmos::HomeStar::sol(),
+            tec11_cosmos::AtmosphereType::EarthLikeN2O2,
         );
         let op_ref = optics.unwrap_or(&default_op);
 
@@ -10495,7 +10495,7 @@ impl HistorySimulation {
             return false;
         };
         let mut sim = if snap.environment.is_some() {
-            let sky = crate::sun_sky::ReconstructedSkyEnvironment::from_snapshot(
+            let sky = tec11_cosmos::ReconstructedSkyEnvironment::from_snapshot(
                 &snap,
                 pre.radius_km() as f32,
                 pre.land_percent(),
@@ -10883,20 +10883,20 @@ mod tests {
     #[test]
     fn test_rivergoing_and_seafaring_technologies_capacity_routes_and_faultlines() {
         // 1. Verify Prehistory spark probabilities & sea-neighbor requirements
-        let p_riv_base = crate::prehistory::rivergoing_spark_prob(2);
+        let p_riv_base = tec11_prehistory::prehistory::rivergoing_spark_prob(2);
         assert!(p_riv_base > 0.0);
         assert_eq!(
-            crate::prehistory::rivergoing_spark_prob(12),
+            tec11_prehistory::prehistory::rivergoing_spark_prob(12),
             0.0,
             "Rivergoing should not spark on EF ice cap tiles"
         );
 
-        let p_sea_base = crate::prehistory::seafaring_spark_prob(3, 1);
-        let p_sea_archipelago = crate::prehistory::seafaring_spark_prob(3, 3);
+        let p_sea_base = tec11_prehistory::prehistory::seafaring_spark_prob(3, 1);
+        let p_sea_archipelago = tec11_prehistory::prehistory::seafaring_spark_prob(3, 3);
         assert!(p_sea_base > 0.0);
         assert!(p_sea_archipelago > p_sea_base);
         assert_eq!(
-            crate::prehistory::seafaring_spark_prob(3, 0),
+            tec11_prehistory::prehistory::seafaring_spark_prob(3, 0),
             0.0,
             "Seafaring requires a coastal tile with at least 1 sea neighbor"
         );
@@ -11214,7 +11214,7 @@ mod tests {
 
     #[test]
     fn test_bronze_and_ironworking_trade_invention_capacity_warfare_and_lexicon() {
-        use crate::rock::{Rock, RockKind, RockLayer};
+        use tec11_geology::rock::{Rock, RockKind, RockLayer};
 
         let mut sim = HistorySimulation::new_earth(42);
         let fine_adj = sim.terrain.terrain_adj.clone();
@@ -11698,7 +11698,7 @@ mod tests {
         let mut rng = Pcg64Mcg::new(99112233);
         let mut recipient = LanguageRecord::new_for_state(0, 0, &[0, 1, 2, 3, 4], &mut rng);
         // Strip retroflexes from recipient so we have a clean test target
-        recipient.phonology.consonants.retain(|c| !crate::language::RETROFLEX_SERIES.contains(c));
+        recipient.phonology.consonants.retain(|c| !tec11_language::RETROFLEX_SERIES.contains(c));
         // Ensure recipient has basic alveolars in lexicon words so retroflex substitution can fire
         for bw in 0..(BASIC_WORD_GLOSSES.len() as u32) {
             recipient.coin_concept(ConceptKey::BasicWord(bw), &mut rng);
@@ -11706,7 +11706,7 @@ mod tests {
 
         let mut donor = LanguageRecord::new_for_state(1, 1, &[0, 1, 2], &mut rng);
         // Ensure donor attests the retroflex series
-        for &c in &crate::language::RETROFLEX_SERIES {
+        for &c in &tec11_language::RETROFLEX_SERIES {
             if !donor.phonology.consonants.contains(&c) {
                 donor.phonology.consonants.push(c);
             }

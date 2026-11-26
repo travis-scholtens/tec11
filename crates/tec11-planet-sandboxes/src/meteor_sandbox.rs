@@ -4,7 +4,7 @@ use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M, ME
 use tec11_math_grid::{dot, Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
-use tec11_geology::prehistory::PrehistorySimulation;
+use tec11_prehistory::prehistory::PrehistorySimulation;
 use tec11_geology::rock::{
     deposit_sedimentary, DepositClimate, ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };

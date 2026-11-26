@@ -1,6 +1,76 @@
 use std::collections::BTreeMap;
 
+use tec11_math_grid::{SphericalGrid, Vec3};
+
 use crate::rock::{Rock, RockKind, RockLayer};
+
+/// A moving tectonic plate / lithospheric tile group (pure data struct shared across stages).
+#[derive(Clone, Debug)]
+pub struct LithosphericGroup {
+    pub tiles: Vec<usize>,
+    pub velocity: Vec3,
+}
+
+/// Nominal planetary radius (km) for a given icosahedral subdivision `grid_size`.
+pub fn planet_radius_km(grid_size: u32) -> f64 {
+    match grid_size {
+        0..=4 => 2100.0,
+        5 => 3700.0,
+        6 => 6400.0,
+        7 => 11000.0,
+        _ => 19000.0,
+    }
+}
+
+/// Decode `(SphericalGrid, Vec<TileGeology>, geoticks)` directly from any `PlanetSnapshot`
+/// (Tectonics, Prehistory, or History stage) without instantiating `TectonicsSimulation`.
+pub fn tiles_from_snapshot(
+    snap: &tec11_proto::PlanetSnapshot,
+) -> Option<(SphericalGrid, Vec<TileGeology>, u32)> {
+    let grid_size = snap.grid_size;
+    if !(4..=8).contains(&grid_size) {
+        return None;
+    }
+    let grid = SphericalGrid::with_size(grid_size);
+    let n = grid.faces.len();
+    let (tiles, geoticks): (Vec<TileGeology>, u32) = match snap.stage.as_ref()? {
+        tec11_proto::PlanetStageOneof::Tectonics(t) => {
+            if t.tiles.len() != n {
+                return None;
+            }
+            let decoded: Option<Vec<TileGeology>> = t
+                .tiles
+                .iter()
+                .map(TileGeology::from_proto_geological_tile)
+                .collect();
+            (decoded?, t.tectonics_ticks)
+        }
+        tec11_proto::PlanetStageOneof::Prehistory(p) => {
+            if p.tiles.len() != n {
+                return None;
+            }
+            let decoded: Option<Vec<TileGeology>> = p
+                .tiles
+                .iter()
+                .map(|pt| TileGeology::from_proto_geological_tile(pt.geology.as_ref()?))
+                .collect();
+            (decoded?, p.tectonics_ticks)
+        }
+        tec11_proto::PlanetStageOneof::History(h) => {
+            let p = h.prehistory_base.as_ref()?;
+            if p.tiles.len() != n {
+                return None;
+            }
+            let decoded: Option<Vec<TileGeology>> = p
+                .tiles
+                .iter()
+                .map(|pt| TileGeology::from_proto_geological_tile(pt.geology.as_ref()?))
+                .collect();
+            (decoded?, p.tectonics_ticks)
+        }
+    };
+    Some((grid, tiles, geoticks))
+}
 
 /// Minimum continuous grade (`0.0..=1.0`) for sparse/trace mineralogical occurrences.
 pub const TRACE_GRADE: f32 = 0.06;

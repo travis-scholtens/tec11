@@ -6,7 +6,6 @@ use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::lifeforms::{settle_species_on_climate, SettledBiosphere, SpeciesKind};
-use crate::pangea::PangeaWorld;
 use crate::population::{
     eden_tile, expand_population_with_technologies_and_islands, is_farmable, is_habitable,
     is_subgrid_island_habitable, tile_population_thousands_with_water_tech, DisjointSet,
@@ -14,10 +13,9 @@ use crate::population::{
 use crate::racination::{
     branch_wide_heritages_by_distance, racinate_with_technologies, racination_shades, Heritage,
 };
-use crate::rivers::trace_coarse_rivers;
-use crate::rock::{Rock, RockKind, RockLayer};
-use crate::tectonics::{LithosphericGroup, TectonicsSimulation};
-use crate::tile::TileGeology;
+use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_geology::rock::{Rock, RockKind, RockLayer};
+use tec11_geology::tile::{planet_radius_km, LithosphericGroup, TileGeology};
 
 pub const PREHISTORY_COAST_PROX: usize = 2;
 pub const PREHISTORY_TRAVEL_RANGE: usize = 6;
@@ -372,7 +370,7 @@ impl PrehistorySimulation {
             23.0,
         );
         climate_model.set_glaciation_only(EARTH_GLACIATION);
-        let radius_km = PangeaWorld::planet_radius_km(6);
+        let radius_km = planet_radius_km(6);
 
         let mut sim = Self {
             grid,
@@ -411,10 +409,23 @@ impl PrehistorySimulation {
         sim
     }
 
-    /// Transition directly from a `TectonicsSimulation` in memory without serializing to protobuf
+    /// Transition directly from Tectonics outputs in memory without serializing to protobuf
     /// or reconstructing the `SphericalGrid`, adjacency graph, or `OceanGridGeometry`.
-    pub fn from_tectonics_mut(tec: &mut TectonicsSimulation) -> Self {
-        let mut saved_environment = tec.saved_environment().cloned();
+    pub fn from_tectonics_parts(
+        mut saved_environment: Option<tec11_proto::PlanetaryEnvironment>,
+        parts: (
+            SphericalGrid,
+            Vec<Vec<usize>>,
+            Vec<TileGeology>,
+            Vec<LithosphericGroup>,
+            ClimateModel,
+            f64,
+            f64,
+            f64,
+            u32,
+            Pcg64Mcg,
+        ),
+    ) -> Self {
         if let Some(ref mut env) = saved_environment {
             env.has_atmosphere = true;
             env.has_life = true;
@@ -431,7 +442,7 @@ impl PrehistorySimulation {
             tilt_deg,
             tectonics_ticks,
             mut rng,
-        ) = tec.take_parts_for_prehistory();
+        ) = parts;
         for t in &mut tiles {
             t.reset_surficial_soil_from_bedrock();
         }
@@ -514,7 +525,7 @@ impl PrehistorySimulation {
         let radius_km = if r_f32 > 0.0 {
             r_f32 as f64
         } else {
-            PangeaWorld::planet_radius_km(grid_size)
+            planet_radius_km(grid_size)
         };
         let spin_f32 = self.spin as f32;
         let spin = if spin_f32 > 0.0 { spin_f32 as f64 } else { 1.0 };
@@ -604,7 +615,7 @@ impl PrehistorySimulation {
     /// in `prehistorysimulation.py:103-146`).
     pub fn step(&mut self) {
         *self.settled_biosphere.borrow_mut() = None;
-        let _span_glac = crate::profile::span(crate::profile::ProfilePhase::PreGlaciationClimate);
+        let _span_glac = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::PreGlaciationClimate);
         // 1. Count initial glacial tiles (`EF = 12`, `ET = 13`) per continent group (`prehistorysimulation.py:104-106`).
         let old_glaciers: Vec<usize> = self
             .groups
@@ -667,7 +678,7 @@ impl PrehistorySimulation {
         self.prehistory_ticks += 1;
 
         drop(_span_glac);
-        let _span_riv = crate::profile::span(crate::profile::ProfilePhase::PreRiversAndTechSparks);
+        let _span_riv = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::PreRiversAndTechSparks);
         // 6. Seed Eden if currently unpopulated (`prehistorysimulation.py:126-127`).
         let elevations: Vec<f32> = self.tile_elevations();
         if self.populated.is_empty() {
@@ -781,7 +792,7 @@ impl PrehistorySimulation {
         }
 
         drop(_span_riv);
-        let _span_exp = crate::profile::span(crate::profile::ProfilePhase::PrePopulationExpansion);
+        let _span_exp = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::PrePopulationExpansion);
         // 9. Run up to `PREHISTORY_ANTHROGLACIAL_STEPS` (6) migration steps (`prehistorysimulation.py:140-143`).
         let mut popcache: BTreeMap<(usize, bool), bool> = BTreeMap::new();
         for _ in 0..PREHISTORY_ANTHROGLACIAL_STEPS {
@@ -804,7 +815,7 @@ impl PrehistorySimulation {
         }
 
         drop(_span_exp);
-        let _span_rac = crate::profile::span(crate::profile::ProfilePhase::PreRacination);
+        let _span_rac = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::PreRacination);
         // 10. Speciate / racinate isolated or admixed populations (`prehistorysimulation.py:146`).
         let mut next_id = self.next_heritage_id;
         racinate_with_technologies(
@@ -1048,7 +1059,7 @@ impl PrehistorySimulation {
         }
     }
 
-    pub(crate) fn take_or_settle_biosphere(&mut self, elevations: &[f32]) -> SettledBiosphere {
+    pub fn take_or_settle_biosphere(&mut self, elevations: &[f32]) -> SettledBiosphere {
         if let Some(bio) = self.settled_biosphere.get_mut().take() {
             bio
         } else {
@@ -1174,7 +1185,7 @@ impl PrehistorySimulation {
         let radius_km = if snap.radius_km > 0.0 {
             snap.radius_km as f64
         } else {
-            PangeaWorld::planet_radius_km(grid_size)
+            planet_radius_km(grid_size)
         };
         let spin = if snap.spin > 0.0 {
             snap.spin as f64
@@ -1777,135 +1788,8 @@ impl PrehistorySimulation {
         tile.to_stratigraphy_json(tile_idx, None)
     }
 
-    pub fn inspect_tile_structured(
-        &self,
-        tile_idx: usize,
-    ) -> Option<crate::sky_vantage::TileInspectionView> {
-        let tile = self.tiles.get(tile_idx)?;
-        let (home_star, optics, solar_system, constellations, moon_count) =
-            if let Some(ref env_proto) = self.saved_environment {
-                let dummy_snap = tec11_proto::PlanetSnapshot {
-                    rng_state_16b: Vec::new(),
-                    grid_size: self.grid.size,
-                    radius_km: self.radius_km() as f32,
-                    spin: self.spin as f32,
-                    tilt_deg: self.tilt_deg as f32,
-                    stage: None,
-                    environment: Some(env_proto.clone()),
-                };
-                let sky = crate::sun_sky::ReconstructedSkyEnvironment::from_snapshot(
-                    &dummy_snap,
-                    self.radius_km() as f32,
-                    self.land_percent(),
-                );
-                (
-                    sky.home_star,
-                    sky.optics,
-                    sky.solar_system,
-                    sky.constellations,
-                    sky.moon_count,
-                )
-            } else {
-                let home_star = crate::sun_sky::HomeStar::sol();
-                let optics = crate::sun_sky::PlanetaryOptics::compute(
-                    &home_star,
-                    crate::sun_sky::AtmosphereType::EarthLikeN2O2,
-                );
-                let mut sys_rng = Pcg64Mcg::from_seed_u64(0x517C_C1B7_2722_0A95);
-                let ecliptic_pole = [0.0, -0.398, 0.917];
-                let mut solar_system = crate::sun_sky::generate_solar_system_with_rng(
-                    &mut sys_rng,
-                    &home_star,
-                    ecliptic_pole,
-                    true,
-                );
-                crate::sun_sky::substitute_simulated_planet(
-                    &mut solar_system,
-                    &home_star,
-                    self.radius_km() as f32,
-                    self.land_percent(),
-                    1,
-                    ecliptic_pole,
-                );
-                let constellations = crate::sun_sky::generate_default_constellations(42);
-                (home_star, optics, solar_system, constellations, 1)
-            };
-        let elev = tile.elevation();
-        let isl_k = self.subgrid_island_koeppen.get(tile_idx).copied().unwrap_or(0);
-        let is_subgrid_island = elev <= 0.0 && isl_k != 0;
-        let koeppen = if is_subgrid_island {
-            isl_k
-        } else {
-            self.tile_koeppen.get(tile_idx).copied().unwrap_or(0)
-        };
-        let loc_summary = if is_subgrid_island {
-            format!(
-                "Sub-grid Island ({}) | Bathymetry: {elev:.2} km",
-                tec11_koeppen::koeppen_climate_name(koeppen)
-            )
-        } else if elev <= 0.0 {
-            format!("Marine Basin | Bathymetry: {elev:.2} km")
-        } else {
-            format!(
-                "{} | Elevation: +{elev:.2} km",
-                tec11_koeppen::koeppen_climate_name(koeppen)
-            )
-        };
-        let (pop_summary, tech_str) = if let Some(&hid) = self.populated.get(&tile_idx) {
-            let is_ag = self.agricultural_heritages.contains(&hid);
-            let is_riv = self.rivergoing_heritages.contains(&hid);
-            let is_sea = self.seafaring_heritages.contains(&hid);
-            let pop_k = self.tile_population_for_heritage_thousands(tile_idx, hid);
-            let mut tech = Vec::new();
-            if is_ag {
-                tech.push("Agricultural");
-            }
-            if is_riv {
-                tech.push("Rivergoing");
-            }
-            if is_sea {
-                tech.push("Seafaring");
-            }
-            if tech.is_empty() {
-                tech.push("Paleolithic");
-            }
-            (format!("{pop_k:.1}K (Heritage #{hid})"), tech.join(" · "))
-        } else {
-            ("Uninhabited".to_string(), "Prehistory".to_string())
-        };
-        let surf_infos = crate::tile_surface_infos(&self.tiles);
-        let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
-            tile_idx,
-            crate::sky_vantage::CoarseTileSkyParams {
-                grid: &self.grid,
-                adjacency: &self.adjacency,
-                tiles: &surf_infos,
-                koeppen_ids: &self.tile_koeppen,
-                glacier_cover: self.climate_model.tile_glacier_cover(),
-                tile_life: &self.tile_life,
-                river_tiles: Some(&self.river_tiles),
-                radius_km: self.radius_km(),
-                day_hours: 24.0 / self.spin.max(0.1),
-                tilt_deg: self.tilt_deg,
-                has_atmosphere: true,
-                has_life: true,
-                current_year: 0,
-                moon_count,
-                home_star: &home_star,
-                optics: &optics,
-                solar_system: &solar_system,
-                constellations: &constellations,
-                title: format!("Coarse Tile #{tile_idx}"),
-                location_summary: loc_summary,
-                population_summary: pop_summary,
-                technology: tech_str,
-                stratigraphy_json: self.inspect_tile_stratigraphy_json(tile_idx),
-            },
-        )?;
-        let (flora, fauna) = self.salient_flora_and_fauna_for_tile(tile_idx, 6, 6);
-        view.flora = flora;
-        view.fauna = fauna;
-        Some(view)
+    pub fn subgrid_island_koeppen(&self) -> &[u8] {
+        &self.subgrid_island_koeppen
     }
 
     pub fn salient_flora_and_fauna_for_tile(
@@ -1956,7 +1840,7 @@ mod tests {
 
     #[test]
     fn test_custom_planet_prehistory_rivers_use_physical_km_threshold() {
-        let mut tec = TectonicsSimulation::new(4, 30.0, 2026);
+        let mut tec = tec11_geology::TectonicsSimulation::new(4, 30.0, 2026);
         for _ in 0..35 {
             tec.step();
         }
@@ -2069,8 +1953,8 @@ mod tests {
 
         // Give t_a fertile basaltic/volcanic topsoil and t_b nutrient-poor granite topsoil,
         // and settle a shared biosphere with identical plant/herbivore counts on both tiles.
-        sim.tiles[t_a] = TileGeology::empty_land(crate::rock::Rock::extrusive(0.48), 1.0);
-        sim.tiles[t_b] = TileGeology::empty_land(crate::rock::Rock::intrusive(0.74), 1.0);
+        sim.tiles[t_a] = TileGeology::empty_land(tec11_geology::rock::Rock::extrusive(0.48), 1.0);
+        sim.tiles[t_b] = TileGeology::empty_land(tec11_geology::rock::Rock::intrusive(0.74), 1.0);
         assert!(
             sim.tiles[t_a].surface_soil_fertility() > sim.tiles[t_b].surface_soil_fertility(),
             "Basaltic topsoil should have higher fertility than granitic topsoil"

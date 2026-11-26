@@ -1,4 +1,4 @@
-use tec11_geology::PopulationSandbox;
+use tec11_prehistory::PopulationSandbox;
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids};

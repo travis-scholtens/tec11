@@ -530,7 +530,7 @@ impl LocalTerrainWorld {
 mod tests {
     use super::*;
     use tec11_geology::rock::{Rock, RockKind, RockLayer};
-    use tec11_geology::PrehistorySimulation;
+    use tec11_prehistory::PrehistorySimulation;
     use tec11_proto::Message as _;
 
     fn earth_snapshot_bytes() -> Vec<u8> {
