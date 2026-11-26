@@ -4,18 +4,14 @@ rust_library(
     name = "tec11_prehistory",
     srcs = [
         "src/lib.rs",
-        "src/lifeforms.rs",
         "src/population.rs",
         "src/prehistory.rs",
         "src/racination.rs",
     ],
-    compile_data = [
-        "data/animals.tsv",
-        "data/plants.tsv",
-    ],
     edition = "2021",
     visibility = ["//visibility:public"],
     deps = [
+        "//crates/tec11-biosphere:tec11_biosphere",
         "//crates/tec11-climate:tec11_climate",
         "//crates/tec11-geology:tec11_geology",
         "//crates/tec11-koeppen:tec11_koeppen",
@@ -23,6 +19,7 @@ rust_library(
         "//crates/tec11-proto:tec11_proto",
         "//crates/tec11-rivers:tec11_rivers",
         "//crates/tec11-terrain:tec11_terrain",
+        "//crates/tec11-topography:tec11_topography",
     ],
 )
 
