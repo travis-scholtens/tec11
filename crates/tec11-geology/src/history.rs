@@ -9393,7 +9393,7 @@ impl HistorySimulation {
             .get(primary_c)
             .copied()
             .unwrap_or(0);
-        let climate_str = crate::world::koeppen_climate_name(koeppen_code);
+        let climate_str = tec11_koeppen::koeppen_climate_name(koeppen_code);
         let is_river = self.river_tiles.get(fine_idx).copied().unwrap_or(false);
 
         let state_id = self.tile_states.get(&fine_idx).copied();
@@ -10167,7 +10167,7 @@ impl HistorySimulation {
                 DisplayFaceSource::OceanCoarse(c_idx) => {
                     if aspect == "color" {
                         let h = coarse_elevs.get(c_idx).copied().unwrap_or(-3.0).min(-0.01);
-                        let rgb = crate::world::WorldSimulation::natural_color_shaded(
+                        let rgb = tec11_sky_view::natural_color_shaded(
                             h,
                             0.0,
                             felsities.get(c_idx).copied().unwrap_or(0.5),
@@ -10177,7 +10177,7 @@ impl HistorySimulation {
                             op_ref,
                         );
                         let ice = ocean.sea_ice_cover.get(c_idx).copied().unwrap_or(0.0);
-                        let rgb = crate::world::WorldSimulation::blend_sea_ice_rgb(rgb, ice);
+                        let rgb = tec11_sky_view::blend_sea_ice_rgb(rgb, ice);
                         out.extend_from_slice(&rgb);
                     } else if aspect == "population" {
                         out.extend_from_slice(&[0.03, 0.06, 0.14]);
@@ -10221,7 +10221,7 @@ impl HistorySimulation {
                 if aspect == "color" {
                     let c_idx = self.terrain.primary_coarse_tile(f_idx, &coarse_elevs);
                     let h = self.terrain.fine_elevations[f_idx].min(-0.01);
-                    let rgb = crate::world::WorldSimulation::natural_color_shaded(
+                    let rgb = tec11_sky_view::natural_color_shaded(
                         h,
                         0.0,
                         felsities[c_idx],
@@ -10266,7 +10266,7 @@ impl HistorySimulation {
                         .get(c_idx)
                         .map(|t| t.mountainosity)
                         .unwrap_or(0.0);
-                    let rgb = crate::world::WorldSimulation::natural_color_shaded(
+                    let rgb = tec11_sky_view::natural_color_shaded(
                         h,
                         mount,
                         felsities[c_idx],

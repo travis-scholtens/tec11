@@ -2695,7 +2695,7 @@ impl TectonicsSimulation {
             let k_code = self.tile_koeppen.get(tile_idx).copied().unwrap_or(0);
             format!(
                 "{} | Elevation: +{elev:.2} km",
-                crate::world::koeppen_climate_name(k_code)
+                tec11_koeppen::koeppen_climate_name(k_code)
             )
         };
         let surf_infos = crate::tile_surface_infos(&self.tiles);

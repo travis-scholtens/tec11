@@ -3,13 +3,9 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 rust_library(
     name = "tec11_geology",
     srcs = [
-        "src/erosion_sandbox.rs",
         "src/history.rs",
         "src/lib.rs",
         "src/lifeforms.rs",
-        "src/meteor_sandbox.rs",
-        "src/moon_sandbox.rs",
-        "src/move_sandbox.rs",
         "src/movement.rs",
         "src/pangea.rs",
         "src/population.rs",
@@ -18,13 +14,9 @@ rust_library(
         "src/racination.rs",
         "src/rivers.rs",
         "src/rock.rs",
-        "src/split_sandbox.rs",
         "src/tectonics.rs",
         "src/terrain.rs",
-        "src/tides_sandbox.rs",
         "src/tile.rs",
-        "src/weather_sandbox.rs",
-        "src/world.rs",
     ],
     compile_data = [
         "data/animals.tsv",
@@ -40,8 +32,6 @@ rust_library(
         "//crates/tec11-math-grid:tec11_math_grid",
         "//crates/tec11-proto:tec11_proto",
         "//crates/tec11-sky-view:tec11_sky_view",
-        "//crates/tec11-tides:tec11_tides",
-        "//crates/tec11-weather:tec11_weather",
     ],
 )
 

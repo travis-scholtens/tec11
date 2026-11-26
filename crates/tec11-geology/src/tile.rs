@@ -372,6 +372,23 @@ impl TileGeology {
         best
     }
 
+    /// Lightweight surface summary `(elev_km, mountainosity_norm, top_felsity, rock_name, rock_kind_code)`
+    /// for view/rendering layers such as `tec11-sky-view`.
+    pub fn surface_info_tuple(&self) -> (f32, f32, f32, &'static str, &'static str) {
+        let (rock_name, rock_kind_code) = if let Some(top) = self.layers.last() {
+            (top.rock.name, top.rock.kind.code())
+        } else {
+            ("basalt", "I")
+        };
+        (
+            self.elevation(),
+            self.mountainosity_norm(),
+            self.top_felsity(),
+            rock_name,
+            rock_kind_code,
+        )
+    }
+
     pub fn impact_signature(&self) -> f32 {
         self.impact_scar.max(self.stratigraphic_impact_signature())
     }

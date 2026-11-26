@@ -4,14 +4,14 @@ use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M, ME
 use tec11_math_grid::{dot, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::prehistory::PrehistorySimulation;
-use crate::rock::{
+use tec11_geology::prehistory::PrehistorySimulation;
+use tec11_geology::rock::{
     deposit_sedimentary, DepositClimate, ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
-use crate::sun_sky::HomeStar;
-use crate::tectonics::TectonicsSimulation;
-use crate::tile::TileGeology;
-use crate::world::{koeppen_climate_name, koeppen_rgb};
+use tec11_cosmos::HomeStar;
+use tec11_geology::tectonics::TectonicsSimulation;
+use tec11_geology::tile::TileGeology;
+use tec11_koeppen::{koeppen_climate_name, koeppen_rgb};
 
 /// Standalone Moon, Harmonic Orbit & Tidal Erosion Sandbox (`MoonScreen`).
 /// Loads any `.tec11` planet file (or canned Earth `ETOPO2`) and visualizes:

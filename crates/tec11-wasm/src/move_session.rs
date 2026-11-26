@@ -1,4 +1,4 @@
-use tec11_geology::MoveSandbox;
+use tec11_tectonics_sandboxes::MoveSandbox;
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids};

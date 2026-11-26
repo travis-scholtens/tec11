@@ -1,11 +1,11 @@
 use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::history::HistorySimulation;
-use crate::population::tile_population_thousands_with_water_tech;
-use crate::prehistory::PrehistorySimulation;
-use crate::racination::Heritage;
-use crate::sun_sky::{
+use tec11_geology::history::HistorySimulation;
+use tec11_geology::population::tile_population_thousands_with_water_tech;
+use tec11_geology::prehistory::PrehistorySimulation;
+use tec11_geology::racination::Heritage;
+use tec11_cosmos::{
     build_star_map_buffers_from_sky, format_solar_system_summary,
     generate_solar_system_with_rng, sample_atmosphere_with_rng, sample_galactic_home_with_rng,
     sample_home_star_with_rng, substitute_simulated_planet,
@@ -13,8 +13,8 @@ use crate::sun_sky::{
     synthesize_galaxy_cloud_normalized, AtmosphereType, Constellation, GalacticVantage,
     GalaxyType, HomeStar, PlanetaryOptics, SolarSystemPlanet,
 };
-use crate::tectonics::TectonicsSimulation;
-use crate::tile::TileGeology;
+use tec11_geology::tectonics::TectonicsSimulation;
+use tec11_geology::tile::TileGeology;
 
 pub use tec11_koeppen::{koeppen_climate_name, koeppen_rgb};
 
@@ -151,7 +151,7 @@ impl WorldSimulation {
     }
 
     pub fn new(params: WorldCreateParams, seed: u64) -> Self {
-        let _span_init = crate::profile::span(crate::profile::ProfilePhase::StageWorldInit);
+        let _span_init = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::StageWorldInit);
         let mut tec = TectonicsSimulation::new_with_full_params(
             params.grid_size,
             params.day_hours as f64,
@@ -624,7 +624,7 @@ impl WorldSimulation {
 
         let transition = match &mut self.stage {
             WorldStageState::Tectonics(tec) => {
-                let _span = crate::profile::span(crate::profile::ProfilePhase::StageTectonics);
+                let _span = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::StageTectonics);
                 tec.step();
                 self.tectonics_ticks = tec.geoticks();
                 if tec.has_life() {
@@ -639,7 +639,7 @@ impl WorldSimulation {
                 }
             }
             WorldStageState::Prehistory(pre) => {
-                let _span = crate::profile::span(crate::profile::ProfilePhase::StagePrehistory);
+                let _span = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::StagePrehistory);
                 pre.step();
                 self.prehistory_ticks = pre.prehistory_ticks();
                 // Rivergoing and seafaring let prehistoric peoples disperse along rivers and across seas,
@@ -651,7 +651,7 @@ impl WorldSimulation {
                 }
             }
             WorldStageState::History(hist) => {
-                let _span = crate::profile::span(crate::profile::ProfilePhase::StageHistory);
+                let _span = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::StageHistory);
                 hist.step();
                 self.history_ticks = hist.history_ticks();
                 StageTransition::None
@@ -675,7 +675,7 @@ impl WorldSimulation {
     }
 
     fn enter_prehistory_stage(&mut self) {
-        let _span = crate::profile::span(crate::profile::ProfilePhase::StageToPrehistory);
+        let _span = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::StageToPrehistory);
         if let WorldStageState::Tectonics(tec) = &mut self.stage {
             let _sub_seed = self.rng.next_u64();
             let mut pre = PrehistorySimulation::from_tectonics_mut(tec);
@@ -687,12 +687,12 @@ impl WorldSimulation {
     }
 
     fn enter_history_stage(&mut self) {
-        let _span = crate::profile::span(crate::profile::ProfilePhase::StageToHistory);
+        let _span = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::StageToHistory);
         if let WorldStageState::Prehistory(pre) = &mut self.stage {
             let sub_seed = self.rng.next_u64();
             let pre_copy = {
                 let _span_copy =
-                    crate::profile::span(crate::profile::ProfilePhase::HistInitPrehistoryCopy);
+                    tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::HistInitPrehistoryCopy);
                 pre.take_for_history()
             };
             let mpy = self.main_moon_synodic_months_per_year();
@@ -947,7 +947,7 @@ impl WorldSimulation {
     pub fn inspect_state_for_tile(
         &self,
         tile_idx: usize,
-    ) -> Option<crate::history::StateInspectionView> {
+    ) -> Option<tec11_geology::history::StateInspectionView> {
         match &self.stage {
             WorldStageState::History(hist) => hist.inspect_state_for_tile(tile_idx),
             _ => None,
@@ -958,7 +958,7 @@ impl WorldSimulation {
         &self,
         state_id: u32,
         selected_fine_idx: Option<usize>,
-    ) -> Option<crate::history::StateInspectionView> {
+    ) -> Option<tec11_geology::history::StateInspectionView> {
         match &self.stage {
             WorldStageState::History(hist) => hist.inspect_state(state_id, selected_fine_idx),
             _ => None,
@@ -968,7 +968,7 @@ impl WorldSimulation {
     pub fn inspect_tile_structured(
         &self,
         tile_idx: usize,
-    ) -> Option<crate::sky_vantage::TileInspectionView> {
+    ) -> Option<tec11_sky_view::TileInspectionView> {
         match &self.stage {
             WorldStageState::Tectonics(tec) => {
                 let tile = tec.tiles().get(tile_idx)?;
@@ -980,7 +980,7 @@ impl WorldSimulation {
                 } else if elev <= 0.0 {
                     format!(
                         "{} | Bathymetry: {elev:.2} km",
-                        crate::tectonics::classify_submarine_tile(tile)
+                        tec11_geology::tectonics::classify_submarine_tile(tile)
                     )
                 } else {
                     let k_code = tec.tile_koeppen_ids().get(tile_idx).copied().unwrap_or(0);
@@ -989,10 +989,10 @@ impl WorldSimulation {
                         koeppen_climate_name(k_code)
                     )
                 };
-                let surf_infos = crate::tile_surface_infos(tec.tiles());
-                let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
+                let surf_infos = tec11_geology::tile_surface_infos(tec.tiles());
+                let mut view = tec11_sky_view::build_coarse_tile_inspection_view(
                     tile_idx,
-                    crate::sky_vantage::CoarseTileSkyParams {
+                    tec11_sky_view::CoarseTileSkyParams {
                         grid: tec.grid(),
                         adjacency: tec.adjacency(),
                         tiles: &surf_infos,
@@ -1038,7 +1038,7 @@ impl WorldSimulation {
                 let loc_summary = if elev <= 0.0 {
                     format!(
                         "{} | Bathymetry: {elev:.2} km",
-                        crate::tectonics::classify_submarine_tile(tile)
+                        tec11_geology::tectonics::classify_submarine_tile(tile)
                     )
                 } else {
                     format!(
@@ -1078,10 +1078,10 @@ impl WorldSimulation {
                 } else {
                     ("Uninhabited".to_string(), "Prehistory".to_string())
                 };
-                let surf_infos = crate::tile_surface_infos(pre.tiles());
-                let mut view = crate::sky_vantage::build_coarse_tile_inspection_view(
+                let surf_infos = tec11_geology::tile_surface_infos(pre.tiles());
+                let mut view = tec11_sky_view::build_coarse_tile_inspection_view(
                     tile_idx,
-                    crate::sky_vantage::CoarseTileSkyParams {
+                    tec11_sky_view::CoarseTileSkyParams {
                         grid: pre.grid(),
                         adjacency: pre.adjacency(),
                         tiles: &surf_infos,
@@ -1119,14 +1119,14 @@ impl WorldSimulation {
     pub fn inspect_language(
         &self,
         lang_id: u32,
-    ) -> Option<crate::history::LanguageDetailView> {
+    ) -> Option<tec11_geology::history::LanguageDetailView> {
         match &self.stage {
             WorldStageState::History(hist) => hist.inspect_language(lang_id),
             _ => None,
         }
     }
 
-    pub fn inspect_nation(&self, nat_id: u32) -> Option<crate::history::NationDetailView> {
+    pub fn inspect_nation(&self, nat_id: u32) -> Option<tec11_geology::history::NationDetailView> {
         match &self.stage {
             WorldStageState::History(hist) => hist.inspect_nation(nat_id),
             _ => None,
@@ -2179,7 +2179,7 @@ impl WorldSimulation {
     }
 
     pub fn encode_snapshot(&self) -> Vec<u8> {
-        let _span = crate::profile::span(crate::profile::ProfilePhase::StageSnapshotEncode);
+        let _span = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::StageSnapshotEncode);
         let mut snap = match &self.stage {
             WorldStageState::Tectonics(tec) => tec.to_snapshot(),
             WorldStageState::Prehistory(pre) => pre.to_snapshot(),
@@ -2231,7 +2231,7 @@ impl WorldSimulation {
             } else {
                 Self::planet_radius_km(self.params.grid_size)
             };
-            let sky = crate::sun_sky::ReconstructedSkyEnvironment::from_snapshot(
+            let sky = tec11_cosmos::ReconstructedSkyEnvironment::from_snapshot(
                 &snap,
                 radius_km,
                 self.params.land_pct,
@@ -2892,7 +2892,7 @@ mod tests {
         // 2. Gating: with 1 required glaciation cycle (32 ticks), agriculture cannot spark before tick 32
         let mut pre = PrehistorySimulation::new_earth(42);
         pre.set_min_glaciation_cycles(1);
-        assert_eq!(pre.min_ag_ticks(), 2 * crate::prehistory::PREHISTORY_GLACIATION_STEP);
+        assert_eq!(pre.min_ag_ticks(), 2 * tec11_geology::prehistory::PREHISTORY_GLACIATION_STEP);
         for _ in 0..10 {
             pre.step();
             assert_eq!(

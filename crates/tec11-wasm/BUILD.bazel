@@ -36,8 +36,13 @@ rust_shared_library(
         "//crates/tec11-geology:tec11_geology",
         "//crates/tec11-local-terrain:tec11_local_terrain",
         "//crates/tec11-math-grid:tec11_math_grid",
+        "//crates/tec11-planet-sandboxes:tec11_planet_sandboxes",
         "//crates/tec11-proto:tec11_proto",
         "//crates/tec11-speech:tec11_speech",
+        "//crates/tec11-tectonics-sandboxes:tec11_tectonics_sandboxes",
+        "//crates/tec11-tides-sandbox:tec11_tides_sandbox",
+        "//crates/tec11-weather-sandbox:tec11_weather_sandbox",
+        "//crates/tec11-world:tec11_world",
         "@rules_rust_wasm_bindgen//3rdparty:wasm_bindgen",
     ],
 )

@@ -10,7 +10,7 @@ use tec11_geology::profile::{
     self, ProfilePhase, ALLOC_CALLS, DEALLOC_CALLS, LIVE_BYTES, PEAK_LIVE_BYTES, REALLOC_CALLS,
     TOTAL_ALLOC_BYTES, TOTAL_DEALLOC_BYTES,
 };
-use tec11_geology::world::{
+use tec11_world::{
     format_with_commas, WorldCreateParams, WorldSimulation, WorldStageState,
 };
 
