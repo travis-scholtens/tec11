@@ -5,7 +5,8 @@ use std::f64::consts::PI;
 
 use tec11_climate::{nominal_cells_for_spin, ClimateModel};
 use tec11_geology::rock::RockLayer;
-use tec11_geology::{trace_coarse_rivers, PangeaWorld, TileGeology};
+use tec11_geology::{planet_radius_km, TileGeology};
+use tec11_rivers::trace_coarse_rivers;
 use tec11_math_grid::{SphericalGrid, SubdividedTerrainGrid};
 use tec11_proto::{Message as _, PlanetSnapshot, PlanetStageOneof};
 
@@ -172,7 +173,7 @@ impl PlanetaryTerrainContext {
         let radius_km = if snap.radius_km > 100.0 {
             snap.radius_km as f64
         } else {
-            PangeaWorld::planet_radius_km(grid_size)
+            planet_radius_km(grid_size)
         };
         let spin = if snap.spin > 0.01 {
             snap.spin as f64

@@ -9,14 +9,14 @@ use tec11_proto::PlanetSnapshotExt;
 
 use crate::movement::{center_tile, farthest_tile, move_group, split_group};
 use crate::pangea::PangeaWorld;
-use crate::rock::{
+use tec11_geology::rock::{
     deposit_sedimentary, enrich_orogenic_veins_in_place, metamorphic_contact,
     metamorphic_regional_in_place, DepositClimate, ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
-use crate::tile::{TileGeology, TileSourceColumn};
+use tec11_geology::tile::{TileGeology, TileSourceColumn};
 
 /// A moving continental / lithospheric group (`Group` in `tile.py:17-20`).
-pub use crate::tile::LithosphericGroup;
+pub use tec11_geology::tile::LithosphericGroup;
 
 /// An active mid-ocean spreading ridge segment on the unit sphere (`Section 5.4` of the design doc).
 #[derive(Clone, Debug)]
@@ -1125,7 +1125,7 @@ impl TectonicsSimulation {
     /// in `planetsimulation.py:211-381` + full ocean-floor bathymetry from Section 5.4).
     pub fn step(&mut self) {
         let n = self.tiles.len();
-        let _span_adv = crate::profile::span(crate::profile::ProfilePhase::TecPlateAdvectionAndSubduction);
+        let _span_adv = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::TecPlateAdvectionAndSubduction);
 
         // 0. Clear previous tick's transient subduction & intrusion markers, and weather impact scars
         //    on the crustal columns themselves (so scars move with continental drift).
@@ -1528,7 +1528,7 @@ impl TectonicsSimulation {
         }
 
         drop(_span_adv);
-        let _span_ridge = crate::profile::span(crate::profile::ProfilePhase::TecRidgeAndOceanBathymetry);
+        let _span_ridge = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::TecRidgeAndOceanBathymetry);
 
         // 3. Mid-ocean ridges, mantle hotspot plumes, intra-oceanic subduction arcs, and
         //    water-loaded Airy-isostatic ocean bathymetry:
@@ -1998,10 +1998,10 @@ impl TectonicsSimulation {
         if self.has_atmosphere() {
             let has_life = self.has_life() && self.impact_winter_ticks == 0;
             {
-                let _span_clim = crate::profile::span(crate::profile::ProfilePhase::TecClimateAndOceanCirculation);
+                let _span_clim = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::TecClimateAndOceanCirculation);
                 self.refresh_climate_fields();
             }
-            let _span_erode = crate::profile::span(crate::profile::ProfilePhase::TecErosionAndDeposition);
+            let _span_erode = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::TecErosionAndDeposition);
             if self.impact_winter_ticks > 0 {
                 for l in &mut self.tile_life {
                     *l *= 0.25;
@@ -2249,7 +2249,7 @@ impl TectonicsSimulation {
             }
         }
 
-        let _span_meta = crate::profile::span(crate::profile::ProfilePhase::TecMetamorphismAndRifting);
+        let _span_meta = tec11_geology::profile::span(tec11_geology::profile::ProfilePhase::TecMetamorphismAndRifting);
         // 7. Random plutonic intrusions and contact metamorphism on continental arcs (`planetsimulation.py:325-329`).
         for t in 0..n {
             if in_new_continent[t] && self.tiles[t].subduction > 0.0 && self.rng.next_f64() < 0.1 {
@@ -3600,15 +3600,15 @@ mod tests {
             for t in &land_tiles {
                 let acc = t.accessible_mineral_abundances(0.5);
                 if acc
-                    .get(&crate::tile::MineralKind::Gold)
-                    .map(|&(g, a)| g >= crate::tile::WORKABLE_GRADE && a >= 0.005)
+                    .get(&tec11_geology::tile::MineralKind::Gold)
+                    .map(|&(g, a)| g >= tec11_geology::tile::WORKABLE_GRADE && a >= 0.005)
                     .unwrap_or(false)
                 {
                     workable_gold_tiles += 1;
                 }
                 if acc
-                    .get(&crate::tile::MineralKind::Quartz)
-                    .map(|&(g, a)| g >= crate::tile::WORKABLE_GRADE && a >= 0.020)
+                    .get(&tec11_geology::tile::MineralKind::Quartz)
+                    .map(|&(g, a)| g >= tec11_geology::tile::WORKABLE_GRADE && a >= 0.020)
                     .unwrap_or(false)
                 {
                     workable_quartz_tiles += 1;

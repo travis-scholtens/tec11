@@ -6,7 +6,7 @@ use tec11_math_grid::{
 use tec11_proto::PlanetSnapshotExt;
 
 use crate::prehistory::PrehistorySimulation;
-use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_rivers::trace_coarse_rivers;
 use tec11_geology::tile::TileGeology;
 
 pub const TERRAIN_MIN_RIVER_ELEV: f32 = 5.0;

@@ -1,112 +1,9 @@
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-
 use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M};
+use tec11_geology::rock::{Rock, RockKind, RockLayer};
+use tec11_geology::tile::{tiles_from_snapshot, TileGeology};
 use tec11_math_grid::{normal, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
-
-use crate::rock::{Rock, RockKind, RockLayer};
-use crate::tectonics::TectonicsSimulation;
-use crate::tile::TileGeology;
-
-/// Compute a globally consistent, cycle-free downstream flow target `downstream[t]` for every land tile `t`
-/// using Priority-Flood depression routing from the ocean (`elevation <= 0.0`).
-/// Because every land tile has at most one downstream neighbor, coarse river networks form a strict
-/// dendritic forest where tributaries merge cleanly at confluences and never cross or diverge.
-fn compute_downstream_targets(elevations: &[f32], adjacency: &[Vec<usize>]) -> Vec<Option<usize>> {
-    let n = elevations.len();
-    let mut downstream = vec![None; n];
-    let mut visited = vec![false; n];
-    let mut heap: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
-
-    let elev_key = |e: f32| -> i64 { (e as f64 * 1_000_000.0).round() as i64 };
-
-    for t in 0..n {
-        if elevations[t] <= 0.0 {
-            visited[t] = true;
-            heap.push(Reverse((elev_key(elevations[t]), t)));
-        }
-    }
-
-    // Priority-Flood from the sea inward: each unvisited land tile `nb` is reached first from its
-    // lowest-elevation spill path `u`, establishing a unique monotonic drainage tree to the ocean.
-    while let Some(Reverse((_, u))) = heap.pop() {
-        for &nb in &adjacency[u] {
-            if !visited[nb] {
-                visited[nb] = true;
-                // If `nb` has an already-visited neighbor with strictly lower elevation than `u`,
-                // prefer the steepest-descent visited neighbor so hillslopes follow steepest gradient.
-                let best_down = adjacency[nb]
-                    .iter()
-                    .copied()
-                    .filter(|&cand| visited[cand])
-                    .min_by(|&a, &b| {
-                        elevations[a]
-                            .partial_cmp(&elevations[b])
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| a.cmp(&b))
-                    })
-                    .unwrap_or(u);
-                downstream[nb] = Some(best_down);
-                heap.push(Reverse((elev_key(elevations[nb]), nb)));
-            }
-        }
-    }
-
-    downstream
-}
-
-/// Trace coarse rivers from local elevation peaks (`elevation >= hmin`) down to the sea,
-/// starting each active river where cumulative normalized precipitation reaches `pmin`
-/// on an unglaciated (`glacier_cover < 0.50`) land tile.
-pub fn trace_coarse_rivers(
-    elevations: &[f32],
-    precip_norm: &[f32],
-    glacier_cover: &[f32],
-    adjacency: &[Vec<usize>],
-    hmin: f32,
-    pmin: f32,
-) -> Vec<Vec<usize>> {
-    let n = elevations.len();
-    let downstream = compute_downstream_targets(elevations, adjacency);
-    let mut rivers = Vec::new();
-
-    for t in 0..n {
-        let elev_t = elevations[t];
-        if elev_t > 0.0
-            && elev_t >= hmin
-            && adjacency[t].iter().all(|&nb| elev_t >= elevations[nb])
-        {
-            let mut ts = Vec::new();
-            let mut cur_opt = Some(t);
-            let mut steps = 0usize;
-            while let Some(u) = cur_opt {
-                ts.push(u);
-                if elevations[u] <= 0.0 || steps > n {
-                    break;
-                }
-                cur_opt = downstream[u];
-                steps += 1;
-            }
-            if ts.last().is_some_and(|&last| elevations[last] <= 0.0) {
-                let mut p_cum = 0.0f32;
-                for i in 0..ts.len() {
-                    let u = ts[i];
-                    if elevations[u] > 0.0 {
-                        p_cum += precip_norm[u];
-                    }
-                    let is_glaciated = glacier_cover.get(u).copied().unwrap_or(0.0) >= 0.50;
-                    if elevations[u] > 0.0 && !is_glaciated && p_cum >= pmin {
-                        rivers.push(ts[i..].to_vec());
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    rivers
-}
+use tec11_rivers::trace_coarse_rivers;
 
 /// Standalone rivers sandbox (`riverssimulation.py`, `riversdisplay.py`, `riverspresenter.py`).
 pub struct RiversSandbox {
@@ -211,22 +108,23 @@ impl RiversSandbox {
         let Ok(snap) = tec11_proto::PlanetSnapshot::decode_bytes(bytes) else {
             return false;
         };
-        let Some(tec_sim) = TectonicsSimulation::from_snapshot(&snap, 42) else {
+        let Some((grid, tiles, geoticks)) = tiles_from_snapshot(&snap) else {
             return false;
         };
-        let grid = tec_sim.grid().clone();
         let adjacency = grid.adjacency();
         let n = grid.faces.len();
+        let land_cnt = tiles.iter().filter(|t| t.elevation() > 0.0).count();
+        let land_pct = ((land_cnt as f64) * 100.0 / (n.max(1) as f64)).round() as u32;
         self.grid = grid.clone();
         self.adjacency = adjacency;
-        self.tiles = tec_sim.tiles().to_vec();
+        self.tiles = tiles;
         self.climate_model = ClimateModel::new_for_tectonics(grid, 3, 1.0, 23.0);
         self.tile_koeppen = vec![0; n];
         self.tile_life = vec![0.0; n];
         self.tile_precip_norm = vec![0.0; n];
         self.tile_river_progress = vec![0.0; n];
-        self.custom_geoticks = Some(tec_sim.geoticks());
-        self.custom_land_percent = Some(tec_sim.land_percent());
+        self.custom_geoticks = Some(geoticks);
+        self.custom_land_percent = Some(land_pct);
         self.recompute_climate_and_rivers();
         true
     }

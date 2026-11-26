@@ -4,23 +4,15 @@ rust_library(
     name = "tec11_geology",
     srcs = [
         "src/lib.rs",
-        "src/movement.rs",
-        "src/pangea.rs",
         "src/profile.rs",
-        "src/rivers.rs",
         "src/rock.rs",
-        "src/tectonics.rs",
         "src/tile.rs",
     ],
     edition = "2021",
     visibility = ["//visibility:public"],
     deps = [
-        "//crates/tec11-climate:tec11_climate",
-        "//crates/tec11-cosmos:tec11_cosmos",
-        "//crates/tec11-koeppen:tec11_koeppen",
         "//crates/tec11-math-grid:tec11_math_grid",
         "//crates/tec11-proto:tec11_proto",
-        "//crates/tec11-sky-view:tec11_sky_view",
     ],
 )
 

@@ -5,7 +5,7 @@ use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{dot, Pcg64Mcg, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
-use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_rivers::trace_coarse_rivers;
 use tec11_geology::rock::{Rock, RockKind, RockLayer};
 use tec11_geology::tile::{tiles_from_snapshot, TileGeology};
 

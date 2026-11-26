@@ -1,4 +1,5 @@
-use tec11_geology::{RockKind, TectonicsSimulation};
+use tec11_geology::RockKind;
+use tec11_tectonics::TectonicsSimulation;
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids};
@@ -156,7 +157,7 @@ impl WasmTectonicsSession {
         } else if elev <= 0.0 {
             format!(
                 "{} | Bathymetry: {elev:.2} km",
-                tec11_geology::classify_submarine_tile(tile)
+                tec11_tectonics::classify_submarine_tile(tile)
             )
         } else {
             let k_code = self.sim.tile_koeppen_ids().get(tile_idx).copied().unwrap_or(0);

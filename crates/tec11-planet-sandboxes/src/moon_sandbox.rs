@@ -9,7 +9,7 @@ use tec11_geology::rock::{
     deposit_sedimentary, DepositClimate, ErodedMaterialBatch, Rock, RockKind, RockLayer,
 };
 use tec11_cosmos::HomeStar;
-use tec11_geology::tectonics::TectonicsSimulation;
+use tec11_tectonics::tectonics::TectonicsSimulation;
 use tec11_geology::tile::TileGeology;
 use tec11_koeppen::{koeppen_climate_name, koeppen_rgb};
 

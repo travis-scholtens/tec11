@@ -1,0 +1,22 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+rust_library(
+    name = "tec11_rivers_sandbox",
+    srcs = [
+        "src/lib.rs",
+    ],
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/tec11-climate:tec11_climate",
+        "//crates/tec11-geology:tec11_geology",
+        "//crates/tec11-math-grid:tec11_math_grid",
+        "//crates/tec11-proto:tec11_proto",
+        "//crates/tec11-rivers:tec11_rivers",
+    ],
+)
+
+rust_test(
+    name = "tec11_rivers_sandbox_test",
+    crate = ":tec11_rivers_sandbox",
+)

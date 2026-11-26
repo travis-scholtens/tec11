@@ -14,7 +14,7 @@ use tec11_prehistory::population::{
     PlanetaryGeography,
 };
 use tec11_prehistory::prehistory::PrehistorySimulation;
-use tec11_geology::rivers::trace_coarse_rivers;
+use tec11_rivers::trace_coarse_rivers;
 use tec11_cosmos::{
     generate_default_constellations, generate_solar_system_with_rng, AtmosphereType, Constellation,
     HomeStar, PlanetaryOptics, SolarSystemPlanet,

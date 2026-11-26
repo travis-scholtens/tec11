@@ -13,7 +13,7 @@ use tec11_cosmos::{
     synthesize_galaxy_cloud_normalized, AtmosphereType, Constellation, GalacticVantage,
     GalaxyType, HomeStar, PlanetaryOptics, SolarSystemPlanet,
 };
-use tec11_geology::tectonics::TectonicsSimulation;
+use tec11_tectonics::tectonics::TectonicsSimulation;
 use tec11_geology::tile::TileGeology;
 
 pub use tec11_koeppen::{koeppen_climate_name, koeppen_rgb};
@@ -985,7 +985,7 @@ impl WorldSimulation {
                 } else if elev <= 0.0 {
                     format!(
                         "{} | Bathymetry: {elev:.2} km",
-                        tec11_geology::tectonics::classify_submarine_tile(tile)
+                        tec11_tectonics::tectonics::classify_submarine_tile(tile)
                     )
                 } else {
                     let k_code = tec.tile_koeppen_ids().get(tile_idx).copied().unwrap_or(0);
@@ -1060,7 +1060,7 @@ impl WorldSimulation {
                 let loc_summary = if elev <= 0.0 {
                     format!(
                         "{} | Bathymetry: {elev:.2} km",
-                        tec11_geology::tectonics::classify_submarine_tile(tile)
+                        tec11_tectonics::tectonics::classify_submarine_tile(tile)
                     )
                 } else {
                     format!(

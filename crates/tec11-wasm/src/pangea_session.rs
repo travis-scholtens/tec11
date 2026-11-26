@@ -1,4 +1,4 @@
-use tec11_geology::PangeaWorld;
+use tec11_tectonics::PangeaWorld;
 use tec11_math_grid::Pcg64Mcg;
 use wasm_bindgen::prelude::*;
 
