@@ -5,7 +5,6 @@ use tec11_climate::{ClimateModel, EARTH_GLACIATION, EARTH_SIZE6_ELEVATIONS_M};
 use tec11_math_grid::{dot, Pcg64Mcg, SphericalGrid, Vec3};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::language::Language;
 use crate::rivers::trace_coarse_rivers;
 use crate::rock::{Rock, RockKind, RockLayer};
 use crate::tectonics::TectonicsSimulation;
@@ -176,22 +175,6 @@ impl PlanetaryGeography {
     }
 }
 
-fn format_adjectival_prefix(name: &str) -> String {
-    let lower = name.trim().to_lowercase();
-    if lower.is_empty() {
-        return "continental".to_string();
-    }
-    if lower.ends_with('n') || lower.ends_with("ic") || lower.ends_with("sh") {
-        lower
-    } else if lower.ends_with('a') || lower.ends_with('e') || lower.ends_with('o') || lower.ends_with('u') {
-        format!("{lower}n")
-    } else if lower.ends_with('i') {
-        format!("{lower}an")
-    } else {
-        format!("{lower}an")
-    }
-}
-
 fn compute_tile_set_centroid(tiles: &[usize], grid: &SphericalGrid) -> Vec3 {
     if tiles.is_empty() {
         return [1.0, 0.0, 0.0];
@@ -206,43 +189,6 @@ fn compute_tile_set_centroid(tiles: &[usize], grid: &SphericalGrid) -> Vec3 {
     } else {
         grid.faces[tiles[0]].0
     }
-}
-
-fn generate_geographic_name(
-    seed_tag: u64,
-    rank: usize,
-    centroid: Vec3,
-    used_names: &mut BTreeSet<String>,
-) -> String {
-    let qx = ((centroid[0] + 1.0) * 500.0).round() as u64;
-    let qy = ((centroid[1] + 1.0) * 500.0).round() as u64;
-    let qz = ((centroid[2] + 1.0) * 500.0).round() as u64;
-    let seed = seed_tag
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add((rank as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
-        .wrapping_add(qx << 20)
-        .wrapping_add(qy << 10)
-        .wrapping_add(qz);
-    let mut rng = Pcg64Mcg::new(seed as u128 | 1);
-    let lang = Language::generate(&mut rng);
-    let mut seen_keys = BTreeSet::new();
-    let mut seen_words = BTreeSet::new();
-    for _ in 0..32 {
-        let mut word = lang.generate_word_unique(&mut seen_keys, &seen_words, &mut rng);
-        if word.syllables.len() < 2 {
-            let extra = lang.generate_syllable(&mut rng);
-            word.syllables.push(extra);
-        }
-        seen_words.insert(word.clone());
-        let written = word.write(true);
-        if written.chars().count() >= 3 && !used_names.contains(&written) {
-            used_names.insert(written.clone());
-            return written;
-        }
-    }
-    let fallback = format!("Terra{}", rank + 1);
-    used_names.insert(fallback.clone());
-    fallback
 }
 
 /// Identify all continents (connected landmasses + associated coastal islands) and ocean basins
@@ -265,8 +211,6 @@ pub fn identify_continents_and_oceans_with_adj(
     if n == 0 {
         return PlanetaryGeography::default();
     }
-
-    let mut used_names = BTreeSet::new();
 
     // --- 1. Continents & Island Realms ---
     let mut land_dsu = DisjointSet::new(n);
@@ -360,8 +304,12 @@ pub fn identify_continents_and_oceans_with_adj(
                 tile_continent[t] = Some(cid);
             }
             let centroid = compute_tile_set_centroid(&tiles, grid);
-            let name = generate_geographic_name(0x434F_4E54, cid, centroid, &mut used_names);
-            let adjectival_prefix = format_adjectival_prefix(&name);
+            let name = if is_island_group {
+                format!("Archipelago {}", cid + 1)
+            } else {
+                format!("Continent {}", cid + 1)
+            };
+            let adjectival_prefix = name.clone();
             ContinentInfo {
                 id: cid,
                 name,
@@ -480,7 +428,7 @@ pub fn identify_continents_and_oceans_with_adj(
                 tile_ocean[t] = Some(oid);
             }
             let centroid = compute_tile_set_centroid(&tiles, grid);
-            let name = generate_geographic_name(0x4F43_4541, oid, centroid, &mut used_names);
+            let name = format!("Ocean {}", oid + 1);
             OceanBasinInfo {
                 id: oid,
                 name,
@@ -534,7 +482,7 @@ pub fn identify_continents_and_oceans_with_adj(
                 tile_sea[t] = Some(sid);
             }
             let centroid = compute_tile_set_centroid(&tiles, grid);
-            let name = generate_geographic_name(0x5345_4153, sid, centroid, &mut used_names);
+            let name = format!("Sea {}", sid + 1);
             SeaInfo {
                 id: sid,
                 name,
@@ -580,7 +528,7 @@ pub fn identify_continents_and_oceans_with_adj(
                 }
             }
             let centroid = compute_tile_set_centroid(&tiles, grid);
-            let name = generate_geographic_name(0x4D54_4E53, mid, centroid, &mut used_names);
+            let name = format!("Mountain Range {}", mid + 1);
             MountainRangeInfo {
                 id: mid,
                 name,
