@@ -1,11 +1,7 @@
-pub mod lifeforms;
 pub mod population;
 pub mod prehistory;
 pub mod racination;
 
-pub use lifeforms::{
-    settle_species_on_climate, LifeformsSandbox, SettledBiosphere, SettledSpecies, SpeciesKind,
-};
 pub use population::{
     agricultural_density, eden_tile, expand_population, expand_population_with_technologies,
     expand_population_with_technologies_and_islands, expand_within,

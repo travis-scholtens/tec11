@@ -1,4 +1,4 @@
-use tec11_prehistory::LifeformsSandbox;
+use tec11_biosphere_sandbox::LifeformsSandbox;
 use wasm_bindgen::prelude::*;
 
 use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_ids};

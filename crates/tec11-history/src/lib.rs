@@ -7,13 +7,13 @@ use tec11_math_grid::{
 };
 use tec11_proto::PlanetSnapshotExt;
 
+use tec11_biosphere::{select_salient_flora_and_fauna_ids, SettledSpecies, SpeciesKind};
 use tec11_language::{ArealFeature, Language, SoundChangeKind, Word, WordOrigin};
-use tec11_prehistory::lifeforms::{select_salient_flora_and_fauna_ids, SettledSpecies, SpeciesKind};
 use tec11_prehistory::population::{
-    is_farmable, is_habitable, is_passable, main_ocean, tile_population_thousands,
-    PlanetaryGeography,
+    is_farmable, is_habitable, is_passable, tile_population_thousands,
 };
 use tec11_prehistory::prehistory::PrehistorySimulation;
+use tec11_topography::{main_ocean, PlanetaryGeography};
 use tec11_rivers::trace_coarse_rivers;
 use tec11_cosmos::{
     generate_default_constellations, generate_solar_system_with_rng, AtmosphereType, Constellation,

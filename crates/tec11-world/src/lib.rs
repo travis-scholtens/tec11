@@ -143,7 +143,7 @@ pub struct WorldSimulation {
     sys_rng_bytes: [u8; 16],
     is_sol_system: bool,
     rng: Pcg64Mcg,
-    cached_tectonics_biosphere: std::cell::RefCell<Option<(u32, tec11_prehistory::SettledBiosphere)>>,
+    tectonics_biosphere_cache: tec11_biosphere::BiosphereCache,
 }
 
 impl WorldSimulation {
@@ -213,7 +213,7 @@ impl WorldSimulation {
             sys_rng_bytes,
             is_sol_system: true,
             rng: Pcg64Mcg::from_seed_u64(seed.wrapping_add(1000)),
-            cached_tectonics_biosphere: std::cell::RefCell::new(None),
+            tectonics_biosphere_cache: tec11_biosphere::BiosphereCache::new(),
         };
         sim.sync_counters();
         sim
@@ -609,6 +609,7 @@ impl WorldSimulation {
         );
         tec.set_meteor_freq(params.meteor_freq as f64);
         self.stage = WorldStageState::Tectonics(tec);
+        self.tectonics_biosphere_cache.clear();
         self.people_ticks_remaining = (params.people_dt_myr / 5).max(1);
         self.tectonics_ticks = 0;
         self.prehistory_ticks = 0;
@@ -1034,22 +1035,18 @@ impl WorldSimulation {
                     },
                 )?;
                 if has_atm && has_life {
-                    let mut guard = self.cached_tectonics_biosphere.borrow_mut();
-                    if !guard.as_ref().is_some_and(|(gt, _)| *gt == tec.geoticks()) {
-                        let elevations: Vec<f32> =
-                            tec.tiles().iter().map(|t| t.elevation()).collect();
-                        let bio = tec11_prehistory::settle_species_on_climate(
-                            &elevations,
+                    let (flora, fauna) = self
+                        .tectonics_biosphere_cache
+                        .select_salient_flora_and_fauna_names(
+                            tec.geoticks(),
+                            || tec.tiles().iter().map(|t| t.elevation()).collect(),
                             tec.climate_model(),
+                            tile_idx,
+                            6,
+                            6,
                         );
-                        *guard = Some((tec.geoticks(), bio));
-                    }
-                    if let Some((_, bio)) = guard.as_ref() {
-                        let (flora, fauna) =
-                            bio.select_salient_flora_and_fauna_names(tile_idx, 6, 6);
-                        view.flora = flora;
-                        view.fauna = fauna;
-                    }
+                    view.flora = flora;
+                    view.fauna = fauna;
                 }
                 Some(view)
             }
@@ -2221,6 +2218,7 @@ impl WorldSimulation {
                 self.prehistory_ticks = 0;
                 self.history_ticks = 0;
                 self.stage = WorldStageState::Tectonics(tec);
+                self.tectonics_biosphere_cache.clear();
                 true
             }
             Some(tec11_proto::PlanetStageOneof::Prehistory(pre_proto)) => {

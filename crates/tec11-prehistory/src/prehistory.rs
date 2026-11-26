@@ -5,7 +5,7 @@ use tec11_climate::{ClimateModel, DEFAULT_GLACIATION, EARTH_GLACIATION, EARTH_SI
 use tec11_math_grid::{Pcg64Mcg, SphericalGrid};
 use tec11_proto::PlanetSnapshotExt;
 
-use crate::lifeforms::{settle_species_on_climate, SettledBiosphere, SpeciesKind};
+use tec11_biosphere::{settle_species_on_climate, SettledBiosphere, SpeciesKind};
 use crate::population::{
     eden_tile, expand_population_with_technologies_and_islands, is_farmable, is_habitable,
     is_subgrid_island_habitable, tile_population_thousands_with_water_tech, DisjointSet,

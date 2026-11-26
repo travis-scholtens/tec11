@@ -8,6 +8,7 @@ rust_library(
     edition = "2021",
     visibility = ["//visibility:public"],
     deps = [
+        "//crates/tec11-biosphere:tec11_biosphere",
         "//crates/tec11-climate:tec11_climate",
         "//crates/tec11-cosmos:tec11_cosmos",
         "//crates/tec11-geology:tec11_geology",
@@ -19,6 +20,7 @@ rust_library(
         "//crates/tec11-rivers:tec11_rivers",
         "//crates/tec11-sky-view:tec11_sky_view",
         "//crates/tec11-terrain:tec11_terrain",
+        "//crates/tec11-topography:tec11_topography",
     ],
 )
 

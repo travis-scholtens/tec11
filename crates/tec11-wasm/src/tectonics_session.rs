@@ -8,7 +8,7 @@ use crate::mesh::{build_mesh_normals, build_mesh_positions, build_vertex_tile_id
 pub struct WasmTectonicsSession {
     sim: TectonicsSimulation,
     seed: u64,
-    cached_biosphere: std::cell::RefCell<Option<(u32, tec11_prehistory::SettledBiosphere)>>,
+    biosphere_cache: tec11_biosphere::BiosphereCache,
 }
 
 #[wasm_bindgen]
@@ -19,14 +19,14 @@ impl WasmTectonicsSession {
         Self {
             sim,
             seed,
-            cached_biosphere: std::cell::RefCell::new(None),
+            biosphere_cache: tec11_biosphere::BiosphereCache::new(),
         }
     }
 
     pub fn reset(&mut self, grid_size: u32, land_percent: f64) {
         self.seed = self.seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
         self.sim = TectonicsSimulation::new(grid_size, land_percent, self.seed);
-        *self.cached_biosphere.borrow_mut() = None;
+        self.biosphere_cache.clear();
     }
 
     pub fn step(&mut self) {
@@ -209,20 +209,18 @@ impl WasmTectonicsSession {
             return "{\"hasTile\":false}".to_string();
         };
         if has_atm && has_life {
-            let mut guard = self.cached_biosphere.borrow_mut();
-            if !guard.as_ref().is_some_and(|(gt, _)| *gt == self.sim.geoticks()) {
-                let elevations: Vec<f32> = self.sim.tiles().iter().map(|t| t.elevation()).collect();
-                let bio = tec11_prehistory::settle_species_on_climate(
-                    &elevations,
+            let (flora, fauna) = self
+                .biosphere_cache
+                .select_salient_flora_and_fauna_names(
+                    self.sim.geoticks(),
+                    || self.sim.tiles().iter().map(|t| t.elevation()).collect(),
                     self.sim.climate_model(),
+                    tile_idx,
+                    6,
+                    6,
                 );
-                *guard = Some((self.sim.geoticks(), bio));
-            }
-            if let Some((_, bio)) = guard.as_ref() {
-                let (flora, fauna) = bio.select_salient_flora_and_fauna_names(tile_idx, 6, 6);
-                view.flora = flora;
-                view.fauna = fauna;
-            }
+            view.flora = flora;
+            view.fauna = fauna;
         }
         view.to_json()
     }
@@ -234,6 +232,7 @@ impl WasmTectonicsSession {
     pub fn load_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
         if let Some(loaded) = TectonicsSimulation::decode_snapshot(bytes, self.seed) {
             self.sim = loaded;
+            self.biosphere_cache.clear();
             true
         } else {
             false
