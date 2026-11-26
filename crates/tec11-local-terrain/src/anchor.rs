@@ -59,6 +59,7 @@ pub struct NeighborTileSample {
     pub bottom_m: f32,
     pub mountainosity: f32,
     pub subduction: f32,
+    pub has_intrusion: bool,
     pub impact_scar: f32,
     pub soil_depth_m: f32,
     pub soil_fertility: f32,
@@ -78,6 +79,18 @@ pub struct NeighborTileSample {
 pub struct FineGroundSample {
     pub local_xy_m: [f64; 2],
     pub elevation_m: f32,
+}
+
+/// Anchor-invariant canonical spherical frame for a neighbor tile, enabling volcanic edifices,
+/// radial dikes, and parasitic cones to maintain `< 0.01 m` positional invariance when panning
+/// across coarse-tile boundaries (`SC-004`).
+#[derive(Copy, Clone, Debug)]
+pub struct TileCanonicalFrame {
+    pub tile_id: usize,
+    /// Unit vector in this anchor's tangent plane pointing along `tile_id`'s canonical East.
+    pub east_2d: [f64; 2],
+    /// Unit vector in this anchor's tangent plane pointing along `tile_id`'s canonical North.
+    pub north_2d: [f64; 2],
 }
 
 /// Immutable planetary reference extracted from `.tec11` snapshot bytes (`data-model.md`).
@@ -103,6 +116,9 @@ pub struct LocalZoomAnchor {
     pub fine_samples: Vec<FineGroundSample>,
     /// Characteristic center-to-center spacing of `fine_samples` in meters (`0.0` if empty).
     pub fine_spacing_m: f64,
+    /// Canonical per-tile tangent frames projected into this anchor's plane for anchor-invariant
+    /// volcanic edifice and dike placement (`Spec 009`, `SC-004`).
+    pub tile_frames: Vec<TileCanonicalFrame>,
 }
 
 struct HistoryFineGround {
@@ -613,6 +629,7 @@ impl PlanetaryTerrainContext {
                 bottom_m,
                 mountainosity: tile.mountainosity,
                 subduction: tile.subduction,
+                has_intrusion: tile.intrusion.is_some(),
                 impact_scar: tile.impact_scar,
                 soil_depth_m: if self.has_atmosphere { tile.soil_depth_m } else { 0.0 },
                 soil_fertility: tile.soil_fertility,
@@ -723,6 +740,26 @@ impl PlanetaryTerrainContext {
             }
         }
 
+        // Compute canonical per-tile tangent frames projected into this anchor's plane so
+        // volcanic edifices, radial dikes, and parasitic cones stay anchor-invariant across
+        // coarse-tile re-anchoring (`Spec 009`, `SC-004`).
+        let mut tile_frames = Vec::with_capacity(sample_ids.len());
+        for &tid in &sample_ids {
+            let n_tid = normalize3(self.grid.faces[tid].0);
+            let (te, tn) = build_tangent_basis(n_tid);
+            let e_raw = [dot3(te, tangent_east), dot3(te, tangent_north)];
+            let e_len = (e_raw[0] * e_raw[0] + e_raw[1] * e_raw[1]).sqrt().max(1e-12);
+            let east_2d = [e_raw[0] / e_len, e_raw[1] / e_len];
+            let n_raw = [dot3(tn, tangent_east), dot3(tn, tangent_north)];
+            let n_len = (n_raw[0] * n_raw[0] + n_raw[1] * n_raw[1]).sqrt().max(1e-12);
+            let north_2d = [n_raw[0] / n_len, n_raw[1] / n_len];
+            tile_frames.push(TileCanonicalFrame {
+                tile_id: tid,
+                east_2d,
+                north_2d,
+            });
+        }
+
         Ok(LocalZoomAnchor {
             world_seed: self.world_seed,
             stage: self.stage,
@@ -741,6 +778,7 @@ impl PlanetaryTerrainContext {
             river_edges,
             fine_samples,
             fine_spacing_m,
+            tile_frames,
         })
     }
 }

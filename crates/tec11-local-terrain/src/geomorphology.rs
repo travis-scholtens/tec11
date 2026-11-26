@@ -14,6 +14,7 @@ use crate::rivers::{DrainageNetwork, LakeState, RiverQueryResult};
 use crate::stratigraphy::{
     fbm2, value_noise3, InterpolatedLocalContext, LocalStratumSlice, RegionalStratigraphyField,
 };
+use crate::volcanoes::{VolcanicField, VolcanicQueryResult};
 
 /// Evaluated surface & column summary at a single tangent-plane point `(x_m, y_m)`.
 #[derive(Clone, Debug)]
@@ -31,27 +32,31 @@ pub struct ColumnSynthesis {
     pub ice_thickness_m: f32,
     pub strata: Vec<LocalStratumSlice>,
     pub flora_flag: u8,
+    pub volcanic_hit: Option<VolcanicQueryResult>,
 }
 
-/// Evaluate all 6 physical geomorphology operators at `(x_m, y_m)` at exact physical width
-/// (including procedural tributaries).
+/// Evaluate all physical geomorphology operators at `(x_m, y_m)` at exact physical width
+/// (including procedural tributaries and volcanic edifices).
 pub fn synthesize_column(
     anchor: &LocalZoomAnchor,
     strat: &RegionalStratigraphyField,
     drainage: &DrainageNetwork,
+    volcanoes: &VolcanicField,
     x_m: f64,
     y_m: f64,
 ) -> ColumnSynthesis {
-    synthesize_column_with_options(anchor, strat, drainage, x_m, y_m, 0.0, true)
+    synthesize_column_with_options(anchor, strat, drainage, volcanoes, x_m, y_m, 0.0, true)
 }
 
-/// Evaluate all 6 physical geomorphology operators at `(x_m, y_m)` using the Hydrology-First
+/// Evaluate all physical geomorphology operators at `(x_m, y_m)` using the Hydrology-First
 /// Non-Negative Relief Envelope (`z = z_valley + R(d, x, y)`, `R >= 0`), with optional coarse-scale
 /// minimum channel half-width (`min_river_half_w_m`) and tributary visibility toggle.
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_column_with_options(
     anchor: &LocalZoomAnchor,
     strat: &RegionalStratigraphyField,
     drainage: &DrainageNetwork,
+    volcanoes: &VolcanicField,
     x_m: f64,
     y_m: f64,
     min_river_half_w_m: f32,
@@ -126,6 +131,19 @@ pub fn synthesize_column_with_options(
         } else if ctx.precip_norm > 0.25 && ctx.mountainosity > 1.5 {
             let v_factor = (valley_wave * 3.0).clamp(0.0, 1.0);
             elev_m -= (1.0 - v_factor) * (16.0 + 55.0 * m_norm) * ctx.precip_norm;
+        }
+    }
+
+    // 3b. Volcanic edifices, calderas, parasitic cinder cones, and eroded necks (`Spec 009`).
+    // Applied BEFORE the hydrology envelope so rivers compose strictly downhill through flanks.
+    let volcanic_hit = volcanoes.query(x_m, y_m, anchor.has_atmosphere, seed);
+    if let Some(vh) = volcanic_hit {
+        elev_m += vh.delta_elev_m;
+        if let Some((floor_z, bowl_blend)) = vh.caldera_floor_blend {
+            elev_m = elev_m * (1.0 - bowl_blend) + floor_z * bowl_blend;
+        }
+        if let Some(rim_min) = vh.rim_min_elev_m {
+            elev_m = elev_m.max(rim_min);
         }
     }
 
@@ -215,6 +233,23 @@ pub fn synthesize_column_with_options(
         }
     }
 
+    // 5b. Volcanic crater lakes & caldera floors (`Spec 009`, `FR-004`)
+    if anchor.has_atmosphere && !is_river && !is_sandbar && !is_lake {
+        if let Some(vh) = volcanic_hit {
+            if vh.in_caldera {
+                if let (Some(z_lake), Some(lstate)) = (vh.crater_lake_z_m, vh.crater_lake_state) {
+                    if elev_m < z_lake {
+                        lake_state_hit = Some(lstate);
+                        if lstate == LakeState::Freshwater {
+                            is_lake = true;
+                            lake_water_elev = Some(z_lake);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 6. Karst surface sinkholes (dolines) in dry humid high-calcity strata well away from rivers/lakes
     let away_from_river = river_hit.map_or(true, |rh| rh.valley_blend < 0.15);
     if anchor.has_atmosphere
@@ -262,7 +297,19 @@ pub fn synthesize_column_with_options(
 
     // Surficial mantle thickness & material (FR-006: directly consumes persisted soil_depth_m / soil_fertility)
     let (surficial_material, soil_depth_m, ice_thickness_m, flora_flag) = if !anchor.has_atmosphere {
-        (strata[0].material, 0.0, 0.0, 0)
+        let base_mat = if let Some(vh) = volcanic_hit {
+            if vh.in_conduit_or_dike || vh.delta_elev_m > 30.0 {
+                vh.magma_material
+            } else {
+                strata[0].material
+            }
+        } else {
+            strata[0].material
+        };
+        (base_mat, 0.0, 0.0, 0)
+    } else if volcanic_hit.is_some_and(|vh| vh.sulfur_intensity > 0.35 && !is_river && !is_lake) {
+        // Active fumarolic sulfur crusts on crater rims & resurgent caldera domes (`Spec 009`, `FR-006`)
+        (MaterialId::SULFUR_DEPOSIT, 0.8, 0.0, 0)
     } else if is_sandbar {
         let mat = if ctx.mountainosity > 2.5 {
             MaterialId::RIVER_GRAVEL
@@ -363,6 +410,7 @@ pub fn synthesize_column_with_options(
         ice_thickness_m,
         strata,
         flora_flag,
+        volcanic_hit,
     }
 }
 
@@ -411,8 +459,36 @@ pub fn sample_cell_at_z(
         return cell;
     }
 
-    // 4. Bedrock & discrete ore/mineral veins
-    let (mat, slice) = strat.sample_bedrock_material(&col.strata, x_m, y_m, z_m);
+    // 4. Bedrock, volcanic feeder conduits/dikes/contact aureoles (`Spec 009`), & ore veins
+    let depth_below = (col.surface_elev_m - z_m).max(0.0);
+    let (mut mat, slice) = strat.sample_bedrock_material(&col.strata, x_m, y_m, z_m);
+    if let Some(vh) = col.volcanic_hit {
+        if vh.in_conduit_or_dike {
+            mat = if depth_below < 55.0 {
+                vh.magma_material
+            } else {
+                vh.pluton_material
+            };
+        } else if vh.in_contact_halo {
+            mat = MaterialId::HORNFELS;
+        }
+
+        // Hollow 3D basalt lava tubes inside fresh shield volcano flanks (`FR-006`)
+        if vh.lava_tube_eligible && depth_below >= 4.0 && depth_below <= 28.0 && !vh.in_conduit_or_dike {
+            let along = x_m * (vh.radial_dir[0] as f64) + y_m * (vh.radial_dir[1] as f64);
+            let across = -x_m * (vh.radial_dir[1] as f64) + y_m * (vh.radial_dir[0] as f64);
+            let t1 = value_noise3(along * 0.018, across * 0.075, (z_m as f64) * 0.11, anchor.world_seed ^ 0x1a7a_0001);
+            let t2 = value_noise3(along * 0.018 + 9.1, across * 0.075 - 13.4, (z_m as f64) * 0.11, anchor.world_seed ^ 0x1a7a_0002);
+            let tube_ridge = (t1 - 0.5).abs() + (t2 - 0.5).abs();
+            if tube_ridge < 0.155 {
+                return HexPrismCell {
+                    material: MaterialId::AIR,
+                    fluid: 0,
+                    flags: cell_flags::NATURAL_CAVE,
+                };
+            }
+        }
+    }
 
     // 5. Underground karst cavern dissolution inside soluble high-calcity or evaporite strata
     if anchor.has_atmosphere
@@ -485,6 +561,7 @@ mod tests {
                 bottom_m: -9000.0,
                 mountainosity: 0.5,
                 subduction: 0.0,
+                has_intrusion: false,
                 impact_scar: 0.0,
                 soil_depth_m,
                 soil_fertility,
@@ -503,16 +580,18 @@ mod tests {
             river_edges: vec![],
             fine_samples: vec![],
             fine_spacing_m: 0.0,
+            tile_frames: vec![],
         }
     }
 
     #[test]
     fn test_airless_hadean_and_surficial_soil_and_karst() {
         let empty = DrainageNetwork::default();
+        let no_volc = VolcanicField::default();
         // 1. Airless Hadean Tectonics tile: zero soil, zero water, zero flora
         let hadean = synthetic_anchor(false, 0.0, 1.0, Rock::extrusive(0.48), 0.0);
         let h_strat = RegionalStratigraphyField::from_anchor(&hadean);
-        let h_col = synthesize_column(&hadean, &h_strat, &empty, 0.0, 0.0);
+        let h_col = synthesize_column(&hadean, &h_strat, &empty, &no_volc, 0.0, 0.0);
         assert_eq!(h_col.soil_depth_m, 0.0);
         assert!(h_col.water_elev_m.is_none());
         assert_eq!(h_col.flora_flag, 0);
@@ -521,13 +600,13 @@ mod tests {
         // 2. Loess-enriched soil vs. bare scoured bedrock (FR-006)
         let loess = synthetic_anchor(true, 6.0, 1.30, Rock::intrusive(0.74), 0.6);
         let l_strat = RegionalStratigraphyField::from_anchor(&loess);
-        let l_col = synthesize_column(&loess, &l_strat, &empty, 0.0, 0.0);
+        let l_col = synthesize_column(&loess, &l_strat, &empty, &no_volc, 0.0, 0.0);
         assert!(l_col.soil_depth_m > 3.5);
         assert_eq!(l_col.surficial_material, MaterialId::LOESS_TILL);
 
         let scoured = synthetic_anchor(true, 0.05, 0.85, Rock::intrusive(0.74), 0.6);
         let s_strat = RegionalStratigraphyField::from_anchor(&scoured);
-        let s_col = synthesize_column(&scoured, &s_strat, &empty, 0.0, 0.0);
+        let s_col = synthesize_column(&scoured, &s_strat, &empty, &no_volc, 0.0, 0.0);
         assert!(s_col.soil_depth_m < 0.35);
         assert_eq!(s_col.surficial_material, MaterialId::GRANITE);
 
@@ -551,7 +630,7 @@ mod tests {
             for iy in 0..32 {
                 let x = (ix as f64) * 3.0;
                 let y = (iy as f64) * 3.0;
-                let col = synthesize_column(&karst, &k_strat, &empty, x, y);
+                let col = synthesize_column(&karst, &k_strat, &empty, &no_volc, x, y);
                 for dz in 6..38 {
                     let c = sample_cell_at_z(&karst, &k_strat, &col, x, y, col.surface_elev_m - (dz as f32));
                     if (c.flags & cell_flags::NATURAL_CAVE) != 0 {

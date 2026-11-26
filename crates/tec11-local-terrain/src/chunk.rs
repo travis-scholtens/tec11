@@ -10,6 +10,7 @@ use crate::geomorphology::{sample_cell_at_z, synthesize_column};
 use crate::materials::{cell_flags, HexPrismCell};
 use crate::rivers::{DrainageNetwork, DrainageReach};
 use crate::stratigraphy::RegionalStratigraphyField;
+use crate::volcanoes::{VolcanicEdifice, VolcanicField};
 use crate::{LocalTerrainError, LocalVolumeConfig};
 
 pub const CHUNK_Q: i32 = 16;
@@ -223,6 +224,7 @@ pub struct LocalTerrainVolume {
     config: LocalVolumeConfig,
     stratigraphy: RegionalStratigraphyField,
     drainage: Arc<DrainageNetwork>,
+    volcanoes: Arc<VolcanicField>,
     pub center_xy_m: [f64; 2],
     pub surface_z_center: i32,
     chunks: HashMap<ChunkCoord, HexChunk>,
@@ -235,10 +237,17 @@ impl LocalTerrainVolume {
         config: LocalVolumeConfig,
         stratigraphy: RegionalStratigraphyField,
         drainage: Arc<DrainageNetwork>,
+        volcanoes: Arc<VolcanicField>,
         center_xy_m: [f64; 2],
     ) -> Self {
-        let center_col =
-            synthesize_column(&anchor, &stratigraphy, &drainage, center_xy_m[0], center_xy_m[1]);
+        let center_col = synthesize_column(
+            &anchor,
+            &stratigraphy,
+            &drainage,
+            &volcanoes,
+            center_xy_m[0],
+            center_xy_m[1],
+        );
         let surface_z_center = (center_col.surface_elev_m / config.z_step_m).round() as i32;
         let anchor_hash = anchor.anchor_hash();
         Self {
@@ -246,6 +255,7 @@ impl LocalTerrainVolume {
             config,
             stratigraphy,
             drainage,
+            volcanoes,
             center_xy_m,
             surface_z_center,
             chunks: HashMap::new(),
@@ -266,6 +276,7 @@ impl LocalTerrainVolume {
                     &self.anchor,
                     &self.stratigraphy,
                     &self.drainage,
+                    &self.volcanoes,
                     self.center_xy_m[0] + rel[0],
                     self.center_xy_m[1] + rel[1],
                 );
@@ -302,6 +313,10 @@ impl LocalTerrainVolume {
         &self.drainage
     }
 
+    pub fn volcanoes(&self) -> &[VolcanicEdifice] {
+        &self.volcanoes.edifices
+    }
+
     /// Generate (if not cached) and return a `16×16×32` `HexChunk`, applying any `DeltaOverlay` edits.
     pub fn get_or_generate_chunk(&mut self, coord: ChunkCoord) -> &HexChunk {
         if !self.chunks.contains_key(&coord) {
@@ -325,7 +340,14 @@ impl LocalTerrainVolume {
                 let rel_xy = axial_to_xy_m(q, r, self.config.hex_spacing_m);
                 let wx = self.center_xy_m[0] + rel_xy[0];
                 let wy = self.center_xy_m[1] + rel_xy[1];
-                let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.drainage, wx, wy);
+                let col = synthesize_column(
+                    &self.anchor,
+                    &self.stratigraphy,
+                    &self.drainage,
+                    &self.volcanoes,
+                    wx,
+                    wy,
+                );
 
                 let col_offset = (lq * (CHUNK_R as usize) + lr) * (CHUNK_Z as usize);
                 for lz in 0..(CHUNK_Z as usize) {
@@ -375,7 +397,14 @@ impl LocalTerrainVolume {
         let rel_xy = axial_to_xy_m(q, r, self.config.hex_spacing_m);
         let wx = self.center_xy_m[0] + rel_xy[0];
         let wy = self.center_xy_m[1] + rel_xy[1];
-        let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.drainage, wx, wy);
+        let col = synthesize_column(
+            &self.anchor,
+            &self.stratigraphy,
+            &self.drainage,
+            &self.volcanoes,
+            wx,
+            wy,
+        );
         let elev_m = (z as f32) * self.config.z_step_m;
         let depth_below = (col.surface_elev_m - elev_m).max(0.0);
         let summary = format!(

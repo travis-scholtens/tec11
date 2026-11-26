@@ -1,0 +1,27 @@
+# Phase 0 Research: Volcanoes, Calderas, and 3D Magmatic Plumbing (Spec 009)
+
+## Decision 1: Anchor-Invariant Spherical Positioning
+- **Decision**: Compute each volcanic edifice's 3D unit-sphere position `pos3: [f64; 3]` deterministically from `(tile_id, world_seed)` using that tile's own canonical tangent basis `build_tangent_basis(normalize3(grid.faces[tile_id].0))` inside `PlanetaryTerrainContext`, then project all edifices within the 2-ring neighborhood into `LocalZoomAnchor`'s tangent plane.
+- **Rationale**: Guarantees `0.00 m` lateral drift (`SC-004`) when `WasmLocalTerrainSession::maybe_reanchor_to_nearest` re-anchors across coarse tile boundaries at any latitude (including polar tiles where tangent bases rotate).
+- **Alternatives considered**: Offsetting `(ox, oy)` in the active anchor's tangent frame around `nb.local_xy_m` (rejected: rotates by 2–5° across adjacent high-latitude tiles, causing visible pops on re-anchor).
+
+## Decision 2: Emergent Physical Classification from Persisted `TileGeology`
+- **Decision**: Derive volcanic eligibility and morphology strictly from persisted `TileGeology` fields (`subduction`, `intrusion`, top `RockLayer` kind & `felsity`, `mountainosity`, `elevation`, and `thickness`) without modifying `.tec11` protobufs or simulation stages:
+  1. **Stratovolcano** (`subduction > 0.0` with extrusive intermediate rock `felsity ∈ [0.46, 0.66]`, or elevated extrusive `andesite` with `mountainosity >= 2.0`): `R = 5–12 km` (`10–24 km` diameter), `H = 1,100–2,900 m`, concave exponential flank `H * exp(-2.2 * (r / R)^1.15)` with radial barranco gullies (suppressed on airless worlds), and either a summit crater (`0.08–0.14 R`) or collapse caldera (`0.22–0.38 R`).
+  2. **Shield Volcano** (extrusive mafic `basalt`, `felsity < 0.46`, on emergent hotspot islands or thick mafic crust `elevation > sea_m` or submarine seamounts with `subduction > 0` / thickened crust): `R = 20–48 km` (`40–96 km` diameter), `H = 900–2,200 m`, gentle convex-to-linear shield profile `(1 - (r/R)^1.6)^1.3` (slope < 8°), and a nested `1.5–3.2 km` radius summit pit caldera.
+  3. **Resurgent Caldera** (extrusive felsic `rhyolite`, `felsity >= 0.66`, with `subduction > 0` or `intrusion.is_some()` or `mountainosity >= 2.5`): `R = 12–26 km` (`24–52 km` diameter) collapse basin with raised outward-sloping ignimbrite rim (`+180..+420 m`), steep inner caldera wall (`-350..-750 m` floor drop), and a central resurgent dome (`0.25–0.40 R_caldera`).
+  4. **Eroded Volcanic Neck** (surface rock is intrusive `granite`/`diorite`/`gabbro` with `intrusion.is_some()` or high-toughness residual plug on non-subducting terrain `subduction == 0`): `R = 0.6–2.0 km` steep resistant central plug (`H = 220–650 m`) plus 3–5 radiating dike ridges (`30–70 m` wide, `1.5–4.5 km` long).
+- **Rationale**: Satisfies Constitution Principle I (Emergent Physical Processes) & II (Model-Derived Stochasticity) and produces measurably distinct slopes & morphologies (`SC-002`) across all existing `.tec11` saves (`SC-001`).
+- **Alternatives considered**: Storing an explicit `volcano_type` enum in `TileGeology` (rejected: violates Principle I and breaks backwards compatibility with existing `.tec11` saves).
+
+## Decision 3: Hydrology & River Composition Order
+- **Decision**: Apply volcanic edifice relief **before** Step 4 (`Hydrology-First Non-Negative Relief Envelope`) in `synthesize_column_with_options`, and keep `VolcanicEdifice` placement offset slightly away from active mainstem river channels (while allowing rivers to carve cleanly through volcanic flanks if they intersect). Evaluate caldera crater lakes via the existing `classify_lake_state` (`Freshwater | Frozen | SaltFlat | DryPlaya`), suppressed when `!anchor.has_atmosphere`.
+- **Rationale**: Placing volcanic relief *before* the Non-Negative Relief Envelope mathematically guarantees `SC-003` (100% strictly non-increasing rivers, zero floating aqueducts, zero uphill waterfalls) — any river encountering a volcanic flank incises a realistic gorge/valley through it instead of climbing uphill.
+- **Alternatives considered**: Adding volcanic relief after river carving (rejected: would bury rivers or push riverbanks uphill).
+
+## Decision 4: Level 3 3D Subsurface Plumbing & Performance
+- **Decision**: Evaluate 3D volcanic features purely analytically in `sample_cell_at_z` using `VolcanicQueryResult` precomputed once per `(x_m, y_m)` column in `synthesize_column_with_options`:
+  - **Feeder conduit & radial dikes**: Vertical cylinder (`r <= conduit_r_m`, `18–65 m`) plus 3–5 narrow angular dike blades (`±6–14 m` wide) override host bedrock with the edifice's igneous `MaterialId` (`BASALT`/`ANDESITE`/`RHYOLITE` or `GABBRO`/`DIORITE`/`GRANITE` at depth), with a contact-metamorphic `HORNFELS` halo (`4–10 m`) and epithermal vein enrichment.
+  - **Fumarolic sulfur deposits**: On young/active (`activity > 0.35`) crater rims, inner caldera walls, and resurgent dome floors, noise-modulated patches emit `MaterialId::SULFUR_DEPOSIT`.
+  - **Basalt lava tubes**: Inside fresh basaltic shield flanks (`depth 4–28 m` below surface, `MaterialId::BASALT`), dual-ridged 3D noise aligned radially away from the summit carves sinuous tubular voids (`NATURAL_CAVE` flag), matching the existing karst cavern pattern.
+- **Rationale**: Zero extra memory allocations, $O(1)$ per column, keeps Level 3 `56×56×72` volume meshing well under `< 50 ms` in WASM (`SC-005`).

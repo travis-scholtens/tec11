@@ -14,13 +14,14 @@ pub mod materials;
 pub mod mesher;
 pub mod rivers;
 pub mod stratigraphy;
+pub mod volcanoes;
 
 use std::fmt;
 use std::sync::Arc;
 
 pub use anchor::{
     CoarseRiverEdge, FineGroundSample, LayerMineralHint, LocalZoomAnchor, NeighborTileSample,
-    PlanetaryTerrainContext, SnapshotStage,
+    PlanetaryTerrainContext, SnapshotStage, TileCanonicalFrame,
 };
 pub use chunk::{
     axial_to_xy_m, xy_m_to_axial, CellInspection, ChunkCoord, ChunkStorage, HexChunk,
@@ -37,6 +38,9 @@ pub use rivers::{
 pub use stratigraphy::{
     CorrelatedStratum, InterpolatedLocalContext, LocalStratumSlice, MineralVeinSpec,
     RegionalStratigraphyField,
+};
+pub use volcanoes::{
+    ParasiticCone, VolcanicEdifice, VolcanicField, VolcanicQueryResult, VolcanoKind,
 };
 
 #[derive(Clone, Debug)]
@@ -128,6 +132,7 @@ pub struct LocalTerrainWorld {
     config: LocalVolumeConfig,
     stratigraphy: RegionalStratigraphyField,
     drainage: Arc<DrainageNetwork>,
+    volcanoes: Arc<VolcanicField>,
 }
 
 impl LocalTerrainWorld {
@@ -136,11 +141,13 @@ impl LocalTerrainWorld {
         config.z_step_m = config.z_step_m.clamp(0.5, 2.0);
         let stratigraphy = RegionalStratigraphyField::from_anchor(&anchor);
         let drainage = Arc::new(DrainageNetwork::build(&anchor, &stratigraphy));
+        let volcanoes = Arc::new(VolcanicField::build(&anchor, &stratigraphy, &drainage));
         Self {
             anchor,
             config,
             stratigraphy,
             drainage,
+            volcanoes,
         }
     }
 
@@ -171,6 +178,14 @@ impl LocalTerrainWorld {
 
     pub fn drainage(&self) -> &DrainageNetwork {
         &self.drainage
+    }
+
+    pub fn volcanoes(&self) -> &[VolcanicEdifice] {
+        &self.volcanoes.edifices
+    }
+
+    pub fn volcanic_field(&self) -> &VolcanicField {
+        &self.volcanoes
     }
 
     /// Horizontal hex spacing (meters) for progressive drill-down level `0..=3`.
@@ -207,6 +222,7 @@ impl LocalTerrainWorld {
                     &self.anchor,
                     &self.stratigraphy,
                     &self.drainage,
+                    &self.volcanoes,
                     wx,
                     wy,
                     spacing * 0.52,
@@ -247,6 +263,7 @@ impl LocalTerrainWorld {
             self.config,
             self.stratigraphy.clone(),
             Arc::clone(&self.drainage),
+            Arc::clone(&self.volcanoes),
             center_xy_m,
         )
     }
@@ -332,6 +349,62 @@ impl LocalTerrainWorld {
             });
         }
 
+        // 2b. Volcanic Edifice / Caldera / Crater Lake / Volcanic Neck (`Spec 009`, `FR-007`)
+        if let Some(ed) = self
+            .volcanoes
+            .edifices
+            .iter()
+            .filter(|e| {
+                let d = (e.center_xy_m[0].powi(2) + e.center_xy_m[1].powi(2)).sqrt();
+                d <= max_r * 1.25
+            })
+            .min_by(|a, b| {
+                let da = a.center_xy_m[0].powi(2) + a.center_xy_m[1].powi(2);
+                let db = b.center_xy_m[0].powi(2) + b.center_xy_m[1].powi(2);
+                da.total_cmp(&db)
+            })
+        {
+            let rim_xy = ed.poi_rim_xy_m();
+            let rim_col = synthesize_column(
+                &self.anchor,
+                &self.stratigraphy,
+                &self.drainage,
+                &self.volcanoes,
+                rim_xy[0],
+                rim_xy[1],
+            );
+            let has_crater_lake = matches!(
+                ed.crater_lake_state,
+                Some(LakeState::Freshwater | LakeState::Frozen | LakeState::SaltFlat)
+            );
+            let is_caldera = ed.caldera_radius_m >= 1200.0;
+            let label = ed.kind.display_name(has_crater_lake, is_caldera).to_string();
+            let desc = if has_crater_lake {
+                format!(
+                    "{} rim at {:.0} m (crater lake at {:.0} m, {})",
+                    label,
+                    rim_col.surface_elev_m,
+                    ed.crater_lake_z_m.unwrap_or(rim_col.surface_elev_m),
+                    ed.magma_material.name()
+                )
+            } else {
+                format!(
+                    "{} summit/rim at {:.0} m (+{:.0} m relief, {})",
+                    label,
+                    rim_col.surface_elev_m,
+                    ed.peak_height_m,
+                    ed.magma_material.name()
+                )
+            };
+            pois.push(LocalPointOfInterest {
+                kind: "volcano",
+                label,
+                local_xy_m: rim_xy,
+                elevation_m: rim_col.surface_elev_m,
+                description: desc,
+            });
+        }
+
         // Sample Level 0 columns across the tile neighborhood for peaks, coast, karst, ore, craters
         let spacing = self.hex_spacing_for_level(0);
         let r_hex = 14i32;
@@ -351,7 +424,14 @@ impl LocalTerrainWorld {
                 if (xy[0] * xy[0] + xy[1] * xy[1]).sqrt() > max_r {
                     continue;
                 }
-                let col = synthesize_column(&self.anchor, &self.stratigraphy, &self.drainage, xy[0], xy[1]);
+                let col = synthesize_column(
+                    &self.anchor,
+                    &self.stratigraphy,
+                    &self.drainage,
+                    &self.volcanoes,
+                    xy[0],
+                    xy[1],
+                );
                 if col.is_ocean {
                     has_ocean = true;
                 } else {
@@ -544,6 +624,7 @@ mod tests {
                     bottom_m: -9000.0,
                     mountainosity: 1.0,
                     subduction: 0.0,
+                    has_intrusion: false,
                     impact_scar: 0.0,
                     soil_depth_m: 2.0,
                     soil_fertility: 1.0,
@@ -566,6 +647,7 @@ mod tests {
                     bottom_m: -9000.0,
                     mountainosity: 1.0,
                     subduction: 0.0,
+                    has_intrusion: false,
                     impact_scar: 0.0,
                     soil_depth_m: 2.0,
                     soil_fertility: 1.0,
@@ -582,6 +664,7 @@ mod tests {
             river_edges: vec![],
             fine_samples: vec![],
             fine_spacing_m: 0.0,
+            tile_frames: vec![],
         };
 
         let strat = RegionalStratigraphyField::from_anchor(&anchor);
@@ -753,6 +836,7 @@ mod tests {
                         world.anchor(),
                         world.stratigraphy(),
                         world.drainage(),
+                        world.volcanic_field(),
                         bx,
                         by,
                     );
@@ -774,5 +858,386 @@ mod tests {
             }
         }
         assert!(verified_reaches > 0, "Expected to verify at least one river reach");
+    }
+
+    #[test]
+    fn volcano_level3_conduit_dike_hornfels_sulfur_and_lava_tubes() {
+        // 1. Subduction andesite stratovolcano -> conduit, HORNFELS halo, and SULFUR_DEPOSIT crust
+        let andesite_anchor = LocalZoomAnchor {
+            world_seed: 2025,
+            stage: SnapshotStage::Prehistory,
+            grid_size: 6,
+            radius_km: 6371.0,
+            parent_tile_id: 7,
+            parent_tile_radius_m: 80_000.0,
+            anchor_normal: [0.0, 1.0, 0.0],
+            tangent_east: [1.0, 0.0, 0.0],
+            tangent_north: [0.0, 0.0, 1.0],
+            sea_level_m: 0.0,
+            has_atmosphere: true,
+            has_life: true,
+            is_pentagon: false,
+            neighbors: vec![NeighborTileSample {
+                tile_id: 7,
+                local_xy_m: [0.0, 0.0],
+                elevation_m: 600.0,
+                bottom_m: -9000.0,
+                mountainosity: 0.85,
+                subduction: 0.55,
+                has_intrusion: true,
+                impact_scar: 0.0,
+                soil_depth_m: 0.8,
+                soil_fertility: 1.0,
+                is_glaciated: false,
+                glacier_cover: 0.0,
+                annual_temp_c: 10.0,
+                precip_norm: 0.65,
+                tidal_range_m: 1.0,
+                wind_vec: [1.0, 0.0],
+                layers: vec![RockLayer {
+                    rock: Rock::extrusive(0.60),
+                    thickness: 9.6,
+                }],
+                occurrences: vec![],
+            }],
+            river_edges: vec![],
+            fine_samples: vec![],
+            fine_spacing_m: 0.0,
+            tile_frames: vec![TileCanonicalFrame {
+                tile_id: 7,
+                east_2d: [1.0, 0.0],
+                north_2d: [0.0, 1.0],
+            }],
+        };
+
+        let world = LocalTerrainWorld::new(andesite_anchor, LocalVolumeConfig::default());
+        assert_eq!(world.volcanoes().len(), 1);
+        let ed = &world.volcanoes()[0];
+        assert_eq!(ed.kind, VolcanoKind::Stratovolcano);
+
+        // Center column must sit in the magmatic feeder conduit:
+        // shallow (< 55 m) is solidified ANDESITE lava, deeper (>= 55 m) transitions to DIORITE pluton
+        let center_col = synthesize_column(
+            world.anchor(),
+            world.stratigraphy(),
+            world.drainage(),
+            world.volcanic_field(),
+            ed.center_xy_m[0],
+            ed.center_xy_m[1],
+        );
+        let shallow_conduit = sample_cell_at_z(
+            world.anchor(),
+            world.stratigraphy(),
+            &center_col,
+            ed.center_xy_m[0],
+            ed.center_xy_m[1],
+            center_col.surface_elev_m - 25.0,
+        );
+        assert_eq!(
+            shallow_conduit.material,
+            MaterialId::ANDESITE,
+            "Expected shallow volcanic conduit to be solidified ANDESITE"
+        );
+        let deep_conduit = sample_cell_at_z(
+            world.anchor(),
+            world.stratigraphy(),
+            &center_col,
+            ed.center_xy_m[0],
+            ed.center_xy_m[1],
+            center_col.surface_elev_m - 75.0,
+        );
+        assert_eq!(
+            deep_conduit.material,
+            MaterialId::DIORITE,
+            "Expected deep volcanic conduit to transition to DIORITE pluton"
+        );
+
+        // Just outside conduit radius must hit the HORNFELS contact-metamorphic halo
+        let halo_x = ed.center_xy_m[0] + (ed.conduit_radius_m as f64) + 12.0;
+        let halo_y = ed.center_xy_m[1];
+        let halo_col = synthesize_column(
+            world.anchor(),
+            world.stratigraphy(),
+            world.drainage(),
+            world.volcanic_field(),
+            halo_x,
+            halo_y,
+        );
+        let halo_cell = sample_cell_at_z(
+            world.anchor(),
+            world.stratigraphy(),
+            &halo_col,
+            halo_x,
+            halo_y,
+            halo_col.surface_elev_m - 25.0,
+        );
+        assert_eq!(
+            halo_cell.material,
+            MaterialId::HORNFELS,
+            "Expected HORNFELS contact-metamorphic halo around conduit"
+        );
+
+        // Scan around the summit rim / caldera edge for fumarolic SULFUR_DEPOSIT crust
+        let mut sulfur_hits = 0usize;
+        for i in 0..48 {
+            let ang = (i as f64) * std::f64::consts::TAU / 48.0;
+            for &r_mult in &[0.75, 0.92, 1.0, 1.08] {
+                let r = (ed.caldera_radius_m as f64).max(ed.conduit_radius_m as f64) * r_mult;
+                let px = ed.center_xy_m[0] + ang.cos() * r;
+                let py = ed.center_xy_m[1] + ang.sin() * r;
+                let col = synthesize_column(
+                    world.anchor(),
+                    world.stratigraphy(),
+                    world.drainage(),
+                    world.volcanic_field(),
+                    px,
+                    py,
+                );
+                if col.surficial_material == MaterialId::SULFUR_DEPOSIT {
+                    sulfur_hits += 1;
+                }
+            }
+        }
+        assert!(
+            sulfur_hits > 0,
+            "Expected fumarolic SULFUR_DEPOSIT patches near active stratovolcano rim"
+        );
+
+        // 2. Basalt shield volcano flank -> hollow 3D lava tubes with NATURAL_CAVE flag
+        let shield_anchor = LocalZoomAnchor {
+            world_seed: 4040,
+            stage: SnapshotStage::Prehistory,
+            grid_size: 6,
+            radius_km: 6371.0,
+            parent_tile_id: 9,
+            parent_tile_radius_m: 80_000.0,
+            anchor_normal: [0.0, 1.0, 0.0],
+            tangent_east: [1.0, 0.0, 0.0],
+            tangent_north: [0.0, 0.0, 1.0],
+            sea_level_m: 0.0,
+            has_atmosphere: true,
+            has_life: true,
+            is_pentagon: false,
+            neighbors: vec![NeighborTileSample {
+                tile_id: 9,
+                local_xy_m: [0.0, 0.0],
+                elevation_m: 400.0,
+                bottom_m: -9000.0,
+                mountainosity: 0.65,
+                subduction: 0.0,
+                has_intrusion: true,
+                impact_scar: 0.0,
+                soil_depth_m: 0.5,
+                soil_fertility: 1.0,
+                is_glaciated: false,
+                glacier_cover: 0.0,
+                annual_temp_c: 18.0,
+                precip_norm: 0.55,
+                tidal_range_m: 1.0,
+                wind_vec: [1.0, 0.0],
+                layers: vec![RockLayer {
+                    rock: Rock::extrusive(0.45),
+                    thickness: 9.4,
+                }],
+                occurrences: vec![],
+            }],
+            river_edges: vec![],
+            fine_samples: vec![],
+            fine_spacing_m: 0.0,
+            tile_frames: vec![TileCanonicalFrame {
+                tile_id: 9,
+                east_2d: [1.0, 0.0],
+                north_2d: [0.0, 1.0],
+            }],
+        };
+
+        let shield_world = LocalTerrainWorld::new(shield_anchor, LocalVolumeConfig::default());
+        assert_eq!(shield_world.volcanoes().len(), 1);
+        let sed = &shield_world.volcanoes()[0];
+        assert_eq!(sed.kind, VolcanoKind::ShieldVolcano);
+
+        let flank_base_x = sed.center_xy_m[0] + (sed.base_radius_m as f64) * 0.40;
+        let flank_base_y = sed.center_xy_m[1];
+        let mut lava_tube_cells = 0usize;
+        for ix in 0..24 {
+            for iy in 0..24 {
+                let x = flank_base_x + (ix as f64) * 3.0;
+                let y = flank_base_y + (iy as f64) * 3.0;
+                let col = synthesize_column(
+                    shield_world.anchor(),
+                    shield_world.stratigraphy(),
+                    shield_world.drainage(),
+                    shield_world.volcanic_field(),
+                    x,
+                    y,
+                );
+                for dz in 5..26 {
+                    let c = sample_cell_at_z(
+                        shield_world.anchor(),
+                        shield_world.stratigraphy(),
+                        &col,
+                        x,
+                        y,
+                        col.surface_elev_m - (dz as f32),
+                    );
+                    if c.is_air() && (c.flags & cell_flags::NATURAL_CAVE) != 0 {
+                        lava_tube_cells += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            lava_tube_cells > 20,
+            "Expected hollow 3D basalt lava tubes on shield volcano flank (found {lava_tube_cells})"
+        );
+    }
+
+    #[test]
+    fn volcano_reanchor_invariance_and_pois() {
+        let mut sim = PrehistorySimulation::new_earth(42);
+        for _ in 0..4 {
+            sim.step();
+        }
+        let bytes = sim.encode_snapshot();
+        let ctx = PlanetaryTerrainContext::from_snapshot_bytes(&bytes)
+            .expect("PlanetaryTerrainContext should decode");
+
+        // Find a tile that hosts a volcanic edifice, verify its POI and re-anchor invariance
+        let mut checked_volcano = false;
+        for tid in 0..sim.tiles().len() {
+            let anchor_a = ctx.build_anchor(tid).expect("Anchor A should build");
+            let world_a = LocalTerrainWorld::new(anchor_a, LocalVolumeConfig::default());
+            let Some(ed_a) = world_a.volcanoes().iter().find(|e| e.tile_id == tid) else {
+                continue;
+            };
+
+            // Verify FR-007 volcanic POI is emitted
+            let pois = world_a.find_points_of_interest();
+            assert!(
+                pois.iter().any(|p| p.kind == "volcano"),
+                "Tile {tid} with edifice {:?} should emit a 'volcano' POI",
+                ed_a.kind
+            );
+
+            // Re-anchor onto a neighboring tile that still contains `tid` in its 2-ring
+            let nb_tid = world_a.anchor().neighbors[1].tile_id;
+            let anchor_b = ctx.build_anchor(nb_tid).expect("Anchor B should build");
+            let world_b = LocalTerrainWorld::new(anchor_b, LocalVolumeConfig::default());
+            let Some(ed_b) = world_b.volcanoes().iter().find(|e| e.tile_id == tid) else {
+                continue;
+            };
+
+            // Both anchors must derive identical volcanic morphology and dimensions
+            assert_eq!(ed_a.kind, ed_b.kind);
+            assert!((ed_a.base_radius_m - ed_b.base_radius_m).abs() < 1e-3);
+            assert!((ed_a.peak_height_m - ed_b.peak_height_m).abs() < 1e-3);
+
+            // Evaluate the volcanic rim point in each anchor's own edifice coordinates (`SC-004`):
+            // canonical frame ensures < 0.01 m elevation invariance across coarse-tile re-anchoring.
+            let rim_a = ed_a.poi_rim_xy_m();
+            let rim_b = ed_b.poi_rim_xy_m();
+            let q_a = world_a.volcanic_field().query(
+                rim_a[0],
+                rim_a[1],
+                world_a.anchor().has_atmosphere,
+                world_a.anchor().world_seed,
+            );
+            let q_b = world_b.volcanic_field().query(
+                rim_b[0],
+                rim_b[1],
+                world_b.anchor().has_atmosphere,
+                world_b.anchor().world_seed,
+            );
+            let da = q_a.map(|q| q.delta_elev_m).unwrap_or(0.0);
+            let db = q_b.map(|q| q.delta_elev_m).unwrap_or(0.0);
+            assert!(
+                (da - db).abs() < 0.01,
+                "Volcanic rim delta across adjacent anchors drifted: A={da:.4} m vs B={db:.4} m"
+            );
+            checked_volcano = true;
+            break;
+        }
+        assert!(
+            checked_volcano,
+            "Expected at least one active volcanic tile in Earth Prehistory simulation"
+        );
+    }
+
+    #[test]
+    fn crater_lakes_sit_strictly_below_caldera_rim() {
+        let mut sim = PrehistorySimulation::new_earth(42);
+        for _ in 0..4 {
+            sim.step();
+        }
+        let bytes = sim.encode_snapshot();
+        let ctx = PlanetaryTerrainContext::from_snapshot_bytes(&bytes)
+            .expect("PlanetaryTerrainContext should decode");
+
+        let mut checked_lakes = 0usize;
+        for tid in 0..sim.tiles().len() {
+            let anchor = ctx.build_anchor(tid).expect("Anchor should build");
+            let world = LocalTerrainWorld::new(anchor, LocalVolumeConfig::default());
+            for ed in world.volcanoes() {
+                if ed.tile_id != tid {
+                    continue;
+                }
+                let Some(z_lake) = ed.crater_lake_z_m else {
+                    continue;
+                };
+                if ed.crater_lake_state != Some(LakeState::Freshwater) {
+                    continue;
+                }
+                // Check 32 azimuths around the full 360° caldera rim: every rim point must sit
+                // strictly ABOVE the crater lake water surface (never a raised water plateau!).
+                let mut min_rim = f32::INFINITY;
+                for i in 0..32 {
+                    let ang = (i as f64) * std::f64::consts::TAU / 32.0;
+                    let rx = ed.center_xy_m[0] + ang.cos() * (ed.caldera_radius_m as f64);
+                    let ry = ed.center_xy_m[1] + ang.sin() * (ed.caldera_radius_m as f64);
+                    let col = synthesize_column(
+                        world.anchor(),
+                        world.stratigraphy(),
+                        world.drainage(),
+                        world.volcanic_field(),
+                        rx,
+                        ry,
+                    );
+                    if !col.is_river && !col.is_ocean {
+                        assert!(
+                            col.surface_elev_m > z_lake + 2.0,
+                            "Crater lake on tile {tid} ({:?}) had water ({z_lake:.1} m) above rim ({:.1} m) at angle {i}",
+                            ed.kind,
+                            col.surface_elev_m
+                        );
+                        min_rim = min_rim.min(col.surface_elev_m);
+                    }
+                }
+                // Check that the caldera floor inside the bowl is strictly below the rim
+                let fx = ed.center_xy_m[0] + (ed.caldera_radius_m as f64) * 0.55;
+                let fy = ed.center_xy_m[1];
+                let floor_col = synthesize_column(
+                    world.anchor(),
+                    world.stratigraphy(),
+                    world.drainage(),
+                    world.volcanic_field(),
+                    fx,
+                    fy,
+                );
+                assert!(
+                    floor_col.surface_elev_m < min_rim - 40.0,
+                    "Caldera floor ({:.1} m) should sit well below rim ({min_rim:.1} m) on tile {tid} ({:?})",
+                    floor_col.surface_elev_m,
+                    ed.kind
+                );
+                checked_lakes += 1;
+            }
+            if checked_lakes >= 8 {
+                break;
+            }
+        }
+        assert!(
+            checked_lakes > 0,
+            "Expected to verify at least one crater lake in Earth Prehistory simulation"
+        );
     }
 }

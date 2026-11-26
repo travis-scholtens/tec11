@@ -12,6 +12,7 @@ rust_library(
         "src/mesher.rs",
         "src/rivers.rs",
         "src/stratigraphy.rs",
+        "src/volcanoes.rs",
     ],
     edition = "2021",
     visibility = ["//visibility:public"],
