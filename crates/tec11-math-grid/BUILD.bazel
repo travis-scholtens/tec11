@@ -3,6 +3,7 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 rust_library(
     name = "tec11_math_grid",
     srcs = [
+        "src/fv_geom.rs",
         "src/geometry.rs",
         "src/grid.rs",
         "src/lib.rs",

@@ -6,16 +6,13 @@ rust_library(
     name = "tec11_climate",
     srcs = [
         "src/earth_data.rs",
-        "src/fv_geom.rs",
-        "src/koeppen.rs",
         "src/lib.rs",
         "src/model.rs",
         "src/ocean.rs",
-        "src/tides.rs",
-        "src/weather.rs",
     ],
     edition = "2021",
     deps = [
+        "//crates/tec11-koeppen:tec11_koeppen",
         "//crates/tec11-math-grid:tec11_math_grid",
     ],
 )
