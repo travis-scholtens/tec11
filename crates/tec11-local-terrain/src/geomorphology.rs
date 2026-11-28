@@ -490,29 +490,102 @@ pub fn sample_cell_at_z(
         }
     }
 
-    // 5. Underground karst cavern dissolution inside soluble high-calcity or evaporite strata
-    if anchor.has_atmosphere
-        && (slice.calcity > 0.65 || slice.salinity > 0.55)
-        && col.ctx.precip_norm > 0.25
-        && z_m < col.surface_elev_m - 4.0
-    {
-        let c1 = value_noise3(x_m * 0.055, y_m * 0.055, (z_m as f64) * 0.09, anchor.world_seed ^ 0xcafe);
-        let c2 = value_noise3(x_m * 0.055 + 17.3, y_m * 0.055 - 11.7, (z_m as f64) * 0.09, anchor.world_seed ^ 0xbabe);
-        // Intersecting dual-ridged worm cavities form connected 3D cave galleries
-        let ridge = (c1 - 0.5).abs() + (c2 - 0.5).abs();
-        if ridge < 0.145 {
-            // Submerged aquifer below sea level / water table, open air cave above
-            let water_table = col.water_elev_m.unwrap_or(anchor.sea_level_m as f32 - 8.0);
-            if z_m <= water_table {
-                let mut cell = HexPrismCell::water(false, 7);
-                cell.flags |= cell_flags::NATURAL_CAVE;
-                return cell;
+    // 5. Underground natural cave systems (karst, flood-basalt lava tubes, coastal sea caves,
+    //    and tectonic fissure caverns). Skip inside active volcanic magma conduits/dikes.
+    let in_volcanic_conduit = col
+        .volcanic_hit
+        .is_some_and(|vh| vh.in_conduit_or_dike);
+
+    if !in_volcanic_conduit {
+        // 5a. Karst cavern dissolution inside soluble high-calcity or evaporite strata
+        if anchor.has_atmosphere
+            && (slice.calcity > 0.65 || slice.salinity > 0.55)
+            && col.ctx.precip_norm > 0.25
+            && depth_below > 4.0
+        {
+            let c1 = value_noise3(x_m * 0.055, y_m * 0.055, (z_m as f64) * 0.09, anchor.world_seed ^ 0xcafe);
+            let c2 = value_noise3(x_m * 0.055 + 17.3, y_m * 0.055 - 11.7, (z_m as f64) * 0.09, anchor.world_seed ^ 0xbabe);
+            // Intersecting dual-ridged worm cavities form connected 3D cave galleries
+            let ridge = (c1 - 0.5).abs() + (c2 - 0.5).abs();
+            if ridge < 0.145 {
+                // Submerged aquifer below sea level / water table, open air cave above
+                let water_table = col.water_elev_m.unwrap_or(anchor.sea_level_m as f32 - 8.0);
+                if z_m <= water_table {
+                    let mut cell = HexPrismCell::water(false, 7);
+                    cell.flags |= cell_flags::NATURAL_CAVE;
+                    return cell;
+                }
+                return HexPrismCell {
+                    material: MaterialId::AIR,
+                    fluid: 0,
+                    flags: cell_flags::NATURAL_CAVE,
+                };
             }
-            return HexPrismCell {
-                material: MaterialId::AIR,
-                fluid: 0,
-                flags: cell_flags::NATURAL_CAVE,
-            };
+        }
+
+        // 5b. Extrusive flood-basalt lava tube caves (outside shield-volcano edifice flanks)
+        if mat == MaterialId::BASALT
+            && col.ctx.mountainosity >= 0.45
+            && depth_below >= 3.0
+            && depth_below <= 28.0
+        {
+            let t1 = value_noise3(x_m * 0.028, y_m * 0.068, (z_m as f64) * 0.105, anchor.world_seed ^ 0x1a7a_1001);
+            let t2 = value_noise3(x_m * 0.028 + 11.3, y_m * 0.068 - 7.9, (z_m as f64) * 0.105, anchor.world_seed ^ 0x1a7a_1002);
+            let tube_ridge = (t1 - 0.5).abs() + (t2 - 0.5).abs();
+            if tube_ridge < 0.165 {
+                return HexPrismCell {
+                    material: MaterialId::AIR,
+                    fluid: 0,
+                    flags: cell_flags::NATURAL_CAVE,
+                };
+            }
+        }
+
+        // 5c. Coastal sea caves & littoral grottoes carved near sea level in coastal cliffs
+        let sea_m = anchor.sea_level_m as f32;
+        if anchor.has_atmosphere
+            && col.surface_elev_m > sea_m + 3.5
+            && col.surface_elev_m < sea_m + 75.0
+            && z_m >= sea_m - 3.0
+            && z_m <= sea_m + 9.0
+            && depth_below >= 2.5
+        {
+            let s1 = value_noise3(x_m * 0.048, y_m * 0.048, ((z_m - sea_m) as f64) * 0.14, anchor.world_seed ^ 0x5ea0_c001);
+            let s2 = value_noise3(x_m * 0.048 - 14.1, y_m * 0.048 + 9.7, ((z_m - sea_m) as f64) * 0.14, anchor.world_seed ^ 0x5ea0_c002);
+            let grotto_ridge = (s1 - 0.5).abs() + (s2 - 0.5).abs();
+            if grotto_ridge < 0.175 {
+                if z_m <= sea_m {
+                    let mut cell = HexPrismCell::water(true, 7);
+                    cell.flags |= cell_flags::NATURAL_CAVE;
+                    return cell;
+                }
+                return HexPrismCell {
+                    material: MaterialId::AIR,
+                    fluid: 0,
+                    flags: cell_flags::NATURAL_CAVE,
+                };
+            }
+        }
+
+        // 5d. Tectonic fissure caverns: steep, vertically elongated fault-fracture clefts in
+        //     uplifted mountain highlands
+        if col.ctx.mountainosity >= 0.65 && depth_below >= 3.5 && depth_below <= 32.0 {
+            let f1 = value_noise3(x_m * 0.062, y_m * 0.036, (z_m as f64) * 0.032, anchor.world_seed ^ 0xfa01_7001);
+            let f2 = value_noise3(x_m * 0.062 + 23.4, y_m * 0.036 - 15.2, (z_m as f64) * 0.032, anchor.world_seed ^ 0xfa01_7002);
+            let fissure_ridge = (f1 - 0.5).abs() + (f2 - 0.5).abs();
+            if fissure_ridge < 0.155 {
+                let water_table = col.water_elev_m.unwrap_or(sea_m - 8.0);
+                if z_m <= water_table {
+                    let mut cell = HexPrismCell::water(false, 7);
+                    cell.flags |= cell_flags::NATURAL_CAVE;
+                    return cell;
+                }
+                return HexPrismCell {
+                    material: MaterialId::AIR,
+                    fluid: 0,
+                    flags: cell_flags::NATURAL_CAVE,
+                };
+            }
         }
     }
 
@@ -642,6 +715,101 @@ mod tests {
         assert!(
             cave_cells > 50,
             "Expected karst caverns in humid high-calcity limestone (found {cave_cells} cave cells)"
+        );
+    }
+
+    #[test]
+    fn test_basalt_lava_tubes_sea_caves_and_tectonic_fissures() {
+        let empty = DrainageNetwork::default();
+        let no_volc = VolcanicField::default();
+
+        // 1. Flood-basalt lava tubes in extrusive basalt highlands
+        let mut basalt_anchor = synthetic_anchor(true, 0.5, 1.0, Rock::extrusive(0.15), 0.15);
+        basalt_anchor.neighbors[0].mountainosity = 1.2;
+        let b_strat = RegionalStratigraphyField::from_anchor(&basalt_anchor);
+        let mut tube_cells = 0usize;
+        for ix in 0..24 {
+            for iy in 0..24 {
+                let x = (ix as f64) * 2.5;
+                let y = (iy as f64) * 2.5;
+                let col = synthesize_column(&basalt_anchor, &b_strat, &empty, &no_volc, x, y);
+                for dz in 4..26 {
+                    let c = sample_cell_at_z(
+                        &basalt_anchor,
+                        &b_strat,
+                        &col,
+                        x,
+                        y,
+                        col.surface_elev_m - (dz as f32),
+                    );
+                    if (c.flags & cell_flags::NATURAL_CAVE) != 0 && c.is_air() {
+                        tube_cells += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            tube_cells > 40,
+            "Expected hollow basalt lava tube voids (found {tube_cells} cells)"
+        );
+
+        // 2. Coastal sea caves & flooded littoral grottoes near sea level
+        let mut coast_anchor = synthetic_anchor(true, 0.5, 0.8, Rock::intrusive(0.72), 0.15);
+        coast_anchor.neighbors[0].elevation_m = 18.0;
+        coast_anchor.neighbors[0].mountainosity = 0.2;
+        let c_strat = RegionalStratigraphyField::from_anchor(&coast_anchor);
+        let mut sea_cave_air = 0usize;
+        let mut sea_cave_water = 0usize;
+        for ix in 0..24 {
+            for iy in 0..24 {
+                let x = (ix as f64) * 2.0;
+                let y = (iy as f64) * 2.0;
+                let col = synthesize_column(&coast_anchor, &c_strat, &empty, &no_volc, x, y);
+                for z in -3..=8 {
+                    let c = sample_cell_at_z(&coast_anchor, &c_strat, &col, x, y, z as f32);
+                    if (c.flags & cell_flags::NATURAL_CAVE) != 0 {
+                        if c.is_air() {
+                            sea_cave_air += 1;
+                        } else if c.material == MaterialId::OCEAN_WATER {
+                            sea_cave_water += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            sea_cave_air > 20 && sea_cave_water > 10,
+            "Expected both open-air and sea-flooded coastal sea caves (air={sea_cave_air}, water={sea_cave_water})"
+        );
+
+        // 3. Tectonic fissure caverns in uplifted mountain granite (low precip, non-karst)
+        let mut fissure_anchor = synthetic_anchor(true, 0.4, 0.8, Rock::intrusive(0.74), 0.10);
+        fissure_anchor.neighbors[0].mountainosity = 1.5;
+        let f_strat = RegionalStratigraphyField::from_anchor(&fissure_anchor);
+        let mut fissure_cells = 0usize;
+        for ix in 0..24 {
+            for iy in 0..24 {
+                let x = (ix as f64) * 2.5;
+                let y = (iy as f64) * 2.5;
+                let col = synthesize_column(&fissure_anchor, &f_strat, &empty, &no_volc, x, y);
+                for dz in 4..28 {
+                    let c = sample_cell_at_z(
+                        &fissure_anchor,
+                        &f_strat,
+                        &col,
+                        x,
+                        y,
+                        col.surface_elev_m - (dz as f32),
+                    );
+                    if (c.flags & cell_flags::NATURAL_CAVE) != 0 {
+                        fissure_cells += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            fissure_cells > 40,
+            "Expected tectonic fissure cavern voids in uplifted mountains (found {fissure_cells} cells)"
         );
     }
 }
